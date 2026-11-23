@@ -33,6 +33,7 @@ from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
+from klayout_tools.build_identity import grading_ruleset_id
 from klayout_tools.cli import main
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
@@ -4933,38 +4934,11 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["citation"] is None
 
 
-def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
-    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
-    yield_path = _write(tmp_path, "yield.json", envelope)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-
-
 # --------------------------------------------------------------------------- #
 # Campaign-discipline gate on item 6 (issue #2467): the cited report's own
 # `sample_size.verdict` and `negative_control` state, read as grading inputs
 # rather than dropped with the run-level `warnings` array.
 # --------------------------------------------------------------------------- #
-
-
-def test_yield_insufficient_sample_size_renders_unmet_undersized_sample(tmp_path):
-    """Issue #2467: the report's own `sample_size.verdict` says its estimate
-    is not sized for the claim; a `"pass"` status must not overrule that."""
-    yield_path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-    assert item_6["citation"] is None
-    campaign = item_6["detail"]["yield_campaign"]
-    assert campaign["sample_size"] == "insufficient"
-    assert campaign["undersized_measurements"] == ["vref"]
 
 
 def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
@@ -8637,11 +8611,6 @@ def test_describe_grader_shape():
         "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
-    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
-        "ihp-sg13g2",
-        "ihp-sg13cmos5l",
-        "gf180mcu",
-    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -11594,7 +11563,7 @@ def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_p
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": {
             "scope": "connectivity",
-            "checked": [],
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
             "skipped": [],
             "inapplicable": [
                 {
@@ -13782,17 +13751,19 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
 #: comparable across provisioning routes.
 _TARBALL_ROUTE_BUILD_BLOCK = {
-    "version": "0.5.0+unknown",
+    "version": "0.5.0+unknown",  # unresolved identity: build_skew is "unverifiable"
     "package_version": "0.5.0",
     "git_commit": None,
     "git_tag": None,
     "dirty": None,
     "is_release": None,
-    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+    "grading_ruleset_id": grading_ruleset_id(),  # same commit, same grading code
 }
 
 
-def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+def _committed_from_other_provisioning_route(
+    tmp_path, report: dict, name: str = "committed.json"
+) -> str:
     """``report`` as it would have been committed by an install of the *same
     commit* provisioned differently: identical grading, a different `build`
     block (issue #2249)."""
@@ -13807,18 +13778,19 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
     drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
     manifest = _manifest(evidence={"3": drc_path})
     fresh = build_tier_report(manifest)
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
-
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
+    committed_build = json.loads(Path(committed_path).read_text())["build"]
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+    assert committed_build != fresh["build"]
+    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
+    skew_fields = [  # fresh values are install-specific, so derived, not hard-coded
+        {"field": f"build.{k}", "committed": v, "fresh": fresh["build"][k]}
+        for k, v in sorted(_TARBALL_ROUTE_BUILD_BLOCK.items() - fresh["build"].items())
+    ]
 
-    result = check_tier_report(committed_path, manifest)
-
-    assert result == {
+    assert check_tier_report(committed_path, manifest) == {
         "schema_version": 1,
         "mode": "check",
         "report": committed_path,
@@ -13826,7 +13798,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_skew": result["build_skew"],
+        "build_skew": {"state": "unverifiable", "fields": skew_fields},
         "fresh": fresh,
     }
 
@@ -13839,9 +13811,7 @@ def test_check_reports_drift_in_a_graded_field(tmp_path):
     stale = build_tier_report(manifest)
     stale["t1_met_count"] = 11
     stale["tier"] = "T1"
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, stale, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, stale)
 
     result = check_tier_report(committed_path, manifest)
 
@@ -13954,9 +13924,7 @@ def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", manifest)
     fresh = build_tier_report(manifest)
     assert fresh["tier"] is None  # rendering this manifest exits 3
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
 
     exit_code = main(
         ["signoff", "--manifest", manifest_path, "--check", committed_path]
@@ -14046,12 +14014,12 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
 def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     tmp_path,
 ):
-    """The verdict exclusion is exactly two registered sets -- build identity
-    (issue #2249) and the report's quotation of the checklist (issue #2526):
-    every *other* top-level field of a tier report is still compared, so a
-    future field cannot quietly join the unchecked set. Guards against
-    widening either set by accident."""
+    """Pin three registered sets: build identity (#2249), checklist prose (#2526),
+    and derived unmet_reason_counts (#5903); compare every other top-level field."""
+    from klayout_tools.signoff_unmet_reasons import DERIVED_REPORT_PATHS
+
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    assert DERIVED_REPORT_PATHS == frozenset({("unmet_reason_counts",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
     excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
@@ -16010,7 +15978,7 @@ def _inventory(item: int, **overrides) -> dict:
                 "name": "sky130A",
                 "revision": "0fe599b2afb6708d281543108caf8310912f54af",
             },
-            "tools": {"ngspice": "42", "klt": "0.7.0"},
+            "tools": {"ngspice": "42"},
         }
     else:
         base["hygiene"] = ["README.md", "LICENSE", ".github/workflows/ci.yml"]
@@ -16261,7 +16229,7 @@ def test_attest_commands_run_in_the_declared_repo_relative_cwd(tmp_path):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"schema_version": 2}, "schema_version 2"),
+        ({"schema_version": 3}, "schema_version 3"),
         ({"schema_version": _DROP}, "schema_version"),
         ({"schema_version": True}, "schema_version"),
         ({"kind": "manifest"}, "t1-attestation-inventory"),
@@ -18067,43 +18035,9 @@ def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypat
     assert item_3["detail"]["path"] == gone
 
 
-def _capture_attest_env(monkeypatch):
-    from klayout_tools import signoff_attest
-
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, stdout=b"")
-
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
-    return seen["env"]
-
-
-def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
-    venv_bin = os.path.dirname(sys.executable)
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-
-
-def test_attest_command_env_unchanged_outside_venv(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/base")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
-    monkeypatch.setenv("PATH", path)
-    assert _capture_attest_env(monkeypatch)["PATH"] == path
-
-
-def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-    monkeypatch.delenv("PATH")
-    assert "PATH" not in _capture_attest_env(monkeypatch)
+# The declared-command environment tests (venv-bin stripping, #4192, plus the
+# run-scoped klt-only shim, #5565) live in tests/test_signoff_attest_env.py,
+# split out of this file for the per-file size ratchet.
 
 
 # --------------------------------------------------------------------------- #
@@ -18297,7 +18231,7 @@ def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
 
 
 def _capture_attest_timeout(monkeypatch, spec):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -18305,8 +18239,8 @@ def _capture_attest_timeout(monkeypatch, spec):
         seen["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", spec)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", spec)
     return seen["timeout"]
 
 

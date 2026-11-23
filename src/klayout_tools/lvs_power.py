@@ -5,7 +5,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .lvs_mismatch import _body_unverified_counts
+from .extract_base import ExtractError
+from .lvs_base import (
+    _POWER_INSTANCE_SAMPLE_LIMIT,
+    POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
+    POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    POWER_STATUS_UNCHECKED,
+    RULE_POWER_INCONSISTENT_PIN_NET,
+    RULE_POWER_UNCONNECTED_PIN,
+    RULE_POWER_UNEXPECTED_PIN_NET,
+    LvsError,
+)
 from .socket_check import classify_pin_by_name
 
 
@@ -45,8 +57,6 @@ def _parse_power_connectivity(
     A wrong-shaped value is a clean request error, matching every other
     option parser in this module (see :func:`_parse_compare_parameters`).
     """
-
-    from .lvs import LvsError
 
     if "power_connectivity" not in options:
         return True, None, None
@@ -106,7 +116,6 @@ def _well_layer_lef_pins(lef_paths: tuple[str, ...]) -> frozenset[tuple[str, str
     unreadable path was already reported by the extraction itself)."""
     if not lef_paths:
         return frozenset()
-    from .extract import ExtractError
     from .extract_abstract import _load_abstract_cell_lefs
 
     try:
@@ -213,8 +222,6 @@ def _power_net_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     differ are the whole point of the finding.
     """
 
-    from .lvs import _POWER_INSTANCE_SAMPLE_LIMIT
-
     by_net: dict[str | None, list[dict[str, Any]]] = {}
     for row in rows:
         by_net.setdefault(row["net"], []).append(row)
@@ -300,12 +307,6 @@ def _power_connectivity_findings(
     lesser severity to soften (``power_connectivity.status`` is derived from
     the presence of findings, and the report's own ``status`` is untouched).
     """
-
-    from .lvs import (
-        RULE_POWER_INCONSISTENT_PIN_NET,
-        RULE_POWER_UNCONNECTED_PIN,
-        RULE_POWER_UNEXPECTED_PIN_NET,
-    )
 
     by_pin: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -403,94 +404,6 @@ def _power_connectivity_findings(
     return findings
 
 
-def _body_verification_unchecked(reason: str) -> dict[str, Any]:
-    """A ``body_verification`` block for a run that could not determine how
-    the layout's MOS body terminals were resolved (issue #1983), stating
-    *why* in ``reason``.
-
-    Always emitted -- including for the pre-extracted ``layout.netlist``
-    request form this determination does not apply to -- so the question
-    "did this run verify that the device bodies are tied?" is answerable
-    from any ``klt lvs`` report on its own, rather than requiring a reader
-    to know which ``layout`` request shape produced it and infer the answer
-    from the *absence* of a ``device.body_unverified`` warning. That
-    absence is exactly the ambiguity issue #1983 reported: on a
-    pre-extracted netlist it means "not checked", and on an inline
-    extraction it means "checked and clean", and nothing in the report
-    distinguished them. Same discipline as
-    :func:`_power_connectivity_unchecked`.
-    """
-
-    from .lvs import BODY_STATUS_UNCHECKED
-
-    return {
-        "status": BODY_STATUS_UNCHECKED,
-        "reason": reason,
-        "device_classes": [],
-        "device_count": 0,
-        "findings": [],
-        "finding_count": 0,
-    }
-
-
-def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
-    """The ``body_verification`` block for an inline-extraction compare
-    (issue #1983) -- the machine-checkable form of the
-    ``device.body_unverified`` warning (issue #281).
-
-    Rendered from :func:`~klayout_tools.lvs_mismatch._body_unverified_counts`,
-    the *same* determination :func:`_body_net_warnings` renders its prose
-    ``mismatches[]`` entries from, so the warning a human reads and the field
-    a grader reads can never disagree about how many devices are affected or
-    which classes they belong to.
-
-    Why this needs to exist at all, given the warning already did: a
-    ``mismatches[]`` entry is not gradeable. Answering "were this layout's
-    device bodies verifiably tied?" from a committed ``klt lvs`` record meant
-    string-matching a ``category`` inside an array whose other entries are
-    ordinary compare findings -- so in practice nothing downstream asked, and
-    a record carrying the warning was indistinguishable from a clean one at
-    every consumer that only reads ``status`` (``klt signoff`` included). See
-    ``docs/cli/lvs.md`` -> ``body_verification``.
-
-    **This does not change ``status``.** A layout with unverified bodies
-    still reports ``status: "match"`` when the compare matched, and the
-    warning entries are still ``severity: "warning"`` with
-    ``mismatch_count`` counting them -- unchanged from before this block
-    existed. The block makes the condition *visible to a grader*; whether it
-    should also block a verdict is a separate policy question, deliberately
-    left to the consumer (see ``docs/design-evidence-tiers.md`` item 7).
-    """
-
-    from .lvs import (
-        BODY_STATUS_UNVERIFIED,
-        BODY_STATUS_VERIFIED,
-    )
-
-    counts = _body_unverified_counts(layout_circuit, deck)
-    if not counts:
-        return {
-            "status": BODY_STATUS_VERIFIED,
-            "reason": None,
-            "device_classes": [],
-            "device_count": 0,
-            "findings": [],
-            "finding_count": 0,
-        }
-    findings = [
-        {"class": device_class, "device_count": count}
-        for device_class, count in sorted(counts.items())
-    ]
-    return {
-        "status": BODY_STATUS_UNVERIFIED,
-        "reason": None,
-        "device_classes": sorted(counts),
-        "device_count": sum(counts.values()),
-        "findings": findings,
-        "finding_count": len(findings),
-    }
-
-
 def _power_pins_derivation(
     masters: list[str],
     corroborated: bool,
@@ -520,11 +433,6 @@ def _power_pins_derivation(
     right), the check runs and says so here -- ``corroborated: false`` plus
     a ``reason`` naming the limitation.
     """
-
-    from .lvs import (
-        POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
-        POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
-    )
 
     if libraries is not None:
         # Issue #2707: multi-library derivation. `reason` names each library
@@ -612,8 +520,6 @@ def _power_connectivity_unchecked(
     derivable universe at all) -- never omitted, so the key's presence is
     not itself a signal a consumer has to branch on.
     """
-
-    from .lvs import POWER_STATUS_UNCHECKED
 
     return {
         "status": POWER_STATUS_UNCHECKED,
@@ -767,11 +673,7 @@ def _power_connectivity_report(
     :func:`_power_pins_derivation`.
     """
 
-    from .lvs import (
-        POWER_STATUS_MATCH,
-        POWER_STATUS_MISMATCH,
-        _gate_level_power_pin_evidence_detail,
-    )
+    from .lvs import _gate_level_power_pin_evidence_detail
 
     power_pin_names, masters, corroborated, libraries = (
         _gate_level_power_pin_evidence_detail(reference_netlist, library_pin_orders)

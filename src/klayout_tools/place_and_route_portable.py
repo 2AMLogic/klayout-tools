@@ -28,9 +28,13 @@ from .env_provenance import _absolute_paths_in, find_repo_root, repo_relative_pa
 PDK_ROOT_TOKEN = "$PDK_ROOT"
 
 
-def _under(path: str, root: str) -> str | None:
+def path_under_root(path: str, root: str) -> str | None:
     """``path`` relative to ``root`` (POSIX, ``"."`` for the root itself), or
-    ``None`` when it is not inside it."""
+    ``None`` when it is not inside it.
+
+    Public (issue #5812): ``klt lvs``'s report assembly reuses this to
+    tokenise ``provenance.pin_order_sources[].path`` -- a symbol two verb
+    groups both need cannot stay private behind the import-boundary gate."""
     resolved = os.path.realpath(path)
     base = os.path.realpath(root)
     if resolved == base:
@@ -42,7 +46,7 @@ def _under(path: str, root: str) -> str | None:
 
 def _portable_value(value: str, *, repo_root: str | None, pdk_root: str | None) -> Any:
     if pdk_root is not None:
-        relative = _under(value, pdk_root)
+        relative = path_under_root(value, pdk_root)
         if relative is not None:
             return PDK_ROOT_TOKEN if relative == "." else f"{PDK_ROOT_TOKEN}/{relative}"
     return repo_relative_path(value, repo_root=repo_root)

@@ -51,14 +51,16 @@ SKIPPED_CHECK_KEYS = (
     *item9.DOCUMENTED_KEYS,
 )
 
-#: Keys beyond ``role`` that identify one ``attestation.checks[]`` entry, in
-#: the order a ``drift[].check`` object lists them: ``path`` for a ``present``
-#: file check, ``target``/``name``/``testbench`` for a ``command`` or
-#: ``recorded_hash`` check, ``row`` for an item-8 citation check, and
-#: ``corner`` + ``metric`` for an item-8 metric check (there is one check per
-#: corner x metric, so the corner alone would not name it). A check kind
-#: carrying none of them -- item 9's ``pdk``/``tools`` pins, a top-level
-#: ``cold_start`` covering every bench -- is identified by its ``role`` alone.
+#: Keys beyond ``role`` (and the check's own ``check`` kind, which
+#: :func:`check_identity` emits first) that identify one
+#: ``attestation.checks[]`` entry, in the order a ``drift[].check`` object
+#: lists them: ``path`` for a ``present`` file check, ``target``/``name``/
+#: ``testbench`` for a ``command`` or ``recorded_hash`` check, ``row`` for an
+#: item-8 citation check, and ``corner`` + ``metric`` for an item-8 metric
+#: check (there is one check per corner x metric, so the corner alone would
+#: not name it). A check kind carrying none of them -- item 9's
+#: ``pdk``/``tools`` pins, a top-level ``cold_start`` covering every bench --
+#: is identified by its ``role`` plus its ``check`` kind alone.
 CHECK_IDENTITY_KEYS = (
     "path",
     "target",
@@ -80,10 +82,18 @@ _CHECK_DRIFT_FIELD = re.compile(r"attestation\.checks\.(\d+)(?:\.|\Z)")
 
 
 def check_identity(check: Mapping[str, Any]) -> dict[str, Any]:
-    """The identity of one ``attestation.checks[]`` entry: its ``role``
+    """The identity of one ``attestation.checks[]`` entry: its ``role``,
+    then the check's own kind -- its ``check`` value (``present``,
+    ``command``, ``stream_readable``, ...), when the check carries one --
     followed by whichever of :data:`CHECK_IDENTITY_KEYS` the check carries,
-    in that order."""
+    in that order. The kind comes before the per-instance keys so checks of
+    one ``role`` that carry no other identity key (the three ``layout``
+    stream checks, item 8's ``report`` present check) still get pairwise
+    distinct identities, and so the ``--format text`` label reads
+    ``[role kind identity...]``."""
     identity: dict[str, Any] = {"role": check["role"]}
+    if "check" in check:
+        identity["check"] = check["check"]
     identity.update((key, check[key]) for key in CHECK_IDENTITY_KEYS if key in check)
     return identity
 
@@ -120,6 +130,78 @@ def annotate_check_drift(
             entry["check"] = check_identity(checks[index])
 
 
+def yaml_notes(
+    committed: Mapping[str, Any], fresh: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """The informational notes for ``attest: "yaml"`` checks whose raw bytes
+    drifted while the canonical hash held (issue #5862): one
+    ``{check, path, note}`` per such check. ``raw_content_hash`` rides in
+    the envelope *only* so this comparison is possible -- the drift diff
+    excludes it (:func:`drift_result`), so the note is the one place the
+    difference surfaces. Live-result only: never written into an envelope,
+    which is why a note never keeps a byte-differing ``--check`` green on
+    its own (``content_hash`` participates in the diff like any field)."""
+    checks = (committed.get("attestation") or {}).get("checks")
+    fresh_checks = (fresh.get("attestation") or {}).get("checks")
+    if (
+        not isinstance(checks, list)
+        or not isinstance(fresh_checks, list)
+        or len(checks) != len(fresh_checks)
+    ):
+        return []
+    notes: list[dict[str, Any]] = []
+    for committed_check, check in zip(checks, fresh_checks, strict=True):
+        if not isinstance(committed_check, Mapping):
+            continue
+        if (
+            check.get("attest") == "yaml"
+            and check.get("content_hash") is not None
+            and check.get("content_hash") == committed_check.get("content_hash")
+            and check.get("raw_content_hash") != committed_check.get("raw_content_hash")
+        ):
+            notes.append(
+                {
+                    "check": check_identity(check),
+                    "path": check["path"],
+                    "note": (
+                        "raw bytes differ; canonical yaml hash unchanged "
+                        '(attest: "yaml")'
+                    ),
+                }
+            )
+    return notes
+
+
+def _description_added_across_builds(
+    committed: dict[str, Any], fresh: dict[str, Any]
+) -> bool:
+    """Recognize a missing disclosure echo when both builds bind the same inventory."""
+    old = committed.get("attestation")
+    new = fresh["attestation"]
+    if not isinstance(old, dict) or "description" in old or "description" not in new:
+        return False
+    old_provenance = committed.get("provenance")
+    if not isinstance(old_provenance, dict):
+        return False
+    provenance = fresh["provenance"]
+    versions = (old_provenance.get("klt_version"), provenance.get("klt_version"))
+    if versions[0] == versions[1] or not all(
+        isinstance(version, str) and version and "+unknown" not in version
+        for version in versions
+    ):
+        return False
+    # Item 2 pins the stream in provenance.input and its inventory separately.
+    if fresh["t1_item"] == 2:
+        binding, previous = new.get("inventory"), old.get("inventory")
+    else:
+        binding, previous = provenance.get("input"), old_provenance.get("input")
+    return (
+        isinstance(binding, dict)
+        and bool(binding.get("content_hash"))
+        and binding == previous
+    )
+
+
 def drift_result(
     committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -136,14 +218,35 @@ def drift_result(
             skipped.append(
                 {key: check[key] for key in SKIPPED_CHECK_KEYS if key in check}
             )
+    # A yaml check's raw_content_hash is deliberately unbound (informational
+    # only), so it is excluded here per call -- VOLATILE_ATTESTATION_PATHS is
+    # positional and cannot express "this key under any check" -- and any
+    # committed-vs-fresh difference is reported as a live note instead.
+    checks = fresh["attestation"]["checks"]
+    exclude = VOLATILE_ATTESTATION_PATHS | {
+        ("attestation", "checks", str(index), "raw_content_hash")
+        for index in range(len(checks))
+    }
+    # An unknown running build can only disclose that it could not verify the
+    # klt pin. Keep comparing the pin and verdict across builds.
+    exclude |= {
+        ("attestation", "checks", str(index), "unverifiable")
+        for index, check in enumerate(checks)
+        if check["check"] == "pin" and check["role"] == "tool_version"
+    }
+    if _description_added_across_builds(committed, fresh):
+        exclude |= {("attestation", "description")}
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,
         fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
+        exclude=exclude,
         mode="check",
     )
-    annotate_check_drift(result["drift"], fresh["attestation"]["checks"])
+    annotate_check_drift(result["drift"], checks)
+    notes = yaml_notes(committed, fresh)
+    if notes:
+        result["notes"] = notes
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]
     result["skipped_checks"] = skipped

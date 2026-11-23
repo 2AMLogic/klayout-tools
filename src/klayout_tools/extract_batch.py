@@ -35,6 +35,7 @@ extract-specific:
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import math
@@ -46,8 +47,10 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from . import _batch_common, remote_transport, sim_batch
+from . import _batch_collect, _batch_common, remote_transport, sim_batch
 from . import netlist_batch as _nb
+from .extract_base import REQUEST_SCHEMA
+from .extract_netlist_target import _default_output_path
 from .extract_spef import ExtractError
 from .netlist import NetlistError
 
@@ -99,7 +102,6 @@ def _translate(exc: NetlistError) -> ExtractError:
 def argv_request(args_values: dict[str, Any]) -> dict[str, Any]:
     """The runner request for an argv-form invocation (``file`` plus the
     :data:`ARGV_FORWARDED` flags and ``--deck-option`` pairs)."""
-    from .extract import REQUEST_SCHEMA
 
     request: dict[str, Any] = {"schema": REQUEST_SCHEMA}
     for key in ARGV_FORWARDED:
@@ -351,27 +353,6 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> ExtractError:
     return _batch_common.transport_error(job_id, exc, ExtractError, _NO_FALLBACK)
 
 
-def _job_failure(
-    *,
-    job_id: str,
-    status: dict[str, Any],
-    runner_error: dict[str, Any] | None,
-    note: str,
-    stderr_tail: str,
-    harness_log: str,
-) -> ExtractError:
-    return _batch_common.job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=harness_log,
-        err_cls=ExtractError,
-        no_fallback=_NO_FALLBACK,
-    )
-
-
 def _collect(
     config: sim_batch.BatchConfig,
     job_id: str,
@@ -383,32 +364,19 @@ def _collect(
     """Collect ``outputs/``. A job that did not finish ``done`` becomes an
     :class:`ExtractError` carrying the runner's own error, else the tail of
     its ``stderr.log`` (the ``--progress`` lines show how far it got)."""
-    done = status.get("state") == "done" and (
-        sim_batch._status_exit_code(status) in (0, None)
-    )
-    if done:
-        try:
-            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        except sim_batch.BatchError as exc:
-            raise _transport_error(job_id, exc) from exc
-        return
-    runner_error: dict[str, Any] | None = None
-    stderr_tail = ""
-    try:
-        sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        runner_error, note = _nb._runner_error(collected)
-        if runner_error is None:
-            stderr_tail = _nb._remote_stderr_tail(collected)
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    raise _job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
-        + "/harness.log",
+    _batch_collect.collect(
+        config,
+        job_id,
+        status,
+        collected,
+        runner=runner,
+        err_cls=ExtractError,
+        no_fallback=_NO_FALLBACK,
+        job_failure=functools.partial(
+            _batch_common.job_failure,
+            err_cls=ExtractError,
+            no_fallback=_NO_FALLBACK,
+        ),
     )
 
 
@@ -418,30 +386,14 @@ def _collect(
 
 
 def _read_report(collected: str, job_id: str) -> dict[str, Any]:
-    try:
-        report = sim_batch.read_collected_report(collected)
-    except sim_batch.BatchError as exc:
-        raise ExtractError(
-            f"batch job {job_id}: {exc} {_NO_FALLBACK}",
-            code=_batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        ) from exc
-    kind, error = sim_batch._classify_collected_report(report)
-    if kind == "error" and error is not None:
-        raise ExtractError(
-            f"batch job {job_id}: the runner's klt reported: "
-            f"{error['message']} {_NO_FALLBACK}",
-            code=error.get("code") or _batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    if "netlist_path" not in report:
-        raise ExtractError(
-            f"batch job {job_id}: the collected {sim_batch.BATCH_REPORT_FILENAME} "
-            f"is not a `klt extract` report {_NO_FALLBACK}",
-            code=_batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    return report
+    return _batch_collect.read_collected_unit_report(
+        collected,
+        job_id,
+        err_cls=ExtractError,
+        no_fallback=_NO_FALLBACK,
+        validate=lambda report: "netlist_path" in report,
+        what="a `klt extract` report",
+    )
 
 
 def _write_collected_netlist(
@@ -508,8 +460,6 @@ def run_extract_batch(
     )
     no_netlist = bool(request.get("no_netlist"))
     if output is None and not no_netlist:
-        from .extract import _default_output_path
-
         output = _default_output_path(_abs(request["file"], base_dir))
     config = _resolve_config(pdk, timeout_s)
     ceiling = _check_ceiling(config, timeout_s)
@@ -549,7 +499,7 @@ def run_extract_batch(
             "input_bytes": tree.total_bytes,
             "timeout_s": timeout_s,
             "job_ceiling": ceiling,
-            "stderr_tail": _nb._remote_stderr_tail(collected),
+            "stderr_tail": _batch_collect.remote_stderr_tail(collected),
         }
     environment = report.get("environment")
     report["environment"] = {

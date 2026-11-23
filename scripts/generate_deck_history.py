@@ -11,9 +11,8 @@ This script is the "generated automatically ... not hand-maintained" half of
 that feature (issue #623's recommended Option A): it walks every ``v*`` git
 tag reachable from the current branch and, for every deck module under
 ``src/klayout_tools/decks/`` present at that tag, records its content hash
-(computed exactly the way ``klayout_tools._provenance.sha256_file`` hashes a
-deck file at runtime -- a straight streamed SHA-256 of the raw file bytes),
-the tag, its commit, and the package version from that tag's
+(using the rule-source declaration at that tag, or raw file bytes for releases
+that predate it), the tag, its commit, and the package version from that tag's
 ``pyproject.toml``. A standalone ``<name>.drc`` KLayout deck file (ASAP7) is
 a separate artifact and gets its own entry tagged ``"artifact": "drc_deck"``
 (issue #3826). One entry is recorded **per deck per release** (not only
@@ -41,17 +40,20 @@ reproduces byte-identical output.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import runpy
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DECKS_DIR = REPO_ROOT / "src" / "klayout_tools" / "decks"
 HISTORY_PATH = DECKS_DIR / "_history.json"
+# This release script also runs with plain Python, outside an installed package.
+_source_hash = runpy.run_path(str(DECKS_DIR.parent / "_deck_hash.py"))["source_hash"]
 
 #: Deck modules are plain per-PDK sibling files under decks/ -- anything
 #: that isn't the package init, a non-deck support module colocated in the
@@ -116,14 +118,14 @@ def _drc_deck_names_at(tag: str) -> list[str]:
     )
 
 
-def _blob_sha256(tag: str, deck_name: str, suffix: str = ".py") -> str:
+def _blob(tag: str, filename: str) -> bytes:
     result = subprocess.run(
-        ["git", "show", f"{_ref(tag)}:src/klayout_tools/decks/{deck_name}{suffix}"],
+        ["git", "show", f"{_ref(tag)}:src/klayout_tools/decks/{filename}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
     )
-    return hashlib.sha256(result.stdout).hexdigest()
+    return result.stdout
 
 
 def _package_version_at(tag: str) -> str:
@@ -150,24 +152,27 @@ def build_entries() -> list[dict[str, Any]]:
     for tag in _tags():
         package_version = _package_version_at(tag)
         commit = _commit_sha(tag)
+
+        read_blob = partial(_blob, tag)
+
         for deck_name in _deck_module_names_at(tag):
-            digest = _blob_sha256(tag, deck_name)
+            digest = _source_hash(f"{deck_name}.py", read_blob)
             entries.append(
                 {
                     "deck": deck_name,
-                    "content_hash": f"sha256:{digest}",
+                    "content_hash": digest,
                     "git_tag": tag,
                     "git_commit": commit,
                     "package_version": package_version,
                 }
             )
         for deck_name in _drc_deck_names_at(tag):
-            digest = _blob_sha256(tag, deck_name, ".drc")
+            digest = _source_hash(f"{deck_name}.drc", read_blob)
             entries.append(
                 {
                     "deck": deck_name,
                     "artifact": "drc_deck",
-                    "content_hash": f"sha256:{digest}",
+                    "content_hash": digest,
                     "git_tag": tag,
                     "git_commit": commit,
                     "package_version": package_version,

@@ -4,9 +4,7 @@ First seam split out of :mod:`klayout_tools.sim_batch` (issue #4065), moved
 verbatim, then split by section so each file stays within the size limit:
 this module holds the constants and exceptions; ``sim_batch_contract_spec``,
 ``_worker``, ``_preflight`` and ``_jobspec`` hold the rest.
-:mod:`klayout_tools.sim_batch` re-exports every name, so ``from
-klayout_tools.sim_batch import _x`` keeps working. Names a test patches must be
-patched in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
+Patch names in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
 ``sim_batch_contract_worker``).
 """
 
@@ -73,6 +71,7 @@ BATCH_JOB_COMMAND_FAILED_CODE = "batch_job_command_failed"
 #: Top-level report diagnostic under ``runner_version_check: "warn"`` naming
 #: the request features the runner predates (issue #2901).
 BATCH_RUNNER_FEATURE_PREDATED_CODE = "batch_runner_request_feature_predated"
+BATCH_RUNNER_FEATURE_UNVERIFIED_CODE = "batch_runner_request_feature_unverified"
 #: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
 #: the deck-list contract; the major.minor gate cannot see that (issue #3303).
 BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"
@@ -163,8 +162,12 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "analysis.op_check": "0.9.2",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
+    # Variant-relative object form (#7039). The worker gate is osdi_pdk_relative.
+    "options.osdi_preload[].pdk_relative": None,
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
     "options.stage_model_inputs": "0.7.0",
+    # Selected-corner reruns (#6778) have not shipped in a tag.
+    "_regrade": None,
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
@@ -172,6 +175,16 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
+    # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
+    # a supply_v rail value finer than three decimals is spelled at full
+    # precision in corner_id instead of .3f, so sub-milli rungs keep distinct
+    # IDs and artifact directories. Untagged; its detector is the client-side
+    # _require_supply_echo check, which refuses a legacy-.3f runner response
+    # per dispatched point instead of merging mis-attributed units. Pin the
+    # first shipped version here (with a detector row in
+    # _RELEASED_FEATURE_DETECTORS) when a release contains it, so --dry-run
+    # refuses an older runner pre-submit.
+    "lossless supply_v corner_id spelling": None,
 }
 
 #: Upper bound on how much of the collected stderr file recovery reads (its
@@ -285,6 +298,12 @@ BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"
+
+#: ``environment.remote.job_ceiling``'s ``basis`` when the caller states the
+#: whole-job wall bound via ``request.batch.job_timeout_s`` (issue #5544):
+#: every field of the assessment is then defined by that stated bound, not
+#: by the serial formula (see ``sim_batch_job_timeout.assess_caller_job_timeout``).
+JOB_CEILING_BASIS_CALLER = "caller_job_timeout"
 
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0

@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from . import env_provenance
@@ -74,42 +75,23 @@ from .arith_gen import (
     generate_adder,
     normalize_architecture,
 )
+from .synthesize_abc import FastMode
+from .synthesize_abc_stages import run_mapping
 
 
+@dataclass(slots=True, kw_only=True)
 class _EngineOptions:
-    """The per-library Yosys/ABC knobs a trial synthesis needs to reproduce
-    the real run's engine configuration exactly.
+    """Engine settings shared by the final synthesis and arithmetic candidates."""
 
-    Bundled into one object purely so :func:`_measure_candidate` does not
-    take nine positional look-alikes; every field is resolved once, in
-    :func:`run_synthesize`, from the same tables the real run uses.
-    """
-
-    __slots__ = (
-        "liberty_path",
-        "cell_library",
-        "delay_target_ps",
-        "dont_use_globs",
-        "tie_cells",
-        "constr_inputs",
-    )
-
-    def __init__(
-        self,
-        *,
-        liberty_path: str,
-        cell_library: str,
-        delay_target_ps: int | None,
-        dont_use_globs: tuple[str, ...],
-        tie_cells: tuple[tuple[str, str], tuple[str, str]] | None,
-        constr_inputs: tuple[str, float] | None,
-    ) -> None:
-        self.liberty_path = liberty_path
-        self.cell_library = cell_library
-        self.delay_target_ps = delay_target_ps
-        self.dont_use_globs = dont_use_globs
-        self.tie_cells = tie_cells
-        self.constr_inputs = constr_inputs
+    liberty_path: str
+    cell_library: str
+    delay_target_ps: int | None
+    dont_use_globs: tuple[str, ...]
+    tie_cells: tuple[tuple[str, str], tuple[str, str]] | None
+    constr_inputs: tuple[str, float] | None
+    abc_fast: FastMode = None
+    abc_script_path: str | None = None
+    abc_timeout_s: float | None = None
 
     @property
     def target_period_ns(self) -> float | None:
@@ -710,12 +692,7 @@ def _measure_candidate(
     """Run one full trial synthesis for a candidate architecture and report
     what it measured.
 
-    Uses exactly the engine configuration the real run will use (same
-    liberty, same ``-constr``/``-D``/``-dont_use``/``hilomap`` knobs), into
-    its own ``.klt/synthesize/<run_id>/arith/<label>/`` directory so every trial's
-    script, netlist, stats and ABC log survive as debuggable artifacts --
-    "measured, not guessed" is only a real claim if the measurement is
-    reproducible afterwards.
+    Each trial keeps its script, netlist, stats and ABC log in its own directory.
 
     Returns ``None`` when this candidate's trial synthesis fails outright,
     which disqualifies it from selection without failing the whole run: one
@@ -727,7 +704,6 @@ def _measure_candidate(
         _read_produced_netlist,
         _read_sta_timing,
         _read_stats,
-        _run_yosys,
         _write_constr,
         _write_script,
     )
@@ -749,7 +725,10 @@ def _measure_candidate(
         abc_log_path = os.path.join(trial_dir, f"{hdl_toplevel}_abc.log")
         _write_constr(constr_path, *engine_options.constr_inputs)
 
-    _write_script(
+    scripts = _write_script(
+        abc_timeout_s=engine_options.abc_timeout_s,
+        abc_fast=engine_options.abc_fast,
+        abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
         sources=resolved_sources,
         hdl_toplevel=hdl_toplevel,
@@ -768,9 +747,11 @@ def _measure_candidate(
     )
 
     try:
-        _run_yosys(script_path)
+        run_mapping(scripts)
         _read_produced_netlist(netlist_path)
-        module_stats = _read_stats(stats_path, hdl_toplevel)
+        module_stats = _read_stats(
+            stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
+        )
         abc_timing = _read_produced_abc_timing(
             abc_log_path, engine_options.delay_target_ps
         )

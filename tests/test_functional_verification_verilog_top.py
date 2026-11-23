@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
+from klayout_tools._provenance import _combined_content_hash
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -22,8 +24,6 @@ EXAMPLE_DIR = (
     / "functional-verification"
     / "verilog-tb"
 )
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
-needs_icarus = pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog/vvp not installed")
 
 
 def _stage(tmp_path: Path, request_name: str = "request-rtl.json") -> Path:
@@ -190,6 +190,13 @@ def test_integration_sdf_annotated_run(tmp_path):
     sdf = report["environment"]["sdf"]
     assert sdf["annotated"] is True
     assert sdf["partial"] is False
+    source_paths = [
+        str(tmp_path / name) for name in ("and_cell.v", "and2.v", "tb_and2.v")
+    ]
+    assert report["provenance"]["input"] == {
+        "content_hash": _combined_content_hash(source_paths),
+        "role": "source",
+    }
 
 
 @needs_icarus
@@ -219,13 +226,10 @@ def test_plusargs_validation(tmp_path, value, match):
         run_functional_verification(request)
 
 
-def test_plusargs_with_cocotb_module_is_unknown_field(tmp_path):
-    request_path = _stage(tmp_path)
-    doc = json.loads(request_path.read_text())
-    doc["testbench"] = {"module": "test_x", "plusargs": ["+a"]}
-    request_path.write_text(json.dumps(doc))
-    with pytest.raises(FunctionalVerificationError, match="plusargs"):
-        run_functional_verification(str(request_path))
+# `testbench.plusargs` with `testbench.module` is no longer an unknown
+# field: issue #6906 accepts and forwards it on the cocotb path. Its
+# validation, reservation, forwarding, and echo are covered by
+# tests/test_functional_verification_plusargs.py.
 
 
 @needs_icarus

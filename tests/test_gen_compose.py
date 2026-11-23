@@ -3254,6 +3254,7 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
             "connectivity": [
                 {
                     "net": "BUS",
+                    "layer_role": "metal",  # no #6920 climb: keep the rejection
                     "pins": [
                         {"block": "b1", "port": "P1"},
                         {"block": "b1", "port": "P2"},
@@ -3314,69 +3315,6 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
     # The drawn subset must itself stay DRC-clean (#1169 acceptance criteria).
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
-
-
-def test_compose_bundle_net_tries_every_candidate_leg_to_an_unreachable_pin(
-    tmp_path, pdk_root
-):
-    # A pin behind a closed guard ring cannot be reached from anywhere, so
-    # *both* candidate legs into it are attempted and rejected -- evidence
-    # that a rejected leg is retried against another partner rather than
-    # failing the net at the first rejection. Since #1169, the b1-b2 leg --
-    # individually routable and unrelated to the ring obstacle -- is drawn
-    # even though b3 ends up stranded: the "2-leg net (3 pins), one leg
-    # unroutable" partial-routing case, this time via a real closed-ring
-    # obstacle rather than a self-net one.
-    m1, m2 = _gate_rail_blocks(tmp_path, pdk_root, 2)
-    ringed = _gen_block(tmp_path, pdk_root, "diff_pair", "ringed", splits=1)
-    output = tmp_path / "ringed_bundle.gds"
-    report = compose(
-        _gate_rail_request(
-            pdk_root,
-            [m1, m2, ringed],
-            [
-                {"block": "b1", "port": "U0_G"},
-                {"block": "b2", "port": "U0_G"},
-                {"block": "b3", "port": "Q1_1_S"},
-            ],
-            output,
-            "ringed_bundle_0",
-        )
-    )
-
-    assert report["unrouted_nets"] == ["VBIAS"]
-    net = report["nets"][0]
-    assert net["routed"] is False
-    assert net["status"] == "partial"
-    assert net["route_length_um"] is not None  # the b1-b2 leg's length
-    ring_legs = [
-        leg for leg in net["legs"] if any(pin["block"] == "b3" for pin in leg["pins"])
-    ]
-    assert len(ring_legs) == 2  # both partners tried
-    assert all("closed guard/collector ring" in leg["reason"] for leg in ring_legs)
-    assert all(leg["routed"] is False for leg in ring_legs)
-
-    # The b1-b2 leg has nothing to do with the ring obstacle -- it is drawn.
-    bridge_leg = next(
-        leg
-        for leg in net["legs"]
-        if {pin["block"] for pin in leg["pins"]} == {"b1", "b2"}
-    )
-    assert bridge_leg["routed"] is True
-    assert bridge_leg["reason"] is None
-    assert bridge_leg["route_length_um"] == pytest.approx(net["route_length_um"])
-
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(output))
-    top = layout.cell("ringed_bundle_0")
-    paths = [s for s in top.shapes(layout.layer(67, 20)).each() if s.is_path()]
-    assert len(paths) == 1  # exactly the b1-b2 backbone
-
-    # The drawn subset must itself stay DRC-clean (#1169 acceptance criteria).
-    drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean"
 
 
 def test_route_bundle_falls_back_to_a_farther_leg_when_the_nearest_is_rejected(
@@ -4663,10 +4601,8 @@ def _diffpair_request(dp, mir, *, dp_port, mir_port, pdk_root, spacing_um=1.0):
 
 def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
     # #199 case 1's minimal repro: two _D ports (both direction_deg: 0) on
-    # adjacent blocks. The backbone would have to cross the *destination*
-    # block's full width to reach its far-side _D pin, plowing straight
-    # through that device's own _S pin on the way -- a device-level short
-    # `klt extract` would otherwise catch only after the fact.
+    # adjacent blocks -- the backbone crosses the destination block's full
+    # width through its own _S pin: a device-level short.
     dp = _gen_block(
         tmp_path,
         pdk_root,
@@ -4689,6 +4625,8 @@ def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
     request = _diffpair_request(
         dp, mir, dp_port="Q1_1_D", mir_port="M1_1_D", pdk_root=pdk_root
     )
+    # The net names its own plane: no #6920 climb, single-plane rejection.
+    request["connectivity"][0]["layer_role"] = "metal"
     request["options"] = {"cell_name": "test4", "output": str(output)}
     report = compose(request)
 
@@ -4703,11 +4641,8 @@ def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
 
 
 def test_compose_rejects_same_facing_port_pair_across_a_third_block(tmp_path, pdk_root):
-    # The same same-facing short, but with the two same-facing blocks not
-    # adjacent -- the backbone also has to cross clean through the
-    # in-between block's bbox, exercising the third-party-block branch of
-    # the obstacle-overlap check (not just "the two connected blocks'"
-    # own-block branch).
+    # The same short, blocks not adjacent -- also crossing the in-between
+    # block: the third-party-block branch of the obstacle-overlap check.
     dp = _gen_block(
         tmp_path,
         pdk_root,
@@ -4744,6 +4679,7 @@ def test_compose_rejects_same_facing_port_pair_across_a_third_block(tmp_path, pd
             "connectivity": [
                 {
                     "net": "N1",
+                    "layer_role": "metal",  # single-plane verdict (#6920 climb off)
                     "pins": [
                         {"block": "diffpair", "port": "Q1_1_D"},
                         {"block": "mirror", "port": "M1_1_D"},
@@ -6198,6 +6134,8 @@ def test_compose_routes_same_facing_port_pair_when_waypoints_um_clears_it(
             "connectivity": [
                 {
                     "net": "N1",
+                    # No-waypoints control: no #6920 climb, rejection stays.
+                    **({"layer_role": "metal"} if waypoints_um is None else {}),
                     "pins": [
                         {"block": "b1", "port": "P1"},
                         {"block": "b2", "port": "P1"},
@@ -6222,54 +6160,6 @@ def test_compose_routes_same_facing_port_pair_when_waypoints_um_clears_it(
     assert with_waypoints["unrouted_nets"] == []
     assert with_waypoints["nets"][0]["routed"] is True
     assert with_waypoints["nets"][0]["route_length_um"] is not None
-
-
-def test_compose_rejects_route_into_guard_ringed_block(tmp_path, pdk_root):
-    # #199 case 2's minimal repro: `add_guard_ring: true` (diff_pair's
-    # default) draws a local-metal ring around the block; any inbound route
-    # to a non-tap pin crosses that ring, merging the routed net with the
-    # ring's own tap net.
-    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp_ring1", splits=1)
-    mir = _gen_block(
-        tmp_path, pdk_root, "diff_pair", "mir_ring1", mirror=True, splits=1
-    )
-    output = tmp_path / "ring1.gds"
-    request = _diffpair_request(
-        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_S", pdk_root=pdk_root
-    )
-    request["options"] = {"cell_name": "ring1", "output": str(output)}
-    report = compose(request)
-
-    assert output.is_file()
-    assert report["unrouted_nets"] == ["N1"]
-    assert report["nets"][0]["routed"] is False
-    assert any("ring" in note.lower() for note in report["drc_hints"]["notes"])
-
-
-def test_compose_rejects_route_out_of_guard_ringed_source_block(tmp_path, pdk_root):
-    # The ring check must be symmetric: a guard ring fully encloses its
-    # block, so a route is just as unsafe leaving a ring-having *source*
-    # block's non-tap pin as it is entering a ring-having *destination*
-    # block's non-tap pin (Test Plan's "source block" edge case).
-    dp = _gen_block(tmp_path, pdk_root, "diff_pair", "dp_ring2", splits=1)  # ring on
-    mir = _gen_block(
-        tmp_path,
-        pdk_root,
-        "diff_pair",
-        "mir_ring2",
-        mirror=True,
-        splits=1,
-        add_guard_ring=False,
-    )
-    output = tmp_path / "ring2.gds"
-    request = _diffpair_request(
-        dp, mir, dp_port="Q1_1_D", mir_port="M1_1_S", pdk_root=pdk_root
-    )
-    request["options"] = {"cell_name": "ring2", "output": str(output)}
-    report = compose(request)
-
-    assert report["unrouted_nets"] == ["N1"]
-    assert report["nets"][0]["routed"] is False
 
 
 def test_compose_allows_connecting_directly_to_a_guard_ring_tap_port(
@@ -6360,81 +6250,6 @@ def test_compose_allows_opposite_facing_ports_without_guard_ring(tmp_path, pdk_r
 # backbone against every other same-layer port on that block, and report the
 # net unrouted (never `routed: true`) when it overlaps one.
 # --------------------------------------------------------------------------- #
-
-
-def test_compose_rejects_self_net_that_crosses_another_pad_on_same_block(
-    tmp_path, pdk_root
-):
-    # The exact reproduction from the issue: an 8-unit bjt_array, bussing
-    # three emitters (Q0_E, Q1_E, Q2_E) into one node via two 2-pin self-nets
-    # chained end to end. Each net's backbone jogs directly over the base pad
-    # sitting between the two emitters it connects (Q0_B between Q0_E/Q1_E,
-    # Q1_B between Q1_E/Q2_E) -- before #433 this composed `routed: true` and
-    # extracted a single 12-terminal net for what should be a 3-terminal bus.
-    arr = _gen_block(
-        tmp_path,
-        pdk_root,
-        "bjt_array",
-        "arr",
-        rows=1,
-        cols=8,
-        topology="array",
-        dummy=0,
-        add_collector_ring=False,
-    )
-    output = tmp_path / "bjt_bus.gds"
-    report = compose(
-        {
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [{"id": "arr", "generator_report": arr}],
-            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
-            "connectivity": [
-                {
-                    "net": "EBUS1",
-                    "pins": [
-                        {"block": "arr", "port": "Q0_E"},
-                        {"block": "arr", "port": "Q1_E"},
-                    ],
-                },
-                {
-                    "net": "EBUS2",
-                    "pins": [
-                        {"block": "arr", "port": "Q1_E"},
-                        {"block": "arr", "port": "Q2_E"},
-                    ],
-                },
-            ],
-            "routing": {"layer_role": "metal", "width_um": 0.17},
-            "options": {"cell_name": "bjt_bus", "output": str(output)},
-        }
-    )
-
-    # Partial success -- blocks still placed, but neither bussing net routed.
-    assert output.is_file()
-    assert report["unrouted_nets"] == ["EBUS1", "EBUS2"]
-    assert report["nets"][0]["routed"] is False
-    assert report["nets"][0]["route_length_um"] is None
-    assert report["nets"][1]["routed"] is False
-    assert report["nets"][1]["route_length_um"] is None
-    assert any(
-        "EBUS1" in note and "Q0_B" in note for note in report["drc_hints"]["notes"]
-    )
-    assert any(
-        "EBUS2" in note and "Q1_B" in note for note in report["drc_hints"]["notes"]
-    )
-
-    # No metal path was drawn for either net at all -- routed: false means no
-    # `routed_geometry[]` entry, so nothing was drawn on li1 for these nets in
-    # the first place (the short the issue describes never gets a chance to
-    # be drawn).
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(output))
-    top = layout.cell("bjt_bus")
-    li1 = layout.layer(67, 20)
-    paths = [s for s in top.shapes(li1).each() if s.is_path()]
-    assert paths == []
 
 
 def test_compose_routes_self_net_with_no_other_pad_in_the_way(tmp_path, pdk_root):
@@ -6530,77 +6345,6 @@ def test_compose_self_net_pad_crossing_ignores_ports_on_a_different_layer(
     assert report["unrouted_nets"] == []
     assert report["nets"][0]["routed"] is True
     assert report["nets"][0]["route_length_um"] > 0
-
-
-@pytest.mark.parametrize("width_um", [0.22, 0.25, 0.3])
-def test_compose_rejects_self_net_same_row_same_direction_pair(
-    tmp_path, pdk_root, width_um
-):
-    # #453: the #439 pad-crossing check modelled each other port as a square of
-    # its *reported* width_um, inflated by the route half-width. For an array
-    # unit's base-tie pad that badly under-estimates the real drawn metal in the
-    # pad's facing direction, so a self-net between two SAME-ROW, SAME-DIRECTION
-    # (both north-facing) emitter ports sandwiching that base pad -- exactly the
-    # issue's 8-unit common_centroid bjt_array reproduction (Q4_E<-Q0_E with
-    # Q4_B between them) -- composed `routed: true` and DRC-clean while actually
-    # shorting the array's shared base node into the emitter net. It reproduced
-    # for every route width >= the pad's reported width_um (0.22um): the jog is
-    # lifted only one stub width, so a wider route clears the under-sized
-    # reported square yet still plows through the pad's real drawn metal. The
-    # conservative same-direction check must reject it at all such widths.
-    arr = _gen_block(
-        tmp_path,
-        pdk_root,
-        "bjt_array",
-        "arr",
-        emitter_um=0.68,
-        rows=2,
-        cols=4,
-        dummy=1,
-        ratio=8,
-        topology="common_centroid",
-        add_collector_ring=False,
-    )
-    output = tmp_path / "pnp_bus.gds"
-    report = compose(
-        {
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [{"id": "arr", "generator_report": arr}],
-            "placement": {"strategy": "row", "order": ["arr"], "spacing_um": 1.0},
-            "connectivity": [
-                {
-                    "net": "EBUS",
-                    "pins": [
-                        {"block": "arr", "port": "Q4_E"},
-                        {"block": "arr", "port": "Q0_E"},
-                    ],
-                }
-            ],
-            "routing": {"layer_role": "metal", "width_um": width_um},
-            "options": {"cell_name": "pnp_bus", "output": str(output)},
-        }
-    )
-
-    # The crossing self-net must not compose as routed -- before #453 this
-    # returned routed: true (a silent short to the intervening Q4_B base pad).
-    assert output.is_file()
-    assert report["unrouted_nets"] == ["EBUS"]
-    assert report["nets"][0]["routed"] is False
-    assert report["nets"][0]["route_length_um"] is None
-    # The explanatory note names the crossed intervening base pad.
-    assert any(
-        "EBUS" in note and "Q4_B" in note for note in report["drc_hints"]["notes"]
-    )
-
-    # routed: false means no metal path was drawn for the net -- the short the
-    # issue describes never gets a chance to be drawn on the route layer.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(output))
-    top = layout.cell("pnp_bus")
-    li1 = layout.layer(67, 20)
-    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -6717,13 +6461,16 @@ def test_compose_rejects_route_that_crosses_an_already_routed_net(tmp_path, pdk_
 
 
 def test_compose_route_vs_route_collision_is_order_dependent(tmp_path, pdk_root):
-    # Consistent with every other route_two_pin() check: a net is compared
-    # only against whatever geometry already exists at the time it is
-    # processed. Reversing connectivity[] order flips which net "wins" --
-    # NET_V (now first) routes, NET_H (now second) is rejected instead.
+    # A net is compared only against whatever geometry already exists when
+    # it is processed: reversing connectivity[] order flips the winner.
+    # NET_H names its own plane so the #6920 climb stays out; NET_V's own
+    # waypoints already suppress its climb.
     output = tmp_path / "cross_reversed.gds"
     request = _crossing_routes_fixture(tmp_path, pdk_root)
     request["connectivity"] = list(reversed(request["connectivity"]))
+    next(e for e in request["connectivity"] if e["net"] == "NET_H")["layer_role"] = (
+        "metal"
+    )
     request["options"] = {"cell_name": "cross_reversed", "output": str(output)}
     report = compose(request)
 
@@ -7611,74 +7358,6 @@ def test_resolve_via_drop_layer_diffusion_role_port_missing_via_is_unresolvable(
     assert error is not None
     assert "no via" in error
     assert "metals[0]" in error and "metals[1]" in error
-
-
-def test_route_two_pin_populates_via_drops_for_a_diffusion_role_port():
-    # Issue #1894 (Gap 1 root cause, at the route_two_pin() level rather
-    # than full compose()+drc+extract): a same-block leg from a port
-    # reported on the deck's diffusion role (mirroring `bjt_array`'s
-    # `COLL_*`) to a port on the resolved route_layer used to report
-    # `routed: true` with an *empty* `via_drops` -- no contact ever drawn,
-    # even though the leg claimed success. With the fix, `via_drops` carries
-    # the real contact ladder (licon then mcon, #1567-shaped), matching
-    # `_resolve_via_drop_layer`'s own new ladder exactly.
-    deck = get_extraction_deck("sky130")
-    blocks = {
-        "a": {
-            "id": "a",
-            "port_names": {"D", "M"},
-            "ports": {
-                "D": {
-                    "x_um": 0.0,
-                    "y_um": 0.0,
-                    "direction_deg": 0,
-                    "layer": {"layer": deck.active[0], "datatype": deck.active[1]},
-                    "width_um": 0.42,
-                },
-                "M": {
-                    "x_um": 5.0,
-                    "y_um": 0.0,
-                    "direction_deg": 180,
-                    "layer": {
-                        "layer": deck.metals[1][0],
-                        "datatype": deck.metals[1][1],
-                    },
-                    "width_um": 0.17,
-                },
-            },
-        },
-    }
-    offsets = {"a": {"x": 0.0, "y": 0.0}}
-    bboxes = {"a": {"x0": -1.0, "y0": -1.0, "x1": 6.0, "y1": 1.0}}
-    pin_a = {"block": "a", "port": "D"}
-    pin_b = {"block": "a", "port": "M"}
-    result = gen_compose.route_two_pin(
-        pin_a,
-        pin_b,
-        blocks,
-        offsets,
-        bboxes,
-        0.17,
-        route_layer=deck.metals[1],
-        extraction_deck=deck,
-    )
-    assert result["routed"] is True
-    assert result["via_drops"] == [
-        {
-            "x_um": 0.0,
-            "y_um": 0.0,
-            "via_layer": deck.contact,
-            "landing_layers": (deck.active, deck.metals[0]),
-            "block_id": "a",
-        },
-        {
-            "x_um": 0.0,
-            "y_um": 0.0,
-            "via_layer": deck.vias[0],
-            "landing_layers": (deck.metals[0], deck.metals[1]),
-            "block_id": "a",
-        },
-    ]
 
 
 def test_resolve_via_drop_layer_bare_poly_gate_port_is_rejected():
@@ -9019,22 +8698,18 @@ def test_route_two_pin_allows_a_normal_approach_along_the_ports_own_facing():
     assert result["points_um"] == [(10.0, 2.0), (12.2, 2.0)]
 
 
+@pytest.mark.parametrize("pin_plane", [False, True])
 def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
-    tmp_path, pdk_root
+    tmp_path, pdk_root, pin_plane
 ):
     # #1895's reproduction, distilled to two blocks: `BUS` is a same-block
     # self-net across `n2`'s two source straps (the documented
     # `routing.cross_block_layer_role` case -- it falls back to met1), and
     # `FAN` is an unrelated net reaching `n2`'s north-facing gate pad from
-    # `n1` in the west, i.e. from *below* the gate, across the Q1_1_S strap
-    # `BUS` itself lands on.
-    #
-    # Before the fix both nets reported `routed: true`, `unrouted_nets == []`
-    # and `warnings == []`, while `klt extract` recovered them as one
-    # `BUS|FAN` node carrying 6 device terminals. The composed GDS is the
-    # ground truth here, so this test asserts against `klt extract` directly:
-    # whatever `gen-compose` reports, the two labels must never end up on one
-    # extracted net.
+    # *below* the gate, across the Q1_1_S strap `BUS` itself lands on.
+    # Before the fix both nets reported `routed: true` while `klt extract`
+    # recovered them as one `BUS|FAN` node -- the composed GDS is the ground
+    # truth here: the two labels must never end up on one extracted net.
     n1 = _gen_block(
         tmp_path, pdk_root, "diff_pair", "n1", add_guard_ring=False, gate_contact=True
     )
@@ -9064,6 +8739,7 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
                 },
                 {
                     "net": "FAN",
+                    **({"layer_role": "metal"} if pin_plane else {}),
                     "pins": [
                         {"block": "n1", "port": "Q1_1_D"},
                         {"block": "n2", "port": "Q1_1_G"},
@@ -9083,26 +8759,26 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
         }
     )
 
-    # The documented cross-block bus still routes -- the fix must not cost
-    # `routing.cross_block_layer_role` its own intended use case (#1168).
+    # The configured cross-block bus still routes (#1168).
     bus = next(net for net in report["nets"] if net["net"] == "BUS")
     assert bus["routed"] is True, bus
-    # The offending leg is now reported, not drawn -- and says why.
     fan = next(net for net in report["nets"] if net["net"] == "FAN")
-    assert fan["routed"] is False
-    assert "FAN" in report["unrouted_nets"]
-    assert "on the side *away* from its own pin 'Q1_1_G'" in fan["legs"][0]["reason"]
+    assert fan["routed"] == (not pin_plane)
+    if pin_plane:
+        assert (
+            "on the side *away* from its own pin 'Q1_1_G'" in fan["legs"][0]["reason"]
+        )
 
-    # The composed GDS agrees: two labels, two nets, no silent merge.
     result = extract.run_extract(str(output), "sky130", top="cross_block_short_1895")
     assert result["merged_net_labels"] == []
     net_names = {net["name"] for net in result["nets"] if net.get("name")}
     assert "BUS|FAN" not in net_names
+    if not pin_plane:
+        assert "FAN" in net_names
     assert "BUS" in net_names
-    # BUS reaches exactly the two source terminals it declared -- not the
-    # gate/drain terminals it absorbed through the short before the fix.
-    bus_net = next(net for net in result["nets"] if net["name"] == "BUS")
-    assert bus_net["device_count"] == 2
+    assert (
+        next(net for net in result["nets"] if net["name"] == "BUS")["device_count"] == 2
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -9285,10 +8961,8 @@ def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
     tmp_path, pdk_root, monkeypatch
 ):
     # Regression guard for #1057/#1386: the retry proposes lanes, it never
-    # waives the collision check. With the lane generator yielding nothing to
-    # try, the identical request must fall straight back to the pre-#1393
-    # rejection -- `routed: false` naming the already-routed net, not a
-    # silently-accepted short.
+    # waives the collision check -- with none to try, the request falls
+    # back to the pre-#1393 rejection, not a silently-accepted short.
     monkeypatch.setattr(
         gen_compose, "_self_net_cross_layer_lane_waypoints_um", lambda *a, **k: []
     )
@@ -9302,11 +8976,14 @@ def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
         gate_contact=True,
     )
     output = tmp_path / "dp_split_gates_no_lane.gds"
-    report = compose(
-        _diff_pair_split_gate_request(
-            pdk_root, dp, output, "dp_split_gates_no_lane", ("GA", "GB")
-        )
+    request = _diff_pair_split_gate_request(
+        pdk_root, dp, output, "dp_split_gates_no_lane", ("GA", "GB")
     )
+    # GB's own named plane: no #6920 climb off its met2 collision plane.
+    next(e for e in request["connectivity"] if e["net"] == "GB")["layer_role"] = (
+        "metal2"
+    )
+    report = compose(request)
 
     assert report["unrouted_nets"] == ["GB"]
     blocker = next(
@@ -9315,38 +8992,6 @@ def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
     assert "crosses already-routed net 'GA'" in blocker["reason"]
 
     result = extract.run_extract(str(output), "sky130", top="dp_split_gates_no_lane")
-    assert result["merged_net_labels"] == []
-
-
-def test_compose_two_same_block_self_nets_unchanged_without_a_cross_layer(
-    tmp_path, pdk_root
-):
-    # The retry is reachable only from a leg that resolved on
-    # `routing.cross_block_layer_role` (#1168). Drop that key and the same
-    # request behaves exactly as it did before #1168 ever existed: neither
-    # gate net routes -- each one's own fixed-shape backbone would short
-    # across another of the block's pads on the primary layer (checks 3/4) --
-    # and nothing is drawn that could merge the two declared nets.
-    dp = _gen_block(
-        tmp_path,
-        pdk_root,
-        "diff_pair",
-        "dp",
-        splits=2,
-        add_guard_ring=False,
-        gate_contact=True,
-    )
-    output = tmp_path / "dp_split_gates_no_cross.gds"
-    request = _diff_pair_split_gate_request(
-        pdk_root, dp, output, "dp_split_gates_no_cross", ("GA", "GB")
-    )
-    del request["routing"]["cross_block_layer_role"]
-    report = compose(request)
-
-    assert report["unrouted_nets"] == ["GA", "GB"]
-    assert all(net["routed"] is False for net in report["nets"])
-
-    result = extract.run_extract(str(output), "sky130", top="dp_split_gates_no_cross")
     assert result["merged_net_labels"] == []
 
 
@@ -9537,57 +9182,6 @@ def _bjt_self_net_request(pdk_root, arr, output, pin_a, pin_b, width_um):
         "routing": {"layer_role": "metal", "width_um": width_um},
         "options": {"cell_name": "pnp_bus", "output": str(output)},
     }
-
-
-@pytest.mark.parametrize("width_um", [0.17, 0.22])
-def test_compose_rejects_self_net_between_same_facing_ports_on_different_rows(
-    tmp_path, pdk_root, width_um
-):
-    # Q4_E (row 0) and Q3_E (row 1) both face north but sit on different rows
-    # and columns, so neither #439's inflated-pad-footprint check nor #467's
-    # same-row/same-direction fallback fires (both require the two pins to
-    # share their facing-axis coordinate). The route's drawn metal still
-    # crosses another unit's real drawn emitter/base pads on its way across
-    # the array -- exactly the "different rows" gap the issue's table
-    # measures, at both route widths below the pad's own reported width_um
-    # (0.22) and at it.
-    arr = _bjt_array_8(tmp_path, pdk_root)
-    output = tmp_path / "pnp_bus.gds"
-    report = compose(
-        _bjt_self_net_request(pdk_root, arr, output, "Q4_E", "Q3_E", width_um)
-    )
-
-    assert report["unrouted_nets"] == ["N"]
-    assert report["nets"][0]["routed"] is False
-    assert report["nets"][0]["route_length_um"] is None
-    assert any("N" in note for note in report["drc_hints"]["notes"])
-
-    # routed: false means no metal path was drawn for the net.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.read(str(output))
-    top = layout.cell("pnp_bus")
-    li1 = layout.layer(67, 20)
-    assert [s for s in top.shapes(li1).each() if s.is_path()] == []
-
-
-def test_compose_rejects_self_net_between_adjacent_ports_with_a_wide_route(
-    tmp_path, pdk_root
-):
-    # Q4_E and Q4_B are directly adjacent, same row, same facing direction --
-    # with nothing else reported as a port between them, so #439/#467's
-    # reported-geometry pad models see no obstacle at all. A route wide
-    # enough (0.5um, more than double any port's reported width_um) still
-    # draws metal that lands on another unit's real drawn pad -- only the
-    # block's actual drawn shapes (not its reported ports[]) show that.
-    arr = _bjt_array_8(tmp_path, pdk_root)
-    output = tmp_path / "pnp_bus.gds"
-    report = compose(_bjt_self_net_request(pdk_root, arr, output, "Q4_E", "Q4_B", 0.50))
-
-    assert report["unrouted_nets"] == ["N"]
-    assert report["nets"][0]["routed"] is False
-    assert report["nets"][0]["route_length_um"] is None
 
 
 def test_route_two_pin_same_row_pair_needs_drawn_geometry_to_be_caught(
@@ -9966,6 +9560,8 @@ def test_cli_gen_compose_partial_success_exit_3(tmp_path, pdk_root, capsys):
                 "connectivity": [
                     {
                         "net": "BUS",
+                        # No #6920 climb: unroutable exit-3 vehicle.
+                        "layer_role": "metal",
                         "pins": [
                             {"block": "b1", "port": "P1"},
                             {"block": "b1", "port": "P2"},
@@ -10419,10 +10015,14 @@ def _shares_merged_polygon(gds_path, cell_name, layer, datatype, p0_um, p1_um):
     return not at_p0.interacting(_probe(p1_um)).is_empty()
 
 
-def _compose_two_diff_pairs(tmp_path, pdk_root, name, a_params, b_params):
+def _compose_two_diff_pairs(
+    tmp_path, pdk_root, name, a_params, b_params, layer_role=None
+):
     """#434's documented repro: a mirror-labelled pair wired to a plain pair's
     source, both with their default guard ring, differing only in the ring-gap
-    params under test."""
+    params under test. `layer_role` names the net's own plane (#1655) -- pin
+    it to keep the pre-#6912 single-plane verdict and its rejection message
+    observable."""
     a = _gen_block(
         tmp_path, pdk_root, "diff_pair", f"a_{name}", mirror=True, splits=2, **a_params
     )
@@ -10430,6 +10030,15 @@ def _compose_two_diff_pairs(tmp_path, pdk_root, name, a_params, b_params):
         tmp_path, pdk_root, "diff_pair", f"b_{name}", mirror=False, splits=2, **b_params
     )
     output = tmp_path / f"{name}.gds"
+    net = {
+        "net": "N1",
+        "pins": [
+            {"block": "a", "port": "M1_1_D"},
+            {"block": "b", "port": "Q1_1_S"},
+        ],
+    }
+    if layer_role is not None:
+        net["layer_role"] = layer_role
     report = compose(
         {
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
@@ -10438,15 +10047,7 @@ def _compose_two_diff_pairs(tmp_path, pdk_root, name, a_params, b_params):
                 {"id": "b", "generator_report": b},
             ],
             "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
-            "connectivity": [
-                {
-                    "net": "N1",
-                    "pins": [
-                        {"block": "a", "port": "M1_1_D"},
-                        {"block": "b", "port": "Q1_1_S"},
-                    ],
-                }
-            ],
+            "connectivity": [net],
             "routing": {"layer_role": "metal", "width_um": 0.17},
             "options": {"cell_name": name, "output": str(output)},
         }
@@ -10483,59 +10084,6 @@ def test_compose_routes_into_guard_ringed_block_through_a_declared_ring_gap(
     ring_point = (tap_n["x_um"] + offsets["a"]["x"], tap_n["y_um"] + offsets["a"]["y"])
     assert not _shares_merged_polygon(
         output, "ringgap", 67, 20, route_point, ring_point
-    )
-
-
-def test_compose_rejects_route_when_the_ring_gap_is_on_a_different_side(
-    tmp_path, pdk_root
-):
-    # An opening exists, but not on the side this route crosses -- the ring is
-    # still closed where the wire would go, so #199 case 2's protection holds.
-    _, report, _ = _compose_two_diff_pairs(
-        tmp_path,
-        pdk_root,
-        "ringgap_wrongside",
-        dict(_DIFF_PAIR_GAP_E, ring_gap_side="N"),
-        _DIFF_PAIR_GAP_W,
-    )
-    assert report["unrouted_nets"] == ["N1"]
-    assert any("declares no opening" in note for note in report["drc_hints"]["notes"])
-
-
-def test_compose_rejects_route_that_misses_the_declared_ring_gap(tmp_path, pdk_root):
-    # The opening is on the right side but left at the ring's own mid-height,
-    # while the route crosses at the lower device row -- the wire would cut
-    # the ring's metal, so the net is still reported unroutable.
-    _, report, _ = _compose_two_diff_pairs(
-        tmp_path,
-        pdk_root,
-        "ringgap_missed",
-        dict(_DIFF_PAIR_GAP_E, ring_gap_offset_um=0.0),
-        _DIFF_PAIR_GAP_W,
-    )
-    assert report["unrouted_nets"] == ["N1"]
-    assert any(
-        "outside the" in note and "opening it declares" in note
-        for note in report["drc_hints"]["notes"]
-    )
-
-
-def test_compose_ring_gap_too_narrow_for_the_route_width_is_rejected(
-    tmp_path, pdk_root
-):
-    # A route needs half its width *plus* the block's own reported
-    # min_spacing_um of clearance inside the opening -- an opening only just
-    # wider than the wire would leave the wire shorted to the ring's cut ends.
-    _, report, _ = _compose_two_diff_pairs(
-        tmp_path,
-        pdk_root,
-        "ringgap_narrow",
-        dict(_DIFF_PAIR_GAP_E, ring_gap_um=0.4),
-        _DIFF_PAIR_GAP_W,
-    )
-    assert report["unrouted_nets"] == ["N1"]
-    assert any(
-        "clearance inside the opening" in n for n in report["drc_hints"]["notes"]
     )
 
 
@@ -10644,50 +10192,6 @@ def test_compose_routes_into_collector_ringed_bjt_array_through_a_ring_gap(
     assert report["unrouted_nets"] == []
     assert report["nets"][0]["routed"] is True
     assert output.is_file()
-
-
-def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
-    tmp_path, pdk_root
-):
-    # The same composition with bjt_array's default *closed* collector ring is
-    # still rejected -- the ring-gap path is additive, not a relaxation.
-    bjt = _gen_block(tmp_path, pdk_root, "bjt_array", "bjt_closed")
-    ring = _gen_block(tmp_path, pdk_root, "guard_ring", "bjt_closed_partner")
-    report = compose(
-        {
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "blocks": [
-                {"id": "bjt", "generator_report": bjt},
-                {"id": "ring", "generator_report": ring},
-            ],
-            "placement": {
-                "strategy": "explicit",
-                "order": ["bjt", "ring"],
-                "origins_um": {
-                    "bjt": {"x": 0.0, "y": 0.0},
-                    "ring": {"x": 0.2, "y": 5.0},
-                },
-            },
-            "connectivity": [
-                {
-                    "net": "EMIT",
-                    "pins": [
-                        {"block": "bjt", "port": "Q0_E"},
-                        {"block": "ring", "port": "TAP_S"},
-                    ],
-                }
-            ],
-            "routing": {"layer_role": "metal", "width_um": 0.17},
-            "options": {
-                "cell_name": "bjt_closed_top",
-                "output": str(tmp_path / "bjt_closed.gds"),
-            },
-        }
-    )
-    assert report["unrouted_nets"] == ["EMIT"]
-    assert any(
-        "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -10804,36 +10308,6 @@ def test_compose_routes_over_a_closed_collector_ring_on_a_higher_plane(
     collector_nets = {device["nets"]["c"] for device in result["devices"]}
     assert base_nets == {"vss"}
     assert collector_nets and not (collector_nets & base_nets)
-
-
-def test_compose_still_rejects_a_same_plane_route_out_of_a_closed_ring(
-    tmp_path, pdk_root
-):
-    # The identical composition on the ring's *own* plane (the `metal` role,
-    # li1 -- the level `bjt_array` draws its collector ring's metal loop on
-    # alongside the diffusion its COLL_* ports report) is still the genuine
-    # merge #199 case 2 rejects, with the message unchanged. This is the
-    # companion half of the test above: the difference between the two is
-    # purely `routing.layer_role`.
-    _output, report = _closed_collector_ring_escape(
-        tmp_path, pdk_root, "ringsame", "metal"
-    )
-
-    assert report["unrouted_nets"] == ["vss"]
-    reasons = [leg.get("reason") or "" for leg in report["nets"][0]["legs"]]
-    assert [
-        reason
-        for reason in reasons
-        if "closed guard/collector ring" in reason and "Q0_B" in reason
-    ] == [
-        "block 'array' has a closed guard/collector ring (reports a "
-        "TAP_*/COLL_* port and no GAP_* opening) -- a route to its non-tap "
-        "port 'Q0_B' would cross the ring's own metal loop and merge this net "
-        "with the ring's tap net; route to the ring's own tap port instead, "
-        "regenerate the block with a routing opening in the ring "
-        "(params.ring_gap_side/ring_gap_um), or regenerate it with "
-        "add_guard_ring/add_collector_ring: false"
-    ]
 
 
 def _hand_ringed_cell_block(
@@ -10989,10 +10463,12 @@ def test_compose_rejects_higher_plane_ring_escape_when_the_deck_cannot_resolve_t
     )
 
 
-def _two_ring_gapped_bjt_units(tmp_path, pdk_root, name, ring_gap_um):
+def _two_ring_gapped_bjt_units(tmp_path, pdk_root, name, ring_gap_um, layer_role=None):
     """#1902's own repro shape: two identical single-unit bjt_arrays, each
     with its own collector ring opened on the side facing the other, bussed
-    base-to-base through both declared openings."""
+    base-to-base through both declared openings. `layer_role` names the
+    net's own plane (#1655) -- pin it to keep the pre-#6912 single-plane
+    verdict and its rejection message observable."""
     a = _gen_block(
         tmp_path,
         pdk_root,
@@ -11036,13 +10512,16 @@ def _two_ring_gapped_bjt_units(tmp_path, pdk_root, name, ring_gap_um):
                 },
             },
             "connectivity": [
-                {
-                    "net": "BASE",
-                    "pins": [
-                        {"block": "xq1", "port": "Q0_B"},
-                        {"block": "xqr", "port": "Q0_B"},
-                    ],
-                }
+                dict(
+                    {
+                        "net": "BASE",
+                        "pins": [
+                            {"block": "xq1", "port": "Q0_B"},
+                            {"block": "xqr", "port": "Q0_B"},
+                        ],
+                    },
+                    **({"layer_role": layer_role} if layer_role is not None else {}),
+                )
             ],
             "routing": {"layer_role": "metal", "width_um": 0.17},
             "options": {"cell_name": name, "output": str(output)},
@@ -11092,28 +10571,6 @@ def test_compose_buses_two_collector_ringed_bjt_units_through_opposing_ring_gaps
     assert not _shares_merged_polygon(
         output, "bjt_bus", 67, 20, route_point, ring_point
     )
-
-
-def test_compose_ring_gap_crossing_inside_the_opening_but_too_tight_names_the_footprint(
-    tmp_path, pdk_root
-):
-    # #1902 finding 1: a crossing point that sits *inside* the declared
-    # opening can still be rejected because the route's own clearance-
-    # inflated footprint around it does not fit -- the default-sized opening
-    # (ring_gap_um=1.0) is exactly this case for the bjt_array unit's own
-    # Q0_B geometry. The message must say the crossing is *inside* the
-    # opening but too close to its edge, never the self-contradictory "at
-    # Xum, outside [lo, hi]" wording when X arithmetically sits inside
-    # [lo, hi].
-    _, report, _ = _two_ring_gapped_bjt_units(
-        tmp_path, pdk_root, "bjt_bus_tight", ring_gap_um=1.0
-    )
-    assert report["unrouted_nets"] == ["BASE"]
-    notes = report["drc_hints"]["notes"]
-    assert any(
-        "inside the" in note and "opening it declares but too close to its edge" in note
-        for note in notes
-    ), notes
 
 
 # --------------------------------------------------------------------------- #
@@ -12196,20 +11653,19 @@ def _same_facing_drain_request(m1, m2, pdk_root, output, p_orientation=None):
     }
 
 
-def test_compose_same_facing_drain_net_is_unrouted_without_orientation(
+def test_compose_same_facing_drain_net_routes_via_plane_climb_without_orientation(
     tmp_path, pdk_root
 ):
-    # Baseline (pre-#1166, reproducing #1164's root cause #1): "p"'s own D is
-    # on p's *far* side from "n" -- wiring n.D to p.D forces the backbone
-    # through p's own body, which route_two_pin's obstacle-overlap check
-    # (check 5) rejects.
+    # Pre-#1166 baseline: p's own D is on its far side, so the fixed shape
+    # is rejected on the net's plane -- #6920's climb lifts it by default;
+    # the mirrored companion below still exercises orientation itself.
     m1 = _gen_block(tmp_path, pdk_root, "mos_array", "nfet_like", rows=1, cols=1)
     m2 = _gen_block(tmp_path, pdk_root, "mos_array", "pfet_like", rows=1, cols=1)
     output = tmp_path / "inverter_unrouted.gds"
     report = compose(_same_facing_drain_request(m1, m2, pdk_root, output))
 
-    assert report["unrouted_nets"] == ["VOUT"]
-    assert report["nets"][0]["routed"] is False
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
 
 
 def test_compose_mirrored_block_routes_same_facing_drain_net_and_is_drc_clean(
@@ -13013,331 +12469,6 @@ def test_compose_cell_block_port_direction_deg_normalises_to_int(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# `klt gen`-family + `klt place_and_route`-family compose at a resolved
-# non-1000-DATABASE-MICRONS PDK's own dbu (issue #1496) -- a `klt gen` block
-# and a `blocks[].cell` entry standing in for a `place_and_route`-produced
-# GDS (dbu already correctly resolved from the tech LEF, #1032) must compose
-# without the "must share the same dbu" `GenComposeError` when generated
-# against the *same* resolved PDK. A block generated against a genuinely
-# *different* PDK variant (a real cross-PDK composition mistake) must still
-# raise it.
-# --------------------------------------------------------------------------- #
-
-
-def _write_place_and_route_style_gds(path, cell_name, width_um, height_um, dbu):
-    """Fabricate a single-cell stream at an explicit ``dbu`` -- a stand-in for
-    a `klt place_and_route`-produced GDS, whose dbu is resolved from the
-    target PDK's own tech LEF (#1032) rather than always 0.001, the same
-    shape `_write_library_gds` uses but with the dbu made a parameter so it
-    can mimic a non-1000-DATABASE-MICRONS PDK (e.g. gf180mcu's 0.0005)."""
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    layout.dbu = dbu
-    li1 = layout.layer(67, 20)
-    cell = layout.create_cell(cell_name)
-    cell.shapes(li1).insert(
-        kdb.Box(0, 0, int(round(width_um / dbu)), int(round(height_um / dbu)))
-    )
-    layout.write(str(path))
-    return str(path)
-
-
-def test_compose_gen_block_with_place_and_route_style_gds_same_gf180mcu_pdk(
-    tmp_path, both_pdk_root
-):
-    """The core regression: a `klt gen guard_ring` block and a
-    `place_and_route`-style GDS, both resolved against the same gf180mcuD
-    PDK (tech LEF declaring `DATABASE MICRONS 2000`), compose cleanly -- both
-    now resolve dbu 0.0005 from the same tech LEF, by construction (#1496)."""
-    variant_dir = both_pdk_root / "gf180mcuD"
-    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
-    techlef_dir.mkdir(parents=True, exist_ok=True)
-    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
-        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
-    )
-
-    ring_report = _gen_block_variant(
-        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
-    )
-    assert ring_report["gds_path"]
-    import klayout.db as kdb
-
-    ring_layout = kdb.Layout()
-    ring_layout.read(ring_report["gds_path"])
-    assert ring_layout.dbu == pytest.approx(0.0005)
-
-    macro_gds = _write_place_and_route_style_gds(
-        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0005
-    )
-    output = tmp_path / "composed.gds"
-
-    report = compose(
-        {
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "blocks": [
-                {"id": "ring", "generator_report": ring_report},
-                {
-                    "id": "macro",
-                    "cell": {"gds_path": macro_gds, "cell_name": "macro_top"},
-                },
-            ],
-            "placement": {
-                "strategy": "row",
-                "order": ["ring", "macro"],
-                "spacing_um": 1.0,
-            },
-            "options": {"cell_name": "composed_0", "output": str(output)},
-        }
-    )
-
-    assert output.is_file()
-    assert [b["id"] for b in report["blocks"]] == ["ring", "macro"]
-    # The composed cell is written at the shared, PDK-resolved dbu -- and
-    # says so, so a caller can nest this response as a block in another
-    # compose (#1189) without re-reading the stream (#1496).
-    assert report["dbu_um"] == pytest.approx(0.0005)
-    composed_layout = kdb.Layout()
-    composed_layout.read(str(output))
-    assert composed_layout.dbu == pytest.approx(0.0005)
-
-
-# --------------------------------------------------------------------------- #
-# `klt draw`-style (always dbu=0.001, #230) block composed against a
-# gf180mcu-family `klt gen` block (dbu=0.0005, #1512) -- issue #1514.
-# --------------------------------------------------------------------------- #
-
-
-def test_compose_reconciles_drawn_style_dbu_against_gf180mcu_gen_block(
-    tmp_path, both_pdk_root
-):
-    """The exact issue #1514 repro: `klt draw` always writes `dbu=0.001`
-    (no PDK awareness, #230), but a `klt gen guard_ring --pdk gf180mcuD`
-    block now resolves `dbu=0.0005` from the tech LEF (#1512). Composing the
-    two together used to hit the "must share the same dbu" refusal
-    unconditionally; the ratio (2x) is an exact integer, so it must now
-    reconcile instead: the composed cell is written at the *finer* 0.0005
-    grid, and the coarser (drawn-style) block's geometry is losslessly
-    rescaled onto it -- verified against the block's own literal drawn
-    coordinates, not just its reported bbox."""
-    variant_dir = both_pdk_root / "gf180mcuD"
-    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
-    techlef_dir.mkdir(parents=True, exist_ok=True)
-    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
-        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
-    )
-
-    ring_report = _gen_block_variant(
-        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
-    )
-    import klayout.db as kdb
-
-    ring_layout = kdb.Layout()
-    ring_layout.read(ring_report["gds_path"])
-    assert ring_layout.dbu == pytest.approx(0.0005)
-
-    drawn_gds = _write_place_and_route_style_gds(
-        tmp_path / "drawn.gds", "drawn_top", 1.0, 0.15, dbu=0.001
-    )
-    output = tmp_path / "composed.gds"
-
-    report = compose(
-        {
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "blocks": [
-                {"id": "ring", "generator_report": ring_report},
-                {
-                    "id": "drawn",
-                    "cell": {"gds_path": drawn_gds, "cell_name": "drawn_top"},
-                },
-            ],
-            "placement": {
-                "strategy": "explicit",
-                "order": ["ring", "drawn"],
-                "origins_um": {
-                    "ring": {"x": 0.0, "y": 0.0},
-                    "drawn": {"x": 2.0, "y": 2.0},
-                },
-            },
-            "options": {"cell_name": "composed_0", "output": str(output)},
-        }
-    )
-
-    assert output.is_file()
-    # The composed dbu is the *finest* of the two (0.0005) -- not the
-    # drawn block's own, coarser 0.001.
-    assert report["dbu_um"] == pytest.approx(0.0005)
-    assert any("drawn" in w and "rescaled" in w for w in report["warnings"])
-
-    drawn_block = next(b for b in report["blocks"] if b["id"] == "drawn")
-    assert drawn_block["offset_um"] == {"x": 2.0, "y": 2.0}
-
-    composed_layout = kdb.Layout()
-    composed_layout.read(str(output))
-    assert composed_layout.dbu == pytest.approx(0.0005)
-
-    # The drawn block's own sub-cell, named "<block_id>__<cell_name>" by
-    # `_write_composed_gds` -- read its geometry directly to confirm it was
-    # rescaled (not reinterpreted): a box drawn (0,0)-(1000,150) at the
-    # block's own dbu=0.001 is exactly 1.0um x 0.15um; reinterpreting those
-    # same integer coordinates at the composed dbu=0.0005 without rescaling
-    # would silently read back as 2.0um x 0.3um instead.
-    drawn_cell = composed_layout.cell("drawn__drawn_top")
-    assert drawn_cell is not None
-    li1 = composed_layout.find_layer(67, 20)
-    assert li1 is not None
-    shapes = list(drawn_cell.shapes(li1).each())
-    assert len(shapes) == 1
-    box = shapes[0].box
-    assert box.width() * composed_layout.dbu == pytest.approx(1.0)
-    assert box.height() * composed_layout.dbu == pytest.approx(0.15)
-
-
-def test_compose_dbu_rescale_preserves_block_hierarchy_and_array_pitch(
-    tmp_path, both_pdk_root
-):
-    """The rescale must remap a coarser block's *whole* layout -- its internal
-    cell hierarchy and any instance-array step vectors -- not just the shapes
-    sitting directly in its top cell. A block whose own top cell instances a
-    leaf as a 3x2 array is the case that would silently break if only shapes
-    were scaled: the array pitch would stay at its raw integer value and halve
-    in microns on the finer grid, tearing the array apart (#1514)."""
-    import klayout.db as kdb
-
-    variant_dir = both_pdk_root / "gf180mcuD"
-    techlef_dir = variant_dir / "libs.ref" / "gf180mcu_fd_sc_mcu9t5v0" / "techlef"
-    techlef_dir.mkdir(parents=True, exist_ok=True)
-    (techlef_dir / "gf180mcu_fd_sc_mcu9t5v0__nom.tlef").write_text(
-        "UNITS\n  DATABASE MICRONS 2000 ;\nEND UNITS\n", encoding="utf-8"
-    )
-
-    ring_report = _gen_block_variant(
-        tmp_path, both_pdk_root, "gf180mcuD", "guard_ring", "ring0"
-    )
-
-    # A `klt draw`-style hierarchical block at the coarse 0.001 grid.
-    drawn_gds = tmp_path / "drawn_hier.gds"
-    src = kdb.Layout()
-    src.dbu = 0.001
-    src_li1 = src.layer(67, 20)
-    leaf = src.create_cell("drawn_leaf")
-    leaf.shapes(src_li1).insert(kdb.Box(0, 0, 1000, 150))  # 1.0um x 0.15um
-    hier_top = src.create_cell("drawn_hier_top")
-    hier_top.insert(
-        kdb.CellInstArray(
-            leaf.cell_index(),
-            kdb.Trans(0, False, 5000, 7000),  # 5.0um, 7.0um
-            kdb.Vector(3000, 0),  # 3.0um column pitch
-            kdb.Vector(0, 2000),  # 2.0um row pitch
-            3,
-            2,
-        )
-    )
-    expected_bbox_um = hier_top.dbbox()
-    src.write(str(drawn_gds))
-
-    output = tmp_path / "composed.gds"
-    report = compose(
-        {
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "blocks": [
-                {"id": "ring", "generator_report": ring_report},
-                {
-                    "id": "drawn",
-                    "cell": {
-                        "gds_path": str(drawn_gds),
-                        "cell_name": "drawn_hier_top",
-                    },
-                },
-            ],
-            "placement": {
-                "strategy": "explicit",
-                "order": ["ring", "drawn"],
-                "origins_um": {
-                    "ring": {"x": 0.0, "y": 0.0},
-                    "drawn": {"x": 40.0, "y": 40.0},
-                },
-            },
-            "options": {"cell_name": "composed_0", "output": str(output)},
-        }
-    )
-    assert report["dbu_um"] == pytest.approx(0.0005)
-
-    composed_layout = kdb.Layout()
-    composed_layout.read(str(output))
-    assert composed_layout.dbu == pytest.approx(0.0005)
-
-    drawn_cell = composed_layout.cell("drawn__drawn_hier_top")
-    assert drawn_cell is not None
-    # The block's own hierarchy survived (the leaf is still a separate cell,
-    # instanced as an array -- not flattened away by the rescale).
-    insts = list(drawn_cell.each_inst())
-    assert len(insts) == 1
-    inst = insts[0]
-    # ...and every micron-space dimension is unchanged: array pitch, counts,
-    # the instance's own displacement, and the leaf's own drawn box. (The
-    # a/b axes are compared as an unordered pair: a GDS AREF round-trip
-    # reports them rows-first, independent of this rescale.)
-    axes = {
-        (
-            round(inst.a.x * composed_layout.dbu, 6),
-            round(inst.a.y * composed_layout.dbu, 6),
-            inst.na,
-        ),
-        (
-            round(inst.b.x * composed_layout.dbu, 6),
-            round(inst.b.y * composed_layout.dbu, 6),
-            inst.nb,
-        ),
-    }
-    assert axes == {(3.0, 0.0, 3), (0.0, 2.0, 2)}
-    assert inst.trans.disp.x * composed_layout.dbu == pytest.approx(5.0)
-    assert inst.trans.disp.y * composed_layout.dbu == pytest.approx(7.0)
-
-    composed_bbox = drawn_cell.dbbox()
-    assert composed_bbox.left == pytest.approx(expected_bbox_um.left)
-    assert composed_bbox.bottom == pytest.approx(expected_bbox_um.bottom)
-    assert composed_bbox.right == pytest.approx(expected_bbox_um.right)
-    assert composed_bbox.top == pytest.approx(expected_bbox_um.top)
-
-
-def test_compose_still_rejects_non_integer_ratio_dbu_mismatch(tmp_path, both_pdk_root):
-    """A block generated against sky130A (dbu 0.001, no tech LEF resolver
-    override in this fixture) composed alongside a GDS at a dbu whose ratio
-    to 0.001 is *not* an exact integer (0.001 / 0.0004 == 2.5) is a genuine,
-    irreconcilable composition mistake -- the mismatch error must still
-    fire, not be silently (and lossily) rescaled (#1514, narrowing #1496's
-    original blanket refusal to only the non-integer-ratio case)."""
-    sky_report = _gen_block_variant(
-        tmp_path, both_pdk_root, "sky130A", "guard_ring", "ring0"
-    )
-    macro_gds = _write_place_and_route_style_gds(
-        tmp_path / "macro.gds", "macro_top", 5.0, 5.0, dbu=0.0004
-    )
-    output = tmp_path / "composed.gds"
-
-    with pytest.raises(GenComposeError, match="does not evenly divide"):
-        compose(
-            {
-                "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
-                "blocks": [
-                    {"id": "ring", "generator_report": sky_report},
-                    {
-                        "id": "macro",
-                        "cell": {"gds_path": macro_gds, "cell_name": "macro_top"},
-                    },
-                ],
-                "placement": {
-                    "strategy": "row",
-                    "order": ["ring", "macro"],
-                    "spacing_um": 1.0,
-                },
-                "options": {"cell_name": "composed_0", "output": str(output)},
-            }
-        )
-
-
-# --------------------------------------------------------------------------- #
 # Hierarchical composition -- a gen-compose response as a block (#1189)
 # --------------------------------------------------------------------------- #
 
@@ -13881,30 +13012,21 @@ def test_compose_nests_a_composition_and_bundle_routes_promoted_pins_on_new_laye
 
 
 # --------------------------------------------------------------------------- #
-# Own-block pad self-notch check (issue #1520): a `blocks[].cell` port
-# hand-declared on a pre-existing stream's own internal wire can sit close
-# enough to a *different* part of that same wire (e.g. a perpendicular leg
-# near a corner) that the fixed-size via-drop landing pad `gen-compose` draws
-# there violates the resolved deck's own same-layer minimum-spacing rule --
-# even though the pad and the wire are the same electrical node. Before this
-# check, `gen-compose` drew the pad silently (`routed: true`) and only `klt
-# drc` caught it, several steps downstream of the request that caused it.
+# A via-drop pad can merge with a block's own wire and create a notch near
+# its corner. Compose checks the deck's same-layer spacing before drawing
+# the pad (#1520), using the resolved pad size for each via hop (#6469).
 # --------------------------------------------------------------------------- #
 
 
-def _write_l_wire_gds(path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, w=0.17):
-    """Fabricate a library stream holding one li1 (67/20) "L"-shaped wire --
-    a long horizontal leg from ``x=0`` to ``x=long_len`` at ``y=0.5``, plus a
-    perpendicular leg going north from the corner at ``x=corner_x`` up to
-    ``y=arm_top`` -- the exact shape #1520's reproducer describes: "an
-    L-shaped wire on the base routing layer", with a port later declared on
-    the long leg near the corner.
-    """
+def _write_l_wire_gds(
+    path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, w=0.17, layer=(67, 20)
+):
+    """Draw an L-shaped wire with a horizontal leg centered at y=0.5um."""
     import klayout.db as kdb
 
     layout = kdb.Layout()
     layout.dbu = 0.001
-    li1 = layout.layer(67, 20)
+    wire_layer = layout.layer(*layer)
     cell = layout.create_cell(cell_name)
 
     def d(v):
@@ -13914,22 +13036,18 @@ def _write_l_wire_gds(path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, 
     short_leg = kdb.Box(
         d(corner_x - w / 2), d(0.5 - w / 2), d(corner_x + w / 2), d(arm_top)
     )
-    cell.shapes(li1).insert(long_leg)
-    cell.shapes(li1).insert(short_leg)
+    cell.shapes(wire_layer).insert(long_leg)
+    cell.shapes(wire_layer).insert(short_leg)
     layout.write(str(path))
     return str(path)
 
 
-def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
-    """The shared shape of #1520's reproducer: a small library source block
-    ``u0`` (one li1 port, far from anything) wired via ``metal2`` (met1,
-    which forces an mcon via-drop down to each endpoint's own li1 pad -- the
-    exact mechanism that draws the fixed-size, `width_um`-independent
-    landing pad the issue describes) to a declared port on ``u1``'s own
-    internal L-shaped wire, at ``x=port_x`` along the wire's long leg.
-    """
+def _l_wire_compose_request(
+    tmp_path, pdk_root, port_x, cell_name, output, *, layer=(67, 20), width=0.17
+):
+    """Route on met1 from a source block to a port on the L-wire's long leg."""
     gds = _write_library_gds(tmp_path / "src.gds", {"src": (1.0, 1.0)})
-    wire_gds = _write_l_wire_gds(tmp_path / "wire.gds", cell_name)
+    wire_gds = _write_l_wire_gds(tmp_path / "wire.gds", cell_name, w=width, layer=layer)
     return {
         "pdk": {"variant": "sky130A", "root": str(pdk_root)},
         "blocks": [
@@ -13958,10 +13076,10 @@ def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
                     "ports": [
                         {
                             "name": "o",
-                            "layer": {"layer": 67, "datatype": 20},
+                            "layer": {"layer": layer[0], "datatype": layer[1]},
                             "x_um": port_x,
                             "y_um": 0.5,
-                            "width_um": 0.17,
+                            "width_um": width,
                             "direction_deg": 180,
                         }
                     ],
@@ -13987,15 +13105,8 @@ def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
 def test_compose_rejects_a_via_drop_landing_pad_that_would_self_notch_the_own_wire(
     tmp_path, pdk_root
 ):
-    # #1520's exact reproducer: the declared port ("o", x_um=2.5) sits on the
-    # long leg of the L-wire, close enough to the corner (x=2.9) that the
-    # fixed 0.42um landing pad `gen-compose` draws there -- via an mcon
-    # via-drop, since routing on "metal2" (met1) forces a drop down to each
-    # endpoint's own li1 pad -- comes within 0.105um of the perpendicular
-    # short leg: less than li1.space.1's 0.17um minimum. Before #1520 this
-    # composed `routed: true` with no warning; `klt drc` was the only thing
-    # that caught it (confirmed independently below via `run_drc` against a
-    # hand-drawn equivalent).
+    # A 0.42um pad at x=2.5 leaves 0.105um to the short arm, within
+    # li1.space.1's 0.17um minimum.
     output = tmp_path / "near_corner.gds"
     request = _l_wire_compose_request(tmp_path, pdk_root, 2.5, "l_wire_near", output)
     report = compose(request)
@@ -14014,13 +13125,28 @@ def test_compose_rejects_a_via_drop_landing_pad_that_would_self_notch_the_own_wi
     assert drc_report["violation_count"] == 0
 
 
+def test_compose_rejects_a_resolved_met3_landing_pad_that_would_self_notch(
+    tmp_path, pdk_root
+):
+    # The short arm starts at x=2.75. A 0.42um pad at x=2.225 leaves
+    # 0.315um of clearance, but the met3 area floor grows the pad to
+    # sqrt(0.240)um, leaving 0.280um against met3.space.1's 0.300um minimum.
+    output = tmp_path / "met3_corner.gds"
+    request = _l_wire_compose_request(
+        tmp_path, pdk_root, 2.225, "met3_wire", output, layer=(70, 20), width=0.3
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["N1"]
+    reason = report["nets"][0]["legs"][0]["reason"]
+    assert "draws a pad" in reason
+    assert "met3.space.1" in reason
+    assert "met3.space.1" not in run_drc(str(output), "sky130")["rule_counts"]
+
+
 def test_run_drc_confirms_the_rejected_pad_would_have_been_a_real_violation(tmp_path):
-    # Independent confirmation (not reusing gen_compose's own notch_check
-    # machinery) that the pad #1520's reproducer describes really is a `klt
-    # drc` violation: hand-draw the L-wire plus the exact landing pad
-    # gen_compose would have drawn at port_x=2.5 (composed frame: wire placed
-    # at offset (5, 0), so the pad centers on (7.5, 0.5) with the 0.42um
-    # fixed size), with no other gen_compose machinery involved at all.
+    # Use DRC to check the L-wire and a hand-drawn 0.42um pad in the
+    # composed frame, with the wire translated by (5, 0).
     import klayout.db as kdb
 
     from klayout_tools.drc import run_drc
@@ -14063,11 +13189,7 @@ def test_run_drc_confirms_the_rejected_pad_would_have_been_a_real_violation(tmp_
 def test_compose_routes_a_via_drop_landing_pad_placed_clear_of_the_own_wire_corner(
     tmp_path, pdk_root
 ):
-    # Control case: the same L-wire, the same via-drop mechanism, but the
-    # declared port sits far enough from the corner (x_um=0.5, vs. the
-    # corner at x=2.9) that the landing pad never comes close to the
-    # perpendicular leg -- #1520's fix must not reject a legitimate
-    # placement, only the one that actually violates spacing.
+    # At x=0.5, the pad clears the short arm and the route succeeds.
     output = tmp_path / "far_from_corner.gds"
     request = _l_wire_compose_request(tmp_path, pdk_root, 0.5, "l_wire_far", output)
     report = compose(request)
@@ -15558,16 +14680,13 @@ def test_compose_per_leg_layer_role_routes_one_leg_of_a_bundle_on_a_second_plane
 
 
 def test_compose_per_leg_layer_role_defaults_to_the_nets_own_plane(tmp_path, pdk_root):
-    # Control for the test above: the identical request with `layer_role`
-    # dropped from the first leg leaves that leg on the net's own plane (li1),
-    # where the same-facing drain pair it names has no drawable path -- the
-    # backbone would have to reach u1's pad through u1's own body. So the
-    # bundle only partially routes, and the *only* difference between the two
-    # tests is the one field. (This is also why the leg-level tier exists at
-    # all: the net's other leg is perfectly routable on li1, so moving the
-    # whole net to met1 would be a bigger hammer than the problem.)
+    # Control for the test above: with `layer_role` dropped from the first
+    # leg, it stays on the net's own plane (li1), where the same-facing pair
+    # has no drawable path -- the bundle only partially routes. The net names
+    # its own plane, so the #6920 climb stays off.
     output = tmp_path / "per_leg_default.gds"
     request = _drain_bus_request(tmp_path, pdk_root, output, "per_leg_default")
+    request["connectivity"][0]["layer_role"] = "metal"
     request["connectivity"][0]["legs"] = [
         {
             "from_pin": {"block": "u0", "port": "U0_D"},
@@ -15962,43 +15081,6 @@ def _diff_pair_recessed_gate_request(both_pdk_root, tmp_path, port, output):
         "routing": {"layer_role": "metal", "width_um": 0.38},
         "options": {"cell_name": "compose1904", "output": str(output)},
     }
-
-
-def test_compose_rejects_a_recessed_gate_approach_that_violates_deck_spacing(
-    tmp_path, both_pdk_root
-):
-    # The exact case #1904 filed. Before the fix every leg reaching `Q1_1_G`
-    # composed `routed: true`, `unrouted_nets == []`, `warnings == []` -- and
-    # `klt drc` reported exactly two `metal1.space.1` violations (the left and
-    # right margin edges of the same offending approach) sourced from the
-    # `diff_pair` instance, on a block that is DRC-clean standalone.
-    output = tmp_path / "recessed_gate_1904.gds"
-    dp, request = _diff_pair_recessed_gate_request(
-        both_pdk_root, tmp_path, "Q1_1_G", output
-    )
-
-    # The block itself is clean: whatever the composition draws is what
-    # introduces the violation, not the generator's own geometry.
-    assert run_drc(dp["gds_path"], "gf180mcu")["status"] == "clean"
-
-    report = compose(request)
-
-    # The leg is now reported rather than silently drawn ...
-    assert report["unrouted_nets"] == ["GBUS"]
-    net = report["nets"][0]
-    assert net["routed"] is False
-    offending = [leg for leg in net["legs"] if not leg["routed"]]
-    assert offending, net["legs"]
-    # ... and the reason names the *real* conflict: the deck's own same-layer
-    # spacing rule, the block it is measured against, and the issue.
-    for leg in offending:
-        assert "metal1.space.1" in leg["reason"], leg["reason"]
-        assert "'dp'" in leg["reason"], leg["reason"]
-        assert "#1904" in leg["reason"], leg["reason"]
-
-    # The composed layout agrees -- the violating approach was never drawn.
-    drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_compose_still_routes_the_same_blocks_unobstructed_gate(

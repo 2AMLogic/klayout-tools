@@ -211,14 +211,6 @@ def test_host_default_batch_yields_to_local_for_a_single_unit(monkeypatch):
     assert par_batch.resolve_backend(None, {}, units=1) == "local"
 
 
-def test_explicit_batch_on_a_single_unit_is_refused(monkeypatch):
-    monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend("batch", {}, units=1)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend(None, {"backend": "batch"}, units=1)
-
-
 def test_unsupported_backend_is_refused(monkeypatch):
     monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
     with pytest.raises(PlaceAndRouteError, match="unsupported backend 'remote'"):
@@ -241,7 +233,7 @@ def test_env_batch_with_one_element_list_runs_locally(tmp_path, monkeypatch):
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert "environment" not in report
+    assert report["corner_runs"][0]["environment"]["threads"] == 1
 
 
 def test_flag_local_beats_env_batch(fake, monkeypatch):

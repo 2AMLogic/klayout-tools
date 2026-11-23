@@ -18,12 +18,18 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
 from typing import Any
+
+from . import _warn
+from .sim_batch_hints import is_model_selection_abort
 
 #: ``source`` values. ``runner`` is for off-host backends: the init file is
 #: resolved by the worker, which this client cannot observe.
 SOURCES = ("request", "thread_pin", "home", "none", "runner")
+
+
+BATCH_INIT_UNVERIFIED = "batch_ngspice_init_unverified"
+MODEL_SELECTION_INIT_HINT = "ngspice_model_selection_init_hint"
 
 
 def home_spiceinit_path() -> str:
@@ -42,6 +48,10 @@ def _read_home() -> bytes | None:
 
 def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _lines_digest(lines: tuple[str, ...] | list[str]) -> str:
+    return _digest("".join(line + "\n" for line in lines).encode("utf-8"))
 
 
 def with_thread_pin(
@@ -79,11 +89,10 @@ def effective_init(
     if offhost:
         return {"source": "runner", "lines": None, "sha256": None}
     if written:
-        data = "".join(line + "\n" for line in written).encode("utf-8")
         return {
             "source": "request" if declared else "thread_pin",
             "lines": list(written),
-            "sha256": _digest(data),
+            "sha256": _lines_digest(written),
         }
     home = _read_home()
     if home is None:
@@ -117,7 +126,7 @@ def warning_for(block: dict[str, Any] | None, *, declared: bool) -> str | None:
 def warn(block: dict[str, Any] | None, *, declared: bool) -> None:
     message = warning_for(block, declared=declared)
     if message is not None:
-        print(message, file=sys.stderr)
+        _warn.warn(message)
 
 
 def record(
@@ -135,3 +144,90 @@ def record(
     )
     warn(block, declared=bool(declared))
     return block
+
+
+def _batch_job_init_identity(member: dict[str, Any], declared: tuple[str, ...]) -> str:
+    """Compare the worker's recorded request file with these effective init lines."""
+    worker = member.get("worker_environment")
+    if not isinstance(worker, dict):
+        return "unverified"
+    observed = worker.get("ngspice_init")
+    if not isinstance(observed, dict) or observed.get("source") != "request":
+        return "unverified"
+    lines = observed.get("lines")
+    pinned = with_thread_pin(declared, worker.get("threads_per_worker"), "ngspice")
+    if lines in (list(declared), list(pinned)) and observed.get(
+        "sha256"
+    ) == _lines_digest(lines):
+        return "digest_reported"
+    return "unverified"
+
+
+def batch_init_diagnostic(
+    backend: str, engine: str, declared: tuple[str, ...], remote: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Qualify init evidence on corner-mode batch collection (issue #7368)."""
+    if backend != "batch" or engine != "ngspice" or not declared:
+        return None
+    remote = remote or {}
+    fleet = remote.get("fleet")
+    members: list[tuple[int | None, Any]] = (
+        list(enumerate(fleet))
+        if isinstance(fleet, list) and fleet
+        else [(None, remote)]
+    )
+    jobs = []
+    for index, entry in members:
+        member = entry if isinstance(entry, dict) else {}
+        jobs.append(
+            {
+                "job_id": member.get("job_id"),
+                "fleet_index": index,
+                "request_identity": _batch_job_init_identity(member, declared),
+            }
+        )
+    return {
+        "code": BATCH_INIT_UNVERIFIED,
+        "severity": "warning",
+        "feature": "options.ngspice_init",
+        "simulator_application": "unverified",
+        "jobs": jobs,
+        "message": (
+            "Worker reports do not confirm that ngspice applied options.ngspice_init. "
+            "Jobs marked digest_reported reported the requested init contents. "
+            "For jobs marked unverified, the request identity is also unknown."
+        ),
+    }
+
+
+def report_init_diagnostic(
+    backend: str,
+    engine: str,
+    declared: tuple[str, ...],
+    remote: dict[str, Any] | None,
+    corners: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Explain a declared batch init or suggest one on a model-selection abort."""
+    if declared:
+        return batch_init_diagnostic(backend, engine, declared, remote)
+    if engine != "ngspice" or backend not in ("local", "local-parallel", "batch"):
+        return None
+    aborted = any(
+        is_model_selection_abort(diagnostic)
+        for corner in corners
+        if corner.get("status") == "error"
+        for diagnostic in corner.get("diagnostics", [])
+    )
+    if not aborted:
+        return None
+    return {
+        "code": MODEL_SELECTION_INIT_HINT,
+        "severity": "warning",
+        "feature": "options.ngspice_init",
+        "message": (
+            "ngspice could not select a model. If this library needs a "
+            "compatibility mode, declare the required lines in options.ngspice_init "
+            "(for example, set ngbehavior=hsa for an HSPICE-style library). "
+            "See docs/cli/sim.md under ngspice's working directory and .spiceinit."
+        ),
+    }

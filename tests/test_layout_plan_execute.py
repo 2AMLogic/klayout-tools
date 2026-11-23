@@ -199,10 +199,7 @@ def test_execute_reports_unmapped_netlist_net_as_partial_success(tmp_path, pdk_r
 def test_execute_reports_same_facing_pins_as_unrouted_partial_success(
     tmp_path, pdk_root
 ):
-    # All three sources tied to one common net: mos_array's `S` port faces
-    # the same direction on every unit in a row, so a same-facing multi-pin
-    # bundle is a genuine, deterministic routing failure (not a connectivity
-    # derivation bug) -- `unrouted_nets[]` reports it, not an exception.
+    # `routing.nets` pins this net's plane: no #6920 climb (#1655).
     netlist = """
 .subckt gate_rail VBIAS D1 D2 D3
 M1 D1 VBIAS VSS VSS nfet L=0.28U W=0.42U
@@ -211,6 +208,7 @@ M3 D3 VBIAS VSS VSS nfet L=0.28U W=0.42U
 .ends
 """
     request = _gate_rail_request(tmp_path, pdk_root, netlist)
+    request["routing"]["nets"] = {"VSS": {"layer_role": "metal"}}
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
     assert "VSS" in response["unrouted_nets"]
@@ -269,14 +267,16 @@ def _same_facing_drain_request(tmp_path, pdk_root, p_orientation=None) -> dict:
     }
 
 
-def test_execute_same_facing_drain_net_is_unrouted_without_orientation(
+def test_execute_same_facing_drain_net_routes_via_plane_climb_without_orientation(
     tmp_path, pdk_root
 ):
+    # Same-facing drains now route via #6920's plane climb by default.
     request = _same_facing_drain_request(tmp_path, pdk_root)
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
-    assert "VOUT" in response["unrouted_nets"]
-    assert partial_success(response) is True
+    assert response["unrouted_nets"] == []
+    nets_by_name = {net["net"]: net for net in response["nets"]}
+    assert nets_by_name["VOUT"]["routed"] is True
 
 
 def test_execute_group_orientation_reaches_compose_and_routes_same_facing_drain_net(
@@ -350,19 +350,19 @@ def _bjt_bus_request(tmp_path, pdk_root, routing: dict) -> dict:
     }
 
 
-def test_execute_self_net_crossing_leg_is_unrouted_without_cross_block_layer_role(
+def test_execute_self_net_crossing_leg_routes_via_the_automatic_climb(
     tmp_path, pdk_root
 ):
+    # #1502's fixture: the climb (#6912) lifts the #433 self-net class, so
+    # default routing succeeds (same-plane pins: self_net_climb tests).
     request = _bjt_bus_request(
         tmp_path, pdk_root, {"layer_role": "metal", "width_um": 0.17}
     )
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
-
-    assert "EBUS" in response["unrouted_nets"]
-    assert partial_success(response) is True
-    assert exit_code_for(response) == 3
+    assert response["unrouted_nets"] == []
     nets_by_name = {net["net"]: net for net in response["nets"]}
-    assert nets_by_name["EBUS"]["routed"] is False
+    assert nets_by_name["EBUS"]["routed"] is True
+    assert all(leg["routed"] for leg in nets_by_name["EBUS"]["legs"])
 
 
 def test_execute_cross_block_layer_role_routes_the_self_net_crossing_leg(
