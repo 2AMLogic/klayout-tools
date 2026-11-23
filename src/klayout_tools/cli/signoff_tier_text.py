@@ -87,12 +87,16 @@ def status_marker(status: str, palette: Palette) -> tuple[str, str]:
 
 
 def _print_composed_from(item: dict) -> None:
-    """The sub-block evidence behind a ``met_by_composition`` row (issue
-    #6927): each sub-block, the manifest it was read from (``<inline>``
-    for an inline object) and the content hash of the evidence its own
-    report item cited -- so staleness stays visible in the committed
-    artifact, exactly as a ``cite:`` line does for a direct citation."""
-    for entry in item.get("composed_from") or []:
+    """Print the sub-block evidence for a composed or partly composed row."""
+    if item["status"] == STATUS_MET_BY_COMPOSITION:
+        label = "composed from"
+        entries = item.get("composed_from") or []
+    elif item["status"] == "unmet":
+        label = "sub-block"
+        entries = (item.get("detail") or {}).get("composition", [])
+    else:
+        return
+    for entry in entries:
         source = entry["source"] if entry["source"] is not None else "<inline>"
         note = (
             f", content_hash={entry['content_hash']}"
@@ -100,7 +104,7 @@ def _print_composed_from(item: dict) -> None:
             else ""
         )
         print(
-            f"        composed from: {entry['block']} "
+            f"        {label}: {entry['block']} "
             f"(source={source}, status={entry['status']}{note})"
         )
 
