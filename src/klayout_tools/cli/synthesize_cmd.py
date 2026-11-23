@@ -263,6 +263,7 @@ def _print_partial(report: dict) -> None:
     print(f"stage: {partial['stage']} (ABC budget {partial['abc_timeout_s']:g} s)")
     print(f"netlist_path: {render_path_field(partial['netlist_path'])}")
     print(f"stats_path: {render_path_field(partial['stats_path'])}")
+    print("cell_counts:")
     for cell, count in sorted(partial["cell_counts"].items()):
         print(f"  {cell}: {count}")
     for capability in ("equivalence", "restructuring"):

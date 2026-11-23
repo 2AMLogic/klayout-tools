@@ -349,15 +349,15 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 4915
+      "lines": 4700
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 701
+      "lines": 695
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4835
+      "lines": 4803
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -489,11 +489,11 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3704
+      "lines": 3604
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3152
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,11 +509,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2202
+      "lines": 2167
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1359
+      "lines": 1347
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4525
+      "lines": 4411
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
