@@ -174,8 +174,8 @@ implemented deliberately rather than rediscovered:
     (:data:`SDF_ALIAS_PORT_DROPPED_CLASS`,
     :func:`_drop_sdf_zero_delay_alias_port_interconnects`). The exemption
     is bounded by the entry's own delay value, not by the diagnostic text:
-    an entry with a non-zero value at *any* corner is left in place and
-    still fails the gate loudly. See the module comment above
+    a nonzero delay at any corner on a separately assigned output bit
+    is refused before the build. See the module comment above
     :func:`_drop_sdf_zero_delay_alias_port_interconnects` for the full
     write-up, including why Icarus's ``<file>:<line>:`` locator cannot be
     mapped back to an entry (its line counter is cumulative across
@@ -293,8 +293,10 @@ from .functional_verification_sdf_steps import (
     _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _bus_input_port_names,
     _sdf_refusal_attribution,
     _sdf_refusal_error,
+    _write_sdf_drop_step,
 )
 from .functional_verification_tools import (
     _ENGINE_VERSION_COMMANDS,
@@ -1883,15 +1885,14 @@ def _apply_sdf_interconnect_only_drop(
     """
     if entries != "interconnect":
         return annotate_source_path
-    iopath_drop = _drop_sdf_non_interconnect_entries(annotate_source_path)
-    if iopath_drop is None:
-        return annotate_source_path
-    iopath_text, iopath_dropped_count = iopath_drop
-    new_path = os.path.join(output_dir, "klt_sdf_interconnect_only.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(iopath_text)
-    sdf_pre_dropped_counts[SDF_IOPATH_DROPPED_CLASS] = iopath_dropped_count
-    return new_path
+    return _write_sdf_drop_step(
+        _drop_sdf_non_interconnect_entries(annotate_source_path),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_interconnect_only.sdf",
+        SDF_IOPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+    )
 
 
 def _apply_sdf_unsupported_edge_modpath_drop(
@@ -1916,18 +1917,15 @@ def _apply_sdf_unsupported_edge_modpath_drop(
     two dicts in place, for the same cyclomatic-complexity reason
     :func:`_apply_sdf_physical_only_drop`'s own docstring records.
     """
-    edge_drop = _drop_sdf_unsupported_edge_modpath_iopaths(
-        annotate_source_path, sources
+    return _write_sdf_drop_step(
+        _drop_sdf_unsupported_edge_modpath_iopaths(annotate_source_path, sources),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_ifnone_edge_modpath_dropped.sdf",
+        SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+        sdf_pre_dropped_arcs,
     )
-    if edge_drop is None:
-        return annotate_source_path
-    edge_text, edge_count, edge_arcs = edge_drop
-    new_path = os.path.join(output_dir, "klt_sdf_ifnone_edge_modpath_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(edge_text)
-    sdf_pre_dropped_counts[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_count
-    sdf_pre_dropped_arcs[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_arcs
-    return new_path
 
 
 def _apply_sdf_bus_bit_modpath_drop(
@@ -1950,16 +1948,15 @@ def _apply_sdf_bus_bit_modpath_drop(
     arcs are recorded into the two dicts in place, as in
     :func:`_apply_sdf_unsupported_edge_modpath_drop`.
     """
-    bus_drop = _drop_sdf_bit_selected_bus_iopaths(annotate_source_path, sources)
-    if bus_drop is None:
-        return annotate_source_path
-    bus_text, bus_count, bus_arcs = bus_drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_bit_modpath_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(bus_text)
-    sdf_pre_dropped_counts[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_count
-    sdf_pre_dropped_arcs[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_arcs
-    return new_path
+    return _write_sdf_drop_step(
+        _drop_sdf_bit_selected_bus_iopaths(annotate_source_path, sources),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_bus_bit_modpath_dropped.sdf",
+        SDF_BUS_BIT_MODPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+        sdf_pre_dropped_arcs,
+    )
 
 
 def _sdf_dropped_report(
@@ -1988,7 +1985,7 @@ def _apply_sdf_physical_only_drop(
     output_dir: str,
     sources: list[str],
     hdl_toplevel: str,
-    ports: list[tuple[str, int, str]],
+    ports: list[tuple[str, str, str]],
     sdf_pre_dropped_counts: dict[str, int],
 ) -> str:
     """Issue #2363's physical-only-destination SDF-text drop, applied as one
@@ -2010,19 +2007,18 @@ def _apply_sdf_physical_only_drop(
     its own function specifically to keep that already-baselined function's
     cyclomatic complexity (`complexity-baseline.json`) from growing further.
     """
-    physical_only_drop = _drop_sdf_zero_delay_physical_only_interconnects(
+    return _write_sdf_drop_step(
+        _drop_sdf_zero_delay_physical_only_interconnects(
+            annotate_source_path,
+            _bus_input_port_names(ports),
+            _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+        ),
         annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
-        _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+        output_dir,
+        "klt_sdf_physical_only_dropped.sdf",
+        SDF_PHYSICAL_ONLY_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
     )
-    if physical_only_drop is None:
-        return annotate_source_path
-    physical_only_text, physical_only_count = physical_only_drop
-    new_path = os.path.join(output_dir, "klt_sdf_physical_only_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(physical_only_text)
-    sdf_pre_dropped_counts[SDF_PHYSICAL_ONLY_DROPPED_CLASS] = physical_only_count
-    return new_path
 
 
 # ---------------------------------------------------------------------------
@@ -2323,8 +2319,7 @@ def run_functional_verification(
         # be made annotatable by rewriting the endpoint either; a
         # zero-delay-at-every-corner entry is dropped up front and counted
         # in `environment.sdf.dropped` instead of failing the run (the
-        # helper carries the full write-up; non-zero entries stay in
-        # place and still fail the diagnostic gate loudly).
+        # helper refuses nonzero delays on separately assigned bits).
         annotate_source_path = _apply_sdf_alias_port_drop(
             annotate_source_path,
             output_dir,

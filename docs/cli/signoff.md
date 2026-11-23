@@ -869,7 +869,14 @@ grades `input_verified: null` **by design**, identically on the host that
 happens to have the file and in a fresh clone; for the artifact-anchored
 generic items (T1 1/2/9/10) that means the `unverifiable_provenance`
 refusal renders the same everywhere too, instead of the block grading T1
-on the producing host and not-T1 in CI. The `.git`-less fallback: a tree
+on the producing host and not-T1 in CI. The index also covers *how* the
+candidate is reached (issue #7195, the input side of #6139's yield
+contract): every symlink in the chain and every directory a `dir/..`
+step traverses must itself be tracked by its checkout's index, so a
+purely local link to committed bytes grades exactly like a local copy of
+them, and a name no filesystem call can represent (an embedded NUL byte)
+grades unresolvable instead of aborting the render. The `.git`-less
+fallback: a tree
 with no functioning checkout above the candidate — a
 `/archive/<sha>.tar.gz` unpack, a vendored copy, a `--repo-root` tree
 without VCS metadata — keeps the filesystem-presence behaviour, since
@@ -2655,6 +2662,7 @@ an inventory the author did not write.
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
+| | `unmeasured_metrics`: list of `{"corner": "<declared corner>", "metric": "area\|"fmax\|"power", "reason": "<non-blank text>"}` | no (digital partitions only) | one `unmeasured_metric` check per entry (role `digital`), **passing**, in the corner/metric position its `metric` check would have held: the gap is disclosed to the grader with its corner, metric and reason instead of failing the attestation or being hidden by dropping the `corners`/`metrics` block (issue #7259). A **declared** gap is a passing disclosure; an *undeclared* missing binding is still a **failed check**. Refused (exit `1`): a non-list value, an entry that is not exactly `{corner, metric, reason}`, a `corner` not in `corners`, a `metric` other than `area`/`fmax`/`power`, a blank or non-string `reason`, the same pair declared twice, a pair that `metrics` also binds (measured and unmeasured is a contradiction), and the field on an inventory with no `corners`/`metrics` block (even an empty list). An empty list on a digital inventory is accepted and adds no check. An invalid bound value and a failed citation or freshness command still fail. *First ships in the first release after `v0.9.2`; earlier builds refuse `unmeasured_metrics` as an unknown field.* See "A declared gap" below. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
@@ -2809,6 +2817,64 @@ record binds `fmax` in MHz. The disclosure is the claimant's, not klt's:
 **klt recorded the record's hash and ran the freshness command; it did not
 produce or verify the numbers** — an external record's content is the
 claimant's word, visible as `kind: "external"` in `attestation.checks[]`.
+
+**A declared gap is not a failed measurement (issue #7259).** The
+`corners`/`metrics` block is all-or-nothing per pair: one `metric` check is
+emitted for every corner × required metric, and a missing binding fails its
+check. A characterization with partial coverage — power analysis not run, an
+area figure living in a log no binding can read — declares each gap in
+`unmeasured_metrics`, so the measured metrics are bound and the unmeasured
+ones are disclosed rather than hidden by dropping the block:
+
+```json
+{
+  "corners": ["tt", "ss"],
+  "metrics": {
+    "tt": {
+      "area": {"envelope": "sim/tt.json", "field": "result.area"},
+      "fmax": {"envelope": "sim/tt.json", "field": "result.fmax"},
+      "power": {"envelope": "sim/tt.json", "field": "result.power"}
+    },
+    "ss": {
+      "area": {"envelope": "sim/ss.json", "field": "result.area"},
+      "power": {"envelope": "sim/ss.json", "field": "result.power"}
+    }
+  },
+  "unmeasured_metrics": [
+    {"corner": "ss", "metric": "fmax", "reason": "Frequency sweep was not run at ss"}
+  ]
+}
+```
+
+`ss/fmax` then holds its usual slot in `attestation.checks[]` with a
+**passing** disclosure in place of the `metric` check that would have
+failed, and the other five `metric` checks record their measured values
+exactly as before. The disclosure carries `corner`, `metric` and `reason`
+and no numeric `value`:
+
+```json
+{"check": "unmeasured_metric", "role": "digital", "corner": "ss", "metric": "fmax",
+ "reason": "Frequency sweep was not run at ss", "passed": true}
+```
+
+`--format text` names the gap and its reason on the check's line:
+
+```text
+[PASS] digital ss area: 5
+[PASS] digital ss fmax: unmeasured (Frequency sweep was not run at ss)
+[PASS] digital ss power: 2
+```
+
+A declaration excuses exactly the pair it names. The same metric missing at
+another corner, a different metric missing at the same corner, a bound field
+that is not a number, and a failed citation or freshness command each still
+**fail** the attestation, and `--check` reports an edited `reason` as drift
+on the `unmeasured_metric` check it names by corner and metric. Declaring a
+pair that `metrics` also binds is refused (exit `1`), as is the list on an
+inventory with no `corners`/`metrics` block. An inventory that declares
+every pair unmeasured passes with nothing measured — each gap visible, with
+its reason, among the checks a reviewer reads. Whether a declared gap should
+fail the tier is a grading-policy decision this producer does not make.
 
 #### Envelope
 
@@ -4659,6 +4725,75 @@ path resolves as given (like a `not_applicable` document), so a relative
 path is read against the process working directory. `schema_version`: no
 bump; every new report field is omitted when unused.
 
+#### Structural rows: the `structural` disposition (issue #6985)
+
+Some ratified spec rows are not measured quantities at all: a row that
+states a **design constant** the bench itself wires in (measuring the node
+the bench drives would grade the bench's own source, not the design — a
+tautology), or a row whose claim is a **structural property** (device
+sizing, array population, geometry legality) checked by inspecting the
+deck or layout. For such rows no producible envelope can ever carry a
+covering measurement, so before this form they could only be asserted
+through some envelope's `rows` (a false claim) or declared a gap — and a
+gap reads identically whether the row is unevidenced or evidenced by a
+real structural check the grader cannot see.
+
+The `structural` disposition makes such a row representable and distinct.
+It is an object on the row (mutually exclusive with `gap`, either form)
+carrying a human **claim** and the inspected **artifact**, pinned by
+content hash — the same `{file, content_hash}` binding the `not_applicable`
+and justified-gap forms use:
+
+```json
+{
+  "id": "vref_const",
+  "structural": {
+    "claim": "reference is the 0.9 V source `Vref` wired in tb_ota.spice, not a measured node",
+    "artifact": {"file": "sim/tb_ota.spice", "content_hash": "sha256:..."}
+  }
+}
+```
+
+The hash pin proves the artifact is **unchanged**, not that the property
+holds: `klt signoff` records and freshness-pins the artifact, it does not
+execute any check (mirroring `executed_by_klt: false` for `model-run`
+evidence). Outcomes:
+
+- a structural row is listed under `detail.structural_rows`
+  (`[{id, claim, artifact}]`) — never in `declared_gaps`,
+  `justified_gaps`, `uncovered_rows` or `row_sources`, so it is distinct
+  from both a gap and an (impossible) coverage. The key is omitted when
+  no structural row is declared, so a disposition-free report is
+  byte-identical to this build's previous rendering (`--check` sees no
+  drift); `--format text` lists each row's claim and its artifact + hash
+  beside the item;
+- a declared structural row forces the item `unmet` / `partial_coverage`
+  exactly as a justified gap does — the roll-up is deliberately
+  unchanged (that a gap keeps blocking `tier: "T1"` is the operator
+  ruling on #5858; whether a structural disposition may ever *satisfy*
+  item 5 is a separate operator-level ruling in the same family, not
+  decided here);
+- the artifact is hash-checked at grading time like any cited artifact:
+  missing or unreadable grades `unmet` / `structural_artifact_unreadable`,
+  a mismatched content hash `unmet` / `structural_artifact_stale`
+  (`detail` names the row, the file, and both hashes);
+- a malformed `structural` object — a missing or empty `claim`, a
+  missing or malformed `artifact`, an unknown key, a non-object, or
+  `structural` together with `gap` (either form) — is
+  `invalid_evidence` for that item alone, never a raise and never a
+  silent demotion to an undispositioned or gap row;
+- a citation naming a structural row in its `rows` is
+  `invalid_evidence` (a structural row is never covered by a
+  measurement), and the `spec_rows[]` table renders the row in the
+  `structural` state beside `gap` / `no_evidence` (see "The per-spec-row
+  table" below).
+
+Item 6 rows share the reader and grading branch, so they accept the same
+form with the same outcomes. The artifact path resolves as given (like a
+`not_applicable` document or a justified gap's rationale). Additive:
+`schema_version` is not bumped, and every new report field is omitted
+when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -4856,11 +4991,15 @@ The block is a **projection of the same evidence grading already read**, not a
 second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
 because of it. Its rules:
 
-- **States.** Every declared row gets a record, in one of four states. `graded`
-  — at least one cited, file-backed envelope carries a `spec_row`-tagged
-  measurement naming the row. `gap` — the row declares a free-text or justified
-  gap. The record quotes the free text or the justified gap's `reason` in
-  `gap` and has no measured values, even if a citation names it.
+- **States.** Every declared row gets a record, in one of five states.
+  `graded` — at least one cited, file-backed envelope carries a
+  `spec_row`-tagged measurement naming the row. `gap` — the row declares a
+  free-text or justified gap. The record quotes the free text or the
+  justified gap's `reason` in `gap` and has no measured values, even if a
+  citation names it. `structural` — the row carries the `structural`
+  disposition (#6985): the record has no measured values and instead
+  carries the disposition's `claim` and `artifact` (with its content
+  hash); grading refuses citations naming the row, exactly as for a gap.
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
@@ -4944,7 +5083,9 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
   against a proposed limit is provisional) separately; item 6's rows also
   accept the justified object form of `gap` (issue #5599, listed under
   `detail.justified_gaps` with the same outcomes as item 5's -- see
-  "Declared gaps" above);
+  "Declared gaps" above) and the `structural` disposition (issue #6985,
+  listed under `detail.structural_rows`, same outcomes as item 5's -- see
+  "Structural rows" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;

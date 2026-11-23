@@ -45,6 +45,7 @@ from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
+from ._dont_use import cell_exclusion_fields
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -53,6 +54,7 @@ from ._openroad_engine import (
     _timing_status,
     container_runtime_hint,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._paths import _tcl_net_list as _tcl_net_list
@@ -95,7 +97,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
-from .place_and_route_hints import grt_hint, null_unconstrained_fmax, outside_cwd_note
+from .place_and_route_hints import grt_hint, null_unconstrained_fmax
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -107,6 +109,10 @@ from .place_and_route_layers import _signal_routing_layers as _signal_routing_la
 # PDN-0185. Same "self-contained subsystem in its own module" split as the
 # power audit below.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
+from .place_and_route_pin_connectivity import (
+    apply_pin_connectivity,
+    audit_pin_connectivity,
+)
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
@@ -1714,12 +1720,10 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
-    # Issue #2635: which of each macro's per-corner liberties applies to
-    # *this* run, resolvable only now that `_resolve_liberty` has named the
-    # corner. A macro that declared a `lib` map with no entry for this
-    # corner (and no `"default"`) is rejected here with a named error rather
-    # than silently timed at some other corner -- see
-    # `klayout_tools.macros.macro_lib_for_corner`.
+    exclusions = cell_exclusion_fields(
+        cell_library, library, liberty_path, error_cls=PlaceAndRouteError
+    )
+    # Select hard-macro Liberties for the resolved corner.
     macro_liberty_paths = [
         path
         for path in (
@@ -1786,6 +1790,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
+            instance_groups=instance_groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -2002,13 +2007,10 @@ def _run_single_corner(
     via_pad_trim_info: dict[str, Any] | None = None
     pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
+    route_open = False
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
-        # Same deterministic path `_stage_script_lines`'s own `"route"`
-        # branch just handed `write_verilog` (issue #996) -- recomputed here
-        # rather than threaded back out, exactly as `def_path` above and the
-        # `-output_drc` report path earlier already are.
         verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
         merge_info = _merge_def_to_gds(
             def_path=def_path,
@@ -2021,6 +2023,14 @@ def _run_single_corner(
             out_path=gds_path,
             output_dbu_um=output_dbu_um,
         )
+        check = audit_pin_connectivity(
+            def_path,
+            gds_path,
+            hdl_toplevel,
+            _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library),
+            cell_lef,
+        )
+        route_open = apply_pin_connectivity(stages[-1], check)
         gds_dbu_um = merge_info["output_dbu_um"]
         layer_map_info = {
             "path": merge_info["path"],
@@ -2196,7 +2206,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
-            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
+            "tapless": tap_master is None,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
@@ -2276,17 +2286,7 @@ def _run_single_corner(
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
     engine_version = _openroad_version()
-    # `deck` names the resolved LEF/liberty/GDS-view platform set (contract
-    # spike section 5's own "e.g. sky130hd" example) -- `<cell_library>__
-    # <corner>` matching the STA/timing (liberty/device) corner actually
-    # requested, the same naming `klt synthesize`'s own `deck.name` uses.
-    # The tech LEF's own "nom"/"min"/"max" parasitic (interconnect) corner
-    # *is* independently caller-selectable (issue #1100,
-    # `request.pdk.interconnect_corner`) -- it is deliberately kept out of
-    # `deck_name` (an artifact-naming convention other stages/tests key off
-    # of) and reported instead as the sibling top-level `interconnect_corner`
-    # response field below, the same additive-sibling-field shape
-    # `spef_sta` (issue #948) used rather than folding into existing naming.
+    # Input naming follows the resolved Liberty corner.
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
         deck_name=deck_name,
@@ -2304,6 +2304,7 @@ def _run_single_corner(
     )
 
     response: dict[str, Any] = {
+        **exclusions,
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -2315,7 +2316,7 @@ def _run_single_corner(
         "netlist": repo_relative_path(
             netlist_path, repo_root=find_repo_root(request_dir)
         ),
-        "status": "ok",
+        "status": "failed" if route_open else "ok",
         "stage_reached": target_stage,
         "seed": seed,
         # Additive field (issue #4914): what `estimated_power_mw` was
@@ -2376,9 +2377,7 @@ def _run_single_corner(
             if audited_def_path
             else None
         ),
-        # Additive field (issue #4344): placed-origin bbox of each requested
-        # `instance_groups` entry, read from the same DEF (`null` at
-        # "floorplan"; `[]` when none were requested).
+        # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
             read_def_instance_groups(audited_def_path, instance_groups)
             if audited_def_path
@@ -2575,7 +2574,7 @@ def _run_rebuild_corners(
                 output_subdir=name,
             )
         except PlaceAndRouteError as exc:
-            entry.update({"status": "failed", "error": str(exc)})
+            _route_overflow.record_corner_failure(entry, exc)
         else:
             entry.update(report)
         corner_runs.append(entry)
@@ -2604,24 +2603,6 @@ def _run_rebuild_corners(
 # Request validation
 # --------------------------------------------------------------------------- #
 
-#: Matches the "can't read/open a file" *phrase* in an OpenROAD/Tcl error
-#: line, deliberately loose on wording -- issue #1868 has observed both
-#: ``cannot read file <path>.`` and ``couldn't open "<path>": ...``, and
-#: OpenROAD's own diagnostics interpose extra words (``cannot open LEF file
-#: <path>``). Matched against one line at a time; :data:`_ABS_PATH_RE` then
-#: pulls the actual path out of a line this matches, rather than trying to
-#: encode both the phrase and the path shape in one pattern.
-_UNREADABLE_FILE_PHRASE_RE = re.compile(
-    r"(?:cannot|can[' ]?t|couldn[' ]?t|could\s+not)\s+(?:read|open)\b",
-    re.IGNORECASE,
-)
-
-#: The first absolute-path-shaped token on a line -- used only after
-#: :data:`_UNREADABLE_FILE_PHRASE_RE` has already matched that line, so a
-#: bare ``/`` prefix is a reliable enough signal without also anchoring the
-#: surrounding phrase.
-_ABS_PATH_RE = re.compile(r"\"?(/[^\s\"]+)")
-
 
 def _engine_error_message(
     stage: str,
@@ -2648,7 +2629,8 @@ def _engine_error_message(
 
     ``pdk_info`` -- when the caller has one (``run_place_and_route`` always
     does, once liberty/LEF resolution has happened) -- feeds
-    :func:`_mount_namespace_hint`, appended as a further ``--`` clause when
+    :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`, appended
+    as a further ``--`` clause when
     the failure looks like the container-wrapper mount gap issue #1868
     describes: ``openroad`` couldn't read a file this process just resolved
     and can itself still read. ``pdk_info`` is ``None`` in the existing
@@ -2687,7 +2669,7 @@ def _engine_error_message(
     # field would have supplied its physical view.
     streams = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     hints = (
-        _mount_namespace_hint(completed, pdk_info),
+        mount_namespace_hint(completed, pdk_info),
         container_runtime_hint(completed),
         macro_spec.missing_lef_master_hint(streams),
         slot_shortage_hint(streams, pin_constraints, top_ports),
@@ -2695,80 +2677,6 @@ def _engine_error_message(
     )
     message += "".join(f" -- {hint}" for hint in hints if hint is not None)
     return message
-
-
-def _mount_namespace_hint(
-    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
-) -> str | None:
-    """``None``, or an actionable hint that ``openroad`` and this process do
-    not share a filesystem view (issue #1868).
-
-    ``klt place-and-route`` resolves every liberty/LEF path on the **host**
-    (via :func:`_resolve_liberty`/:func:`_resolve_lef`, backed by
-    :mod:`klayout_tools.pdk`'s ``find_pdk``) and bakes the resulting absolute
-    paths into the generated Tcl handed to an ``openroad`` **subprocess** --
-    which, per ``docs/cli/place-and-route.md``'s own documented, CI-used
-    install path, is very often actually a wrapper script that runs a
-    container per invocation (``scripts/install-openroad-docker.sh``). A
-    container only sees the host paths its wrapper explicitly bind-mounted,
-    so a PDK discovered via a search root (``~/.volare``, ciel, open_pdks)
-    rather than an explicitly-set ``$PDK_ROOT`` silently falls outside that
-    wrapper's mount set -- see that script's own header comment.
-
-    The result is an OpenROAD/Tcl "can't read/open file <path>" failure that,
-    read alone, looks identical to a genuinely missing or unreadable file.
-    The cheap, general signal that distinguishes the two: **this** process
-    can still read that exact path (it is the one that resolved it in the
-    first place). When that holds, the failure is a mount/namespace gap, not
-    a missing file -- worth saying so, and worth surfacing the resolved PDK
-    root/``resolved_via`` alongside it when the path is a PDK asset, so a
-    reader sees ``resolved_via`` next to the unreadable path immediately
-    rather than having to separately run ``klt pdk find``.
-
-    This generalizes beyond PDK assets on purpose (issue #1868's own closing
-    note): any absolute path outside ``$PWD``/``$PDK_ROOT`` that a request
-    can reference -- an out-of-tree netlist, an ``--abstract-cell-lef``, a
-    macro LEF given by absolute path -- hits the identical hazard, and
-    ``pdk_info`` being ``None`` (or the path not living under its root) just
-    means the hint is generic rather than PDK-specific.
-    """
-    path: str | None = None
-    for stream in (completed.stdout or "", completed.stderr or ""):
-        for line in stream.splitlines():
-            if not _UNREADABLE_FILE_PHRASE_RE.search(line):
-                continue
-            path_match = _ABS_PATH_RE.search(line)
-            if path_match is not None:
-                path = path_match.group(1).rstrip(".,;:'\"")
-                break
-        if path is not None:
-            break
-    if path is None:
-        return None
-
-    try:
-        readable = os.path.isfile(path) and os.access(path, os.R_OK)
-    except OSError:
-        readable = False
-    if not readable:
-        return None
-
-    pdk_note = ""
-    if pdk_info is not None and path.startswith(pdk_info.get("root", "\0")):
-        pdk_note = (
-            f" (resolved PDK root: '{pdk_info['root']}', "
-            f"{pdk_info['resolved_via']}; $PDK_ROOT="
-            f"{os.environ.get('PDK_ROOT') or '(unset)'})"
-        )
-
-    mount_note = outside_cwd_note(path)
-
-    return (
-        f"'openroad' could not read '{path}', but this process can read it"
-        f"{pdk_note} -- if 'openroad' is a container/wrapper invocation, its "
-        "mounts likely do not cover that path (see docs/cli/place-and-route.md's "
-        f"'Installing OpenROAD' section){mount_note}"
-    )
 
 
 def _constant_tie_diagnosis(

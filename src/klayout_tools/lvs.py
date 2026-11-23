@@ -327,6 +327,8 @@ from .netlist_capacitor_recovery import (
     parse_capacitor_class_comments,
     resistor_classes_for_deck,
 )
+from .netlist_inductor_recovery import inductor_classes_for_deck
+from .netlist_normalize_scan import recovery_subckt_names
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
 from .verilog_netlist import (
@@ -3047,17 +3049,10 @@ def _resolve_layout(
         reference_deck_name,
         layout_spec.get("deck"),
     )
-    # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
-    # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
-    # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of a mangled-name abstract circuit. A best-effort lookup only: an
-    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
-    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
-    # this function returns and raises the authoritative `LvsError`, so
-    # this must not duplicate (and potentially reorder) that validation.
-    # Empty when `layout.deck` was never given, unchanged for old requests.
+    # run_lvs validates layout.deck and its options after X-card recovery.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
+    inductor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
     if deck_name:
         try:
@@ -3068,17 +3063,21 @@ def _resolve_layout(
             custom_device_classes = custom_device_classes_for_deck(
                 layout_deck_for_recovery
             )
-            # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
+            inductor_classes = inductor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
-    from .netlist_normalize import defined_subckt_names
-
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
-        defined_subckt_names=defined_subckt_names(layout_netlist_text),
+        inductor_classes=inductor_classes,
+        defined_subckt_names=recovery_subckt_names(
+            layout_netlist_text,
+            layout_netlist_path,
+            custom_device_classes.keys()
+            | resistor_classes.keys()
+            | inductor_classes.keys(),
+        ),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3239,7 +3238,6 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
-        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3337,17 +3335,11 @@ def _read_reference_netlist(
 
     netlist = kdb.Netlist()
     recovered_capacitor_classes = parse_capacitor_class_comments(read_text)
-    # Issue #1942: the same round-tripped custom-device-class recognition
-    # `_resolve_layout` wires for `layout.deck` above, keyed off
-    # `reference.deck` instead -- a best-effort lookup: an unresolvable
-    # `deck` name here is deliberately swallowed (not raised) since this
-    # function's *existing* `deck`/`device_map` resolution (the
-    # `form="subckt-call"` conversion above) already owns raising the
-    # authoritative error for a bad `reference.deck`. `{}` when `deck` was
-    # never given, unchanged from every request that predates this
-    # parameter.
+    # Recover bare extract X cards using reference.deck (#1942, #1157, #6726).
+    # The subckt-call conversion above reports bad deck names.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
+    inductor_classes: dict[str, str] = {}
     if deck:
         try:
             reference_deck_for_recovery = get_extraction_deck(deck)
@@ -3357,10 +3349,8 @@ def _read_reference_netlist(
             custom_device_classes = custom_device_classes_for_deck(
                 reference_deck_for_recovery
             )
-            # Issue #1157: the reference side gets the same drawn-resistor
-            # `X`-card recovery the layout side wired above -- a bare-mode
-            # extract output is a legitimate reference netlist too.
             resistor_classes = resistor_classes_for_deck(reference_deck_for_recovery)
+            inductor_classes = inductor_classes_for_deck(reference_deck_for_recovery)
     # Issue #2813: a FinFET layout deck reads `M` cards through the
     # nfin-preserving reader (the planar reader would drop `nfin`).
     read_path, read_text, tmp_path = sliced_reference_file(
@@ -3372,7 +3362,14 @@ def _read_reference_netlist(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
-            defined_subckt_names=defined_subckt_names(read_text),
+            inductor_classes=inductor_classes,
+            defined_subckt_names=recovery_subckt_names(
+                read_text,
+                read_path,
+                custom_device_classes.keys()
+                | resistor_classes.keys()
+                | inductor_classes.keys(),
+            ),
         ),
     )
     try:

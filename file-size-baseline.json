@@ -176,10 +176,6 @@
       "lines": 2238
     },
     {
-      "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 551
-    },
-    {
       "path": "src/klayout_tools/cli/extract_cmd.py",
       "lines": 914
     },
@@ -253,7 +249,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1593
+      "lines": 1586
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -273,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/equiv_sequential.py",
-      "lines": 1527
+      "lines": 1413
     },
     {
       "path": "src/klayout_tools/erc.py",
@@ -337,35 +333,35 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2686
+      "lines": 2672
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2488
+      "lines": 2473
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4184
+      "lines": 3931
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 4915
+      "lines": 4700
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 701
+      "lines": 695
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4835
+      "lines": 4803
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3128
+      "lines": 2986
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2831
+      "lines": 2800
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -401,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5993
+      "lines": 5990
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -489,11 +485,11 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3704
+      "lines": 3604
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3314
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,11 +505,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2202
+      "lines": 2167
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1359
+      "lines": 1347
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -521,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4535
+      "lines": 4532
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -561,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 6955
+      "lines": 6554
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -573,27 +569,27 @@
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
-      "lines": 2009
+      "lines": 2008
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11727
+      "lines": 11085
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4314
+      "lines": 4250
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 912
+      "lines": 909
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2264
+      "lines": 2246
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
-      "lines": 1146
+      "lines": 1144
     },
     {
       "path": "src/klayout_tools/sim_search.py",
@@ -601,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1230
+      "lines": 1227
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
@@ -645,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4525
+      "lines": 4411
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -901,7 +897,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26043
+      "lines": 26034
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

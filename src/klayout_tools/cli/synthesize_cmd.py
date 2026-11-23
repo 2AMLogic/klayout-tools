@@ -22,6 +22,7 @@ Exit codes (see ``docs/cli/synthesize.md`` for the full table):
         multiply-driven net (issue #1588). Follows `klt drc`'s own
         convention of a nonzero exit on findings from an otherwise
         successful run.
+    4 - generic ABC timed out with a retained pre-ABC checkpoint
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. A failed equivalence gate is folded into exit 1 rather than
 reusing `klt equiv`'s own 3/4 split -- `klt synthesize`'s own pass/fail
@@ -145,6 +146,9 @@ def _run_request(args: argparse.Namespace) -> int:
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
+    if report["status"] == "inconclusive":
+        emit_success(report, args.format, _print_partial)
+        return 4
     emit_success(report, args.format, _print_text)
 
     if report["structural"]["has_critical"]:
@@ -251,6 +255,20 @@ def _print_memory_mapping(report: dict) -> None:
     blackboxes = report.get("blackbox_modules")
     if blackboxes:
         print(f"blackbox_modules (area not included): {', '.join(blackboxes)}")
+
+
+def _print_partial(report: dict) -> None:
+    partial = report["partial"]
+    print(f"status: {report['status']} ({report['reason']})")
+    print(f"stage: {partial['stage']} (ABC budget {partial['abc_timeout_s']:g} s)")
+    print(f"netlist_path: {render_path_field(partial['netlist_path'])}")
+    print(f"stats_path: {render_path_field(partial['stats_path'])}")
+    print("cell_counts:")
+    for cell, count in sorted(partial["cell_counts"].items()):
+        print(f"  {cell}: {count}")
+    for capability in ("equivalence", "restructuring"):
+        if report.get(capability):
+            print(f"{capability}: {report[capability]['status']}")
 
 
 def _print_text(report: dict) -> None:

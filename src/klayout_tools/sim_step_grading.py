@@ -6,6 +6,10 @@ from typing import Any
 
 from . import sim_step_evidence
 from .sim_eye import EyeOutcome, is_eye
+from .sim_measurement_grading import (
+    _eye_measurement_result,
+    _grade_measurement_value,
+)
 from .sim_step_evidence import step_outcomes
 
 
@@ -156,8 +160,6 @@ def _grade_one(
     unreached_locals: set[str],
     engine_diagnostics: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    from .sim import _eye_measurement_result, _grade_measurement_value
-
     base = {"name": spec["name"], "value": None, "unit": spec.get("unit")}
     errored = {
         **base,
