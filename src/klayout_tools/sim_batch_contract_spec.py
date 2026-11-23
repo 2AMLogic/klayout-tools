@@ -185,15 +185,10 @@ def _runner_gate_release(version: str) -> str | None:
     return ".".join(parts[:2]) if len(parts) >= 2 else None
 
 
-#: Request features a client can send that a runner built before the feature
-#: landed cannot parse (issue #3249): ``name -> (first runner release that
-#: supports it, detector)``. The major.minor gate (:func:`_runner_gate_release`)
-#: deliberately lets a post-tag client talk to a patch-level older runner, so
-#: it cannot see these; this registry compares the *full* release segment
-#: instead. ``analysis_steps[]`` (#2482) landed after ``v0.7.0``, so the first
-#: release segment that can carry it is ``0.7.1`` (post-tag builds render as
-#: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
-#: indistinguishable from one built after, so it counts as supporting it.
+#: Map each request feature to its first runner release segment and detector (#3249).
+#: The major.minor gate allows older patches, so features use the full segment.
+#: ``analysis_steps[]`` (#2482) landed after v0.7.0 and needs 0.7.1. All
+#: 0.7.1.devN builds count as supporting it, including builds predating the change.
 #: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
 #: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
 #: ``stimulus`` (the declarative timed stimulus block, #2977), and
@@ -210,6 +205,10 @@ def _runner_gate_release(version: str) -> str | None:
 #: (``measurements[].slope_band``, #5518) missed the ``v0.9.2`` tag (it was not
 #: in that release), so ``0.9.3`` is its first release segment; an older runner
 #: would reject the unknown form or drop the measurement, hence mandatory.
+#: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
+#: likewise first ships in ``0.9.3``; an older runner would reject the unknown
+#: key (at best) or grade the raw crossing count, hence mandatory.
+#: ``exclusive_bounds`` (#7645) also requires the 0.9.3 release segment.
 def _uses_extended_eye(request: dict[str, Any]) -> bool:
     for step in request.get("analysis_steps") or []:
         if isinstance(step, dict) and any(
@@ -337,12 +336,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
 #: -- mandatory membership mirrors that severity, moving the identical
 #: refusal from after the grid ran to before anything is launched.
-#: ``lossless supply_v corner_id spelling`` is mandatory because its
-#: post-run ``supply_precision_unsupported_worker`` echo check
-#: hard-fails the request (#5870); its registry version is still ``None``
-#: (unreleased), so it has no detector row yet and the pre-launch gates
-#: engage only once a release pins the version -- until then the echo
-#: check is the gate.
+#: ``lossless supply_v corner_id spelling`` (#5870) hard-fails on a post-run
+#: ``supply_precision_unsupported_worker`` echo. Its unreleased registry version
+#: is ``None``, so only that echo applies until a release pins the pre-launch gate.
+#: ``exclusive_bounds`` stops older workers from passing equality at a strict bound.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "_regrade",
