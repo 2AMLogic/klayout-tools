@@ -23,20 +23,15 @@ from typing import Any
 from . import env_provenance
 from ._jsonnum import is_number
 from ._provenance import build_provenance
-from .pdk import PdkNotFoundError, find_pdk
-from .sim import SimError, _resolve_models_lib
 from .size import (
     _JOINT_WIDTH_STEP_EPS,
     _OP_PARAM_KEYS,
     _OP_PARAMS,
     _OP_VALUE_RE,
     _TOPOLOGY_ROLE_KIND,
-    DEFAULT_GM_ID_TOLERANCE,
     DEFAULT_MAX_JOINT_ITERATIONS,
-    DEFAULT_SWEEP_POINTS,
     DEFAULT_TIMEOUT_S,
     MIN_JOINT_ITERATIONS,
-    MIN_SWEEP_POINTS,
     SCHEMA_VERSION,
     SUPPORTED_TOPOLOGIES,
     TOPOLOGY_ROLES,
@@ -51,7 +46,9 @@ from .size import (
     _op_point_from_confirmed,
     _parse_corner,
     _parse_device,
+    _parse_sweep_settings,
     _require_positive_number,
+    _resolve_size_models,
     _run_sweep,
     _size_work_dir,
 )
@@ -303,37 +300,10 @@ def _run_topology_size(
     targets = _parse_topology_targets(request.get("target"), topology)
     bias = _parse_topology_bias(request.get("bias"))
 
-    models = request.get("models") or {}
-    try:
-        models_lib = _resolve_models_lib(models, request_dir)
-    except SimError as exc:
-        raise SizeError(str(exc)) from exc
-
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
-    tolerance = request.get("tolerance") or {}
-    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
-    gm_id_rel_tol = _require_positive_number(
-        gm_id_rel_tol, "request.tolerance.gm_id_rel"
-    )
+    models_lib, provenance_pdk = _resolve_size_models(request, request_dir)
+    gm_id_rel_tol, sweep_points = _parse_sweep_settings(request)
 
     options = request.get("options") or {}
-    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
-    if (
-        isinstance(sweep_points, bool)
-        or not isinstance(sweep_points, int)
-        or sweep_points < MIN_SWEEP_POINTS
-    ):
-        raise SizeError(
-            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
-        )
     max_joint_iterations = _parse_max_joint_iterations(options)
 
     timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")

@@ -335,6 +335,15 @@ def build_fleet_report(
                     if tier_report.get("t1_justified_gap_count")
                     else {}
                 ),
+                # Issue #6927: rows met by composition
+                # (`signoff_composition.py`), carried the same way -- omitted
+                # when zero, so a roll-up over manifests that compose nothing
+                # is byte-identical to the previous rendering.
+                **(
+                    {"t1_composed_count": tier_report["t1_composed_count"]}
+                    if tier_report.get("t1_composed_count")
+                    else {}
+                ),
                 **(
                     {"findings": tier_report["findings"]}
                     if tier_report.get("findings")

@@ -13,9 +13,9 @@ the very geometry the router inserted -- the disagreement issue #4495 asks
 this stage to surface.
 
 The sibling landing repair can remove redundant pads, shrink protrusions, and
-lengthen a pair of placed M1 landings when their complete facing sides cause
-M1.S.4. This checker measures the resulting geometry, including residual
-wire tips and unsafe landing pairs. It only reads geometry.
+lengthen facing M1 edges at a pair of placed landings or between a
+cut-flush landing and a wire. This checker measures the resulting geometry,
+including residual wire tips and unsafe landing pairs. It only reads geometry.
 
 What it measures
 ----------------

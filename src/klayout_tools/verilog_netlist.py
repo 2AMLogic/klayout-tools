@@ -169,14 +169,8 @@ _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 #: (trailing, must be blank) is one `module ... ... endmodule` body.
 _ENDMODULE_RE = re.compile(r"\bendmodule\b")
 
-#: An identifier: a plain Verilog identifier, or an escaped identifier
-#: (`\name`, terminated by whitespace -- Verilog's own escape convention for
-#: identifiers containing characters that would otherwise be delimiters).
-#: The post-backslash character class here is deliberately the *plain*
-#: identifier one: this pattern validates module/port/direction-statement
-#: names, where the escape only ever guards against a keyword collision.
-#: Connection expressions do **not** use it for an escaped name -- see
-#: :data:`_ESCAPED_IDENT_RE`.
+#: Plain identifier spelling, optionally escaped to guard a keyword.
+#: Port declarations also accept full escaped names via _ESCAPED_IDENT_RE.
 _IDENT_RE = re.compile(r"\\?[A-Za-z_$][A-Za-z0-9_$]*")
 
 #: A Verilog escaped identifier in its full generality: a leading backslash
@@ -317,7 +311,13 @@ def _split_top_level(text: str, seps: str = ",") -> list[str]:
     parts: list[str] = []
     depth = 0
     current: list[str] = []
+    escaped = False
     for char in text:
+        if char == "\\" or (escaped and not char.isspace()):
+            escaped = True
+            current.append(char)
+            continue
+        escaped = False
         if char in "([{":
             depth += 1
         elif char in ")]}":
@@ -363,15 +363,25 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"{trailer!r} -- only a plain, non-ANSI port list "
             "('module name(a, b, c);') is supported"
         )
-    for port in port_names:
-        if not _IDENT_RE.fullmatch(port):
-            raise VerilogNetlistError(
-                f"'module {name}' port list entry {port!r} is not a plain "
-                "port name -- ANSI-style inline port declarations "
-                "('module name(input a, output b);') are not supported, "
-                "only 'module name(a, b); input a; output b;'"
-            )
-    return _unescape(name), [_unescape(p) for p in port_names]
+    context = f"'module {name}' port list entry"
+    return _unescape(name), [_port_name(port, context) for port in port_names]
+
+
+def _port_name(raw: str, context: str, *, escape_terminated: bool = True) -> str:
+    if _IDENT_RE.fullmatch(raw) or (
+        escape_terminated and _ESCAPED_IDENT_RE.fullmatch(raw)
+    ):
+        return _unescape(raw)
+    if _DIRECTION_STMT_RE.match(raw):
+        raise VerilogNetlistError(
+            f"{context} {raw!r} uses an ANSI-style inline declaration. "
+            "Declare the direction after the module header."
+        )
+    raise VerilogNetlistError(
+        f"{context} {raw!r} is not a port identifier. Declare a bus with "
+        "a range before its name, or escape a literal port name with a "
+        "leading backslash and terminate it with whitespace."
+    )
 
 
 def _unescape(identifier: str) -> str:
@@ -396,21 +406,13 @@ def _parse_direction_statement(
         raise VerilogNetlistError(
             f"could not parse port direction declaration: {statement.strip()[:80]!r}"
         )
-    names_text = match.group("names")
-    names = [_unescape(n) for n in _split_top_level(names_text)]
+    names = _split_top_level(match.group("names"))
     if not names:
         raise VerilogNetlistError(
             f"port direction declaration names no signal: {statement.strip()[:80]!r}"
         )
-    for name in names:
-        if not _IDENT_RE.fullmatch(name):
-            # Re-validate the already-unescaped name so a stray range/
-            # expression in the name list fails loudly instead of silently
-            # becoming a malformed net name.
-            raise VerilogNetlistError(
-                f"port direction declaration has a non-identifier entry "
-                f"{name!r}: {statement.strip()[:80]!r}"
-            )
+    for raw in names:
+        name = _port_name(raw, "port direction declaration entry")
         if match.group("msb") is not None:
             msb = int(match.group("msb"))
             lsb = int(match.group("lsb"))
@@ -544,19 +546,16 @@ def _parse_instance_statement(statement: str) -> _Instance:
                     f"instance '{inst_name}' ('{cell}') connection {item!r} "
                     "is not a well-formed '.PORT(NET)' entry"
                 )
-            port_name = item[1:port_open].strip()
-            if not _IDENT_RE.fullmatch(port_name):
-                raise VerilogNetlistError(
-                    f"instance '{inst_name}' ('{cell}') connection {item!r} "
-                    "names an invalid port"
-                )
+            port_name = _port_name(
+                item[1:port_open].strip(),
+                f"instance '{inst_name}' ('{cell}') pin",
+                escape_terminated=item[port_open - 1].isspace(),
+            )
             expr = item[port_open + 1 : port_close].strip()
             if not expr:
-                # `.PORT()` -- an explicit no-connect. Leave it unrecorded;
-                # `_convert_module` synthesizes a fresh disconnected net for
-                # any declared pin with no recorded connection.
+                # _convert_module supplies a fresh disconnected net for `.PORT()`.
                 continue
-            expressions[_unescape(port_name)] = expr
+            expressions[port_name] = expr
     return _Instance(cell=cell, name=inst_name, expressions=expressions)
 
 

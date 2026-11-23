@@ -45,6 +45,7 @@ from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim_batch_hints as sbh
+from klayout_tools import sim_expr_hint as expr_hint
 from klayout_tools import sim_measurement_grading as smg
 from klayout_tools import sim_measurement_results as smr
 from klayout_tools.cli import main
@@ -10823,9 +10824,8 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
-#: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, sim_steps, smr)
-_DIAGNOSTIC_SOURCE_MODULES += (sim.sim_noise_mechanism, sim.sim_homotopy, smg)  # 7320
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, expr_hint, sim_steps)
+_DIAGNOSTIC_SOURCE_MODULES += (smr, sim.sim_noise_mechanism, sim.sim_homotopy, smg)
 
 #: Emission sites whose code comes from the site's *caller* or a table it
 #: iterates, so no literal can be read off the site; each fan-in's vocabulary
@@ -10844,8 +10844,8 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
     # probe's own abort diagnostic already carries as a literal (rule 3).
-    ("klayout_tools.sim", "_run_local", "stop_reason"),
-    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
 
 
