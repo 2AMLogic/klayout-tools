@@ -95,17 +95,14 @@ def bump_pyproject(text: str, new: str) -> str:
     return _BASE_VERSION_RE.sub(rf"\g<1>{new}\g<3>", text, count=1)
 
 
-def _unreleased_entries(text: str) -> str | None:
-    """Body of the ``## Unreleased`` section (to the next ``## `` or EOF).
-
-    None when there is no ``## Unreleased`` heading at all.
-    """
+def _unreleased_span(text: str) -> tuple[int, int]:
+    """Offsets of the Unreleased body in the original changelog."""
     match = _UNRELEASED_RE.search(text)
     if match is None:
-        return None
-    next_heading = re.search(r"^## ", text[match.end() :], re.MULTILINE)
-    end = match.end() + next_heading.start() if next_heading else len(text)
-    return text[match.end() : end]
+        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
+    start = match.end()
+    next_heading = re.compile(r"^## ", re.MULTILINE).search(text, start)
+    return start, next_heading.start() if next_heading else len(text)
 
 
 def _has_release_heading(text: str, version: str) -> bool:
@@ -132,7 +129,7 @@ def _read_changelog_fragments(
 
 
 def add_changelog_heading(
-    text: str, new: str, date: str, *, fragments: str = ""
+    text: str, new: str, date: str, *, fragments: str = "", previous: str | None = None
 ) -> str:
     """Insert ``## new (date)`` below ``## Unreleased``; no-op if present.
 
@@ -142,17 +139,22 @@ def add_changelog_heading(
     """
     if _has_release_heading(text, new):
         return text
-    entries = _unreleased_entries(text)
-    if entries is None:
-        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
+    heading_end, section_end = _unreleased_span(text)
+    entries = text[heading_end:section_end]
     if not entries.strip() and not fragments:
         raise PrepError(
             "CHANGELOG.md '## Unreleased' section has no entries --"
             " nothing to release; refusing to insert an empty release section"
         )
-    match = _UNRELEASED_RE.search(text)
-    heading_end = match.end()
-    remaining = text[heading_end + len(entries) :]
+    remaining = text[section_end:]
+    if previous is not None and previous != new:
+        entries = update_signoff_notes(entries, previous, new)
+        check_signoff_note_anchors(
+            entries,
+            previous,
+            source="CHANGELOG.md",
+            first_line=text.count("\n", 0, heading_end) + 1,
+        )
     if fragments:
         legacy = entries.strip("\n")
         body = f"{legacy}\n\n{fragments}" if legacy.strip() else fragments
@@ -170,7 +172,11 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
 
 
 def check_signoff_note_anchors(
-    text: str, previous: str, *, source: str = "docs/cli/signoff.md"
+    text: str,
+    previous: str,
+    *,
+    source: str = "docs/cli/signoff.md",
+    first_line: int = 1,
 ) -> None:
     """Refuse availability-note placeholders the resolver can never match again.
 
@@ -179,7 +185,7 @@ def check_signoff_note_anchors(
     for good. Raise instead of letting it ship silently stale (issue #5582).
     """
 
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(text.splitlines(), start=first_line):
         for match in _NOTE_PLACEHOLDER_RE.finditer(line):
             if parse_version(match.group(1)) < parse_version(previous):
                 raise PrepError(
@@ -221,7 +227,11 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
         else _read_changelog_fragments(repo / "changelog.d", current, new)
     )
     new_log_text = add_changelog_heading(
-        changelog_text, new, date, fragments="\n\n".join(fragments.values())
+        changelog_text,
+        new,
+        date,
+        previous=current,
+        fragments="\n\n".join(fragments.values()),
     )
     # On an idempotent re-run `current == new`; the notes were already resolved.
     new_signoff_text = None

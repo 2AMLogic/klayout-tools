@@ -351,3 +351,42 @@ def test_publish_refuses_non_tag_refs() -> None:
 
 def test_release_lag_workflow_is_retired() -> None:
     assert not (REPO_ROOT / ".github/workflows/release-lag.yml").exists()
+
+
+@pytest.mark.parametrize("with_fragments", [False, True])
+def test_prepare_resolves_legacy_unreleased_entries(
+    tmp_path: Path, with_fragments: bool
+):
+    repo = _repo(tmp_path)
+    note = "the first release after `v0.8.0`"
+    changelog = repo / "CHANGELOG.md"
+    historical = "## 0.8.0 (2026-10-24)\n\n- " + note + "\n"
+    changelog.write_text(
+        f"# Changelog\n\n## Unreleased\n\n- Legacy: {note}\n\n{historical}"
+    )
+    if with_fragments:
+        fragment = repo / "changelog.d" / "100.md"
+        fragment.parent.mkdir()
+        fragment.write_text("- Fragment\n")
+    rp.prepare(repo, None, "2026-11-09")
+    result = changelog.read_text()
+    assert "- Legacy: `klt 0.9.0`\n" in result
+    assert result.endswith(historical)
+
+
+def test_prepare_stale_unreleased_anchor_reports_file_line_before_writing(
+    tmp_path: Path,
+):
+    repo = _repo(tmp_path)
+    changelog = repo / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\nIntro\n\n## Unreleased\n\n- Old\n"
+        "  the first release after `v0.7.0`\n"
+    )
+    fragment = repo / "changelog.d" / "200.md"
+    fragment.parent.mkdir()
+    fragment.write_text("- Pending\n")
+    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    with pytest.raises(rp.PrepError, match=r"CHANGELOG\.md:8:"):
+        rp.prepare(repo, None, "2026-11-09")
+    assert {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
