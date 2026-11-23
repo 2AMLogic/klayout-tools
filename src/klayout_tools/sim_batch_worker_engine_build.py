@@ -101,3 +101,19 @@ def apply_worker_engine_build(environment: dict[str, Any]) -> None:
         "probe": probe,
         "reason": reason,
     }
+
+
+def portable_batch_report(
+    report: dict[str, Any], *, enabled: bool, backend: str | None = None
+) -> dict[str, Any]:
+    """Omit the submitter's binary path only from an opted-in batch report."""
+    env = report.get("environment") or {}
+    if not enabled or "client_ngspice_binary" not in env:
+        return report
+    resolved = (env.get("backend") or {}).get("resolved")
+    transport = (env.get("remote") or {}).get("backend")
+    if (resolved or transport or backend) != "batch":
+        return report
+    portable_env = dict(env)
+    portable_env.pop("client_ngspice_binary")
+    return {**report, "environment": portable_env}

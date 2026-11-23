@@ -44,6 +44,7 @@ from .sim_batch import (
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
 from .sim_batch_receipt import COLLECTED_NETLIST_MISMATCH
+from .sim_batch_worker_engine_build import portable_batch_report
 from .sim_set_runtime import (
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
@@ -154,6 +155,7 @@ def _run_one(
     sleep: Callable[[float], None] = time.sleep,
     collect_partial: bool = False,
     tracker: _ShardTracker | None = None,
+    portable_base: str | None = None,
 ) -> dict[str, Any]:
     tracker = tracker if tracker is not None else _ShardTracker()
     shard_map = os.path.join(directory, BATCH_SHARDS_FILENAME)
@@ -212,7 +214,10 @@ def _run_one(
     os.makedirs(directory, exist_ok=True)
     report_path = os.path.join(directory, REPORT_FILENAME)
     with open(report_path, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
+        payload = portable_batch_report(
+            report, enabled=portable_base is not None, backend="batch"
+        )
+        json.dump(payload, handle, indent=2)
         handle.write("\n")
     job_ids = _job_ids(report)
     entry.update(
@@ -220,7 +225,9 @@ def _run_one(
         exit_code=_entry_exit_code(report["status"]),
         job_id=job_ids[0] if len(job_ids) == 1 else None,
         job_ids=job_ids,
-        report=report_path,
+        report=os.path.relpath(report_path, portable_base)
+        if portable_base is not None
+        else report_path,
         shards=tracker.summary(report),
     )
     if _client_interrupted(report):
@@ -324,6 +331,8 @@ def run_sim_set(
     preflight: Callable[..., Any] | None = None,
     dry_run: bool = False,
     collect_partial: bool = False,
+    portable_paths: bool = False,
+    aggregate_path: str | None = None,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -393,6 +402,11 @@ def run_sim_set(
 
     dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
+    reference_dir = (
+        os.path.dirname(os.path.abspath(aggregate_path))
+        if aggregate_path
+        else manifest_dir
+    )
     manifest = _Manifest(
         os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
     )
@@ -414,6 +428,7 @@ def run_sim_set(
             sleep,
             collect_partial,
             tracker,
+            reference_dir if portable_paths else None,
         ),
     )
 

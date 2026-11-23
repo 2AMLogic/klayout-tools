@@ -1647,6 +1647,15 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   a wait budget the pending wait is unbounded, as before.
 - **`--report-out`** writes the aggregate envelope to a file (also on a partial
   failure), in addition to stdout.
+- **`--portable-paths`** omits `environment.client_ngspice_binary` from
+  batch reports and preserves the worker binary and both build records.
+  In a batch set, resolve each non-null `requests[].report` from the
+  aggregate file's directory when using `--report-out`, including for the
+  copy on stdout. For stdout alone, use the directory containing
+  `set-manifest.json`. For example, `-o bundle/members --report-out
+  bundle/reports/set.json --portable-paths` records
+  `../members/amp/report.json` for a member named `amp.request.json`.
+  Moving the whole `bundle/` preserves this reference.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
