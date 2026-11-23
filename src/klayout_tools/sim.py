@@ -3998,7 +3998,6 @@ def _run_sim_corners(
         )
 
     shard_fingerprint = functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
-
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
         refuse_hosts_over_units(hosts, len(dispatch_points))
