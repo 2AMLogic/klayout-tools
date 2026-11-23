@@ -1,5 +1,7 @@
 """Identify caller-supplied SPEF bytes at the scope where STA consumes them."""
 
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -111,6 +113,60 @@ def test_replacing_spef_between_liberty_corners_rejects_run(
         run_sta(request)
     assert "<outside repo>" in str(error.value)
     assert str(tmp_path) not in str(error.value)
+
+
+def _touch(path: Path) -> None:
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns - 10**9))
+
+
+def _chmod(path: Path) -> None:
+    path.chmod(path.stat().st_mode ^ 0o100)
+
+
+def _rewrite_identical_bytes(path: Path) -> None:
+    copy = path.with_name(f"{path.name}.copy")
+    shutil.copyfile(path, copy)
+    copy.replace(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_touch, _chmod, _rewrite_identical_bytes],
+    ids=["utime", "chmod", "identical-rewrite"],
+)
+@pytest.mark.parametrize(
+    "spef", ["nom.spef", {"nom": "nom.spef"}], ids=["scalar", "map"]
+)
+def test_metadata_only_change_between_liberty_corners_keeps_run(
+    tmp_path, monkeypatch, spef, mutate
+):
+    request = _setup_matrix_env(tmp_path, monkeypatch, spef)
+    scripts = _stub_openroad_matrix(monkeypatch)
+    run_engine = post_route_sta._run_openroad
+    target = tmp_path / "nom.spef"
+    digest = _sha256_of(target)
+    moved = []
+
+    def mutate_after_first_corner(*args, **kwargs):
+        result = run_engine(*args, **kwargs)
+        if len(scripts) == 1:
+            before = _sta_spef_inputs._file_state(str(target))
+            mutate(target)
+            # Guard against a vacuous pass: the stat tuple must really move.
+            moved.append(_sta_spef_inputs._file_state(str(target)) != before)
+        return result
+
+    monkeypatch.setattr(post_route_sta, "_run_openroad", mutate_after_first_corner)
+    report = run_sta(request)
+
+    assert moved == [True]
+    assert len(scripts) == 2
+    assert _sha256_of(target) == digest
+    if isinstance(spef, str):
+        assert report["spef_content_hash"] == digest
+    else:
+        assert {row["spef_content_hash"] for row in report["corners"]} == {digest}
 
 
 def test_switching_spef_symlink_keeps_engine_on_original_target(tmp_path, monkeypatch):

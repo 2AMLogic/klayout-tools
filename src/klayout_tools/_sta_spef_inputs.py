@@ -67,7 +67,13 @@ def _file_state(path: str) -> tuple[int, ...]:
 def stable_input_hashes(
     scalar: str | None, mapped: dict[str, str] | None
 ) -> Iterator[dict[str | None, str]]:
-    """Hash each input once and guard its identity from hashing through engine exit."""
+    """Hash each input once and reject the run if its bytes change before engine exit.
+
+    The file's stat tuple is only the cheap trigger for the recheck; the digest
+    decides. Metadata that moves while the bytes stay put (``touch``, ``chmod``,
+    a byte-identical rewrite) leaves the recorded digest correct, so it must not
+    discard a completed run. Same predicate as the DEF guard in ``post_route_sta``.
+    """
     paths: dict[str | None, str] = dict((mapped or {}).items())
     if scalar is not None:
         paths[None] = scalar
@@ -81,12 +87,15 @@ def stable_input_hashes(
 
     for path, initial in before.items():
         try:
-            current = _file_state(path)
+            # Short-circuit: an untouched file costs one stat, not a re-read.
+            changed = _file_state(path) != initial and (
+                content_hash_required(path) != by_path[path]
+            )
         except OSError as exc:
             raise PostRouteStaError(
                 f"could not recheck SPEF input '{path}': {exc}"
             ) from exc
-        if current != initial:
+        if changed:
             raise PostRouteStaError(f"SPEF input '{path}' changed during STA")
 
 
