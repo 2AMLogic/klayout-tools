@@ -941,8 +941,9 @@ accepted anything:
   even on a perfectly-correlated run.
 - `design_nets_annotated`/`design_nets_total` — design-side **name-match
   count**: how many eligible linked nets are named by the SPEF. A confirmed
-  internal net connected to just one instance output and no port is excluded
+  internal net with no pins or just one instance output, and no port, is excluded
   from both counts and the missing-net sample, even if it appears in the SPEF.
+  A physical terminal count from OpenDB confirms a zero-pin net is empty.
   Nets with a sink or any connected top-level port count. When OpenSTA cannot
   establish connectivity, the verifier keeps the net in the comparison. It is
   not evidence that parasitics were applied to the timing; the
@@ -1775,6 +1776,10 @@ Comments, blank lines and `\` continuations are handled; anything else --
 other commands, or a checked command using an option/form the reader does not
 understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
 `unchecked`.
+An unchecked form may supply a requested constraint. For that command,
+`mismatches` lists differences involving parsed SDC values. For other
+commands, a requested constraint missing from the SDC still produces a
+mismatch with `sdc_value: null`.
 
 ```json
 "sdc_drift": {

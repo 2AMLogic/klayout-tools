@@ -5,17 +5,19 @@ netlist description header, ``netlist.write`` (with scratch-dir cleanup on
 failure), narrow-width substitution notes, pin ties and the hash/finish step.
 Returns ``(reported_netlist_path, netlist_sha256, pin_ties)``.
 
-``warnings`` is mutated in place, exactly as the inline block did. The helpers
-it calls that still live in ``extract.py`` are imported inside the function
-body: ``extract.py`` imports this module at its top level, so a module-level
-``from .extract import ...`` would be a circular import.
+The writer appends its diagnostics to the supplied ``warnings`` list.
 """
 
 from __future__ import annotations
 
 import re
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+from .extract_base import ExtractError, _parasitic_model_header_comment
+from .extract_netlist_target import _finish_netlist_write
+from .pdk_models import create_model_binding_delegate
 
 #: KLayout's stock ``NetlistSpiceWriter`` (``use_net_names`` on; reported on
 #: 0.30.12, reproduced on 0.30.10, issue #6732) throws from inside ``Netlist.write`` --
@@ -29,70 +31,6 @@ _NC_WRITE_ERROR = "Unexpected text after numeric value"
 
 #: Stem of the placeholder that stands in for ``nc_`` while the writer runs.
 _NC_PLACEHOLDER_STEM = "klt_nc"
-
-
-def _substrate_tie_header_line(requested_ohms: float) -> str:
-    """The ``* - substrate tie: ...`` header line (issue #3089).
-
-    Moved verbatim from ``extract.py`` (issue #6899 pays for its emission
-    growth with the move; behavior unchanged); the extract-side tie helpers
-    are imported lazily, the same direction this module's writer already
-    imports everything else from ``extract``.
-    """
-    from .extract import substrate_tie_mode, substrate_tie_written_ohms
-
-    written = substrate_tie_written_ohms(requested_ohms)
-    if substrate_tie_mode(requested_ohms) == "hard":
-        return (
-            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
-            "SPICE has no zero-ohm resistor) -- the substrate node is "
-            "DC-fixed at 0 V in transient analysis"
-        )
-    from .extract import SUBSTRATE_DC_TIE_RESISTANCE_OHM
-
-    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
-        consequence = (
-            "the substrate is capacitively floating in transient analysis "
-            "(DC reference only); see --substrate-tie-ohms"
-        )
-    else:
-        consequence = (
-            "the substrate is held near 0 V in transient analysis through "
-            "this resistance"
-        )
-    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
-
-
-def _parasitic_model_header_comment(substrate_tie_ohms: float | None = None) -> str:
-    """Render ``PARASITIC_MODEL_SCOPE`` as `*`-prefixed SPICE comment
-    lines for the written netlist's header (issue #728).
-
-    ``kdb.Netlist.write``'s ``description`` argument only `*`-comments its
-    *first* line -- every subsequent line is written verbatim, which would
-    otherwise land as unprefixed text a SPICE reader could try to parse as a
-    circuit element. Each line here is pre-prefixed with ``* `` so the whole
-    block stays a comment regardless of how many lines it spans. Called only
-    when ``--parasitics`` was given (``parasitics_report is not None`` in
-    ``run_extract``) -- a netlist with no parasitics has nothing to declare
-    the scope of.
-
-    Moved verbatim from ``extract.py`` (issue #6899); ``substrate_tie_ohms``
-    defaults lazily to ``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` (every current
-    caller passes it explicitly), and the extract-side names import lazily
-    for the same circular-import reason this module's docstring records.
-    """
-    from .extract import (
-        PARASITIC_MODEL_SCOPE,
-        SUBSTRATE_DC_TIE_RESISTANCE_OHM,
-    )
-
-    if substrate_tie_ohms is None:
-        substrate_tie_ohms = SUBSTRATE_DC_TIE_RESISTANCE_OHM
-    lines = ["* parasitic model (--parasitics):"]
-    for key, value in PARASITIC_MODEL_SCOPE.items():
-        lines.append(f"* - {key}: {value}")
-    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
-    return "\n".join(lines)
 
 
 def _nc_prefixed_nets(netlist: Any) -> list[Any]:
@@ -204,13 +142,6 @@ def write_flat_netlist(
     warnings: Any,
     pin_order: Any = (),
 ) -> tuple[Any, Any, Any]:
-    from .extract import (
-        ExtractError,
-        _apply_pin_ties_if_circuit,
-        _finish_netlist_write,
-        _model_delegate_factory,
-        _substitution_notes,
-    )
 
     # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
     # the PDK reference CDL's parameter set); every other deck keeps the
@@ -261,3 +192,80 @@ def write_flat_netlist(
             netlist_path, scratch_dir
         )
     return reported_netlist_path, netlist_sha256, pin_ties
+
+
+#: Resistance of the ties ``--tie-declared-pins`` writes (issue #4383): a
+#: micro-ohm rather than a literal ``0``, which ngspice warns about and clamps.
+PIN_TIE_RESISTANCE = "1u"
+
+
+def _apply_pin_ties_if_circuit(
+    netlist_path: str, circuit: Any, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: :func:`_apply_pin_ties_to_spice` on the extracted top
+    circuit; a device-free layout has none (and no ``.SUBCKT``), so skip."""
+    if circuit is not None:
+        _apply_pin_ties_to_spice(netlist_path, circuit.name, ties)
+
+
+def _apply_pin_ties_to_spice(
+    netlist_path: str, top_name: str, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: rewrite the written deck so ``top_name``'s ``.SUBCKT``
+    header also lists every tied declared pin (appended after the existing
+    ports, in tie order) and the body gains one ``Rtie_<pin> <pin> <canonical>
+    1u`` per tied pin, just before the matching ``.ENDS``."""
+    if not ties:
+        return
+    with open(netlist_path, encoding="utf-8") as handle:
+        lines = handle.read().split("\n")
+    header_re = re.compile(rf"^\.subckt\s+{re.escape(top_name)}(\s|$)", re.IGNORECASE)
+    start = next((i for i, line in enumerate(lines) if header_re.match(line)), None)
+    if start is None:
+        raise ExtractError(
+            f"--tie-declared-pins: no `.SUBCKT {top_name}` header in '{netlist_path}'"
+        )
+    last_header = start
+    while last_header + 1 < len(lines) and lines[last_header + 1].startswith("+"):
+        last_header += 1
+    end = next(
+        (
+            i
+            for i in range(last_header + 1, len(lines))
+            if lines[i].lower().startswith(".ends")
+        ),
+        None,
+    )
+    if end is None:
+        raise ExtractError(f"--tie-declared-pins: no `.ENDS` in '{netlist_path}'")
+    extra = [pin for tie in ties for pin in tie["tied_pins"]]
+    cards = [
+        f"Rtie_{pin} {pin} {tie['pin']} {PIN_TIE_RESISTANCE}"
+        for tie in ties
+        for pin in tie["tied_pins"]
+    ]
+    lines[last_header] += " " + " ".join(extra)
+    lines[end:end] = cards
+    with open(netlist_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
+def _model_delegate_factory(
+    model_bindings: Any, global_nets: Any, sink: list[Any]
+) -> Callable[[], Any]:
+    """Factory building the model-binding delegate and recording it in ``sink``."""
+
+    def make() -> Any:
+        delegate = create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=global_nets,
+        )
+        sink.append(delegate)
+        return delegate
+
+    return make
+
+
+def _substitution_notes(delegates: list[Any]) -> list[str]:
+    """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
+    return [n for d in delegates for n in getattr(d, "substitution_notes", ())]

@@ -17,7 +17,7 @@ import contextlib
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, TextIO
 
 # Seconds between "still running" lines while one stage is open.
@@ -153,3 +153,9 @@ def stage(name: str) -> Iterator[None]:
         return
     with timer.stage(name):
         yield
+
+
+def _staged(name: str, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Call ``func`` as timed stage ``name`` (issue #3181)."""
+    with stage(name):
+        return func(*args, **kwargs)
