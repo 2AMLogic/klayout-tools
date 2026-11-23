@@ -130,7 +130,7 @@ def test_missing_checkpoint_is_an_engine_error(tmp_path, monkeypatch, suffix):
 
 
 def test_no_budget_report_golden(tmp_path, monkeypatch, capsys):
-    # Pin host-dependent fields. The full report includes the banner-normalised digest (#7277).
+    # Pin host-dependent fields. The golden includes the digest added in #7277.
     path = setup_run(tmp_path, monkeypatch, run_id="golden")
     monkeypatch.setattr(synthesize, "build_provenance", lambda **kw: {})
     monkeypatch.setattr(synthesize, "_read_sta_timing", lambda *args: (None, "fixture"))
