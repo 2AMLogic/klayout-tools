@@ -53,6 +53,10 @@ def test_nested_osdi_current_matches_an_independent_meter(
     total supply current for either leg fails both checks."""
     xm1, xm2 = _device("xm1"), _device("xm2")
     request = psp103_request
+    request["analysis"] = {
+        "kind": analysis,
+        "args": "" if analysis == "op" else "Vdrain 0.2 0.8 0.1",
+    }
     request["options"]["save_vectors"] = [
         xm1 + "[ids]",
         xm1 + "[ide]",
