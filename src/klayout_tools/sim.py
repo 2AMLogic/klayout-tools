@@ -221,7 +221,7 @@ from .sim_convergence_retry import is_retryable_convergence_failure, note_not_re
 #: nothing below calls them -- so ``klayout_tools.sim.<name>`` keeps working.
 from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
 from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
-from .sim_corner_axes import _matches_exclude
+from .sim_corner_axes import _matches_exclude as _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
 from .sim_corner_keys import unknown_key_warnings
 from .sim_corner_point import (
@@ -231,8 +231,23 @@ from .sim_corner_point import (
     _nodeset_report_field,
     _options_report_field,
     _params_report_field,
-    _validate_param_name,
-    _validate_param_scalar,
+)
+from .sim_corner_point import (
+    _validate_param_name as _validate_param_name,
+)
+from .sim_corner_point import (
+    _validate_param_scalar as _validate_param_scalar,
+)
+from .sim_corner_rules import (  # noqa: F401 -- retain the runner's selector imports
+    _NODESET_MATCH_KEYS,
+    _NODESET_MATCH_VALIDATORS,
+    _apply_nodeset_rules,
+    _check_nodeset_selector_names,
+    _nodeset_match_number,
+    _nodeset_match_params,
+    _nodeset_match_process,
+    _nodeset_match_supply,
+    _validate_nodeset_match,
 )
 from .sim_corner_variants import _parse_variants as _parse_variants
 from .sim_corners import (
@@ -244,8 +259,10 @@ from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
+    NODESET_UNSUPPORTED_WORKER_CODE,
     PARAMS_UNSUPPORTED_WORKER_CODE,
     SUPPLY_PRECISION_UNSUPPORTED_WORKER_CODE,
+    _require_nodeset_echo,
     _require_params_echo,
     _require_supply_echo,
 )
@@ -284,6 +301,7 @@ from .sim_analysis_overrides import (  # isort: skip
     AO_UNSUPPORTED_WORKER_CODE as AO_UNSUPPORTED_WORKER_CODE,
     IC_LABEL as _IC_LABEL,
     IC_UNSUPPORTED_WORKER_CODE as IC_UNSUPPORTED_WORKER_CODE,
+    _reject_param_braces,
     effective_analysis_args as _effective_analysis_args,
     ic_analysis_args as _ic_analysis_args,  # noqa: F401
     ic_cards as _ic_cards,
@@ -1673,24 +1691,6 @@ def _resolve_analysis_and_measurements(
     # lines) so everything downstream treats it as one.
     sim_noise.validate_noise_context(measurements_spec, analysis)
     return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
-
-
-def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
-    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
-    (issue #2846). ngspice emits the analysis as a ``.control`` command and
-    does not expand ``.param`` braces in control mode, so ``tran 2e-06
-    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
-    braces are valid, so this check is skipped for ``engine == "xyce"``."""
-    args = analysis.get("args")
-    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
-        raise SimError(
-            f"request.analysis.args {args!r} contains a '{{...}}' brace "
-            "reference: ngspice runs the analysis as a .control command, "
-            "which does not expand .param braces (the analysis aborts with "
-            "'TSTOP is invalid'), and klt does not expand them. Write the "
-            "numeric value literally in analysis.args (or use engine 'xyce', "
-            "whose .tran card accepts braces)"
-        )
 
 
 #: A literal numeric ``AT=<x>`` on a ``.meas`` card (issue #3520). The value
@@ -4973,66 +4973,6 @@ def _needs_models_lib(point: CornerPoint) -> bool:
 # --------------------------------------------------------------------------- #
 
 _NODESET_RULE_KEYS = ("match", "values")
-_NODESET_MATCH_KEYS = ("process", "temperature_c", "supply_v", "params")
-
-
-def _nodeset_match_process(value: Any, where: str) -> str:
-    if not isinstance(value, str):
-        raise SimError(f"{where} must be a string")
-    return value
-
-
-def _nodeset_match_number(value: Any, where: str) -> Any:
-    if not is_finite_number(value):
-        raise SimError(f"{where} must be a finite number")
-    return value
-
-
-def _nodeset_match_supply(supply: Any, where: str) -> dict[str, Any]:
-    if not isinstance(supply, dict):
-        raise SimError(f"{where} must be an object of rail: number")
-    return {
-        rail: _nodeset_match_number(v, f"{where}.{rail}") for rail, v in supply.items()
-    }
-
-
-def _nodeset_match_params(params: Any, where: str) -> dict[str, int | float]:
-    if not isinstance(params, dict):
-        raise SimError(f"{where} must be an object of name: number")
-    row: dict[str, int | float] = {}
-    for name, value in params.items():
-        lowered = _validate_param_name(name, where)
-        if lowered in row:
-            raise SimError(
-                f"{where} names {lowered!r} more than once (names are case-insensitive)"
-            )
-        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
-    return row
-
-
-_NODESET_MATCH_VALIDATORS = {
-    "process": _nodeset_match_process,
-    "temperature_c": _nodeset_match_number,
-    "supply_v": _nodeset_match_supply,
-    "params": _nodeset_match_params,
-}
-
-
-def _validate_nodeset_match(raw: Any, where: str) -> dict[str, Any]:
-    """One rule's ``match`` selector, normalized to the shape
-    :func:`_matches_exclude` consumes (``params`` names lowercased)."""
-    if not isinstance(raw, dict):
-        raise SimError(f"{where} must be an object")
-    unknown = sorted(str(key) for key in set(raw) - set(_NODESET_MATCH_KEYS))
-    if unknown:
-        raise SimError(
-            f"{where} has unknown key(s) {', '.join(unknown)} "
-            f"(supported: {', '.join(_NODESET_MATCH_KEYS)})"
-        )
-    return {
-        key: _NODESET_MATCH_VALIDATORS[key](value, f"{where}.{key}")
-        for key, value in raw.items()
-    }
 
 
 def _validate_nodeset_rules(
@@ -5063,72 +5003,6 @@ def _validate_nodeset_rules(
             }
         )
     return rules
-
-
-def _check_nodeset_selector_names(
-    points: list[CornerPoint],
-    rules: list[dict[str, Any]],
-    label: str = "options.nodeset",
-) -> None:
-    """A selector naming a parameter or supply rail no point carries could
-    never match, so it is refused by name rather than as an unused rule."""
-    declared_params = {name for point in points for name in point.params}
-    declared_rails = {str(rail) for point in points for rail in point.supply_v}
-    for index, rule in enumerate(rules):
-        match = rule["match"]
-        for name in match.get("params", {}):
-            if name not in declared_params:
-                raise SimError(
-                    f"{label}[{index}].match.params names {name!r}, "
-                    "which is not a corners.params parameter of this request"
-                )
-        for rail in match.get("supply_v", {}):
-            if str(rail) not in declared_rails:
-                raise SimError(
-                    f"{label}[{index}].match.supply_v names rail "
-                    f"{rail!r}, which no corner of this request sets"
-                )
-
-
-def _apply_nodeset_rules(
-    points: list[CornerPoint],
-    rules: list[dict[str, Any]],
-    *,
-    label: str = "options.nodeset",
-    attr: str = "nodeset",
-) -> None:
-    """Resolve ``options.nodeset`` rules onto ``points`` in place (issue
-    #3036). Runs once, after corner expansion and exclusions and before Monte
-    Carlo cloning, so a sample inherits its base point's map.
-
-    Zero matching rules at a point mean no hint there; exactly one selects its
-    whole map; two is an error whatever their node maps are (no implicit merge
-    or priority). A rule that matches no retained point is an error, and so is
-    a selector naming a parameter or supply rail no point carries.
-    """
-    if not rules:
-        return
-    _check_nodeset_selector_names(points, rules, label)
-    used = [False] * len(rules)
-    for point in points:
-        hits = [
-            i for i, rule in enumerate(rules) if _matches_exclude(point, rule["match"])
-        ]
-        if len(hits) > 1:
-            raise SimError(
-                f"{label} rules {hits[0]} and {hits[1]} both match "
-                f"corner {point.corner_id!r}; overlapping rules are never "
-                "merged -- make the selectors disjoint"
-            )
-        if hits:
-            used[hits[0]] = True
-            chosen = rules[hits[0]]["values"]
-            setattr(point, attr, dict(chosen) if isinstance(chosen, dict) else chosen)
-    if not all(used):
-        raise SimError(
-            f"{label}[{used.index(False)}] matches no retained corner "
-            "of this request (every declared rule must apply somewhere)"
-        )
 
 
 def _nodeset_cards(point: CornerPoint) -> list[str]:
@@ -5174,56 +5048,6 @@ def _nodeset_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]
         }
         for node in missing
     ]
-
-
-NODESET_UNSUPPORTED_WORKER_CODE = "nodeset_unsupported_worker"
-
-
-def _require_nodeset_echo(
-    points: list[CornerPoint],
-    corners: list[dict[str, Any]],
-    *,
-    backend: str = "remote",
-    label: str = "options.nodeset",
-    attr: str = "nodeset",
-    code: str = NODESET_UNSUPPORTED_WORKER_CODE,
-) -> None:
-    """Fail the request when an off-host worker did not honor
-    ``options.nodeset`` (issue #3036) -- or, with ``label``/``attr``/``code``
-    of ``options.initial_conditions``, that field (issue #3881).
-
-    A worker built before the field ignores the hints and would report a
-    passing, unhinted solve; one that supports it echoes each point's
-    ``nodeset`` in its corner report, which is compared with what was
-    dispatched. Independent of any version check, so it also catches a
-    same-release runner image built before the feature landed.
-    """
-    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
-        return
-    problem: str | None = None
-    if len(corners) != len(points):
-        problem = (
-            f"it returned {len(corners)} corner report(s) for "
-            f"{len(points)} dispatched point(s)"
-        )
-    else:
-        for point, corner in zip(points, corners, strict=True):
-            expected = getattr(point, attr)
-            if (corner.get(attr) or type(expected)()) != expected:
-                problem = (
-                    f"corner {point.corner_id!r} came back with {attr} "
-                    f"{corner.get(attr)!r}, expected {expected!r}"
-                )
-                break
-    if problem is not None:
-        raise SimError(
-            f"the remote/batch worker did not honor {label} -- "
-            f"{problem}. A worker built before the field ignores it and "
-            "would solve without the requested initial values; update the "
-            "runner image to this klt release, or use a local backend. No "
-            "result was reported",
-            code=code,
-        )
 
 
 # --------------------------------------------------------------------------- #
