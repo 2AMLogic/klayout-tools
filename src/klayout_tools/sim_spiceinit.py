@@ -27,6 +27,9 @@ from . import _warn
 SOURCES = ("request", "thread_pin", "home", "none", "runner")
 
 
+BATCH_INIT_UNVERIFIED = "batch_ngspice_init_unverified"
+
+
 def home_spiceinit_path() -> str:
     return os.path.join(os.path.expanduser("~"), ".spiceinit")
 
@@ -43,6 +46,10 @@ def _read_home() -> bytes | None:
 
 def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _lines_digest(lines: tuple[str, ...] | list[str]) -> str:
+    return _digest("".join(line + "\n" for line in lines).encode("utf-8"))
 
 
 def with_thread_pin(
@@ -80,11 +87,10 @@ def effective_init(
     if offhost:
         return {"source": "runner", "lines": None, "sha256": None}
     if written:
-        data = "".join(line + "\n" for line in written).encode("utf-8")
         return {
             "source": "request" if declared else "thread_pin",
             "lines": list(written),
-            "sha256": _digest(data),
+            "sha256": _lines_digest(written),
         }
     home = _read_home()
     if home is None:
@@ -136,3 +142,57 @@ def record(
     )
     warn(block, declared=bool(declared))
     return block
+
+
+def _batch_job_init_identity(member: dict[str, Any], declared: tuple[str, ...]) -> str:
+    """Compare the worker's recorded request file with these effective init lines."""
+    worker = member.get("worker_environment")
+    if not isinstance(worker, dict):
+        return "unverified"
+    observed = worker.get("ngspice_init")
+    if not isinstance(observed, dict) or observed.get("source") != "request":
+        return "unverified"
+    lines = observed.get("lines")
+    pinned = with_thread_pin(declared, worker.get("threads_per_worker"), "ngspice")
+    if lines in (list(declared), list(pinned)) and observed.get(
+        "sha256"
+    ) == _lines_digest(lines):
+        return "digest_reported"
+    return "unverified"
+
+
+def batch_init_diagnostic(
+    backend: str, engine: str, declared: tuple[str, ...], remote: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Qualify init evidence on corner-mode batch collection (issue #7368)."""
+    if backend != "batch" or engine != "ngspice" or not declared:
+        return None
+    remote = remote or {}
+    fleet = remote.get("fleet")
+    members: list[tuple[int | None, Any]] = (
+        list(enumerate(fleet))
+        if isinstance(fleet, list) and fleet
+        else [(None, remote)]
+    )
+    jobs = []
+    for index, entry in members:
+        member = entry if isinstance(entry, dict) else {}
+        jobs.append(
+            {
+                "job_id": member.get("job_id"),
+                "fleet_index": index,
+                "request_identity": _batch_job_init_identity(member, declared),
+            }
+        )
+    return {
+        "code": BATCH_INIT_UNVERIFIED,
+        "severity": "warning",
+        "feature": "options.ngspice_init",
+        "simulator_application": "unverified",
+        "jobs": jobs,
+        "message": (
+            "Worker reports do not confirm that ngspice applied options.ngspice_init. "
+            "Jobs marked digest_reported reported the requested init contents. "
+            "For jobs marked unverified, the request identity is also unknown."
+        ),
+    }

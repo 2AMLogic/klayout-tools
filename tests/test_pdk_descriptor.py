@@ -367,6 +367,33 @@ def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
         pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
 
 
+_OC_HEADER = (
+    'library (x) {{\n  time_unit : "1ps";\n'
+    "  operating_conditions ({n}) {{\n"
+    "    process : 1.0;\n    temperature : 25;\n    voltage : 0.7;\n  }}\n"
+    "  default_operating_conditions : {n};\n"
+)
+
+
+def test_liberty_list_condition_rename_merges(tmp_path, monkeypatch):
+    # Issue #6940: members whose only header difference is the local name of
+    # the single operating condition each selects as its default.
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    (root / "d" / "g1.lib").write_text(
+        _lib("A", "B", header=_OC_HEADER.format(n="tt_n")), encoding="utf-8"
+    )
+    (root / "d" / "g2.lib").write_text(
+        _lib("C", header=_OC_HEADER.format(n="tt_n_rvt")), encoding="utf-8"
+    )
+    path, _ = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    merged = open(path, encoding="utf-8").read()
+    assert "operating_conditions (tt_n)" in merged
+    assert "default_operating_conditions : tt_n;" in merged
+    assert "tt_n_rvt" not in merged
+    assert all(f"cell ({c})" in merged for c in "ABC")
+
+
 def _dm_lib(default: str, cell: str, *, output_limit: str | None = None) -> str:
     """A one-output-cell ``.lib`` whose header pins ``default_max_transition``
     (issue #6933); the output carries an explicit limit only when asked."""

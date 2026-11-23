@@ -212,3 +212,41 @@ def test_flatten_missing_reference_top_preserves_error(tmp_path):
             {"flatten_reference": True},
         )
     assert str(exc.value) == "top cell/subcircuit 'top' not found in reference netlist"
+
+
+@pytest.mark.parametrize(
+    "combine_options", [{}, {"combine_devices_per_circuit": {"leaf": True}}]
+)
+def test_flatten_selected_interior_layout(tmp_path, monkeypatch, combine_options):
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    wrapper = ".subckt outer A B C\nX0 A B C top\n.ends\n"
+    report = _run_divider(
+        tmp_path,
+        wrapper + _HIERARCHICAL_DIVIDER_SPICE,
+        _FLAT_DIVIDER_SPICE,
+        {"flatten_layout": True, **combine_options},
+    )
+    assert report["status"] == "match"
+    assert report["top"] == "TOP"
+    assert report["category_counts"]["topology.flattened"] == 1
+    [warning] = [
+        m for m in report["mismatches"] if m["category"] == "topology.flattened"
+    ]
+    assert warning["side"] == "layout"
+    path = tmp_path / "lvs.json"
+    path.write_text(json.dumps(report))
+    rerun = lvs.rerun_lvs_report(str(path))
+    assert rerun["status"] == "match"
+    assert rerun["drift"] == []
+
+
+def test_flatten_missing_layout_top_preserves_error(tmp_path):
+    with pytest.raises(lvs.LvsError) as exc:
+        _run_divider(
+            tmp_path,
+            _HIERARCHICAL_DIVIDER_SPICE.replace("subckt top ", "subckt other "),
+            _FLAT_DIVIDER_SPICE,
+            {"flatten_layout": True},
+        )
+    assert str(exc.value) == "top cell/subcircuit 'top' not found in layout netlist"
