@@ -77,12 +77,8 @@ from .env_provenance import find_repo_root
 from .signoff import (
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
-    SCHEMA_VERSION,
-    SignoffError,
     _classify,
-    _finite_json_float,
     _generic_item_binding_refusal,
-    _reject_json_constant,
 )
 from .signoff_attest_command import _run_command, reset_command_side_channels
 from .signoff_attest_drift import drift_result
@@ -92,6 +88,7 @@ from .signoff_attest_input import attestation_block, input_binding
 from .signoff_attest_pins import item9_pin_checks
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
+from .signoff_base import SCHEMA_VERSION, SignoffError
 
 #: The attestation-inventory schema version this build mints against. The
 #: inventory is a public, versioned contract (``docs/json-contract.md``);
@@ -211,6 +208,8 @@ def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
     except OSError as exc:
         raise AttestationError(f"could not read inventory '{path}': {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
+    from .signoff_base import _finite_json_float, _reject_json_constant
+
     try:
         inventory = json.loads(
             raw.decode("utf-8"),
