@@ -124,6 +124,7 @@ from .signoff_characterization import (
     attach_characterization_attestation as _attach_characterization_attestation,
 )
 from .signoff_composition import compose_rows, composed_count_field
+from .signoff_corner_box import CornerBox, corner_member_outcome, read_corner_box
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -346,6 +347,7 @@ from .signoff_unmet_reasons import (
     _REASON_NO_EVIDENCE,
     _REASON_NOT_POST_LAYOUT,
     _REASON_NOTHING_CHECKED,
+    _REASON_PARTIAL_COVERAGE,
     _REASON_STALE_ARTIFACT,
     _REASON_STALE_EVIDENCE,
     _REASON_TIER_NOT_SUPPORTED,
@@ -1116,35 +1118,6 @@ _REASON_UNDERSIZED_SAMPLE = "undersized_sample"
 #: entirely: a mechanically-observed negative result, like a failing
 #: registered ``critical: true`` metric.
 _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
-
-#: Issue #2109: the evidence resolved to a readable, recognised envelope of a
-#: kind this item accepts, whose producer applied the common rollup rule
-#: (:func:`~klayout_tools.coverage.coverage_rollup`) and reported its
-#: **partial** status token -- ``"clean_partial"``, ``"pass_partial"``, the
-#: per-kind spelling in :data:`_PARTIAL_STATUS_BY_KIND`. Every check it ran
-#: passed, and it also skipped requested work, so its result is real but not
-#: unconditional.
-#:
-#: It *names* the same class of problem as the "no runnable check proves
-#: this item" reasons (:data:`_REASON_WRONG_KIND`,
-#: :data:`_REASON_NOT_POST_LAYOUT`, :data:`_REASON_NOTHING_CHECKED`), per
-#: issue #826's invariant: the cited check did not fail on its own terms,
-#: and the fix is to re-run it over the work it skipped, not to fix a defect
-#: it found. Reporting it as ``check_failed`` -- which is what happened
-#: before this constant existed, since a partial token simply is not the
-#: kind's success token -- sent a reader looking for a violation that does
-#: not exist.
-#:
-#: It is *ordered* like :data:`_REASON_CHECK_FAILED` rather than like those
-#: three, because it replaces that reason on the same code path: it is
-#: decided from the envelope's own verdict, before :func:`_build_tier_item`'s
-#: kind gate (which only ever downgrades a would-be ``"met"``). So a partial
-#: report cited for an item that does not accept its kind reports
-#: ``partial_coverage``, exactly as a *failing* report of that kind reports
-#: ``check_failed`` rather than ``wrong_kind`` today. The three gated
-#: refusals differ because they apply to an envelope that *passed*, where
-#: "cite a different artifact" really is the more actionable answer.
-_REASON_PARTIAL_COVERAGE = "partial_coverage"
 
 # --- Justified declared gaps (issue #5599) ---------------------------------- #
 # The manifest's `spec_rows` reader, the justified object form of `gap`, and
@@ -3997,6 +3970,7 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
+                    corner_box=read_corner_box(manifest, t1_item["id"], partition),
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     require_derived_rows=require_derived,
                     require_derived_rows_invalid=require_derived_invalid,
@@ -4676,6 +4650,7 @@ def _grade_evidence(
     repo_root: str | Path | None = None,
     generator_exec: GeneratorExecution | None = None,
     envelope_sink: list[dict[str, Any]] | None = None,
+    corner_box: CornerBox | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -4802,6 +4777,7 @@ def _grade_evidence(
         resolution=resolution,
         allowed_kinds=allowed_kinds,
     )
+    unmet = corner_member_outcome(corner_box, spec, check_kind, envelope, unmet)
     if unmet is not None:
         _maybe_record_failed_sim(
             envelope_sink, unmet, check_kind, envelope, spec, resolution, allowed_kinds
@@ -5905,6 +5881,7 @@ def _build_tier_item(
     require_derived_rows_invalid: bool = False,
     require_coverage_disclosure: bool = False,
     require_coverage_disclosure_invalid: bool = False,
+    corner_box: CornerBox | None = None,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -6007,6 +5984,7 @@ def _build_tier_item(
             repo_root=repo_root,
             generator_exec=generator_exec,
             envelope_sink=sink,
+            corner_box=corner_box,
         )
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
@@ -6043,7 +6021,9 @@ def _build_tier_item(
     item5_require_derived_invalid = (
         require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
     )
-    report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
+    report_list = corner_box is not None or (
+        item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
+    )
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6089,6 +6069,7 @@ def _build_tier_item(
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
+            corner_box=corner_box,
             spec_rows=multi_rows,
             spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
@@ -6190,6 +6171,7 @@ def _grade_multi_citation(
     required_kind_pair: tuple[str, ...] | None = None,
     require_derived: bool = False,
     check_slices: bool = True,
+    corner_box: CornerBox | None = None,
     require_derived_invalid: bool = False,
     require_coverage_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
@@ -6236,11 +6218,14 @@ def _grade_multi_citation(
     ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
 
-    if require_derived_invalid:
-        return invalid("'require_derived_rows' must be a boolean")
-
     members, problem = _checked_multi_members(
-        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid, check_slices
+        raw_entry,
+        spec_rows,
+        spec_rows_invalid,
+        require_coverage_invalid,
+        check_slices,
+        require_derived_invalid=require_derived_invalid,
+        corner_box=corner_box,
     )
     if members is None:
         return invalid(problem or "malformed evidence entry")
@@ -6262,6 +6247,7 @@ def _grade_multi_citation(
                 "reason": g[1],
                 **graded_input_provenance(g[2] or g[3].get("cited_evidence")),
                 **graded_entry_campaign(g[2]),
+                **(corner_box.member_disclosure(spec, g[0]) if corner_box else {}),
             }
             for spec, rows, g in graded
         ],
@@ -6275,6 +6261,8 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
+    if corner_box is not None:
+        return corner_box.grade(met_envelopes or {}, graded, extra)
     # Check artifact hashes and timing margins before grading partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
@@ -6315,10 +6303,17 @@ def _checked_multi_members(
     spec_rows_invalid: bool,
     require_coverage_invalid: bool = False,
     check_slices: bool = True,
+    *,
+    require_derived_invalid: bool = False,
+    corner_box: CornerBox | None = None,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
     naming is invalid."""
+    if corner_box and corner_box.problem:
+        return None, corner_box.problem
+    if require_derived_invalid:
+        return None, "'require_derived_rows' must be a boolean"
     if require_coverage_invalid:  # issue #5789: item 3's malformed key
         return None, "'require_coverage_disclosure' must be a boolean"
     if spec_rows_invalid:

@@ -138,6 +138,7 @@ from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label, note_lines
+from ..signoff_corner_box import print_corner_box
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
 from ..signoff_details import _pex_citation_lines
@@ -807,12 +808,8 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
-        # Issue #2176: a row this build has no grading rules for at all --
-        # an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
-        # lists. Shown for every such row, met/unmet and cited/uncited
-        # alike, because the failure this prevents is a row that *looks*
-        # exactly like a graded one; absent for every item of the shipped
-        # doc, which renders exactly as before.
+        # Issue #2176: mark rows introduced by a different tiers doc whose
+        # grading rules this build does not implement.
         if item.get("graded_by_build") is False:
             print(
                 f"        {palette.red}not graded by this build{palette.reset} "
@@ -827,6 +824,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         _print_justified_gaps(item)
         _print_structural_rows(item)
         _print_group_coverage(item)
+        print_corner_box(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)
