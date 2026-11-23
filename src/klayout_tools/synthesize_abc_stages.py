@@ -120,41 +120,65 @@ def write_mapping(
     *,
     repo_root: str | None,
     pdk_root: str | None,
+    run_frontend: list[str] | None = None,
+    run_tail: list[str] | None = None,
 ) -> str | StagedMapping:
     from .synthesize import _publish_script, _script_path_text
 
     if timeout_s is None:
+        run_lines = None
+        if run_frontend is not None:
+            run_lines = run_frontend + synth_lines(top, fast) + (run_tail or [])
         return _publish_script(
-            script_path, frontend + synth_lines(top, fast) + tail, pdk_root
+            script_path,
+            frontend + synth_lines(top, fast) + tail,
+            pdk_root,
+            run_lines=run_lines,
         )
 
     script = Path(script_path)
     netlist = script.parent / f"{top}_pre_abc.v"
     stats = script.parent / f"{top}_pre_abc.json"
 
-    def path_text(path: Path) -> str:
-        return _script_path_text(str(path), repo_root=repo_root)
+    def path_text(path: Path, repo: str | None) -> str:
+        return _script_path_text(str(path), repo_root=repo)
 
-    before = path_text(netlist.with_suffix(".il"))
-    after = path_text(script.parent / f"{top}_post_abc.il")
-    pre_script = _publish_script(
-        str(script.with_suffix(".pre_abc.ys")),
-        [
-            *frontend,
+    def script_lines(
+        active_frontend: list[str], active_tail: list[str], repo: str | None
+    ):
+        before = path_text(netlist.with_suffix(".il"), repo)
+        after = path_text(script.parent / f"{top}_post_abc.il", repo)
+        pre = [
+            *active_frontend,
             f"synth -noabc -top {top}",
             f"write_rtlil {before}",
-            f"write_verilog -noattr {path_text(netlist)}",
-            f"tee -q -o {path_text(stats)} stat -json -top {top}",
-        ],
+            f"write_verilog -noattr {path_text(netlist, repo)}",
+            f"tee -q -o {path_text(stats, repo)} stat -json -top {top}",
+        ]
+        generic = [f"read_rtlil {before}", generic_abc(fast), f"write_rtlil {after}"]
+        return pre, generic, [f"read_rtlil {after}", "opt -fast", *active_tail]
+
+    commit_pre, commit_generic, commit_tail = script_lines(frontend, tail, repo_root)
+    run_triple = None
+    if run_frontend is not None and repo_root is not None:
+        run_triple = script_lines(run_frontend or [], run_tail or [], None)
+    pre_script = _publish_script(
+        str(script.with_suffix(".pre_abc.ys")),
+        commit_pre,
         pdk_root,
+        run_lines=run_triple[0] if run_triple else None,
     )
     generic_script = _publish_script(
         str(script.with_suffix(".generic_abc.ys")),
-        [f"read_rtlil {before}", generic_abc(fast), f"write_rtlil {after}"],
+        commit_generic,
         pdk_root,
+        run_lines=run_triple[1] if run_triple else None,
     )
     tail_script = _publish_script(
-        script_path, [f"read_rtlil {after}", "opt -fast", *tail], pdk_root
+        script_path,
+        commit_tail,
+        pdk_root,
+        run_lines=run_triple[2] if run_triple else None,
     )
     return StagedMapping(
         pre_script, generic_script, tail_script, netlist, stats, timeout_s

@@ -220,6 +220,7 @@ by construction, and that used to be silent. See
 from __future__ import annotations
 
 import fnmatch
+import functools
 import importlib
 import json
 import os
@@ -235,7 +236,7 @@ from . import synthesize_abc_stages as abc_stages
 from . import synthesize_timeout as ytimeout
 from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_int
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -255,8 +256,6 @@ from ._report_verify import (
 )
 from ._sv2v import convert_sources, validate_sv_frontend
 from ._verilog_params import (
-    chparam_lines,
-    read_verilog_line,
     validate_defines,
     validate_parameters,
 )
@@ -282,7 +281,12 @@ from .sta import StaError, compute_critical_path
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
 from .synthesize_abc_stages import AbcTimeout, SynthesizeError
-from .synthesize_abc_timing import parse_abc_regions
+from .synthesize_abc_timing import (
+    AbcStatsCapture,
+    parse_abc_regions,
+    plan_abc_stats_capture,
+    read_abc_stats_timing,
+)
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
     _candidate_measurement,
@@ -298,6 +302,16 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_constrained_timing import (
+    _resolve_clocks as _resolve_clocks,
+)
+from .synthesize_constrained_timing import (
+    _validate_clock_entry as _validate_clock_entry,
+)
+from .synthesize_constrained_timing import (
+    constrained_timing_fields,
+    mapped_sta_constraints,
+)
 from .synthesize_driving_cell import (
     ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
 )
@@ -319,6 +333,32 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
+
+# Re-exported from `synthesize_script` (issue #7010's split): every name
+# below stays importable from this module for its existing callers -- the
+# lazy `from .synthesize import ...` sites in `synthesize_abc_stages`/
+# `synthesize_memory` and the test suite's `synthesize.<name>` references.
+from .synthesize_script import (
+    _COMMIT_RUNNABLE_HEADER,
+    _COMMIT_SCRIPT_HEADER,
+    _RUN_ABSOLUTE_HEADER,
+    _RUN_SCRIPT_HEADER,
+    PDK_ROOT_TOKEN,
+    _script_liberty_text,
+    _write_script_lines,
+    rehydrate_script_text,
+    run_script_path,
+)
+from .synthesize_script import RUN_SCRIPT_SUFFIX as RUN_SCRIPT_SUFFIX
+from .synthesize_script import (
+    _abc_pass_command as _abc_pass_command,
+)
+from .synthesize_script import (
+    _script_input_text as _script_input_text,
+)
+from .synthesize_script import (
+    _script_path_text as _script_path_text,
+)
 from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -704,157 +744,6 @@ _LEAKAGE_UNIT_TO_NW: dict[str, float] = {
 _rpath = RequestPaths(SynthesizeError)
 
 
-def _script_path_text(path: str, *, repo_root: str | None) -> str:
-    """The text :func:`_write_script` embeds for one filesystem path (issue
-    #1844) -- ``path`` unchanged (absolute) when ``repo_root`` is ``None``
-    or ``path`` does not resolve inside it, preserving :func:`_write_script`'s
-    original cwd-independence invariant exactly for those cases; ``path``
-    rewritten relative to ``repo_root`` (POSIX separators) when it does, via
-    the same :func:`~klayout_tools.env_provenance.repo_relative_path` this
-    module's own response fields use -- one normalizer, not two. A caller
-    embedding any relative-form path this way must run the script with
-    ``cwd=repo_root``; see :func:`_write_script`'s own docstring.
-    """
-    if repo_root is None:
-        return path
-    normalized = env_provenance.repo_relative_path(path, repo_root=repo_root)
-    if normalized["scope"] == "repo":
-        return normalized["path"]
-    return path
-
-
-#: The machine-independent placeholder the commit-safe top-level ``.ys``
-#: writes in place of the resolved PDK install root (issue #1870), e.g.
-#: ``$PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib``.
-#: Deliberately the *same* spelling ``klt sim``'s ``request.models.lib``
-#: already accepts for a PDK-anchored path (``sim.py``'s
-#: ``_resolve_models_lib``) and that ``klt pdk env`` exports, so one
-#: convention covers both directions rather than inventing a second token.
-#:
-#: Yosys does **not** expand environment variables in a script file, so a
-#: script carrying this token is not directly runnable -- that is exactly why
-#: :func:`_write_script` also emits the rehydrated
-#: :data:`RUN_SCRIPT_SUFFIX` sibling it actually runs.
-PDK_ROOT_TOKEN = "$PDK_ROOT"
-
-#: Filename suffix of the rehydrated, *runnable* sibling of the commit-safe
-#: top-level script (issue #1870): ``synth_<top>.ys`` -> ``synth_<top>.run.ys``.
-RUN_SCRIPT_SUFFIX = ".run.ys"
-
-#: Header prepended to the commit-safe script whenever it carries a
-#: :data:`PDK_ROOT_TOKEN` -- the token is otherwise indistinguishable from a
-#: path Yosys would try to open literally, and the reader needs to be told,
-#: in the artifact itself, which sibling is the runnable one.
-_COMMIT_SCRIPT_HEADER = (
-    "# Commit-safe form (issue #1870): the liberty below is written relative\n"
-    "# to $PDK_ROOT, which Yosys does NOT expand -- this file is the artifact\n"
-    "# to commit, not the one to run. Run the rehydrated sibling\n"
-    "# '{run_script}' (regenerated by every `klt synthesize` run), or\n"
-    "# substitute your own PDK install root for $PDK_ROOT first.\n"
-)
-
-#: The mirror-image header on the rehydrated sibling. It carries the real
-#: absolute liberty path, so it is machine-specific by construction and must
-#: not be committed -- said in the file itself, where a reviewer looking at a
-#: diff that adds it will actually see it.
-#: Deliberately does not spell the token itself: a rehydrated script
-#: containing no occurrence of :data:`PDK_ROOT_TOKEN` at all is a stronger
-#: (and directly checkable) property than "no occurrence outside the header".
-_RUN_SCRIPT_HEADER = (
-    "# Machine-local rehydration of '{script}' (issue #1870): the PDK-root\n"
-    "# placeholder has been substituted with this machine's resolved PDK\n"
-    "# install root, so this file is runnable but NOT commit-safe. Commit\n"
-    "# '{script}' instead.\n"
-)
-
-
-def run_script_path(script_path: str) -> str:
-    """The rehydrated, runnable sibling of the commit-safe ``script_path``
-    (issue #1870): ``.../synth_gcd.ys`` -> ``.../synth_gcd.run.ys``.
-
-    One function so the writer (:func:`_write_script`), the response field
-    (``run_script_path``), and any caller reconstructing the pair agree on
-    the name by construction rather than by two copies of the same
-    string-munging.
-    """
-    base, extension = os.path.splitext(script_path)
-    return (
-        f"{base}{RUN_SCRIPT_SUFFIX}" if extension else script_path + RUN_SCRIPT_SUFFIX
-    )
-
-
-def rehydrate_script_text(text: str, *, pdk_root: str) -> str:
-    """``text`` with every :data:`PDK_ROOT_TOKEN` prefix replaced by
-    ``pdk_root`` (issue #1870) -- the one documented, testable transformation
-    that turns the commit-safe script into the runnable one.
-
-    Deliberately a plain prefix substitution over the script *text* rather
-    than a re-render from the original inputs: that is what makes "the
-    committed script and the executed script differ in exactly the liberty
-    path, nothing else" a checkable property (the two files are
-    byte-identical after this substitution, modulo their one-line headers)
-    instead of an assumption about two independent code paths agreeing.
-
-    A caller on another machine rehydrates a committed script the same way
-    -- substitute its own install root (``klt pdk find``'s ``root``, or
-    ``$PDK_ROOT``) -- which is the whole point of writing the token.
-    """
-    return text.replace(f"{PDK_ROOT_TOKEN}/", pdk_root.rstrip("/") + "/")
-
-
-def _script_liberty_text(liberty_path: str, *, pdk_root: str | None) -> str:
-    """The text :func:`_write_script` embeds for the resolved liberty (issue
-    #1870) -- ``$PDK_ROOT/<path relative to the install root>`` when
-    ``liberty_path`` resolves inside ``pdk_root``, otherwise ``liberty_path``
-    unchanged (absolute), exactly as before that issue.
-
-    ``pdk_root`` is ``None`` for every script but :func:`run_synthesize`'s own
-    top-level one (the arithmetic-candidate trial scripts, the ABC probe, and
-    the baseline re-derivation script), which keeps those ephemeral internal
-    artifacts fully absolute and directly runnable -- unchanged, and the same
-    split ``repo_root`` already makes for issue #1844's path rewriting.
-
-    Reuses :func:`~klayout_tools.env_provenance.repo_relative_path` as a
-    generic "path relative to this root, or ``external``" helper (it takes
-    the root as an argument and never consults git itself), so the
-    inside/outside test here is the *same* realpath-and-boundary test the
-    repo-relative rewriting uses -- one normalizer, not two. The fallback is
-    the pre-#1870 absolute path: losing machine-independence for a liberty
-    installed outside the resolved PDK root is strictly better than emitting
-    a token that would not rehydrate.
-    """
-    if pdk_root is None:
-        return liberty_path
-    normalized = env_provenance.repo_relative_path(liberty_path, repo_root=pdk_root)
-    if normalized["scope"] != "repo" or normalized["path"] in (None, "."):
-        return liberty_path
-    return f"{PDK_ROOT_TOKEN}/{normalized['path']}"
-
-
-def _script_input_text(
-    path: str, *, repo_root: str | None, pdk_root: str | None
-) -> str:
-    """The text :func:`_write_script` embeds for a caller-supplied input
-    whose home is not known in advance (issue #2635: a declared macro's LEF/
-    liberty/blackbox).
-
-    Composes the two existing normalizers in the order that keeps the
-    artifact commit-safe in the most cases: repo-relative first
-    (:func:`_script_path_text` -- a macro vendored into the design repo, the
-    common case for a ``klt lef-abstract`` output), then ``$PDK_ROOT``-
-    relative (:func:`_script_liberty_text` -- a PDK-shipped memory-compiler
-    macro, the case issue #2635 was filed from), then the absolute path
-    unchanged. Writing a :data:`PDK_ROOT_TOKEN` here needs no extra
-    machinery: :func:`_write_script` already emits a rehydrated runnable
-    sibling whenever the finished script text contains that token at all,
-    and :func:`rehydrate_script_text` substitutes *every* occurrence.
-    """
-    repo_text = _script_path_text(path, repo_root=repo_root)
-    if repo_text != path:
-        return repo_text
-    return _script_liberty_text(path, pdk_root=pdk_root)
-
-
 def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
     """`baseline.ref`'s default value (issue #1844) when
     `request.baseline.ref` is omitted -- previously the literal
@@ -1095,6 +984,7 @@ def run_synthesize(
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
     delay_target_ps = _resolve_delay_target_ps(constraints)
+    sta_constraints = mapped_sta_constraints(constraints)
     # Issue #2382: request shape is validated here -- before any PDK
     # resolution or run-directory creation -- so a malformed exclusion list
     # fails as cheaply as a malformed `clock_period_ns` does. The
@@ -1228,8 +1118,11 @@ def run_synthesize(
     )
 
     abc = mapping or synthesize_abc.DEFAULT_MAPPING
+    # Issue #7010: computed once here so the same answer feeds the engine
+    # options, the statistics-dump capture plan, and the executed script.
+    abc_fast = abc.fast_mode(_abc_supports_option)
     engine_options = _EngineOptions(
-        abc_fast=abc.fast_mode(_abc_supports_option),
+        abc_fast=abc_fast,
         abc_script_path=abc.stage_script(output_dir, SynthesizeError),
         abc_timeout_s=abc.timeout_s,
         liberty_path=liberty_path,
@@ -1261,6 +1154,17 @@ def run_synthesize(
             defines=defines,
         )
 
+    # Issue #7010: on engines that lose ABC's redirected stdout (the WASI
+    # builds), stage the engine's own constrained script with `stime -pd`
+    # so its statistics dump lands in the run directory and is recoverable.
+    stats_capture = plan_abc_stats_capture(
+        output_dir,
+        constrained=constr_inputs is not None,
+        user_script=engine_options.abc_script_path,
+        abc_fast=abc_fast,
+        delay_target_ps=delay_target_ps,
+    )
+
     # Publish a repo-relative, PDK-tokenized script and run its rehydrated copy.
     scripts = _write_script(
         abc_timeout_s=engine_options.abc_timeout_s,
@@ -1285,10 +1189,19 @@ def run_synthesize(
         pdk_root=pdk_info["root"],
         parameters=parameters,
         defines=defines,
+        stats_capture=stats_capture,
     )
 
     try:
-        executed_script_path, yosys_log = abc_stages.run_mapping(scripts, cwd=repo_root)
+        # Issue #7010: with the statistics-dump capture staged, Yosys runs
+        # from this run's own directory (the run sibling carries absolute
+        # paths for exactly this) so ABC's `stats.txt` cannot land anywhere
+        # shared. Without it, the pre-#7010 cwd rule stands: `repo_root`
+        # whenever relative-form paths were embedded.
+        executed_script_path, yosys_log = abc_stages.run_mapping(
+            scripts,
+            cwd=output_dir if stats_capture is not None else repo_root,
+        )
     except AbcTimeout as exc:
         _assert_inputs_unchanged(input_state)
         return exc.report(
@@ -1312,7 +1225,11 @@ def run_synthesize(
     module_stats = _read_stats(
         stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
     )
-    timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
+    timing = _read_produced_abc_timing(
+        abc_log_path,
+        delay_target_ps,
+        stats_path=stats_capture.stats_path if stats_capture is not None else None,
+    )
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
     instance_counts_by_type = dict(
@@ -1347,7 +1264,7 @@ def run_synthesize(
                 tie_cells=_TIE_CELLS,
                 constr_inputs=_ABC_CONSTR_INPUTS,
             ),
-            **_missing_timing_warning(abc_log_path, timing),
+            **_missing_timing_warning(abc_log_path, timing, stats_capture),
             **netlist_warnings(
                 _read_produced_netlist(netlist_path),
                 cell_library=cell_library,
@@ -1493,6 +1410,16 @@ def run_synthesize(
         # Additive field, no `schema_version` bump (docs/json-contract.md).
         "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
+        **constrained_timing_fields(
+            sta_constraints,
+            netlist_path=netlist_path,
+            hdl_toplevel=hdl_toplevel,
+            cell_library=cell_library,
+            corner=corner,
+            macros=macros,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+        ),
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
         # "STA not applicable to this netlist/liberty pair". `null` exactly
@@ -1673,18 +1600,37 @@ def _read_produced_netlist(path: str) -> str:
 
 
 def _read_produced_abc_timing(
-    path: str | None, delay_target_ps: int | None
+    path: str | None,
+    delay_target_ps: int | None,
+    stats_path: str | None = None,
 ) -> dict[str, Any] | None:
     if path is not None and not os.path.isfile(path):
         raise SynthesizeError(f"yosys did not produce the expected ABC log '{path}'")
-    return _read_abc_timing(path, delay_target_ps)
+    # Issue #7010: the captured log stays authoritative (full precision,
+    # per-region). Only when it yields nothing -- the WASI engines lose
+    # ABC's redirected stdout entirely -- does the run's own statistics
+    # dump get a chance, and only in its unambiguous single-record form.
+    timing = _read_abc_timing(path, delay_target_ps)
+    if timing is not None or stats_path is None:
+        return timing
+    return read_abc_stats_timing(path, stats_path, delay_target_ps)
 
 
 def _missing_timing_warning(
-    abc_log_path: str | None, timing: dict[str, Any] | None
+    abc_log_path: str | None,
+    timing: dict[str, Any] | None,
+    stats_capture: AbcStatsCapture | None = None,
 ) -> dict[str, str]:
     if abc_log_path is None or timing is not None:
         return {}
+    if stats_capture is not None:
+        return {
+            "timing_unavailable": (
+                "The current invocation's ABC log has no readable stime summary "
+                "and its statistics dump cannot attribute a delay to this run; "
+                "timing is null and any requested clock target remains unverified."
+            )
+        }
     return {
         "timing_unavailable": (
             "The current invocation's ABC log has no readable stime summary; "
@@ -2150,68 +2096,6 @@ def _resolve_liberty(
     )
 
 
-def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The validated ``constraints.clocks`` list as ``[{port, period_ns}]``
-    (issue #2883), empty when omitted/``null``.
-
-    Each entry must be an object with a non-empty string ``port`` (unique
-    across the list) and a positive numeric ``period_ns``. Unknown entry keys
-    and a non-array / empty list are errors -- a request that means to
-    constrain several clocks but expresses it wrongly must not be silently
-    downgraded, exactly as for ``clock_period_ns``.
-    """
-    if not constraints:
-        return []
-    raw = constraints.get("clocks")
-    if raw is None:
-        return []
-    if not isinstance(raw, list) or not raw:
-        raise SynthesizeError(
-            "request.constraints.clocks must be a non-empty array of "
-            "{port, period_ns} objects or null"
-        )
-    clocks: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        where = f"request.constraints.clocks[{index}]"
-        clock = _validate_clock_entry(entry, where)
-        port = clock["port"]
-        if port in seen:
-            raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
-        seen.add(port)
-        clocks.append(clock)
-    return clocks
-
-
-def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
-    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
-    (issue #2883).
-
-    Checks the entry in isolation -- object shape, no unknown keys, a
-    non-empty string ``port`` and a positive numeric ``period_ns``. The
-    list-level checks (array type, non-empty, unique ports) stay in
-    :func:`_resolve_clocks`. ``where`` prefixes every error message.
-    """
-    if not isinstance(entry, dict):
-        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
-    unknown = sorted(set(entry) - {"port", "period_ns"})
-    if unknown:
-        raise SynthesizeError(
-            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
-            "(allowed: port, period_ns)"
-        )
-    port = entry.get("port")
-    if not isinstance(port, str) or not port.strip():
-        raise SynthesizeError(f"{where}.port must be a non-empty string")
-    if not is_number(period := entry.get("period_ns")):
-        raise SynthesizeError(
-            f"{where}.period_ns must be a positive number (nanoseconds)"
-        )
-    if period <= 0:
-        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
-    return {"port": port, "period_ns": period}
-
-
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
     """The integer picosecond ABC delay target (``abc -D``) derived from
     ``constraints``, or ``None`` when the request does not supply one.
@@ -2612,6 +2496,7 @@ def _write_script(
     abc_fast: synthesize_abc.FastMode = None,
     abc_script_path: str | None = None,
     abc_timeout_s: float | None = None,
+    stats_capture: AbcStatsCapture | None = None,
 ) -> str | abc_stages.StagedMapping:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2766,106 +2651,54 @@ def _write_script(
     outside ``pdk_root``, no token is written, no sibling is emitted, and the
     return value is ``script_path`` itself: the pre-#1870 behaviour exactly.
 
+    ``stats_capture`` (issue #7010, :func:`~klayout_tools.synthesize_abc_
+    timing.plan_abc_stats_capture`'s plan) adds one exception to that
+    sibling rule: the caller executes Yosys from the run directory so
+    ABC's ``stime -d`` statistics dump lands there, so the runnable
+    sibling's paths are **absolute** wherever the commit form keeps
+    repo-relative ones (a sibling is emitted for that reason alone when no
+    token was written), and the ``abc`` line carries the staged capture
+    script via ``-script`` -- the engine's own constrained mapping
+    commands with the ``stime`` tail widened to also dump statistics.
+
     With an ABC budget, return the three staged scripts and checkpoint paths.
     Otherwise return the path of the script to execute (``script_path``, or its
     rehydrated sibling) -- never the artifact to commit, which is always
     ``script_path``.
     """
     liberty_text = _script_liberty_text(liberty_path, pdk_root=pdk_root)
-    stats_text = _script_path_text(stats_path, repo_root=repo_root)
-    netlist_text = _script_path_text(netlist_path, repo_root=repo_root)
-    constr_text = (
-        None
-        if constr_path is None
-        else _script_path_text(constr_path, repo_root=repo_root)
+    # Issue #7010: with the statistics-dump capture staged, the executed
+    # script must be runnable from the run directory (Yosys's cwd there is
+    # what makes ABC's `stats.txt` invocation-local), so the same line set
+    # is emitted twice: the commit-safe form below keeps issue #1844's
+    # repo-relative paths, and the run form carries absolute paths only.
+    render = functools.partial(
+        _write_script_lines,
+        liberty_text=liberty_text,
+        stats_path=stats_path,
+        netlist_path=netlist_path,
+        constr_path=constr_path,
+        abc_log_path=abc_log_path,
+        abc_script_path=abc_script_path,
+        stats_capture=stats_capture,
+        delay_target_ps=delay_target_ps,
+        dont_use_globs=dont_use_globs,
+        tie_cells=tie_cells,
+        adder_sources=adder_sources,
+        adder_techmap_path=adder_techmap_path,
+        latch_techmap_path=latch_techmap_path,
+        macro_inputs=macro_inputs,
+        sources=sources,
+        hdl_toplevel=hdl_toplevel,
+        parameters=parameters,
+        defines=defines,
+        abc_fast=abc_fast,
+        pdk_root=pdk_root,
     )
-    abc_log_text = (
-        None
-        if abc_log_path is None
-        else _script_path_text(abc_log_path, repo_root=repo_root)
-    )
-
-    script_text = (
-        _script_path_text(abc_script_path, repo_root=repo_root)
-        if abc_script_path
-        else None
-    )
-    abc_command = synthesize_abc.liberty_command(
-        liberty_text,
-        abc_fast,
-        script_text,
-        constrained=constr_text is not None,
-        delay_ps=delay_target_ps,
-    )
-    if constr_text is not None:
-        abc_command += f" -constr {constr_text}"
-    if delay_target_ps is not None:
-        abc_command += f" -D {delay_target_ps}"
-    for glob in dont_use_globs:
-        abc_command += f" -dont_use {glob}"
-    if constr_text is not None and abc_log_text is not None:
-        abc_command = f"tee -q -o {abc_log_text} {abc_command}"
-
-    # Issue #4205: load the request's own cell library as cell definitions
-    # first, so RTL may instantiate a library cell by name with no stub.
-    # `read_verilog` of a legacy stub for the same cell still works.
-    frontend = [f"read_liberty -lib {liberty_text}"]
-    frontend += [
-        read_verilog_line(
-            _script_path_text(path, repo_root=repo_root), defines, parameters
-        )
-        for path in sources
-    ]
-    # Issue #2635: every declared hard macro's blackbox declaration, before
-    # `hierarchy` -- see this function's own docstring for why the position
-    # and the `-lib` flag are both load-bearing.
-    for macro_input in macro_inputs:
-        reader = (
-            "read_liberty -lib"
-            if macro_input["source"] == "liberty"
-            else "read_verilog -lib"
-        )
-        macro_text = _script_input_text(
-            macro_input["path"], repo_root=repo_root, pdk_root=pdk_root
-        )
-        frontend.append(f"{reader} {macro_text}")
-    # Issue #3466: top-level parameter overrides apply between the reads and
-    # `hierarchy`, so elaboration sees the overridden value.
-    frontend += chparam_lines(parameters or {}, hdl_toplevel)
-    frontend.append(f"hierarchy -check -top {hdl_toplevel}")
-    if adder_techmap_path is not None:
-        frontend += ["proc", "opt_expr", "opt_clean"]
-        frontend += [
-            f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
-            for path in adder_sources
-        ]
-        frontend.append(
-            f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
-        )
-    tail = []
-    if latch_techmap_path is not None:
-        tail.append(
-            f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
-        )
-    tail += [
-        f"dfflibmap -liberty {liberty_text}",
-        abc_command,
-        "clean",
-    ]
-    if tie_cells is not None:
-        (hi_cell, hi_port), (lo_cell, lo_port) = tie_cells
-        # Issue #1973: resolve every `x` bit to a concrete `0` *before*
-        # `hilomap` runs, so a dangling-argument `x` constant gets mapped
-        # onto a tie cell exactly like a literal `1'b0`/`1'b1` already is --
-        # see this function's own docstring for why the ordering is
-        # load-bearing.
-        tail.append("setundef -zero")
-        tail.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
-    tail += [
-        f"tee -q -o {stats_text} "
-        f"stat -liberty {liberty_text} -json -top {hdl_toplevel}",
-        f"write_verilog -noattr {netlist_text}",
-    ]
+    frontend, tail = render(repo_root=repo_root)
+    run_frontend = run_tail = None
+    if stats_capture is not None and repo_root is not None:
+        run_frontend, run_tail = render(repo_root=None)
     return abc_stages.write_mapping(
         script_path,
         frontend,
@@ -2875,17 +2708,41 @@ def _write_script(
         abc_timeout_s,
         repo_root=repo_root,
         pdk_root=pdk_root,
+        run_frontend=run_frontend,
+        run_tail=run_tail,
     )
 
 
-def _publish_script(script_path: str, lines: list[str], pdk_root: str | None) -> str:
+def _publish_script(
+    script_path: str,
+    lines: list[str],
+    pdk_root: str | None,
+    run_lines: list[str] | None = None,
+) -> str:
     script_text = "\n".join(lines) + "\n"
-
     if pdk_root is None or PDK_ROOT_TOKEN not in script_text:
-        _write_script_text(script_path, script_text)
-        return script_path
+        # Issue #7010: without a token there is normally nothing to
+        # rehydrate, so no sibling -- unless the statistics-dump capture
+        # needs a runnable form whose paths are absolute (`run_lines`).
+        if run_lines is None:
+            _write_script_text(script_path, script_text)
+            return script_path
+        run_path = run_script_path(script_path)
+        _write_script_text(
+            script_path,
+            _COMMIT_RUNNABLE_HEADER.format(run_script=os.path.basename(run_path))
+            + script_text,
+        )
+        _write_script_text(
+            run_path,
+            _RUN_ABSOLUTE_HEADER.format(script=os.path.basename(script_path))
+            + "\n".join(run_lines)
+            + "\n",
+        )
+        return run_path
 
     run_path = run_script_path(script_path)
+    run_text = "\n".join(run_lines) + "\n" if run_lines is not None else script_text
     _write_script_text(
         script_path,
         _COMMIT_SCRIPT_HEADER.format(run_script=os.path.basename(run_path))
@@ -2894,7 +2751,7 @@ def _publish_script(script_path: str, lines: list[str], pdk_root: str | None) ->
     _write_script_text(
         run_path,
         _RUN_SCRIPT_HEADER.format(script=os.path.basename(script_path))
-        + rehydrate_script_text(script_text, pdk_root=pdk_root),
+        + rehydrate_script_text(run_text, pdk_root=pdk_root),
     )
     return run_path
 

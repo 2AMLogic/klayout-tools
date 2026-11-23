@@ -70,11 +70,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         """Matched MOS transistor array (spike section 4's family 1): a
         ``rows`` x ``cols`` grid of identical unit devices (see
         :func:`_mos_unit_layout`), with ``dummy`` extra unit-device columns
-        flanking each side and a ``topology``-selected port-numbering order
-        (see :func:`_centroid_order`). ``flavor="pfet"`` additionally
-        encloses every unit device (real and dummy) in a shared well on PDK
-        families whose curated deck checks one (see ``well_present``);
-        ``flavor="nfet"`` (the default) draws no well shape at all (#208).
+        flanking each side. The topology numbers ports via :func:`_centroid_order`.
+        PFETs enclose the real and dummy devices in a shared well when the
+        PDK supports it (``well_present``). NFETs draw no well (#208).
 
         ``finger_topology`` (#777) selects what a ``fingers > 1`` unit
         device *is*: ``"parallel"`` (the default) straps the alternating
@@ -116,6 +114,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         voltage_flavor_mark_margin_um: float
         voltage_flavor_extra_mark_layer: kdb.LayerInfo
         voltage_flavor_extra_mark_present: bool
+
+        device_well_enclosure_um: float  # Installed by KLayout as a PCell parameter.
 
         def __init__(self) -> None:
             super().__init__()
@@ -405,9 +405,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.pitch_x_um,
                 self.pitch_y_um,
                 top_endcap_um=self.top_endcap_um,
+                well_enclosure_um=self.device_well_enclosure_um,
                 tap_reach_um=_pcell_tap_reach_um(self),
-                # Not a typed attribute (PCell params are set dynamically);
-                # `getattr` keeps the type baseline from growing per param.
+                # These PCell parameters are set dynamically.
                 share_sd=getattr(self, "share_sd"),  # noqa: B009
                 mirror=getattr(self, "mirror"),  # noqa: B009
                 dogbone_terminals=getattr(self, "dogbone_terminals"),  # noqa: B009

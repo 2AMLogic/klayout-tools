@@ -377,11 +377,12 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   before this feature existed. See [`extract.md`](extract.md)'s "Distributed
   (multi-segment) RC ladder for critical nets" section.
 - `--parasitic-variant` (issue #3056) — passed through to `klt extract
-  --parasitic-variant` (`drop-r:NET|*`, `drop-c-ground:NET|*`,
-  `drop-c-coupling`; repeatable) to drop parasitic elements and attribute a
-  failing delta row. Echoed as `extraction.parasitic_variant` (present only
-  when given). See [`extract.md`](extract.md)'s `--parasitic-variant`
-  section.
+  --parasitic-variant` (`drop-r:NET|*`, `drop-r-body:NET|*`,
+  `drop-c-ground:NET|*`, `drop-c-coupling`; repeatable) to drop parasitic
+  elements and attribute a failing delta row (`drop-r-body` also serves the
+  near-floating-body ngspice transient workaround, issue #7317). Echoed as
+  `extraction.parasitic_variant` (present only when given). See
+  [`extract.md`](extract.md)'s `--parasitic-variant` section.
 - `--substrate-tie-ohms` — passed through to `klt extract
   --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
   `1e12`, substrate capacitively floating in transient; `0` = hard tie). See
@@ -827,6 +828,16 @@ extracted-side leg whose testbench did not hand-author a tie hit ngspice's
 `Warning: singular matrix:  check node x<dut>.vsubs`, and the
 gmin/source-stepping recovery that followed could return a non-reproducible
 operating point rather than failing loudly.
+
+Single-top comparison and `--extract-only` JSON reports include
+`extraction.substrate_dc_tie` when the extraction engine supplies tie metadata.
+Each `nets[]` entry identifies the substrate `net` and resistor `device`.
+The block's `reference_node` is SPICE ground (`"0"`), and `resistance_ohm`
+is the value written in each resistor card. The default 1e12 Ω shunt provides
+a DC path while allowing substrate motion during a transient. A zero-ohm
+request reports `mode: "hard"` with the 0.001 Ω floor. An explicit positive
+0.001 Ω request reports `mode: "shunt"`. An empty `nets` list records zero
+written ties. An absent block means the engine supplied no tie metadata.
 
 `klt extract --parasitics` now emits one `R<net>_dctie <net> 0 1e+12` shunt
 per synthesized substrate net **inside the extracted `.SUBCKT` body** — see
