@@ -3037,8 +3037,8 @@ def check_place_and_route_report(
 ) -> dict[str, Any]:
     """Compare committed netlist and Liberty digests to the current inputs.
 
-    Each rebuilt corner carries its own pair. This check requires no engine
-    run and the requested thread count does not enter either digest.
+    Each rebuilt corner has its own pair. This engine-free check excludes thread count.
+    See the ``--check`` / ``--rerun`` contract in ``docs/cli/place-and-route.md``.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     request = load_request(request_path, threads=threads)
