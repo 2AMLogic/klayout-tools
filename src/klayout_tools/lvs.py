@@ -844,18 +844,11 @@ def _aggregate_lvs_findings(
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
-    # Issue #2421: same append-here rationale as the disclosures above -- the
-    # deck-family findings are pre-flight determinations about the reference
-    # netlist and the deck, made before the compare ran, not
-    # `NetlistComparer` events. Unlike the disclosures they are
-    # `severity: "error"` (the reference really cannot match), but like
-    # `device.class_arity` they are diagnostic only: they never move `status`
-    # on their own -- the compare that already ran reported the mismatch they
-    # explain. The metre-scale `device.implausible_dimensions` warnings ride
-    # in the same list and are likewise collected before the compare; the
-    # comparer remains responsible for the verdict. Extended unconditionally
-    # (like `supply_findings` below, unlike the `if`-guarded warnings above):
-    # the list is empty on every run with nothing to report.
+    # Issue #2421: pre-compare determinations, appended here, not folded into
+    # `_build_mismatches`. The deck-family findings are `severity: "error"`
+    # yet diagnostic only -- they never move `status`; the compare that
+    # already ran reported the mismatch they explain. The metre-scale
+    # `device.implausible_dimensions` warnings ride along, likewise pre-compare.
     mismatches.extend(precompare_findings)
 
     if gate_level_port_alias_warnings:

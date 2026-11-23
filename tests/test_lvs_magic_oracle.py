@@ -217,35 +217,18 @@ def _errors(report: dict) -> list[dict]:
     return [entry for entry in report["mismatches"] if entry["severity"] == "error"]
 
 
-#: Which *objects* a report implicates is read two different ways, on
-#: purpose.
-#:
-#: Devices (`_implicated_device_classes`, `_reference_device_ids`) are read
-#: from the `severity: "error"` entries only. Warnings can name devices that
-#: are no part of the verdict, and they are asymmetric between the pipelines:
-#: `klt`'s inline extraction adds a `topology` warning for a device class
-#: (`pnp`) that neither pipeline instantiated, and `device.body_unverified`,
-#: neither of which the magic-fed side emits. Reading them made two agreeing
-#: pipelines look like disagreeing ones (`{"nfet", "pfet", "pnp"}` against
-#: `{"nfet", "pfet"}`), the inverse of what an all-entries read was meant to
-#: prevent.
-#:
-#: The asymmetry an all-entries read *was* meant to absorb is still covered.
-#: `klt lvs` downgrades an unmatched device/net to a warning when a richer
-#: `device.property` finding already explains it (`lvs_mismatch.py`'s
-#: degraded-pair handling), and that downgrade used to fire for only one of
-#: the two request shapes. The explaining finding is itself an error and
-#: names both the class and the reference device, so the downgraded
-#: `device.unmatched` warnings behind it add no identity the errors do not
-#: already carry. At this revision both shapes report the widened NMOS the
-#: same way (one `device.property` error, downgraded `device.unmatched`
-#: warnings); an un-downgraded `device.unmatched` would still be an error
-#: and still be read.
-#:
-#: Nets (`_implicated_nets`) are still read from every entry, because there
-#: the downgraded entries are the only carriers: in the seeded width defect
-#: every `net.unmatched` is a warning, so an errors-only read would see no
-#: nets at all on either side.
+#: Devices are read from the `severity: "error"` entries only, nets from every
+#: entry. Device warnings are no part of the verdict and are asymmetric:
+#: `klt`'s inline extraction adds a zero-instance `topology` warning (`pnp`,
+#: which neither pipeline instantiated) and `device.body_unverified`, so an
+#: all-entries read made agreeing pipelines look different ({nfet, pfet, pnp}
+#: vs {nfet, pfet}). The degraded-pair asymmetry the all-entries read once
+#: absorbed stays covered: `klt lvs` downgrades `device.unmatched` to a
+#: warning when a `device.property` error explains it, that error names the
+#: class and reference device, both shapes now report the widened NMOS that
+#: way, and an un-downgraded `device.unmatched` is still an error. Nets keep
+#: the all-entries read: every `net.unmatched` in the width defect is a
+#: downgraded warning, so an errors-only read would see none.
 
 
 def _implicated_device_classes(report: dict) -> set[str]:
