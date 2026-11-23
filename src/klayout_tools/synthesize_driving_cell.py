@@ -7,7 +7,7 @@ from .liberty_compare import LibertyCompareError, parse_liberty_text
 
 #: Per-cell-library ``abc -dont_use`` glob list: the non-logic cell classes
 #: a real flow keeps out of a mapped netlist. Same sourcing discipline as
-#: :data:`_ABC_CONSTR_INPUTS` above -- each entry is ORFS's own
+#: ``synthesize.py``'s :data:`_ABC_CONSTR_INPUTS` -- each entry is ORFS's own
 #: ``DONT_USE_CELLS`` for that platform, cross-checked against the installed
 #: liberty's actual cell list (read 2026-08-12 from
 #: ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``):
@@ -44,8 +44,9 @@ from .liberty_compare import LibertyCompareError, parse_liberty_text
 #:   the exclusion is *safe* -- it is simply not a QoR win at this stage of
 #:   the flow, and a synthesis-time default that costs a third of the area
 #:   for a congestion benefit no step of this command can observe would be a
-#:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry
-#:   above; a caller wanting ORFS's P&R-oriented exclusion can be served
+#:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry in
+#:   ``synthesize.py``'s :data:`_ABC_CONSTR_INPUTS`; a caller wanting ORFS's
+#:   P&R-oriented exclusion can be served
 #:   later by an explicit request field, measured on its own terms.
 #: - ``sg13g2_stdcell`` (issue #1784) -> the five literal cell names IHP's
 #:   own LibreLane platform config names as its

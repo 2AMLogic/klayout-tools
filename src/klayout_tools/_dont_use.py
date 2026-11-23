@@ -42,6 +42,20 @@ def cell_exclusion_fields(
     *,
     error_cls: type[Exception],
 ) -> dict[str, dict[str, list[str]]]:
+    """``{"cell_exclusions": {...}}`` -- the response block for a supplied
+    ``library.dont_use``, or ``{}`` when the request omitted the field
+    (presence-only-when-supplied, unlike ``klt synthesize``'s always-present
+    block; see ``docs/json-contract.md``).
+
+    ``validated`` carries the same disclosure ``synthesize.py``'s
+    ``cell_exclusions`` does: ``True`` when each requested pattern was
+    matched against the resolved Liberty's own cell names, ``None`` when
+    that cell list could not be established and the zero-match check was
+    skipped (:func:`liberty_cell_names` returning ``None``) -- never passing
+    off an unchecked list as a checked one. A ``null`` here cannot also
+    mean "nothing to check" as it can for synthesize: the request list is
+    validated non-empty before this runs.
+    """
     if not library or "dont_use" not in library:
         return {}
     # The orchestrator owns these tables and imports this module at startup.
@@ -70,5 +84,6 @@ def cell_exclusion_fields(
             "requested": list(requested),
             "library_defaults": list(ABC_DONT_USE_GLOBS.get(cell_library, ())),
             "effective": list(effective_patterns(cell_library, library)),
+            "validated": True if cells else None,
         }
     }
