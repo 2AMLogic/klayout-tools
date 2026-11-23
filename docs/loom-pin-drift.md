@@ -42,18 +42,16 @@ re-audited against upstream tag `v0.19.1306` (`e7af83ea2`, the version
 upstream drift were separated by diffing the pinned files against both the
 re-port base and `v0.19.1306`, porting every upstream hunk that does not touch
 the protected delta. Every file below was **re-ported** (pin kept); none was
-unpinned, because each still carries its protected delta. Upstream issues for
-the four retained deltas do not exist yet and cannot be filed from this repo
-(the `rjwalters` owner gh token is invalid; `create-issue.sh` write-scope
-refuses cross-repo filing) — the filings are tracked in #6306.
+unpinned, because each still carries its protected delta. The upstream
+reports filed for #6306 are linked with their corresponding pins below.
 
 | Pinned file | Protected delta | Upstream drift found (v0.19.1306) | Disposition |
 |---|---|---|---|
-| `scripts/pr-worktree.sh` | #2020 post-worktree hook call | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
-| `scripts/claim-staleness.sh` (+ test) | #1966 frozen-timeline guard | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
-| `.claude/commands/loom/builder-pr.md` | #1674 quoted-keyword section; #2237 `--sweep-id` call site | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
-| `.loom/roles/builder-pr.md` | same as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
-| `scripts/sweep-lease-fence.sh` (+ test) | #2237 `--sweep-id` | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
+| `scripts/pr-worktree.sh` | #2020 [post-worktree hook call](https://github.com/2AMLogic/loom/issues/15045) | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
+| `scripts/claim-staleness.sh` (+ test) | #1966 [frozen-timeline guard](https://github.com/2AMLogic/loom/issues/15044) | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
+| `.claude/commands/loom/builder-pr.md` | #1674 [quoted-keyword guidance](https://github.com/2AMLogic/loom/issues/15046) and #2237 [`--sweep-id` call](https://github.com/2AMLogic/loom/issues/15043) | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
+| `.loom/roles/builder-pr.md` | same [quoting guidance](https://github.com/2AMLogic/loom/issues/15046) and [sweep identity](https://github.com/2AMLogic/loom/issues/15043) as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
+| `scripts/sweep-lease-fence.sh` (+ test) | #2237 [`--sweep-id`](https://github.com/2AMLogic/loom/issues/15043) | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
 
 Notable findings:
 
@@ -74,8 +72,8 @@ After #6222 merged, `test-sweep-lease-fence.sh` passed 110/110 on the updated
 audit branch. This completes the #6236 fence drift check with the
 `LOOM_LEASE_HOST_ID` fix from #6108.
 
-Per-pin retirement conditions are unchanged and now also require the matching
-upstream issue from #6306 to exist and be resolved.
+Retire a pin only after upstream resolves its linked reports with equivalent
+behavior and the pin's local verification conditions pass.
 
 
 ## `commands/loom/champion-epic.md`
@@ -275,8 +273,7 @@ requires a test PATH without a real `uv` binary.
 
 Drop the pin when upstream `pr-worktree.sh` invokes an equivalent
 post-worktree hook on both the fresh and reuse paths, and the local post-hook
-suite passes against the upstream file. Upstreaming that generic hook call
-would permit retirement; it is separate work in `rjwalters/loom`.
+suite passes against the upstream file. [Upstream hook issue](https://github.com/2AMLogic/loom/issues/15045)
 
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 
