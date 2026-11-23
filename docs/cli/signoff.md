@@ -4932,6 +4932,14 @@ ignored. Additive reason, no `schema_version` bump; a digital manifest citing
 only `sim` for item 5 and declaring no margin row now grades `unmet`.
 
 Every list-form item also carries `citations_graded` (per-citation status).
+Each entry includes the cited member's `content_hash` and `input_verified`.
+The hash is the recorded input digest when available. Verification is `true`
+for a matching re-hash, `false` for a mismatch, and `null` when the input
+was not re-hashed. An unmet member retains the values from its disclosed
+evidence. Both fields are `null` when no resolved citation is available.
+For grouped item 11, these fields describe the first part named in that
+manifest group. The full compound citation carries the other parts.
+
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
 exactly as before. The `spec_rows` list form applies to items 5 and 6 (item 6:
