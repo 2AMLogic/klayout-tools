@@ -12,6 +12,28 @@ Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
 #1966: their frozen-timeline protection now lives in the pinned
 `scripts/claim-staleness.sh`. This page does not cover them.
 
+## Pin audit 2026-11-23 (#7601)
+
+Keep the four groups of pins at the recorded install, `v0.19.1306`
+(`e7af83ea2`). The configured resync checkout also predates the three merged
+fixes. To test the next version, we substituted its files into an isolated
+copy of klayout-tools at `85b21713e` on macOS. All three fixes are in
+[the upstream v0.20.25 tag](https://github.com/2AMLogic/loom/tree/5a5eae1d86f5ef068b8da000fc54f6d8d82a246d).
+
+| Pinned files | What the upstream change covers | Result and retirement condition |
+|---|---|---|
+| `sweep-lease-fence.sh` and its test | A sweep ID distinguishes concurrent sweeps on the same host. | Local suite passed 113/113 on the pin and 108/113 on the candidate. A fresh lease from another sweep on this host returns 4 (`SUPERSEDED`) upstream. The local contract expects 0 (fail open). Four diagnostic assertions also differed. Reconcile that exit contract before unpinning. [Upstream fence change](https://github.com/2AMLogic/loom/pull/15057) |
+| Both `builder-pr.md` copies (commands and roles) | The guidance covers quoted closing keywords in final and partial PR bodies, including inline and fenced examples. | The same files supply the fence call. Upstream passes `LOOM_SWEEP_ID`, while the pins use `RUN_ID` or `LOOM_SWEEP_RUN_ID` to match the publisher. Verify the published ID reaches the fence before retiring both copies. The separate quoted-reference helper passed 10/16 on both baseline and candidate, with the same six missed references. [Upstream quoting change](https://github.com/2AMLogic/loom/pull/15053) |
+| `pr-worktree.sh` | The post-worktree hook runs on successful creation and refresh for attached and detached checkouts. | Local hook suite passed 14/14 on the pin and 13/14 on the candidate. The sole failure greps for a call with an explicit path argument. Upstream reads that path inside its helper. The live `uv` invocation passed, as did all 38 local isolation checks. Recheck the behavioral hook tests when the configured install source includes this fix. [Upstream hook change](https://github.com/2AMLogic/loom/pull/15062) |
+| `claim-staleness.sh` and its test | The frozen-timeline change is still open upstream. | All 115 local staleness checks passed on the pin. Retest the frozen-timeline cases when the change lands in the install source. [Upstream report](https://github.com/2AMLogic/loom/issues/15044) and [proposed fix](https://github.com/2AMLogic/loom/pull/15049) |
+
+The upstream isolation suite passed 62/64 with its original macOS fixture.
+Git reported a path under `/private/tmp`, while the fixture requested the
+same checkout under `/tmp`. Two attached refresh checks exited early. Changing
+only the fixture's temporary-directory prefix to `/private/tmp` yielded 64/64
+with the same upstream script. The local lease-publisher control passed 83/83.
+The earlier lease-host reconciliation remains tracked separately in [#6236](https://github.com/2AMLogic/klayout-tools/issues/6236).
+
 ## Pin audit 2026-11-17 (#6236)
 
 All five pins made by the 2026-10-14 re-port (`d532f8e94`, 2am#4345) were
