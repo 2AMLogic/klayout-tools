@@ -10,6 +10,7 @@ flow").
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
     [--verify-equivalence] [--equiv-timeout-s SECONDS] \
     [--equiv-engine yosys|yosys-sequential] \
+    [--yosys-timeout-s SECONDS] \
     [--restructure-timing] [--restructure-max-iterations N] \
     [--format text|json]
 ```
@@ -33,7 +34,8 @@ flag line carries cleanly — not positional RTL file args.
 
 - `<request>` — a path to a request JSON file, e.g. `klt synthesize request.json`.
   Relative paths inside the request (`sources`) resolve against the
-  **request file's own directory**.
+  **request file's own directory**. Pass `-` to read JSON from stdin and resolve
+  relative input paths against the current working directory.
 - `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
@@ -51,6 +53,11 @@ flag line carries cleanly — not positional RTL file args.
   (register-correspondence proof, for designs with flip-flops). No effect
   unless `--verify-equivalence` is given. The `--restructure-timing` check
   stays combinational. Must be re-passed with `--check --rerun`.
+- `--yosys-timeout-s` — per-invocation Yosys wall-clock budget in seconds
+  for this run (default `300`, cap `3600`); overrides the request
+  document's `yosys_timeout_s` field, with `$KLT_YOSYS_TIMEOUT_S` between
+  them. See "Yosys budget overrides" below. Must be re-passed with
+  `--check --rerun`, like `--equiv-timeout-s`.
 - `--restructure-timing` — close (or reduce) a setup violation on the
   native `sta` critical path via a bounded cell-resizing loop, when it
   exceeds `constraints.clock_period_ns`. Requires
@@ -92,18 +99,6 @@ unchanged); an inherited `COLUMNS=80` from an interactive shell is
 overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
 inherited unchanged.
 
-### Watchdog timeouts ("did not complete within")
-
-Each `yosys -s` invocation uses `request.yosys_timeout_s` (default 300 s).
-When the watchdog kills the process group, the error names the budget,
-the script, and the sibling `.log` file containing both output streams.
-
-When the last non-empty stdout line is the ABC gate-netlist extraction
-banner, the error reports that ABC produced no output after extraction.
-Check the ABC build bundled with the `yosys` on `$PATH` and the selected
-liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
-Other timeouts suggest raising `request.yosys_timeout_s` to allow more time.
-
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
 install --user` and installed to `~/.local/bin/yosys`, shadowing a native
@@ -138,6 +133,19 @@ optional and additive: a missing extension reports `"sta": null` and changes
 nothing else about the run. The extension is not shipped with the published
 `klayout-tools` package, so an installed package always reports `"sta": null`
 (see "`sta` is `null`" below).
+
+### Watchdog timeouts ("did not complete within")
+
+Each `yosys -s` invocation uses the resolved [Yosys budget](#yosys-budget-overrides-issue-5773) (default 300 s).
+When the watchdog kills the process group, the error names the budget,
+the script, and the sibling `.log` file containing both output streams.
+
+When the last non-empty stdout line is the ABC gate-netlist extraction
+banner, the error reports that ABC produced no output after extraction.
+Check the ABC build bundled with the `yosys` on `$PATH` and the selected
+liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
+Other timeouts suggest raising `--yosys-timeout-s`, `KLT_YOSYS_TIMEOUT_S`, or
+`request.yosys_timeout_s` to allow more time.
 
 ## Generated `.ys` script
 
@@ -340,6 +348,93 @@ retained directory next to that request.
 | `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
+
+### ABC mapping effort
+
+Use the optional top-level `synthesis` object to select ABC mapping effort and a wall-clock budget.
+
+| Request | Generic mapping | Standard-cell mapping |
+| --- | --- | --- |
+| Omit `synthesis` | Yosys `synth -top` internal ABC pass | Yosys default Liberty script |
+| `{"synthesis":{"abc_fast":true}}` | `synth -noabc -top`, then generic `abc -fast` and `opt -fast` | `abc -fast -liberty` |
+| `{"synthesis":{"abc_script":"scripts/map.abc"}}` | Yosys `synth -top` internal ABC pass | `abc -liberty … -script` with the specified file |
+
+Fast mapping reduces effort on both passes. On builds without the native
+`-fast` option, klt emits the corresponding Yosys 0.67 commands explicitly.
+With Liberty timing constraints it retains the buffer, sizing and `stime -p`
+steps. A custom script applies only to standard-cell mapping so it can refer
+to the target library. Use `--verify-equivalence` to check the resulting
+gate-level netlist against the source RTL. To populate ABC timing with a
+custom script, include `stime -p` and enable the appropriate ABC constraints.
+
+`abc_fast` accepts a boolean. `abc_script` names a file relative to the
+request directory (the working directory for stdin). A leading `+` is a
+literal filename character. klt snapshots the file beside the generated
+script and records its request-relative path and SHA-256 in both
+`synthesis.abc_script` and `provenance.abc_script`. Choose at most one of `abc_fast` and `abc_script`.
+
+The report echoes `abc_fast`, `abc_script` (null without a script), and
+`reduced_passes` when the request includes `synthesis`. Fast mapping records
+`["synth_internal", "liberty"]`, a custom script records `["liberty"]`, and
+an empty object or `abc_fast: false` records `[]`. A signoff item 1 citation
+carries the same disclosure and uses the usual structural grading.
+
+If a custom script leaves generic combinational cells such as `$lut` in the
+netlist, synthesis fails and names the unmapped cell types. Signoff also checks
+these counts when grading a saved custom-mapping report. Declared hard macros
+and expected latches retain their usual grading.
+
+### Generic ABC timeout and pre-ABC checkpoint
+
+Set `synthesis.abc_timeout_s` to a finite number of seconds greater than zero
+and at most 3600. It works with any ABC effort setting. The report records the
+budget in `provenance.abc_timeout_s`. Omitting it keeps the single mapping
+invocation.
+
+With a budget, Yosys runs three scripts in order.
+
+1. `synth_<top>.pre_abc.ys` elaborates the sources and runs `synth -noabc`.
+   It saves the generic-gate design in `<top>_pre_abc.il` and
+   `<top>_pre_abc.v`, and writes `stat -json` to `<top>_pre_abc.json`.
+2. `synth_<top>.generic_abc.ys` reloads the RTLIL, runs generic ABC at the
+   selected effort, and writes `<top>_post_abc.il`. The ABC budget applies
+   to this invocation, including its checkpoint I/O.
+3. `synth_<top>.ys` reloads the result, runs `opt -fast`, maps against the
+   Liberty library, and writes the usual outputs. This stage and the first use
+   the regular Yosys timeout. Use the rehydrated `.run.ys` sibling for each
+   script that contains a PDK token.
+
+If the second invocation times out, the CLI emits an inconclusive report on
+stdout and exits 4. For example, a run with `--verify-equivalence` can
+report these fields.
+
+```json
+{
+  "status": "inconclusive",
+  "reason": "abc_timeout",
+  "partial": {
+    "stage": "pre_abc",
+    "netlist_path": {"path": ".klt/synthesize/demo/adder_pre_abc.v", "scope": "repo"},
+    "stats_path": {"path": ".klt/synthesize/demo/adder_pre_abc.json", "scope": "repo"},
+    "cell_counts": {"$_AND_": 2, "$_XOR_": 1},
+    "abc_timeout_s": 1
+  },
+  "equivalence": {"status": "not_run", "reason": "abc_timeout"}
+}
+```
+
+`partial.cell_counts` counts leaf instances by type in the generic design
+before Liberty mapping. The report omits `netlist_sha256`, `structural`,
+`area_um2`, and `timing`. It cannot satisfy signoff item 1. Equivalence
+and timing restructuring each report `not_run` when requested.
+In an automatic adder sweep, each trial has its own ABC budget. A timed-out
+trial is disqualified and the remaining candidates can still complete.
+
+Cheap `--check` returns `drifted` (exit 3). Its `netlist_sha256` check
+has `match: false` because the report has no mapped netlist hash. A full `--rerun`
+compares the outcome, reason, stage and cell counts across run directories.
+The budget and output paths are bookkeeping. Host load can let an identical
+request finish mapping on a later run, which produces genuine outcome drift.
 
 ### ABC constraints, delay target, and cell exclusions
 
@@ -1371,7 +1466,8 @@ separately if it turns out to matter for evidence-record committing.
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
 | `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Unqualified keys target `hdl_toplevel`. A module-qualified key `module.PARAM` (issue #4698) overrides a parameter of another module (e.g. `"sub.INIT_FILE": "init.hex"` for a sub-module `$readmemh(INIT_FILE)`): when any key is qualified every RTL source is read with `read_verilog -defer`, so the override lands before the sub-module is elaborated, and each target module is checked to exist (`select -assert-any`) so an unknown module fails the run with `Assertion failed: selection is empty: $abstract\<module>`. Only one qualification level is accepted (`module.PARAM`); top-only requests keep their script unchanged. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `defines` | object \| omitted | Verilog preprocessor defines, `name -> string \| null` (issue #4196): each is passed as `read_verilog -D NAME[=VALUE]` (`null` = bare `-D NAME`) on every `read_verilog` of the RTL sources, in sorted-name order, so a source that selects a variant with `` `ifdef `` can be synthesised in that variant. Keys must be Verilog identifiers; values may use only letters, digits and `_ . , : / + - = @ %` (quotes, backslashes, whitespace, `;`, `#` and control characters are rejected — values land in a generated `.ys` script). Applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side via `gold.defines`). Echoed as the response's `defines` and `provenance.defines`. Recorded separately from `provenance.input.content_hash`, so existing committed reports keep their hash. |
-| `yosys_timeout_s` | number \| omitted | Wall-clock budget, in seconds, for **each** `yosys -s` invocation of the run (main synthesis, arithmetic trials, memory evidence pass, STA flatten, baseline stats). Finite, `> 0` and `<= 3600`; a bool, string, `NaN`, `inf`, non-positive or over-cap value is a structured error naming the field and the cap. Default `300` when omitted. A run that exceeds it fails with `yosys did not complete within <N>s` (an error, exit 1, not a verdict). With `arithmetic: auto` the budget is paid **per trial** (10+ runs), so a raised value multiplies the worst-case wall time. The `help abc` capability probe keeps the default. |
+| `synthesis.abc_timeout_s` | number \| omitted | Wall-clock budget for the generic ABC stage. See [Generic ABC timeout and pre-ABC checkpoint](#generic-abc-timeout-and-pre-abc-checkpoint). |
+| `yosys_timeout_s` | number \| omitted | Wall-clock budget, in seconds, for each `yosys -s` invocation, including synthesis, trials and evidence passes. The generic ABC stage uses `synthesis.abc_timeout_s` when set. Finite, `> 0` and `<= 3600`; a bool, string, `NaN`, `inf`, non-positive or over-cap value is a structured error naming the field and the cap. Default `300` when omitted. A run that exceeds it fails with `yosys did not complete within <N>s` (an error, exit 1, not a verdict). With `arithmetic: auto` the budget is paid **per trial** (10+ runs), so a raised value multiplies the worst-case wall time. The `help abc` capability probe keeps the default. The request field is the **lowest-precedence** source: `--yosys-timeout-s` and the `KLT_YOSYS_TIMEOUT_S` environment variable override it — see "Yosys budget overrides" below. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
@@ -1402,18 +1498,70 @@ note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
 relaxed target buys area back at the cost of delay, so the value is a real
 caller decision rather than something this command should pick.
 
+### Yosys budget overrides (issue #5773)
+
+Three sources set the per-invocation Yosys wall-clock budget, resolved in
+precedence order. The budget is a property of **where the run happens** as
+much as of the design, so a caller driving `klt synthesize` from a shell
+script, a CI step, or a `--check` gate that fixes the argv can still raise
+it without authoring or editing a request document:
+
+| `--yosys-timeout-s` | `KLT_YOSYS_TIMEOUT_S` | request `yosys_timeout_s` | Effective budget |
+| ------------------- | --------------------- | ------------------------- | ---------------- |
+| no                  | unset (or empty)      | no                        | `300` (default) |
+| no                  | unset (or empty)      | yes                       | request field |
+| no                  | set                   | no                        | env var |
+| no                  | set                   | yes                       | **env var** — the variable is a property of the *host*, not of the design, so an operator on a loaded shared box with a committed (fixed) request can still raise the watchdog |
+| yes                 | any                    | any                       | **flag** — the most deliberate act wins |
+
+The override is a straight replacement, not a clamp: whichever source wins,
+its value **is** the budget, and any *provided* source that is invalid (a
+bool, a non-numeric string, `NaN`, `inf`, `0`, a negative value, or
+anything over the shared `3600` cap) is a structured application error
+naming that source and the cap — never a silently-ignored value, and
+invalid values in a *losing* source are refused too. This is deliberately
+the opposite direction from `klt sim`'s `KLT_SIM_MAX_WORKERS`, which clamps
+a request down instead of refusing: there the request is a preference and
+the cap a fact about the box; here an override that quietly degrades to the
+default would re-create exactly the flaky shared-host kill this knob
+exists to fix.
+
+```bash
+export KLT_YOSYS_TIMEOUT_S=1800   # every yosys -s on this host gets 30 min
+```
+
+Unset **or empty** (`KLT_YOSYS_TIMEOUT_S=`, what an empty entry in a shell
+env file produces) means "no override": behaviour is identical to a host
+without the variable, and the report carries no `yosys_timeout_s` field.
+
+Whichever source set the budget, the run echoes it as the response's
+`yosys_timeout_s` / `provenance.yosys_timeout_s` — an evidence-producing
+run records the budget it actually used. With no override anywhere the
+fields stay absent, so existing committed reports are unchanged.
+
+The budget reaches every entry point that runs Yosys: the CLI, a direct
+`klayout_tools.synthesize.run_synthesize(...)` library call (env var
+included — it is read from the environment per run, never cached at import
+time), and `--check --rerun`. The `help abc` capability probe keeps the
+`300` default regardless: it never raises, and a timeout there just means
+"assume the ABC capability is unsupported".
+
 ### Unknown request keys are errors (issue #3466)
 
 An unrecognised **top-level** request key is rejected with an error naming it
 (`unknown field 'paramters'`), instead of being dropped in silence — a misspelt
 or unsupported field can no longer produce a plausible default-configuration
 result. Recognised keys: `schema`, `engine`, `sources`, `hdl_toplevel`, `pdk`,
-`constraints`, `structural`, `baseline`, `arithmetic`, `latch_map`, `run_id`, `parameters`, `defines`, `yosys_timeout_s`;
+`constraints`, `structural`, `baseline`, `arithmetic`, `latch_map`, `run_id`, `parameters`, `defines`, `synthesis`, `yosys_timeout_s`;
 the `_comment` annotation is also accepted (its contents are never read). The
-same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
+same check applies to `--check` and `--rerun`. The `synthesis` object also
+rejects unknown keys. Some other nested objects (`pdk`,
 `constraints`, …) are not yet checked for unknown keys.
 
 ## Response
+
+The example and table describe a completed mapping. For the exit-4 response,
+see [Generic ABC timeout and pre-ABC checkpoint](#generic-abc-timeout-and-pre-abc-checkpoint).
 
 ```json
 {
@@ -1496,6 +1644,7 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
   "blackbox_modules": [],
   "netlist_path": { "path": ".klt/synthesize/run-example/gcd_synth.v", "scope": "repo" },
   "netlist_sha256": "<64 lowercase hex chars>",
+  "netlist_sha256_banner_normalised": "<64 lowercase hex chars>",
   "script_path": { "path": ".klt/synthesize/run-example/synth_gcd.ys", "scope": "repo" },
   "run_script_path": { "path": ".klt/synthesize/run-example/synth_gcd.run.ys", "scope": "repo" },
   "provenance": {
@@ -1519,9 +1668,9 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `hdl_toplevel` | string | Echo of the request. |
 | `parameters` | object | The top-level parameter overrides this run elaborated with (`{}` when none; issue #3466). Additive; no `schema_version` bump. Also recorded as `provenance.parameters`. |
 | `defines` | object | The preprocessor defines this run elaborated with (`{}` when none; issue #4196). Additive; no `schema_version` bump. Also recorded as `provenance.defines`. |
-| `yosys_timeout_s` | number | Present **only when the request set `yosys_timeout_s`**: the per-invocation Yosys budget this run used, in seconds. Also recorded as `provenance.yosys_timeout_s`. Absent by default, so existing committed reports are unchanged. Additive; no `schema_version` bump. |
+| `yosys_timeout_s` | number | Present **only when an override set the budget** — the `--yosys-timeout-s` flag, the `KLT_YOSYS_TIMEOUT_S` environment variable, or the request's `yosys_timeout_s` field (flag > env > request, see "Yosys budget overrides"): the per-invocation Yosys budget this run used, in seconds. Also recorded as `provenance.yosys_timeout_s`. Absent by default, so existing committed reports are unchanged. Additive; no `schema_version` bump. |
 | `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
-| `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
+| `status` | string | `"ok"` on completed mapping, including structural findings (exit 3). A generic ABC timeout with a checkpoint produces `"inconclusive"` (exit 4). |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
@@ -1543,6 +1692,7 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `blackbox_modules` | array\<string\> \| null | **Always present** (issue #2745) — sorted names of modules declared `(* blackbox *)`/`(* whitebox *)` that still have at least one instance in the final mapped design. **Their area is not included in `area_um2`** (Yosys's `stat -liberty` has no area for them) and they are never counted as memories. `[]` when there are none; `null` when the evidence invocation failed and the list could not be established. Additive field, no `schema_version` bump. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `netlist_sha256` | string | Lowercase 64-character SHA-256 of the exact bytes of the file `netlist_path` refers to, computed after signed-qualifier stripping (issue #2452). It is computed from the real file even when `netlist_path` is redacted as `external`, so two runs' outputs can be compared from their envelopes alone. It identifies output *bytes* only: it does not prove engine identity or semantic equivalence, and any byte difference (comments, ordering, a different Yosys/abc build) changes it. Additive field; `schema_version` stays 2. |
+| `netlist_sha256_banner_normalised` | string | Lowercase 64-character SHA-256 of the same final bytes as `netlist_sha256` with one leading line omitted: the file's first line, and only it, when it consists entirely of a single `/* Generated by Yosys … */` comment starting at byte zero (the banner `write_verilog` writes, which names the compiler that built the Yosys binary). The omitted line's LF or CRLF terminator goes with it; every remaining byte — blank lines, other comments, all line endings — is hashed verbatim. Yosys's banner varies with the build of Yosys itself even at a fixed version and git sha, so two hosts with differently-built binaries record different `netlist_sha256` for byte-identical netlist content while this digest agrees: compare it to tell "the design changed" from "the Yosys build changed". Without a matching first line the digest equals `netlist_sha256` (a banner appearing later in the file is ordinary content), and it is computed from the real file even when `netlist_path` is redacted as `external`. The emitted netlist keeps its banner, and `netlist_sha256` remains the exact-file integrity check — a banner-only edit still drifts it, including for reports that predate this field. Additive field (issue #7277); `schema_version` stays 2. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the pre-execution content hash of declared `sources` (a combined, order-independent hash when more than one source file is given), with `input.role: "source"` (issue #2027 — RTL source, not a layout stream or a netlist); mutation of declared inputs before return is an error. Transitive includes are not snapshotted. |
@@ -2015,7 +2165,13 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
-A fifth check, `netlist_sha256` (issue #4313), re-hashes the committed
+The `synthesis` check compares the fast flag, reduced passes and custom script
+SHA-256. A legacy report with no block uses default mapping. A malformed block
+or a change in mapping effort or script content reports `drifted`. Full
+`--rerun` compares both the original and restructured netlist proof verdicts
+and ignores the elapsed time of each proof.
+
+The `netlist_sha256` check (issue #4313), re-hashes the committed
 gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
 with the report's recorded top-level `netlist_sha256`, so a hand-edited or
 stale-after-resynthesis netlist reports `drifted` with no Yosys and no extra
@@ -2109,6 +2265,7 @@ a clean exit `1`, not a usage error.
 | `1` | Failed to run — bad request, unreadable RTL source, elaboration/hierarchy error, unresolvable `pdk.cell_library`/`corner` (no matching liberty via `find_pdk()`), a Yosys/ABC engine error — or, with `--verify-equivalence`, a non-equivalent (`"counterexample"`) or inconclusive (timeout) `klt equiv` verdict against the produced netlist — or, with `--restructure-timing`, a missing `constraints.clock_period_ns`/`sta` stage, or a non-equivalent verdict against a netlist it actually resized. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Synthesis succeeded (netlist written, `status` stays `"ok"`), but `structural.has_critical` is `true` — an inferred latch beyond `structural.expected_latches`, a combinational loop, and/or a multiply-driven net (issue #1588). Follows `klt drc`'s own convention of a nonzero exit on findings from an otherwise successful run — `status`/exit `0`/`1`/`2` are unaffected. |
+| `4` | Generic ABC exceeded `synthesis.abc_timeout_s`. The report carries the pre-ABC checkpoint and `status: "inconclusive"`. |
 
 `instance_count`/`area_um2` are still not a pass/fail gate themselves — a
 caller wanting a threshold on them composes this contract into `klt eval`'s

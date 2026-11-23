@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, sim_batch
+from .sim_errors import SimError
 
 #: ``request.batch`` fields that steer submission only (how long to wait for
 #: spot capacity, how many jobs to keep in flight) and never change what a
@@ -184,8 +185,6 @@ def mismatch_error(
             f"--resume: shard map {path} was written for a different request "
             f"({difference}); delete it or drop --resume"
         )
-    from .sim import SimError
-
     return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
 
 
@@ -260,8 +259,6 @@ def attach_batch_shards(
     sharded run does. The map must belong to this request (digest and
     fingerprint); a shard whose job is gone is reported lost, never
     resubmitted."""
-    from .sim import SimError
-
     if os.path.basename(manifest_path) != sim_batch.BATCH_SHARDS_FILENAME:
         raise SimError(
             f"--attach {manifest_path}: expected a job id or a "

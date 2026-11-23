@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt version --format json` lists the install's commands** (#7324): the
+  payload gains an additive `commands` field — one `{"name", "summary"}`
+  object per top-level verb, sorted by `name`, derived from the live parser
+  so it cannot drift from what `klt <cmd>` actually accepts. A downstream
+  toolchain pin check can now verify which subcommands an install provides
+  from the JSON contract instead of scraping `klt --help`'s argparse
+  rendering (coupled to argparse's formatting, and silently empty on
+  formatting drift — which reads as a pin violation rather than as a broken
+  probe). Verbs hidden from `klt --help` are hidden here too; nested
+  subcommands are not listed. `--format text`, `klt --version`, and
+  `schema_version` are unchanged.
+
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
   typical model when only its include tokens are unchanged. gf180mcuD's
@@ -52,8 +64,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `{"source": <envelope>, "defines": {...}}` (`[]` when absent) — an envelope
   cannot be a JSON object key, and a source outside the repo has no path to
   key on. Both response builders (cocotb and Verilog-bench) emit the new
-  shape, and a committed report now passes `klt env-provenance
-  lint-envelope` clean. Path *resolution* is unchanged — the engine still
+  shape. These three echoed inputs now pass provenance lint. Path *resolution* is unchanged — the engine still
   receives the absolute path (the `$sdf_annotate` shim, the define wrappers)
   — and `--format text` still prints the real absolute paths, via the
   `local_paths` side-channel. Consumers reading these three fields as
@@ -164,6 +175,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   An nfet MV ring gets the marker growth too, and still draws no Nwell.
   Other families resolve no ring margin; 3.3V-only gf180mcu rings and
   tap pads keep their 0.15um default.
+- **`klt deck info` reports `enforced_rule_count`, and labels a curated
+  deck's hash truthfully** (#5843, 2026-11-17): each entry gains an additive
+  `enforced_rule_count` field — how many rules the deck's curated DRC rule
+  table enforces, the same count as the `rules:` header of `klt deck rules`
+  — so a provenance row built from `deck info` alone can state deck
+  coverage, not just its `NOT ENFORCED` remainder. It is `null` (present,
+  never omitted, never `0`) for a deck with no curated rule table
+  (`asap7`), keeping "enforces nothing" distinct from "has no rule table".
+  Text output prints `enforced_rules: N` directly above the existing
+  `NOT ENFORCED` line, and for a deck whose `provides` includes
+  `curated_drc` (sky130, gf180mcu, sg13g2, sg13cmos5l) relabels the deck
+  source hash `deck content_hash (extraction + curated DRC rule table)` — the pin
+  covers the primary module and its declared rule sources, so the hash is the identical value `klt deck
+  hash` and `klt deck rules` report and `deck info` alone is sufficient for
+  a provenance citation. `asap7`'s two-artifact rendering is unchanged. The
+  JSON field name `content_hash` does not change; `schema_version` stays
+  `1`.
+
 
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
@@ -616,6 +645,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   uncaught `OverflowError` instead of the contract's `RouteError`; both now
   use the shared finite-number check. `width_um` of `inf`/`nan`, previously
   accepted, is now rejected with the same `RouteError`.
+- **gf180mcu-family streams are written at the family's required stream dbu
+  `0.001`, not the tech LEF's `DATABASE MICRONS 2000` (0.0005)** (#5721,
+  2026-11-17): gf180mcu's native DRC runset enforces an exact-equality `DBU`
+  rule (`rule_decks/geom.rb`: `extent.output('DBU', ...) if dbu != 0.001`),
+  so every `klt gen`/`klt gen-compose` stream this flow produced for the
+  family carried a whole-cell `DBU` marker under the PDK's own deck and could
+  not be handed to it without a rewrite. `klt gen` now writes at
+  `pdk_output_dbu.resolve_output_dbu`'s answer — the family's required stream
+  dbu (`0.001` for gf180mcu, the only declared entry today), falling through
+  to the tech LEF `DATABASE MICRONS` for families with no requirement
+  (byte-identical to the pre-#5721 stream for every such family), and to the
+  historical `0.001` default when neither resolves. `klt gen-compose` targets
+  the family's *declared* requirement only (`pdk_output_dbu.required_stream_dbu`,
+  no fall-through), keeping its #1514 finest-across-blocks target — and
+  therefore its streams byte-identical — for every family with no declared
+  entry (sky130/asap7/sg13g2 unchanged), even when their installs ship a
+  readable tech LEF. `pdk.resolve_pdk_dbu` is **unchanged** and remains the
+  tech-LEF truth a DEF reader must use (`klt place-and-route` keeps reading
+  DEFs at it). `gen-compose` targeting gf180mcu coarsens a finer
+  (0.0005 `place-and-route`-style) block onto `0.001` — but only after
+  measuring every polygon vertex, stored path parameter, text position/size
+  and instance/array vector in
+  the block against the target grid (`kdb.Region.grid_check`, the `ongrid`
+  primitive): an off-grid coordinate raises `GenComposeError` naming the
+  block, the layer and one offending coordinate, writing no output — never a
+  silent round. Non-integer-ratio dbu mismatches still refuse outright.
+  Drawn geometry in micrometres is unchanged for every generator at default
+  params (all sit on the 0.001 µm grid); the stream's integer grid and the
+  reported `dbu_um` change for gf180mcu only. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
+
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -831,6 +891,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt sim` gains `analysis.post_commands`** (#6080, 2026-11-17): an additive,
+  opt-in list of control commands (first token `linearize` or `fft` only) that a
+  scalar `tran` analysis emits after the analysis, `write` and `linearize`
+  lines and before the `expr` lets, so FFT-class benches read spectrum bins
+  without packing a multi-line string into `analysis.kind`. Refused (exit 1)
+  for non-`tran`, `analysis_steps[]`, `engine: "xyce"`, non-`expr`/`spice`
+  measurements, and malformed entries. A request using it needs a batch runner
+  at klt 0.9.3 or later. Requests without the field render a byte-identical deck.
 - **`klt signoff --attest 9`: a `cold_start` may be a list — several named
   cold starts over one inventoried file** (#5641, 2026-11-17): an item-9
   `testbenches[]` entry's `cold_start` now also accepts a non-empty list of
@@ -972,6 +1040,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   `could not read samples '<path>': …` like every other unreadable input, and
   `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
   library surface. No output-shape change; no `schema_version` bump.
+
+- **`klt signoff --manifest` item 6: a `reported` yield campaign now covers an
+  unratified spec row** (#5490, 2026-11-13): a `klt yield` measurement that
+  declares no `target_yield` has `status: "reported"` — it made no claim, so
+  nothing could fail — but item 6's derived-row reader credited a row only
+  from a `status: "pass"` tagged measurement. A row honestly declared
+  `ratified: false` and cited with a real campaign therefore came back in
+  `detail.uncovered_rows`, as if nobody had measured it, and the only
+  workaround was to invent a `target_yield` the campaign was known to clear.
+  A tagged, `limits`-bearing `reported` measurement of a `yield` envelope now
+  covers its row **when that row is `ratified: false`**, recorded
+  `row_sources: "derived"` like any other derived row. Deliberately scoped: a
+  ratified row is unaffected, `fail` / `insufficient_evidence` / no-`limits`
+  measurements still credit nothing, a citation the #2467 gates refuse still
+  credits nothing, and item 5 is untouched (`klt sim` never emits
+  `reported`). No item verdict changes anywhere — only the `detail` lists —
+  and such an item stays `unmet` / `partial_coverage` through
+  `unratified_rows`. No new JSON field; no `schema_version` bump. See
+  `docs/cli/signoff.md`.
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
@@ -1939,6 +2026,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   change:** existing `sim`-only digital manifests must add the row and the
   tag. Additive reason and `detail.missing_timing_margin`; no `schema_version`
   bump.
+- **gf180mcu eFuse extraction / LVS** (issue #4312). The `gf180mcu` extraction
+  deck now recognises the PDK eFuse as a two-terminal `efuse` device (link
+  `poly2 & plfuse` inside `efuse_mk`, anode `lvs_source` 100/8, cathode the rest
+  of the shape), via a new optional `ResistorDevice.anode_marker` field. A fuse
+  with no `lvs_source` is not a device and its `plfuse` is reported as
+  unclaimed, and a fuse wholly under the `dummy` marker stays ordinary
+  conductor whatever is drawn beside it. `A` is always the anode net and `B` the
+  cathode net, at any rotation or mirror. The PDK ignores the link's `R`, so the
+  deck now carries that (new optional `ResistorDevice.ignored_parameters`) and
+  `klt lvs` leaves it out of the compare by default, disclosed as a
+  `device.parameter_excluded` entry with `details.source: "deck"`; naming the
+  class in `options.compare_parameters` compares it. The PDK's own `efuse.gds`
+  matches its shipped `efuse.cdl`, and a `reference.form: "subckt-call"`
+  schematic calling `.subckt efuse in out pblow=0` resolves (read-only: `klt
+  extract --pdk` still writes the bare `R` card). `klt deck devices --class
+  efuse` lists a third `anode` terminal, so the 100/8 marker is in
+  `required_layers`. The `gf180mcu` deck content hash changes.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

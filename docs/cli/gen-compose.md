@@ -1138,6 +1138,47 @@ into the circuit.)
   colliding net) — this is a bounded, one-level retry, not a general router,
   and a genuine same-layer short with no `routing.cross_block_layer_role`
   configured is entirely unaffected, rejecting exactly as before this issue.
+- **A rejected leg now climbs the PDK's own metals stack automatically
+  (#6920, fixed).** The bounded retries above all live on the planes the
+  request named: the one-jog backbone plus its detour lanes and channel
+  tracks on `routing.layer_role`, the one configured
+  `routing.cross_block_layer_role` hop. A leg the fixed shape can never
+  route on its own plane — most visibly a same-facing port pair in a row
+  placement, whose connecting run reaches a pin from behind (#1895), or a
+  leg colliding with an earlier net's route once several nets share the row —
+  used to leave the net in `unrouted_nets[]` with nothing left to try, even
+  though every such rejection text already pointed at the escape ("route to
+  a layer_role with a metal2/via stack instead"). `route_bundle()` now
+  retries such a leg on each higher metal of the resolved PDK's own
+  `metals` stack before reporting it unroutable: each attempt is a full
+  `route_two_pin()` pass (every routability check, via-drop ladder included)
+  against that plane's own drawn-block geometry, gated by the same
+  route-vs-route check, and drawing at the plane's own deck-minimum width
+  when `routing.width_um` is narrower. Every via landing must clear unrelated
+  conductors in the placed cells across the entire ladder. Automatic climbs
+  skip GF180A's 30K top and require a top landing of at least 0.75 µm per
+  side on GF180B. The B/C/D top backbones use a minimum width of 0.44 µm.
+  The climb is off for a net that
+  named its own plane (`connectivity[].layer_role`, #1655 "explicit wins")
+  and for caller-supplied `waypoints_um` paths; a request that configured
+  `routing.cross_block_layer_role` keeps that retry first, the climb
+  continuing past it only when the configured hop also fails.
+- **A rejected leg now names the already-routed net that blocked it as
+  structured data (`blocking_net`, #6961, fixed).** The route-vs-route
+  collision wording above ("crosses already-routed net '<other>'") embedded
+  the blocker's label in prose a caller had to parse back out to decide
+  which `connectivity[]` entries to reorder. Since #6961 every rejected leg
+  whose rejection names an already-routed net — including each rejected leg
+  of a `status: "partial"` net, independently — carries that net's own label
+  as a `nets[].legs[].blocking_net` field (the exact `connectivity[].net`
+  string, carried alongside the reason from the conflict check itself), and
+  everything else is unchanged: `unrouted_nets[]` stays a list of names,
+  reasons/status/exit codes are byte-identical, a successful cross-layer
+  retry discards the earlier collision (no field on the accepted leg), and
+  geometry-based rejections that name no net omit the field. See "Two-plane
+  crossing capacity and the per-leg `blocking_net` (#6961)" below for why a
+  two-plane composition has no fixed crossing-net capacity and which two
+  entries to try reordering.
 - **A via-drop landing pad (or stub-widen box) is checked against its *own*
   block's other drawn geometry, not just against `bbox_um`/`ports[]` (#1520,
   fixed).** The two checks above only ever compare a candidate leg's own
@@ -1383,8 +1424,10 @@ largest floor — like any other
 below-deck-floor override.
 Pads round outward onto the output grid, preserving their margin against
 the rounded via cut as well as their minimum size.
-These floors affect the drawn pads; the router's spacing pre-checks retain
-their existing baseline footprint, as for the prior area and via-width floors.
+Compose uses these rounded pad footprints when checking a leg against accepted
+routes on each landing layer. Automatic climbs also check clearance to placed
+metal around every landing. On gf180mcuB Metal4 and gf180mcuC/D Metal5, the
+9K/11K top-metal spacing rule (MT.2a) requires at least 0.46 µm.
 
 ```json
 {
@@ -1841,6 +1884,73 @@ in one composition, one north-facing and one south-facing — resolve their
 own contention completely independently; a track index assigned in one
 channel has no bearing on the other.
 
+## Two-plane crossing capacity and the per-leg `blocking_net` (#6961)
+
+A request with `routing.layer_role` plus one `routing.cross_block_layer_role`
+has **two** routing planes — the primary and one eligible fallback — and it
+is tempting to read that as a capacity guarantee ("a two-plane composition
+routes N crossing nets"). There is no such number. The primary plane and one
+eligible fallback provide **no fixed crossing-net capacity**: which legs fit
+depends on the actual geometry (block footprints, channel widths, stub
+directions), on layer access (which planes each block's ports can be reached
+on, and whether a via-drop ladder exists between the two roles), on the
+resolved deck's own spacing rules (#1386 rejects a leg that merely comes
+*close* to an accepted route), and — above all — on the order in which nets
+claim tracks and lanes, because the router is an *online*, first-fit
+allocator: the first net declared claims its channel (#1467) or lane, and
+every later contending net is rejected against geometry that is already
+accepted. Reordering `connectivity[]` moves which net wins; it does not
+create capacity where the geometry has none (two nets whose channel spans
+genuinely cross are not resolvable by tracks at all — see "Channel track
+assignment" above). Global layer assignment — spreading many mutually
+crossing nets across planes up front, before any of them routes — is a
+separate, unimplemented capability tracked in
+[#1962](https://github.com/2AMLogic/klayout-tools/issues/1962).
+
+What a two-plane composition *does* give you is a per-leg report of exactly
+which accepted net held the resource a rejected leg wanted. Since #6961,
+every rejected leg whose rejection names an already-routed net carries that
+net's own label as a structured `blocking_net` field — the exact
+`connectivity[].net` string, carried alongside the reason from the conflict
+check itself, never parsed back out of the `reason` wording. To find the
+blocker for a net in `unrouted_nets[]`, look the label up in `nets[]` and
+read each rejected leg's `blocking_net` — concretely, against a report where
+`unrouted_nets` is `["NET_V2"]`:
+
+```jq
+jq '.nets[]
+     | select(.net == "NET_V2")
+     | .legs[]
+     | select(.routed == false)
+     | {reason, blocking_net}' report.json
+```
+
+```json
+{
+  "reason": "crosses already-routed net 'NET_H'",
+  "blocking_net": "NET_H"
+}
+```
+
+A rejected leg of a `status: "partial"` net reports the same field, per leg
+independently — two rejected legs of one net can name two different
+blockers. The field is omitted when there is nothing to name: every
+successful leg (including one that succeeded only after the #1680
+cross-layer retry discarded its earlier collision) and every rejection
+caused by block geometry alone (an obstacle, ring, channel-width or via-drop
+rejection names no net).
+
+**Which two entries to try reordering.** `blocking_net` names the accepted
+net; the two `connectivity[]` entries to try swapping are that net's own
+entry and the rejected net's entry — moving the rejected net's entry
+*ahead* of its blocker's lets it claim the contested track or lane first,
+flipping which net must find another path instead. That is worth one try
+when the two nets' shapes are symmetric (either order routes one of them
+cleanly); when both orders leave a net stranded, the blocked net needs a
+different resource, not a different order: its own plane
+(`connectivity[].layer_role`, #1655), a caller-supplied `waypoints_um`
+detour, or a wider channel/placement change.
+
 ## Per-net routing planes (`connectivity[].layer_role`, #1655)
 
 Everything above allocates **one** routing plane per request: `routing.
@@ -2048,35 +2158,53 @@ specific to composition," section 2). Blocks referenced by
 below — but every dbu disagreement must be an exact integer ratio, or
 composing raises `GenComposeError` (exit 1).
 
-Every block resolved against the **same PDK** agrees by construction: both
-[`klt gen`](gen.md) and [`klt place-and-route`](place-and-route.md) derive
-their output dbu from that PDK's own tech LEF `DATABASE MICRONS` declaration
-(`0.001` for sky130, `0.0005` for gf180mcu — see
-[`docs/cli/gen.md`](gen.md)'s "Output database unit (dbu)"). So a `klt gen`
-guard ring and a `klt place-and-route` macro built for the same PDK compose
-cleanly, including on a PDK whose tech LEF declares something other than
-`DATABASE MICRONS 1000` (issue #1496 — before that fix `klt gen` always wrote
-`0.001`, and such a mix was refused outright).
+Every block resolved against the **same PDK** agrees by construction:
+[`klt gen`](gen.md) writes at that PDK's required **stream** dbu (`0.001`
+for gf180mcu — its native runset rejects any other dbu — and, for families
+with no declared requirement, whatever its tech LEF `DATABASE MICRONS`
+declares, e.g. `0.001` for sky130 — see
+[`docs/cli/gen.md`](gen.md)'s "Output database unit (dbu)"), and
+[`klt place-and-route`](place-and-route.md) derives its dbu from the same
+PDK's tech LEF. A block still sitting at a finer, evenly-related grid than
+the composed target (e.g. a `place_and_route` macro at gf180mcu's
+LEF-derived `0.0005`) composes too — see "Reconciling mismatched `dbu`s"
+below; issue #1496 is what first let such a mix compose at all, and #5721
+changed *where* a gf180mcu composition lands (the family's required 0.001,
+not the finest block's 0.0005).
 
 ### Reconciling mismatched `dbu`s (issue #1514)
 
 `klt draw` has no PDK awareness by design (issue #230) and always writes
 `0.001`, regardless of `--pdk`; a GDS produced by a `klt gen` build predating
-#1512 does too. Composing either of those against a freshly generated
-gf180mcu-family `klt gen` block (`0.0005`) is not a composition mistake — it
-is the exact same design, just described at two different, evenly-related
-grid resolutions.
+#1512 does too. Composing either of those against any other block is not a
+composition mistake — it is the exact same design, just described at two
+different, evenly-related grid resolutions.
 
-The composed cell is written at the **finest** (smallest-valued) `dbu` among
-all blocks, echoed as the response's own `dbu_um`. Every coarser block's
-geometry — including any internal cell hierarchy and array pitch — is
-losslessly rescaled onto that finer grid (an exact integer magnification:
-`0.001` onto `0.0005` is `2x`, `0.001` onto `0.0002` would be `5x`, and so
-on), the same rescale mechanics
+The composed cell's own dbu is the **PDK's required stream dbu** when its
+family declares one (issue #5721: gf180mcu — `0.001`, its native runset's
+exact-equality `DBU` rule), else the **finest** (smallest-valued) `dbu` among
+all blocks (issue #1514), echoed as the response's `dbu_um`. Every block at a
+*different*, evenly-related dbu is rescaled onto that target — including any
+internal cell hierarchy and array pitch, the same rescale mechanics
 [`klt place-and-route`](place-and-route.md)'s DEF/LEF-GDS merge already uses
-for the analogous problem. Each rescaled block adds one entry to the
-response's `warnings[]` naming the block, its own original `dbu`, and the
-`dbu` it was rescaled onto.
+for the analogous problem — and each rescaled block adds one entry to the
+response's `warnings[]` naming the block, its own original `dbu`, the
+`dbu` it was rescaled onto, and the integer ratio:
+
+- **Coarser onto finer** (the #1514 direction): multiplying integer
+  coordinates by an exact integer factor is always exact (`0.001` onto
+  `0.0005` is `2x`, `0.001` onto `0.0002` would be `5x`).
+- **Finer onto coarser** (the #5721 direction, opened for exactly the
+  required-stream-dbu case): dividing coordinates is exact only when every
+  coordinate is already a multiple of the ratio, so the block is **measured
+  first** — every polygon vertex (via the same `grid_check` primitive the
+  DRC engine's `ongrid` checks use), every stored path parameter, every text
+  position and explicit size, and every instance
+  displacement/array step vector across the block's whole cell tree. A block
+  that passes is rescaled exactly; one that fails raises `GenComposeError`
+  naming the block, the offending layer (or text/instance vector) and one
+  offending coordinate, and **no output stream is written** — geometry is
+  never silently rounded.
 
 A `dbu` mismatch that is **not** an exact integer ratio still raises
 `GenComposeError` — that is a genuine composition mistake (e.g. two blocks
@@ -2197,7 +2325,7 @@ exit codes).
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
 | `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's, and (issue #1680) the general route-vs-route collision retry — any leg, same-block or inter-block, rejected for crossing a *different* net's already-accepted route is retried once with `routing.layer_role`/`routing.cross_block_layer_role` swapped before the net is failed outright. Either retry can land a leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
-| `routing.landing_pad_size_um` | number | Optional (issue #5803). The side (µm) of the square landing pad every via-drop draws on each of its `landing_layers`, replacing the fixed 0.42 µm baseline (sized from the contact-enclosure convention) — the knob that reconciles a generator's terminal pitch with the composer's pad footprint. Must be `> 0`. Each drawn `(landing layer, via layer)` pair's own deck floor — the pad layer's minimum-area side and the via side plus twice its enclosing-margin rule, the same floors #2072/#2074 grow the default pads with — is checked against the override once routing has resolved which pairs this request actually draws: an override below a pair's floor is an application error (exit 1) naming the binding rule id and threshold (a smaller pad would be a guaranteed `klt drc` violation, so it is never silently grown back). Where the floors allow it, pads draw at exactly the override, and the route-vs-route collision checks measure the same footprint the drawing inserts. Omitting it changes nothing (default pads, byte-for-byte). |
+| `routing.landing_pad_size_um` | number | Optional (issue #5803). The side (µm) of the square landing pad every via-drop draws on each of its `landing_layers`, replacing the fixed 0.42 µm baseline (sized from the contact-enclosure convention) — the knob that reconciles a generator's terminal pitch with the composer's pad footprint. Must be `> 0`. Each drawn `(landing layer, via layer)` pair's own deck floor — the pad layer's minimum-area side and the via side plus twice its enclosing-margin rule, the same floors #2072/#2074 grow the default pads with — is checked against the override once routing has resolved which pairs this request actually draws: an override below a pair's floor is an application error (exit 1) naming the binding rule and required square side. The resolved deck supplies area and enclosure rules. On gf180mcuC/D Metal5 the native 9K/11K runset also supplies MT.1 (0.44 µm width) and MT.4 (0.5625 µm² area, requiring a 0.75 µm square). Where the floors allow it, pads draw at exactly the override, and the route-vs-route collision checks measure the same footprint the drawing inserts. Omitting it changes nothing (default pads, byte-for-byte). |
 | `routing.minimal_ladder` | boolean | Optional (issue #6058), default `false`. Shrinks a multi-hop via-drop ladder's **intermediate** hop pads — the pads on metal levels the ladder merely passes through, neither the backbone's own plane nor the pin's own layer — from the fixed 0.42 µm baseline to each pair's own deck floor: the pad layer's minimum-area side, its minimum-width rule, and the via side plus twice *both* the pair's plain enclosure margin and its two-adjacent-edges enclosure margin. On sky130A that floors a met1 pad over via1 at 0.32 µm (`met1.enclosing_adjacent.via.1`: 0.15 µm cut + 2×0.085 µm) where the baseline drew 0.42 µm. The two **terminal** pads of each endpoint (its port's own layer and the leg's route layer) keep today's sizing, and a pair whose deck declares no enclosure rule keeps the baseline (no information justifies shrinking). The route-vs-route collision checks measure the same shrunk footprints drawing inserts (checks and drawn output cannot disagree), and `klt drc` on the composed output stays clean: the floors are read from the same curated deck. **Minimum compatible terminal pitch**: for two equal square pads of side *s* on a layer whose same-layer spacing rule is *d* (axis-aligned, edge to edge), the layer-local pitch is *s + d* — e.g. two 0.320 µm met1 squares against sky130A's `met1.space.1` (0.140 µm) need ≥ 0.460 µm centre-to-centre. A ladder deposits pads on *every* plane it crosses, so derive a route's real bound from the largest `pad side + spacing` on any plane the two routes share — intermediate pads at their minimal-ladder floors, terminal pads at the (unchanged) baseline or override, arrays adding `(max(rows, cols) − 1) × pitch`. Assumptions behind the quoted numbers: sky130A curated deck, single cuts (no `access.via_array`), sky130's li1→met5 metals stack. Cannot be combined with `routing.landing_pad_size_um` (they select two different pad-sizing policies; setting both is an application error, exit 1, naming both fields). `false`/omitted is byte-for-byte today's output. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
@@ -2298,15 +2426,15 @@ exit codes).
 | `cell_name` | string | Name of the top cell written into `gds_path`, containing every placed block's cell as a translated sub-cell instance plus all routed metal. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
-| `dbu_um` | number | Database unit (µm) the composed cell was written at — the **finest** dbu among all blocks' own streams (any coarser block is losslessly rescaled onto it, see "Reconciling mismatched `dbu`s" above; a non-integer-ratio mismatch is still an error), matching [`klt gen`](gen.md)'s field of the same name. Reported so this response can be nested as a `blocks[].generator_report` one level up without re-reading the stream. |
+| `dbu_um` | number | Database unit (µm) the composed cell was written at — the resolved PDK's **required stream dbu** when its family declares one (issue #5721: gf180mcu's `0.001`, its native runset's exact-equality `DBU` rule — see [`klt gen`](gen.md)'s "Output database unit (dbu)"), else the **finest** dbu among all blocks' own streams (#1514). Any block at a different, evenly-related dbu is rescaled onto it exactly (a block finer than the target is measured first and refused by name if any coordinate is off the target grid — never silently rounded; a non-integer-ratio mismatch is still an error), matching [`klt gen`](gen.md)'s field of the same name. Reported so this response can be nested as a `blocks[].generator_report` one level up without re-reading the stream. |
 | `bbox_um` | object | Compose takes the union of the placed blocks' [declared envelopes](#a-declared-bbox_um-is-trusted-not-verified-1679) without measuring the written GDS, so drawn geometry can extend beyond this box. To get the top cell's measured extent (`Cell.dbbox()`), run [`klt cells <gds_path> --top --format json`](cells.md) and read `cells[].bbox_um`, whose `{left, bottom, right, top}` fields correspond to Compose's `{x0, y0, x1, y1}`, respectively. [`klt layout-metrics`](layout-metrics.md) uses the cell report for counts and omits the bounding boxes. |
 | `ports[]` | array\<object\> | The composed cell's **own** named terminals (#1189), in the composed (post-placement) coordinate frame — one per request `pins[]` entry, in request order. Same entry shape as [`klt gen`](gen.md)'s `ports[]` (`name`, `net`, `layer`, `x_um`, `y_um`, `width_um`, `direction_deg`) plus `block`/`port` recording which sub-block port it was promoted from. `name` **and** `net` are the `pins[]` entry's own `net` string — the same name written as the port's `kdb.Text` label — so the composed cell's port name, its drawn label, and the name `klt extract` recovers all agree, and the level above addresses it as `connectivity[].pins[].port`. Always present; **empty when the request supplied no `pins[]`** (backward compatible). Only `pins[]` is promoted: auto-exposing every sub-block port would both flood the parent with internal terminals and collide names across blocks (two `mos_array` blocks both report `U0_D`). A `pins[]` port with no reported `{x_um, y_um, layer}` geometry has no composed-frame position and is skipped (the same `drc_hints.notes[]` entry the label path emits explains why); two `pins[]` entries sharing one `net` name both appear, with a note that only the first is addressable by name one level up. |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |
 | `nets[]` | array\<object\> | One entry per `connectivity[]` net: an echo of `net`/`pins`, plus `routed` (boolean — `true` only when *every* pin joined one component), `route_length_um` (summed wire length in um across the net's **drawn** legs, or `null` when zero legs were drawn — for a caller doing a first-order parasitic estimate before extraction), `status` (below), and `legs[]` (below). Present for every net including unroutable ones (with `routed: false`). Under a declare-only request (`routing` absent/`{}`, #1188), every net reports `routed: false`, `status: "unrouted"`, `route_length_um: null`, and every leg's `reason: "routing not requested"` — validated against the blocks' own ports, but never drawn. |
 | `nets[].status` | string | One of `"routed"` (every pin connected into one component), `"partial"` (at least one leg drawn, but the net is not fully connected), or `"unrouted"` (no leg was ever accepted, including every net under a declare-only request, #1188) — issue #1169. Distinguishes a partially-drawn net from a fully-undrawn one: both report `routed: false`, so a caller must read `status` (not just count `legs[].routed`) to tell them apart. |
-| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), and `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
+| `nets[].legs[]` | array\<object\> | The two-pin legs the net was routed as (#1073): `pins` (the leg's own two `{block, port}` entries), `routed`, `route_length_um`, `reason` (`null` when routed, otherwise why this leg was not drawn — `"routing not requested"` for every leg under a declare-only request, #1188, as opposed to a geometry-based rejection reason), `channel_track` (#1467, present only when `routed: true` — which channel track this leg's backbone landed on; `0` is the untracked/default fixed shape, `>0` means the router offset it to clear an already-routed net contending for the same channel; see "Channel track assignment (#1467)" above), and `blocking_net` (#6961, present only on an unrouted leg whose rejection names an already-routed net — the exact `connectivity[].net` label of the net whose accepted geometry blocked this leg, so a caller can reorder `connectivity[]` without parsing `reason`; see "Two-plane crossing capacity and the per-leg `blocking_net`" below. Omitted for every successful leg — including one that succeeded only after a cross-layer retry discarded its earlier collision — and for every geometry-based rejection that names no net; the label is carried alongside the reason from the conflict check itself, never extracted from the wording). A 2-pin net has exactly one leg; an N-pin net has N−1 when fully routed (fewer when the same `{block, port}` is listed more than once — a repeated pin is the same physical point and needs no leg of its own). **`routed: true` means this leg's metal is in the output.** Since #1169, a net that could not be *fully* connected still draws every leg the spanning-tree search accepted — only the legs reaching a stranded pin (plus any candidate rejected on the way) report `routed: false`, each with its own `reason`. For a `status: "routed"` net, legs the router tried and rejected on the way to a working spanning tree are dropped from the list entirely; for a `status: "partial"`/`"unrouted"` net, every attempted leg (drawn or not) is kept, so the caller can see the full search, not just the winning subtree. A leg the caller named via `connectivity[].legs[]` (#1529) is reported in this exact same shape — no distinct field marks a leg as caller-steered versus auto-selected — with one behavioural difference: a **rejected named leg is kept even on a `status: "routed"` net** (an auto-selected candidate's rejection is a router detail; a named leg's is the caller's own path not being drawn, and must not be silent). Check `legs[].routed`, not just `nets[].routed`, when supplying `legs[]`. |
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry); entries whose request carried `request` also carry `requested` / `achieved` (#3971, see below). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
-| `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
+| `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. To find which already-routed net blocked a listed net's rejected legs, look the label up in `nets[]` and read `legs[].blocking_net` (#6961, see the section below) — no reason-prose parsing needed. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. **A gateable signal** (#2638): the `"explicit"`-placement clearance advisory below no longer fires on the two placements that violate a declared minimum *legitimately* — an intra-array pitch a generator reported as its own `drc_hints.min_spacing_um`, and a pair the request declares via `blocks[].abuts` — so a downstream flow can assert `warnings[] == []` rather than asserting a count it has to re-baseline every time a block moves. |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A compose request involves no rule/model deck and no single input layout stream (it composes parameters plus block sub-reports, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |

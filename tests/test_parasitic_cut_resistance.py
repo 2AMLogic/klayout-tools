@@ -118,6 +118,24 @@ def test_sky130_cuts_are_not_uniform():
     assert len({c.nominal_ohm for c in get_parasitics_deck("sky130").cuts}) > 1
 
 
+def test_sky130_poly_contact_matches_published_values():
+    """The poly->li1 contact (`pc`, issue #6917): `contact pc,xpc 152000` /
+    `252000` / `52000` (milliohm per cut) in sky130A.tech's nominal / high-R
+    / low-R blocks -- the same three blocks (L5131 / L5179 / L5227) as the
+    `cuts` rows above. Every other shipped deck leaves it uncurated."""
+    pc = get_parasitics_deck("sky130").poly_contact
+    assert pc is not None
+    assert pc.nominal_ohm == pytest.approx(152000 / 1000)
+    assert pc.high_ohm == pytest.approx(252000 / 1000)
+    assert pc.low_ohm == pytest.approx(52000 / 1000)
+    assert pc.resistance(NOMINAL_CORNER) == pc.nominal_ohm
+
+
+@pytest.mark.parametrize("deck_name", ["gf180mcu", "sg13g2", "sg13cmos5l"])
+def test_other_decks_leave_the_poly_contact_uncurated(deck_name):
+    assert get_parasitics_deck(deck_name).poly_contact is None
+
+
 @pytest.mark.parametrize("deck_name", ["sg13g2", "sg13cmos5l"])
 def test_uncurated_decks_report_every_pair_as_a_gap(deck_name):
     ext = get_extraction_deck(deck_name)
@@ -211,3 +229,17 @@ def test_cut_rows_match_local_tech_file_when_available(deck_name):
                 cut.name,
                 corner,
             )
+
+
+def test_poly_contact_matches_local_tech_file_when_available():
+    path = _tech_file("sky130")
+    if path is None:
+        pytest.skip("pinned PDK tech file not installed locally")
+    blocks = _contact_blocks(path.read_text())
+    pc = get_parasitics_deck("sky130").poly_contact
+    for corner, value in (
+        (NOMINAL_CORNER, pc.nominal_ohm),
+        (HIGH_CORNER, pc.high_ohm),
+        (LOW_CORNER, pc.low_ohm),
+    ):
+        assert value == pytest.approx(blocks[corner]["pc"] / 1000)

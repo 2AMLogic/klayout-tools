@@ -377,41 +377,6 @@ def slope_band_measurement_result(
     a ``[<reason>]`` token from :data:`ERROR_CODES`."""
     from . import sim as _sim
 
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no slope_band value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "slope_band_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "slope_band_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        diagnostic = {
-            "severity": "error",
-            "code": "measurement",
-            "message": f"[{reason}] {message}",
-        }
-        return result, [diagnostic]
-    m_status, margin, grading = _sim._grade_measurement_value(spec, outcome.value)
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "slope_band": outcome.report(spec),
-    }
-    return result, grading
+    return _sim._vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="slope_band", report_with_spec=True
+    )

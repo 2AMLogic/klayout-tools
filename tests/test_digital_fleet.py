@@ -244,7 +244,7 @@ def test_build_digital_job_description_basic_shape(tmp_path):
             "check": "place-and-route",
             "name": "place-and-route",
             "args": {"request": "place_and_route_request.json"},
-            "threshold": {"metric": "stage_reached", "equals": "route"},
+            "threshold": {"metric": "status", "equals": "ok"},
         },
     ]
     assert descriptor["objective"] == {
