@@ -12,16 +12,10 @@ therefore report ``route_drc_violation_count: 0`` while
 the very geometry the router inserted -- the disagreement issue #4495 asks
 this stage to surface.
 
-:func:`~klayout_tools.place_and_route_via_pad.trim_via_pads` (the sibling
-repair pass) can only act where acting is provably safe: it drops a landing
-pad fully covered by routed wire, or shrinks a protruding one back to its own
-via cut plus the deck's enclosure. Neither applies to a pad that is *already*
-minimal -- exactly the shipped ``VIA_VIA12``/``VIA_VIA23``/``VIA_VIA34``
-geometry, whose pads are drawn at cut + enclosure already. Those pads still
-break the deck's tip rules against *neighbouring* metal, and nothing this
-stage may safely change would fix it. So this pass measures and reports
-instead of repairing: it never writes geometry, so the merged GDS is
-byte-identical whether it runs or not, on every PDK including ASAP7.
+The sibling landing repair can remove redundant pads, shrink protrusions, and
+lengthen a pair of placed M1 landings when their complete facing sides cause
+M1.S.4. This checker measures the resulting geometry, including residual
+wire tips and unsafe landing pairs. It only reads geometry.
 
 What it measures
 ----------------

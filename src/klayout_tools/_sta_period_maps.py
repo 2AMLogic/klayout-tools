@@ -4,8 +4,7 @@ A ``constraints.clocks[].period_ns`` (or the single-clock shorthand's
 period) may be a ``{corner: period}`` map instead of a scalar, valid only
 with ``pdk.corners`` and with keys equal to those corner names exactly.
 Split out of ``post_route_sta.py`` to respect the per-file size ratchet.
-Errors are ``post_route_sta.PostRouteStaError`` (imported lazily: that
-module imports this one).
+Validation raises the shared ``PostRouteStaError``.
 """
 
 from __future__ import annotations
@@ -13,19 +12,14 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_number
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
+from .post_route_sta_errors import PostRouteStaError
 
 
 def _period_number(value: Any, where: str) -> float:
     if not is_number(value):
-        raise _error(f"{where} must be a positive number")
+        raise PostRouteStaError(f"{where} must be a positive number")
     if value <= 0:
-        raise _error(f"{where} must be greater than zero")
+        raise PostRouteStaError(f"{where} must be greater than zero")
     return float(value)
 
 
@@ -38,7 +32,9 @@ def validate_period(
     if not isinstance(period, dict):
         return _period_number(period, f"{where}.{field}")
     if not period:
-        raise _error(f"{where}.{field} corner map must name at least one corner")
+        raise PostRouteStaError(
+            f"{where}.{field} corner map must name at least one corner"
+        )
     return {
         corner: _period_number(value, f"{where}.{field}['{corner}']")
         for corner, value in period.items()
@@ -68,7 +64,7 @@ def check_period_maps(
     for port, mapping in maps:
         where = f"request.constraints.clocks (clock '{port}').period_ns"
         if requested_corners is None:
-            raise _error(
+            raise PostRouteStaError(
                 f"{where} is a per-corner map, which requires request.pdk.corners"
             )
         missing = [c for c in requested_corners if c not in mapping]
@@ -79,7 +75,7 @@ def check_period_maps(
                 detail.append("missing corner(s): " + ", ".join(missing))
             if extra:
                 detail.append("unknown corner(s): " + ", ".join(extra))
-            raise _error(
+            raise PostRouteStaError(
                 f"{where} keys must equal request.pdk.corners exactly "
                 f"({'; '.join(detail)})"
             )

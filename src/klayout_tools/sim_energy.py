@@ -63,6 +63,7 @@ from typing import Any
 
 from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
 _ALLOWED_KEYS = frozenset({"source", "voltage", "from", "to"})
@@ -306,8 +307,6 @@ def extract_corner_energy(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EnergyOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["energy"]
     name = spec["name"]
     if not os.path.isfile(raw_path):

@@ -32,6 +32,7 @@ from .sim_batch_contract import (
     JOB_CEILING_BASIS_CALLER,
     JOB_CEILING_CHECK_MODES,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim_batch import BatchConfig
@@ -44,8 +45,6 @@ def resolve_job_timeout_s(batch_spec: dict[str, Any]) -> float | None:
     :class:`~klayout_tools.sim.SimError` before any S3 write, the same
     early-refusal discipline as the other ``batch.*`` resolvers. ``None``
     (the key absent or ``null``) keeps the serial upper bound."""
-    from .sim import SimError
-
     value = batch_spec.get("job_timeout_s")
     if value is None:
         return None
@@ -101,8 +100,6 @@ def assess_caller_job_timeout(
     ceiling = config.max_job_seconds
     bound_value = config.job_timeout_s
     if bound_value is None:
-        from .sim import SimError
-
         raise SimError(
             "request.batch.job_timeout_s must be set to assess the "
             f"caller-stated job ceiling (got {bound_value!r})"
@@ -142,8 +139,6 @@ def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
 
     Moved verbatim from :mod:`klayout_tools.sim_batch` (issue #5544) so its
     size ratchet stays green; re-imported there under the same name."""
-    from .sim import SimError
-
     value = batch_spec.get("job_ceiling_check", "warn")
     if value not in JOB_CEILING_CHECK_MODES:
         raise SimError(
@@ -165,8 +160,6 @@ def _resolve_max_units_per_job(
 
     Moved verbatim from :mod:`klayout_tools.sim_batch` (issue #5544) so its
     size ratchet stays green; re-imported there under the same name."""
-    from .sim import SimError
-
     value = batch_spec.get("max_units_per_job")
     if value is None:
         return None

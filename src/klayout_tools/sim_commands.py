@@ -49,6 +49,7 @@ from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, sim_batch
 from ._jsonnum import is_number
+from .sim_errors import SimError
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -95,8 +96,6 @@ NOT_CHECKED = (
 
 
 def _error(message: str, code: str | None = None):
-    from .sim import SimError
-
     return SimError(message, code=code) if code else SimError(message)
 
 
@@ -726,8 +725,6 @@ def build_job_spec(
     job itself has no ``report.json`` and always exits 0 -- a failed unit is a
     reported outcome, not a failed job.
     """
-    from .sim import SimError
-
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
     command = _batch_common.build_job_command(
         tree_member=TREE_FILENAME,
