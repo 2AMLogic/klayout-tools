@@ -478,7 +478,7 @@ def macros_response(
     return [
         {
             "cell": macro["cell"],
-            "lef": None if macro["lef"] is None else encode(macro["lef"]),
+            "lef": encode(macro["lef"]),
             "lib": (
                 None
                 if macro["lib"] is None

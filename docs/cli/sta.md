@@ -329,8 +329,9 @@ bump. Reports without the field still verify, and `--check` treats
 
 ## Hard macros (`request.macros`)
 
-`lef` stays required here: the LEF-less (blackbox-only) macro declaration is
-`klt synthesize`-only (issue #5612), and a LEF-less entry is a request error.
+An ordinary macro requires `lef`. The synthesis-only `verilog_blackbox`
+shortcut (issue #5612) does not supply STA with a physical abstract.
+STA separately accepts an explicit `blackbox: true` declaration for a named cell.
 
 Issue #2635 adds an optional `macros` array — the same shared shape `klt
 synthesize` and `klt place-and-route` accept, documented once in
