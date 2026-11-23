@@ -305,11 +305,13 @@ def test_verdict_helper_falls_back_to_the_generic_messages():
     [
         (kdb.Box(400, 100, 600, 200), True),
         (kdb.Box(401, 100, 600, 200), False),
-        (kdb.Box(400, 400, 600, 600), False),
+        (kdb.Box(400, 400, 600, 600), True),
     ],
-    ids=["shared-edge", "one-dbu-gap", "point-only"],
+    ids=["shared-edge", "one-dbu-gap", "corner-only"],
 )
-def test_intermediate_pad_conflicts_on_a_shared_edge(other_box, conflicts):
+def test_intermediate_pad_conflicts_on_conductive_contact(other_box, conflicts):
+    # #7024/#7221: a shared edge and a corner-only touch both conduct; the
+    # full verdict matrix lives in test_gen_compose_shared_edge.py.
     reason = pads._leg_conflict_message(
         "sky130A",
         [],
