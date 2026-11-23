@@ -306,49 +306,11 @@ def _transfer_measurement_result(
     :func:`_margin_measurement_result`."""
     from . import sim as _sim
 
-    name = spec["name"]
-    unit = spec.get("unit")
     if outcome is not None and outcome.margins is not None:
         return _margin_measurement_result(spec, outcome)
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no transfer value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "transfer_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "transfer_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _sim._grade_measurement_value(
-        spec, outcome.value
+    return _sim._vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="transfer", report_with_spec=True
     )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "transfer": outcome.report(spec),
-    }
-    return result, grading_diagnostics
 
 
 def _search_measurement_result(

@@ -3511,7 +3511,9 @@ existing request returns changes.
 | `corner_runs[].corner` / `.output_dir` | string | The unit's corner and absolute output directory. |
 | `corner_runs[].status` | `"ok"` \| `"failed"` | |
 | `corner_runs[].input_content_hash` / `.deck_content_hash` | string | `sha256:` digests of the netlist and that corner's liberty deck — the per-unit provenance. Present on failed units too. |
-| `corner_runs[].error` | string | Failed units only. |
+| `corner_runs[].error` | string | The failure message for this unit. |
+| `corner_runs[].error_code` / `.job_id` | string | Present on a failed unit when the error supplies a code or job ID, respectively. |
+| `corner_runs[].congestion` | object | A failed local route includes its global-route table, ranked overflow regions, and raw report path under `global_route`. The fields match those on a successful route. `null_reasons` explains missing evidence. |
 | *(other fields)* | | An `ok` unit carries every field of the single-run report (see "Response") flattened into its entry. |
 
 One failing unit does not stop the others. The command exits `1` when
