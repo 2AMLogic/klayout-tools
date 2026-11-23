@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import remote_fleet, remote_transport, sim_derive, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim import CornerPoint, RemoteLauncher, _Checkpoint
@@ -108,8 +109,6 @@ def _shard_corner_points(
     trailing shards are simply empty lists; :func:`_run_sharded` never calls
     the shard runner for an empty shard.
     """
-    from .sim import SimError
-
     if hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
     total = len(corner_points)
@@ -503,7 +502,7 @@ def _run_remote(
     *this* process's own host, which is not a representative sample of the
     provisioned remote box's hardware.
     """
-    from .sim import RemoteLauncher, SimError
+    from .sim import RemoteLauncher
 
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, checkpoint, probe_abort  # not yet honored
@@ -855,7 +854,7 @@ def _run_remote_fleet(
     nothing) -- an idle fleet member is still billed, so there is no benign
     reading of "more hosts than units" here.
     """
-    from .sim import SimError, _shard_corner_points
+    from .sim import _shard_corner_points
 
     if hosts > len(corner_points):
         raise SimError(

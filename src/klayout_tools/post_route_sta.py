@@ -269,6 +269,7 @@ from ._openroad_engine import (
     container_runtime_hint,
     write_sdf_line,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
@@ -1372,7 +1373,7 @@ def _run_corner_session(
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
             raise PostRouteStaError(
-                _engine_error_message(completed, verilog_mode=not has_def)
+                _engine_error_message(completed, pdk_info, verilog_mode=not has_def)
             )
 
         metrics = _read_metrics(metrics_path)
@@ -3946,23 +3947,17 @@ def _spef_name_map(text: str) -> dict[str, str]:
 
 
 def _engine_error_message(
-    completed: _OpenRoadResult, *, verilog_mode: bool = False
+    completed: _OpenRoadResult,
+    pdk_info: dict[str, Any] | None = None,
+    *,
+    verilog_mode: bool = False,
 ) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
-    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
-    over a bare ``Error:`` trailer line, mirroring
-    ``place_and_route.py``'s own ``_engine_error_message`` (minus that
-    function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
-    here -- this verb never runs TritonRoute).
-
-    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
-    appended as a further ``--`` clause when the captured output shows the
-    engine never really ran at all because its container runtime was
-    unreachable (issue #2632) -- the same append-a-recognized-hint structure
-    ``place_and_route.py`` already uses for ``_mount_namespace_hint`` (issue
-    #1868). A failure carrying neither signature keeps exactly its previous
-    message."""
+    Prefer a bracketed OpenROAD error over a bare Tcl error, as place-and-route
+    does. Append a container runtime or mount hint when the output supports it.
+    The mount hint uses the resolved PDK root when the unreadable path is a
+    PDK asset. The raw diagnostic remains available in either case."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -3985,6 +3980,9 @@ def _engine_error_message(
     hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    mount_hint = mount_namespace_hint(completed, pdk_info)
+    if mount_hint is not None:
+        message = f"{message} -- {mount_hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry
