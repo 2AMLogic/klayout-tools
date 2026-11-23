@@ -213,6 +213,24 @@ from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from .env_provenance import find_repo_root, repo_relative_path
+from .functional_verification_base import (  # noqa: F401 - public re-exports
+    DEFAULT_SDF_CORNER,
+    DEFAULT_SDF_ENTRIES,
+    SDF_ALIAS_PORT_DROPPED_CLASS,
+    SDF_ANNOTATE_MODULE,
+    SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS,
+    SDF_CORNERS,
+    SDF_DIAGNOSTIC_LINE_RE,
+    SDF_DIAGNOSTIC_MARKERS,
+    SDF_ENGINES,
+    SDF_ENTRIES_MODES,
+    SDF_MIN_ICARUS_MAJOR,
+    SDF_OMITTED_ANNOTATION_MARKER,
+    SDF_SPLICED_LOG_HEADER_RE,
+    SDF_WRAPPER_DUT_INSTANCE,
+    SDF_WRAPPER_MODULE,
+    FunctionalVerificationError,
+)
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
     has_from_synthesize,
@@ -275,8 +293,10 @@ from .functional_verification_sdf_steps import (
     _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _bus_input_port_names,
     _sdf_refusal_attribution,
     _sdf_refusal_error,
+    _write_sdf_drop_step,
 )
 from .functional_verification_tools import (
     _ENGINE_VERSION_COMMANDS,
@@ -287,7 +307,7 @@ from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -303,28 +323,6 @@ COVERAGE_BUILD_ARGS = ("--coverage", "--trace")
 #: ``[unit, precision]``, passed to *both* build and test (see gotcha 3).
 DEFAULT_TIMESCALE = ("1ns", "1ps")
 
-#: Only Icarus has an SDF back-annotation path through this flow: Verilator
-#: has no ``$sdf_annotate`` at all (spike §4.1). ``options.sdf`` on any other
-#: engine is a request error, mirroring ``options.coverage`` + ``icarus``.
-SDF_ENGINES = ("icarus",)
-
-#: The extra elaboration root that carries the ``$sdf_annotate`` call. A
-#: cocotb regression's ``hdl_toplevel`` *is* the DUT (driven from Python),
-#: so there is no Verilog testbench module to host an ``initial`` block --
-#: elaborating a second, otherwise-empty root alongside the DUT supplies one
-#: without touching the netlist, the testbench, or the DUT's own hierarchy.
-#: cocotb's own Icarus runner already uses this exact shape for its
-#: ``cocotb_iverilog_dump`` waveform module.
-SDF_ANNOTATE_MODULE = "klt_sdf_annotate"
-
-#: The generated transparent pass-through wrapper module (issue #1056's
-#: fix -- see :func:`_write_sdf_dut_wrapper`), and the name it instantiates
-#: the real DUT under. Both are elaborated in place of ``hdl_toplevel``
-#: *only* for an ``options.sdf`` build; every other build path (baseline
-#: gate-level, RTL, coverage) still passes the real ``hdl_toplevel`` straight
-#: through, unaffected.
-SDF_WRAPPER_MODULE = "klt_sdf_dut_wrapper"
-SDF_WRAPPER_DUT_INSTANCE = "klt_sdf_dut"
 
 #: ``iverilog`` flags an SDF-annotated build requires, all three verified
 #: live (spike §3.1/§3.2/§2.1): without ``-gspecify`` Icarus omits every
@@ -335,90 +333,6 @@ SDF_WRAPPER_DUT_INSTANCE = "klt_sdf_dut"
 #: elaboration root rather than dead code.
 SDF_BUILD_ARGS = ("-gspecify", "-ginterconnect", "-s", SDF_ANNOTATE_MODULE)
 
-#: ``options.sdf.corner`` values, mapping 1:1 onto ``iverilog -T``. Corner
-#: selection is a *compile-time* flag for Icarus, not an ``$sdf_annotate``
-#: argument: Icarus ignores every argument past the second ("$sdf_annotate
-#: currently only uses the first two argument", its own wording), so a
-#: request that named a corner there would be silently ignored (spike §3.5).
-SDF_CORNERS = ("min", "typ", "max")
-
-#: Icarus's own default when ``-T`` is not passed; named explicitly so the
-#: response's echo is never ambiguous about which corner was simulated.
-DEFAULT_SDF_CORNER = "typ"
-
-#: ``options.sdf.entries`` values (issue #2364). ``"all"`` (the default, and
-#: the only behavior before this field existed) annotates every delay entry
-#: the SDF carries -- ``IOPATH`` module-path delays and ``INTERCONNECT`` net
-#: delays alike. ``"interconnect"`` drops every non-``INTERCONNECT`` delay
-#: entry from the SDF text before annotation, counted as its own
-#: :data:`SDF_IOPATH_DROPPED_CLASS` ``environment.sdf.dropped`` class: the
-#: net-delay back-annotation configuration #2364's isolation table validated
-#: on a timing-clean sky130A design (positive setup/hold slack, TNS 0), where
-#: ``INTERCONNECT``-only annotation simulates correctly while any SDF
-#: carrying ``IOPATH`` entries kills the design even at a 10x-relaxed clock
-#: period -- an annotation-mechanism kill, not a timing outcome.
-SDF_ENTRIES_MODES = ("all", "interconnect")
-
-#: See :data:`SDF_ENTRIES_MODES`; the explicit default keeps the response's
-#: echo unambiguous about which entry population was annotated.
-DEFAULT_SDF_ENTRIES = "all"
-
-#: Every SDF problem Icarus hits -- an unopenable file, an instance it cannot
-#: find, an ``IOPATH`` the cell's ``specify`` block does not declare, an
-#: ``INTERCONNECT`` without ``-ginterconnect`` -- is reported with one of
-#: these prefixes and then **survived**: the annotation is dropped, `vvp`
-#: exits ``0``, and cocotb duly reports the zero-delay verdict as a pass.
-#: Scanning for them is the only thing standing between "re-verified with
-#: real post-route delays" and "re-ran at zero delay and nobody noticed"
-#: (spike §3.3, where a 50-flop netlist annotated 0 flops and still reported
-#: the expected verdicts).
-SDF_DIAGNOSTIC_MARKERS = ("SDF WARNING", "SDF ERROR")
-
-#: ...with two deliberate exemptions, both of which fire on *correct* input:
-#:
-#: - ``TIMINGCHECK not supported`` -- Icarus implements SDF delays but not
-#:   SDF timing checks (spike §3.4), and a real ``write_sdf`` emits
-#:   ``TIMINGCHECK`` sections alongside ``IOPATH``/``INTERCONNECT``. Failing
-#:   on this would reject every real post-route SDF; the delays it *does*
-#:   apply are unaffected. The consequence worth knowing (no setup/hold
-#:   violation reporting on this path -- that is OpenSTA's job) is documented
-#:   in ``docs/cli/functional-verification.md``.
-#: - ``NEGATIVE_CONSTRAINT``/``PATHPULSE`` &c. are **not** exempted: only the
-#:   timing-check family is, because only it is both benign and unavoidable.
-SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
-
-#: The shape Icarus gives *every* SDF diagnostic it emits: the marker, then
-#: a ``<file>:<line-number>:`` locator, then the message -- true of all four
-#: failure modes the spike captured live (§3.3) and of the ``$sdf_annotate``
-#: argument warning (§3.6). A marker-bearing transcript line that does *not*
-#: have this shape is not a diagnostic Icarus wrote; it is a corrupted one
-#: (issue #1136 -- see :func:`_scan_sdf_diagnostics`), so the classification
-#: below is applied only to lines that match.
-SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
-
-#: cocotb's log-line header (``<sim-time><unit> <LEVEL> <logger>``), e.g.
-#: ``590.00ns INFO     cocotb.klt_sdf_dut_wrapper``. A marker-bearing line that
-#: *contains* one is a stdout splice even when it still matches
-#: :data:`SDF_DIAGNOSTIC_LINE_RE` (issue #2996, extending #1136's rule past
-#: the locator): the cut landed inside the message, or inside the path with
-#: the spliced-in line's own ``<file>:<line>:`` satisfying the locator. Keying
-#: on the interleaved writer's signature rather than on a second locator
-#: makes the result independent of path length and of which log line lands.
-SDF_SPLICED_LOG_HEADER_RE = re.compile(
-    r"\s\d+(?:\.\d+)?\s?(?:fs|ps|ns|us|ms|s)\s+"
-    r"(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\S+"
-)
-
-#: The ``environment.sdf.dropped`` class counting the zero-delay
-#: ``INTERCONNECT`` entries removed before annotation because their
-#: destination is a top-level port bit the netlist drives through an
-#: ``assign`` alias -- issue #2285's counted exemption, the second member of
-#: this shape after #1102's ``timingcheck``. Unlike ``timingcheck`` this
-#: class is *not* derived from a diagnostic substring: the entries are
-#: dropped from the SDF text up front
-#: (:func:`_drop_sdf_zero_delay_alias_port_interconnects`), so Icarus never
-#: emits a diagnostic for them at all.
-SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 
 #: The ``environment.sdf.dropped`` class counting the zero-delay
 #: ``INTERCONNECT`` entries removed before annotation because they run from
@@ -575,26 +489,6 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
     **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
-#: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
-#: line on this path (spike §3.1): with ``-gspecify`` missing, Icarus drops
-#: the annotation call as an ordinary compile-time ``warning:`` among
-#: hundreds of others and the run is otherwise indistinguishable from a
-#: successful annotation. This module always passes ``-gspecify``, so it must
-#: never appear -- and if it ever does (a cocotb backend that reorders or
-#: drops build args, say), that is a silent zero-delay run, caught here.
-SDF_OMITTED_ANNOTATION_MARKER = "Omitting $sdf_annotate"
-
-#: Minimum Icarus *major* version that has ``-ginterconnect`` at all (issue
-#: #1004's live finding on Icarus 12.0, folded in here rather than deferred).
-#: The spike's GO verdict was captured on Icarus 13.0 -- this repo's own
-#: pinned build -- and on 12.0 (Ubuntu noble's distro package) ``iverilog``
-#: rejects the flag outright: ``Unknown/Unsupported Language generation
-#: interconnect``, exit 255. Since ``-ginterconnect`` is *mandatory* for a
-#: post-route SDF (every ``INTERCONNECT`` entry fails without it), an older
-#: Icarus cannot serve this request at all; probing the resolved version and
-#: saying so is strictly better than letting a raw compiler error surface
-#: from four layers down.
-SDF_MIN_ICARUS_MAJOR = 13
 
 #: The exact transcript signature cocotb's ``libembed`` emits when its
 #: compiled VPI module was ``dlopen``'d by a different CPython than the one
@@ -636,32 +530,6 @@ _MUTATION_KILL_GRACE_S = 5.0
 _COVERAGE_SUMMARY_RE = re.compile(
     r"^\s*(line|toggle|branch|expr)\s*:\s*([0-9.]+)%", re.MULTILINE
 )
-
-
-class FunctionalVerificationError(Exception):
-    """Raised when a regression cannot be *trusted to have run*: a missing/
-    malformed request, an unresolvable RTL source or testbench module, an
-    unsupported engine, ``options.coverage`` requested on an engine that has
-    no coverage path, a missing cocotb/simulator install, a build or
-    elaboration error, a simulator crash, or a run that produced no
-    ``results.xml``.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback. A run that *did* complete and reported failing tests is not
-    an error -- it is ``status: "fail"`` + exit code 3 (see this module's
-    docstring and ``docs/cli/functional-verification.md``).
-
-    ``code`` is an optional stable machine-readable classification the CLI
-    passes through as ``error.code`` (``None`` for every error without one).
-    """
-
-    code: str | None = None
-    details: dict[str, Any] | None = None
-
-    def __init__(self, message: str = "", *, code: str | None = None) -> None:
-        super().__init__(message)
-        if code is not None:
-            self.code = code
 
 
 _rpath = RequestPaths(FunctionalVerificationError)
@@ -1840,7 +1708,7 @@ def _find_coverage_dat(test_dir: str, build_dir: str) -> str | None:
 
 
 def collect_coverage(
-    *, test_dir: str, build_dir: str, info_path: str
+    *, test_dir: str, build_dir: str, info_path: str, repo_root: str | None = None
 ) -> dict[str, Any]:
     """Post-process Verilator's ``coverage.dat`` into the contract's
     ``coverage`` block (spike section 5).
@@ -1897,7 +1765,7 @@ def collect_coverage(
         "toggle_pct": percentages.get("toggle"),
         "branch_pct": percentages.get("branch"),
         "expr_pct": percentages.get("expr"),
-        "info_path": info_path,
+        "info_path": _hashed_path_envelope(info_path, repo_root=repo_root),
     }
 
 
@@ -1953,17 +1821,8 @@ def _find_trace_artifact(
 def _resolve_trace(
     *, hdl_toplevel: str, build_dir: str, test_dir: str
 ) -> dict[str, Any]:
-    """Build the response's ``trace`` block -- ``{"path", "format",
-    "size_bytes"}``, the identical shape ``klt wave build``'s own ``trace``
-    field already uses (``docs/schemas/wave-build-response.schema.json``),
-    so the object this verb hands back can be dropped straight into a
-    ``klt wave build`` request's own ``trace`` field unchanged.
-
-    Raises :class:`FunctionalVerificationError` when ``options.trace`` was
-    requested but the run produced no waveform file -- a requested-and-
-    missing trace would otherwise be indistinguishable from "not requested"
-    (``null``), the same posture :func:`collect_coverage` already takes for
-    a requested-and-missing ``coverage.dat``.
+    """Report waveform path, format and byte count. A wave-build request
+    takes the path and format. A requested but missing waveform is an error.
     """
     found = _find_trace_artifact(
         hdl_toplevel=hdl_toplevel, build_dir=build_dir, test_dir=test_dir
@@ -2007,15 +1866,14 @@ def _apply_sdf_interconnect_only_drop(
     """
     if entries != "interconnect":
         return annotate_source_path
-    iopath_drop = _drop_sdf_non_interconnect_entries(annotate_source_path)
-    if iopath_drop is None:
-        return annotate_source_path
-    iopath_text, iopath_dropped_count = iopath_drop
-    new_path = os.path.join(output_dir, "klt_sdf_interconnect_only.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(iopath_text)
-    sdf_pre_dropped_counts[SDF_IOPATH_DROPPED_CLASS] = iopath_dropped_count
-    return new_path
+    return _write_sdf_drop_step(
+        _drop_sdf_non_interconnect_entries(annotate_source_path),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_interconnect_only.sdf",
+        SDF_IOPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+    )
 
 
 def _apply_sdf_unsupported_edge_modpath_drop(
@@ -2040,18 +1898,15 @@ def _apply_sdf_unsupported_edge_modpath_drop(
     two dicts in place, for the same cyclomatic-complexity reason
     :func:`_apply_sdf_physical_only_drop`'s own docstring records.
     """
-    edge_drop = _drop_sdf_unsupported_edge_modpath_iopaths(
-        annotate_source_path, sources
+    return _write_sdf_drop_step(
+        _drop_sdf_unsupported_edge_modpath_iopaths(annotate_source_path, sources),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_ifnone_edge_modpath_dropped.sdf",
+        SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+        sdf_pre_dropped_arcs,
     )
-    if edge_drop is None:
-        return annotate_source_path
-    edge_text, edge_count, edge_arcs = edge_drop
-    new_path = os.path.join(output_dir, "klt_sdf_ifnone_edge_modpath_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(edge_text)
-    sdf_pre_dropped_counts[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_count
-    sdf_pre_dropped_arcs[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_arcs
-    return new_path
 
 
 def _apply_sdf_bus_bit_modpath_drop(
@@ -2074,16 +1929,15 @@ def _apply_sdf_bus_bit_modpath_drop(
     arcs are recorded into the two dicts in place, as in
     :func:`_apply_sdf_unsupported_edge_modpath_drop`.
     """
-    bus_drop = _drop_sdf_bit_selected_bus_iopaths(annotate_source_path, sources)
-    if bus_drop is None:
-        return annotate_source_path
-    bus_text, bus_count, bus_arcs = bus_drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_bit_modpath_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(bus_text)
-    sdf_pre_dropped_counts[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_count
-    sdf_pre_dropped_arcs[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_arcs
-    return new_path
+    return _write_sdf_drop_step(
+        _drop_sdf_bit_selected_bus_iopaths(annotate_source_path, sources),
+        annotate_source_path,
+        output_dir,
+        "klt_sdf_bus_bit_modpath_dropped.sdf",
+        SDF_BUS_BIT_MODPATH_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
+        sdf_pre_dropped_arcs,
+    )
 
 
 def _sdf_dropped_report(
@@ -2112,7 +1966,7 @@ def _apply_sdf_physical_only_drop(
     output_dir: str,
     sources: list[str],
     hdl_toplevel: str,
-    ports: list[tuple[str, int, str]],
+    ports: list[tuple[str, str, str]],
     sdf_pre_dropped_counts: dict[str, int],
 ) -> str:
     """Issue #2363's physical-only-destination SDF-text drop, applied as one
@@ -2134,19 +1988,18 @@ def _apply_sdf_physical_only_drop(
     its own function specifically to keep that already-baselined function's
     cyclomatic complexity (`complexity-baseline.json`) from growing further.
     """
-    physical_only_drop = _drop_sdf_zero_delay_physical_only_interconnects(
+    return _write_sdf_drop_step(
+        _drop_sdf_zero_delay_physical_only_interconnects(
+            annotate_source_path,
+            _bus_input_port_names(ports),
+            _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+        ),
         annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
-        _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+        output_dir,
+        "klt_sdf_physical_only_dropped.sdf",
+        SDF_PHYSICAL_ONLY_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
     )
-    if physical_only_drop is None:
-        return annotate_source_path
-    physical_only_text, physical_only_count = physical_only_drop
-    new_path = os.path.join(output_dir, "klt_sdf_physical_only_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(physical_only_text)
-    sdf_pre_dropped_counts[SDF_PHYSICAL_ONLY_DROPPED_CLASS] = physical_only_count
-    return new_path
 
 
 # ---------------------------------------------------------------------------
@@ -2658,19 +2511,17 @@ def run_functional_verification(
     run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
+    coverage_info_path = None
     if coverage_requested:
+        coverage_info_path = os.path.join(output_dir, "coverage.info")
         coverage = collect_coverage(
             test_dir=output_dir,
             build_dir=build_dir,
-            info_path=os.path.join(output_dir, "coverage.info"),
+            info_path=coverage_info_path,
+            repo_root=repo_root,
         )
 
-    # Additive (Epic #1585 Phase 3, issue #1845): `null` on a run that did
-    # not ask for a trace, an object -- `{"path", "format", "size_bytes"}`,
-    # the identical shape `klt wave build`'s own `trace` field already uses
-    # -- on one that did. Resolved *after* the verdict/coverage above so a
-    # missing waveform (options.trace requested but unproducible) is never
-    # mistaken for the run's own pass/fail outcome.
+    # Resolve a requested waveform after the run verdict and coverage are known.
     trace = None
     if trace_requested:
         trace = _resolve_trace(
@@ -2760,6 +2611,7 @@ def run_functional_verification(
     )
     with_run_inputs(report, run_inputs)
     report.local_paths = {
+        "coverage_info_path": coverage_info_path,
         "results_xml": results_xml,
         "test_log": test_log,
         "build_log": build_log,

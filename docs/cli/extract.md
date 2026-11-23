@@ -427,6 +427,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `resistance_graph` | bool | `--resistance-graph` (issue #2982) |
 | `resistance_graph_r_cut` | number | `--resistance-graph-r-cut` (issue #2983); finite, `>= 0`, requires `resistance_graph` |
+| `resistance_graph_max_terminals` / `resistance_graph_max_cells` / `resistance_graph_max_nodes` / `resistance_graph_max_edges` | integer | `--resistance-graph-max-terminals` / `--resistance-graph-max-cells` / `--resistance-graph-max-nodes` / `--resistance-graph-max-edges` (issue #6964): positive, requires `resistance_graph`; a non-integer, including `2.5` or `true`, is rejected |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `substrate_tie_ohms` | number | `--substrate-tie-ohms` (issue #3089) |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -1548,6 +1549,12 @@ candidate, and the results are ranked. The ranking is deliberately narrow
   label, or its first-declared LEF `PORT`) rather than a fragment discovered
   by walking the cell's internal connectivity.
 
+Library authors place the pin label before the router chooses which of the
+LEF pin's disjoint `PORT` rectangles receives an external via. In the GF180
+`clkload13/I` case (#1183), the labeled pad and routed pad are connected
+through the master's own conductors. Discovering both before cell abstraction
+preserves that access.
+
 In particular, the ranking never counts how many abstracted-cell pins have
 already been wired onto a candidate net. That count grows as the wiring pass
 itself runs, so ranking on it made the outcome a function of the order pins
@@ -1571,7 +1578,9 @@ to `VGND`) through a plain poly strip, so walking out from the `HI` label
 reaches the cell's own supply rail. Offered that candidate, the ranking has no
 way to refuse it: a supply rail always carries a name, and a genuinely
 *unused* tie output's own island never does, so every unused `HI` bound
-straight onto `VPWR`.
+straight onto `VPWR`. Candidate discovery therefore removes the unrelated
+rail before `_abstract_pin_net_score` runs. At scoring time, a genuine
+connection to that same rail has the same name and connectivity.
 
 The practical failure that produced was backwards — a design extracted
 `match` while its power grid was **missing** (no rail geometry, so no named
@@ -2295,6 +2304,7 @@ passes LVS silently.
 | `gf180mcu` | `rm1` | `gf180mcu_fd_pr__rm1` (drawn Metal1 resistor, issue #1640) | `Metal1` 34/0 | `metal1_res` 110/11 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm2` | `gf180mcu_fd_pr__rm2` | `Metal2` 36/0 | `metal2_res` 110/12 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `efuse` | `gf180mcu_fd_pr__efuse` (eFuse, issue #4312; link `Poly2 & plfuse` inside `efuse_mk`, anode = `Poly2 & lvs_source` 100/8, cathode = the rest of that shape; `A` is always the anode net and `B` the cathode net, whatever the orientation; `klt lvs` leaves `R` out of the compare by default, as the PDK does) | `Poly2` 30/0 | `plfuse` 125/5 | `efuse_mk` 80/5 (scope) | **28.5714 Ω/□** | — |
 | `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
 
 sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
@@ -3469,11 +3479,11 @@ source/drain nets and the same `L`, summing `nfin`, `w_um` and `fingers`.
 That is the only combination performed. Series stacks stay as drawn.
 
 **Polarity, body, connectivity.** Polarity comes from `Nselect`/`Pselect`
-(12/0, 13/0), not from the well. The ASAP7 cells draw no substrate or well
-tie (the CDL simply ties bulk to `VSS`/`VDD`). So the NMOS bulk is the
-synthesized `vsubs` global, and the PMOS bulk is the well net, named by
-its `well pin` text (1/251). Neither is joined to a metal supply of the same
-name, and a `warnings[]` entry says so. Diffusion reaches `LISD` (17/0) only
+(12/0, 13/0). NMOS bulk is the synthesized `vsubs` global. PMOS bulk follows
+the drawn well, named by its `well pin` text (1/251). N-selected active inside
+the well forms a tap. A complete contact path connects that well island to
+metal. Without the path, even a rail bearing the same label remains separate.
+Diffusion reaches `LISD` (17/0) only
 through the `SDT` source/drain trench (88/0). `LIG` (16/0) lands on the gate
 (after `GCut` 10/0 is subtracted). `LIG` and `LISD` conduct where they
 overlap. `V0` (18/0) joins both to `M1`, and `V1`..`V8` climb to `M9`. The
@@ -8163,14 +8173,18 @@ without the flag — output is byte-identical to a run that never had it):
   strap's contact/via array) attaches by its whole footprint, which becomes
   pieces of its own in the mesh. A net with thousands of such landings may
   exceed the decomposition or node caps and report `graph_too_large`, keeping
-  the legacy scalar.
-- The per-cut resistance is **caller-supplied** via
-  `--resistance-graph-r-cut`: the shipped decks do curate a per-cut table
-  (`ParasiticsDeck.cuts`, issue #3053), but `klt extract` does not consume it
-  yet. Without the flag, a net with a contact/via landing joining two
-  *modelled* roles reports `via_resistance_unknown` rather than an assumed
-  ideal via. Diffusion has no coefficient in the shipped decks, so a contact
-  onto diffusion is a terminal, not a landing.
+  the legacy scalar; the `--resistance-graph-max-*` flags below raise those
+  caps.
+- Each landing's per-cut resistance resolves from the deck (issue #6917):
+  `poly`->`metals[0]` from `ParasiticsDeck.poly_contact` (sky130 curates the
+  licon at 152 ohm nominal), `metals[i]`->`metals[i+1]` from
+  `ParasiticsDeck.cuts` (issue #3053), nominal corner only --
+  `--parasitics` has no corner axis. `--resistance-graph-r-cut OHM` overrides
+  every landing uniformly (`0` = ideal via). A landing type the deck does not
+  curate (gf180mcu's poly contact, every sg13g2 cut) reports
+  `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no
+  coefficient in the shipped decks, so a contact onto diffusion is a
+  terminal, not a landing.
 - Terminals come from geometry (landings onto an unmodelled role and
   device-body cut edges), not from `terminals[]` device pins, which carry only
   a per-device position.
@@ -8193,14 +8207,16 @@ default. The selected value is reported only in the additive
   `pair_resistance_unavailable` (disconnected pair). The graph's own
   `diagnostics` still say why the graph was unsupported or disconnected.
 
-Because the shipped decks give no per-cut via resistance, a cross-level net
-falls back to `legacy` by default, never to an assumed ideal via. The value is
-supplied explicitly with `--resistance-graph-r-cut OHM` (request key
-`resistance_graph_r_cut`; `0` is an ideal via, must be finite and `>= 0`,
-requires `--resistance-graph`). With it, a strapped conductor (two levels
-joined at both ends) selects a resistance no larger than the single level
-alone, and a single-landing series conductor selects the sum of the two levels
-plus the via; overlap without a landing adds no path.
+A cross-level net whose landing types the deck curates solves on those
+nominal per-cut values (issue #6917); a landing the deck does not curate keeps
+the net on `legacy`, never on an assumed ideal via. The caller-supplied
+`--resistance-graph-r-cut OHM` (request key `resistance_graph_r_cut`; `0` is
+an ideal via, must be finite and `>= 0`, requires `--resistance-graph`)
+overrides every landing uniformly. With a finite per-cut value, a strapped
+conductor (two levels joined at both ends) selects a resistance no larger
+than the single level alone, and a single-landing series conductor selects
+the sum of the two levels plus the via; overlap without a landing adds no
+path.
 
 **Ladder.** `--distributed-rc` keeps redistributing the legacy
 `resistance_ohm` total; it does not consume `selected_resistance_ohm`, so the
@@ -8209,6 +8225,56 @@ of scope here. `klt extract`'s own netlist always stays on the legacy scalar;
 [`klt pex --resistance-graph`](pex.md) (issue #4037) is the consumer of
 `selected_resistance_ohm`, writing it as the lumped R for `graph`-sourced nets
 (and rejecting the `--distributed-rc` combination).
+
+**Raising the build caps (`--resistance-graph-max-*`, issue #6964).** A net
+over any builder cap is `graph_too_large` and keeps the legacy scalar -- which
+is what happens to a power rail with 65 or more terminals (the terminal cap is
+checked before any geometry is examined) or to a poured polygon whose
+Manhattan decomposition needs more than 4096 mesh cells. Four flags raise
+those caps for one run, each changing only its own limit. `klt pex` passes
+them through (see [pex.md](pex.md)).
+
+| Flag | Default | Applies to |
+| --- | ---: | --- |
+| `--resistance-graph-max-terminals N` | 64 | Terminals per net. |
+| `--resistance-graph-max-cells N` | 4096 | Mesh cells per merged conductor polygon: the grid of every vertex x line by every vertex y line, port edges included, so the count grows with the *product* of the two. Each cell becomes a graph node. |
+| `--resistance-graph-max-nodes N` | 5000 | Nodes per net: one per mesh piece plus one per port. |
+| `--resistance-graph-max-edges N` | 20000 | Edges per net: in-plane piece edges plus one per port attachment and per via landing. |
+
+Each takes a positive integer and requires `--resistance-graph`. With no flag
+the builder's own constants apply (`MAX_GRAPH_TERMINALS`,
+`DEFAULT_MAX_DECOMPOSITION_CELLS`, `MAX_GRAPH_NODES`, `MAX_GRAPH_EDGES`) and
+the report is byte-identical to a run made before the flags existed. A
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+that was applied -- `65 terminals exceed the 64 cap`, `... decomposing it
+needs up to 4669 mesh cells, over this build's 4096-mesh-cell cap`, `4 piece
+nodes exceed the 3 cap`, `6 nodes / 5 edges exceed the 5000 / 4 caps` -- so
+the message says which flag to raise. The node cap is then checked a second
+time on the assembled graph (pieces plus ports, together with the edge cap),
+which is why a large polygon usually takes `-max-cells` together with
+`-max-nodes` and `-max-edges`.
+
+**Cost of raising them.** The defaults are resource bounds, not accuracy
+limits: raising them costs time and output size, never a different model.
+
+- *Polygon grid.* A polygon's candidate cell count is
+  `(x lines - 1) * (y lines - 1)`. A strap's cut array adds two lines per
+  row and per column of cuts, so doubling the cuts on each axis quadruples the
+  cells; a polygon over the cap is refused before it is decomposed. Raise
+  `--resistance-graph-max-cells` for it, and `--resistance-graph-max-nodes`
+  with it, since every cell is a node.
+- *Graph size.* A mesh of `n` pieces has about `2 n` in-plane edges (each
+  piece has at most four neighbours and each edge is shared), plus one edge
+  per port attachment and per via landing; `--resistance-graph-max-nodes` and
+  `--resistance-graph-max-edges` bound the assembled graph of one net.
+- *Terminal matrix.* `pair_resistance_ohm` is `T x T`, quadratic in the
+  terminal count, and the solve is `sum(T_c - 1)` injection solves per net
+  over its terminal-bearing components (a 65-terminal connected rail costs 64
+  solves, a two-terminal net one). Three or more terminals never select a
+  scalar (`terminal_count_not_two`); the matrix is the result.
+- `klt extract` adds no field for the caps: the diagnostics above carry the
+  applied values. `klt pex` records all four effective caps under
+  `extraction.resistance_graph.caps` when any cap flag was given.
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
@@ -9109,10 +9175,13 @@ legitimately (and unhelpfully) show drift in the corresponding fields under
 
 ### Exit codes for `--check` / `--rerun`
 
-Both modes use the same 0/3 split described below: `0` when `status` is
-`"match"`, `3` when it is `"drifted"`. A missing or unparseable
-`<report.json>` exits `1` with a clean error message, same as any other
-application-level failure.
+Both modes return 0 for `match` and 3 for `drifted`. In cheap mode, a
+recorded digest whose input is unavailable on this checkout gives its
+`checks[]` entry `status: "unverifiable"`, `actual: null`, and `match: false`.
+Text output marks that field `[UNVERIFIABLE]`. If every other input matches
+or is also unavailable, the overall status is `unverifiable` (exit 4).
+A changed digest takes precedence (exit 3), with both field results visible.
+A missing or unparseable report is a command error (exit 1).
 
 Both modes accept plain JSON and gzip-compressed reports, such as
 `report.json.gz`. Compression is detected by the file's contents, so a
@@ -9128,6 +9197,7 @@ error envelope under `--format json`.
 | `1`  | Failed to run — bad file, missing/unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). Under `--check`: a missing/unparseable committed report, or `--rerun` given without `--check`. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Under `--check`: the committed report drifted from the current deck/input (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
+| `4`  | Under cheap `--check`, a recorded input is unavailable and every comparable hash matches (`status: "unverifiable"`). |
 
 Outside `--check`, there is no "ran but found problems" outcome for a fresh
 extraction; it either produces a netlist or it fails (matching `klt gen`'s

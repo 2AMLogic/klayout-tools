@@ -14,6 +14,7 @@ import argparse
 from collections.abc import Callable
 
 from . import lvs_cmd
+from ._deck_hash_parser_args import add_expect_deck_hash_arg
 
 
 def add_lvs_parser(
@@ -68,8 +69,8 @@ def add_lvs_parser(
             "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
             "REPORT's recorded inputs; combine with --rerun for full mode "
             "(re-run the compare and diff verdict-bearing fields). Exits 0 "
-            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
-            "'--check'"
+            "if consistent, 3 if drifted, or 4 if a recorded input is unavailable "
+            "in cheap mode. See docs/cli/lvs.md, '--check'"
         ),
     )
     lvs_parser.add_argument(
@@ -161,6 +162,7 @@ def add_lvs_parser(
             "stage) when stderr is not a TTY; --no-progress forces off"
         ),
     )
+    add_expect_deck_hash_arg(lvs_parser)
     lvs_parser.add_argument(
         "--omit-mismatches",
         action="store_true",

@@ -1246,7 +1246,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path)
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["engine"] == "icarus"
     assert report["hdl_toplevel"] == "gcd"
     assert report["testbench"] == "test_gcd"
@@ -1810,8 +1810,8 @@ def test_stubbed_coverage_run_populates_the_coverage_block(tmp_path, monkeypatch
     assert coverage["toggle_pct"] == 60.0
     assert coverage["branch_pct"] == 100.0
     assert coverage["expr_pct"] == 100.0
-    assert coverage["info_path"].endswith("coverage.info")
-    assert os.path.isfile(coverage["info_path"])
+    assert report.local_paths["coverage_info_path"].endswith("coverage.info")
+    assert os.path.isfile(report.local_paths["coverage_info_path"])
 
 
 def test_coverage_requested_but_no_coverage_dat(tmp_path, monkeypatch):
@@ -3143,8 +3143,8 @@ def test_integration_real_verilator_gcd_worked_example_with_coverage(tmp_path):
     # Toggle coverage is deliberately partial: the random test only drives
     # values up to 500 through a 16-bit datapath (spike section 6).
     assert 0.0 < coverage["toggle_pct"] < 100.0
-    assert os.path.isfile(coverage["info_path"])
-    with open(coverage["info_path"], encoding="utf-8") as handle:
+    assert os.path.isfile(report.local_paths["coverage_info_path"])
+    with open(report.local_paths["coverage_info_path"], encoding="utf-8") as handle:
         assert handle.readline().startswith("TN:")
 
 

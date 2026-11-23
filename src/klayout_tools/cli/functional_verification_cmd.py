@@ -40,6 +40,7 @@ reuses this exact 0/1/2/3 trichotomy: exit 3 means "ran fine, found
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..functional_verification import (
     FunctionalVerificationError,
     _log_tail,
@@ -180,11 +181,10 @@ def _print_text(report: dict) -> None:
         for key in ("line_pct", "toggle_pct", "branch_pct", "expr_pct"):
             value = coverage.get(key)
             print(f"  {key}: {'n/a' if value is None else value}")
-        print(f"  info_path: {coverage['info_path']}")
+        info_path = getattr(report, "local_paths", {}).get("coverage_info_path")
+        print(f"  info_path: {info_path or render_path_field(coverage['info_path'])}")
 
-    # Printed only when `options.trace` was requested (Epic #1585 Phase 3,
-    # issue #1845) -- the artifact `klt wave build`'s own `trace` field
-    # accepts unchanged (docs/cli/wave.md).
+    # wave build consumes the path and format. The size describes the response.
     trace = report.get("trace")
     if trace is not None:
         print()
