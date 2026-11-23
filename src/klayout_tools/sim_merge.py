@@ -85,7 +85,15 @@ _REFUSAL_PRIORITY = (
 _PER_REPORT_ENVIRONMENT = ("netlist_sha256", "remote")
 
 #: Per-measurement fields a shard must agree on for the union to be one grid.
-_SPEC_FIELDS = ("unit", "limits", "plausible_range", "step", "derived_from")
+_SPEC_FIELDS = (
+    "unit",
+    "limits",
+    "plausible_range",
+    "step",
+    "derived_from",
+    "spec_row",
+    "case",
+)
 
 
 class MergeError(Exception):
@@ -317,7 +325,7 @@ def _check_consistent(
             )
         if _measurement_specs(report) != first_specs:
             problems.append(
-                f"shard {shard['id']!r}: measurement names, units or limits "
+                f"shard {shard['id']!r}: measurement names or declarations "
                 f"differ from shard {first_id!r}"
             )
         if report.get("netlist") != reports[0].get("netlist"):
@@ -395,11 +403,12 @@ def _merge(manifest: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str,
             "corners": corners,
         }
     )
-    provenances = [
-        r["provenance"] for r in reports if isinstance(r.get("provenance"), dict)
-    ]
-    if len(provenances) == len(reports):
-        merged["provenance"] = _union_blocks(provenances)
+    provenances = [r.get("provenance") for r in reports]
+    if any(isinstance(block, dict) for block in provenances):
+        # Keep a slot for every member, including legacy reports without a digest.
+        merged["provenance"] = _union_blocks(
+            [block if isinstance(block, dict) else {} for block in provenances]
+        )
     if any("plots" in r for r in reports):
         merged["plots"] = [p for r in reports for p in r.get("plots") or []]
     merged["merge"] = {

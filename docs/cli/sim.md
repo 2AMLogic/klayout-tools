@@ -1805,6 +1805,17 @@ whose ids carry corner indices local to each report and are re-based to the
 merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
 
+Sibling requests may use different model libraries for the same netlist.
+Each shard must declare the same measurement names, units, limits and
+provenance, including `spec_row` and `case` whenever present. A disagreement
+returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
+those row and case labels and grades limits over every declared corner.
+
+You can cite the merged report for item 5 of a `klt signoff` manifest.
+List the intended rows on the citation. Passing tagged measurements with
+limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
+digest. Mixed or missing shard hashes leave the pin unverifiable.
+
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
 run locally) and `provenance.input.content_hash` always; any other

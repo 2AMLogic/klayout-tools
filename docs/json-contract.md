@@ -380,6 +380,14 @@ Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
 scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
 `resistance_source_reason`). Output without the flag is unchanged; no
 `schema_version` bump.
+Issue #6964 likewise adds `caps` (`{max_terminals, max_cells, max_nodes,
+max_edges}`, integers) to `extraction.resistance_graph` of `klt pex
+--resistance-graph`: present only when a `--resistance-graph-max-*` flag was
+given, holding all four effective caps (the builder's default for any flag
+omitted), and absent otherwise -- so an existing graph-enabled envelope is
+unchanged. `klt extract` adds no field for the caps: its per-net
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+applied. No `schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
