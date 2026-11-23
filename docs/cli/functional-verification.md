@@ -1268,6 +1268,14 @@ annotation-class-dependent: correct under `INTERCONNECT`-only annotation,
 dead under any `IOPATH`-bearing SDF, still dead at a 10× relaxed clock. See
 §3.8's 2026-09-23 addendum for that isolation table.
 
+On the routed GF180 design in issue #6991, full SDF at both min and typ
+passed 3/21 tests with the bench's 10 ns clock. Interconnect-only passed
+21/21. The first missed bit-counter capture had negative setup slack at
+10 ns and positive hold slack. With the same full SDF at 100 ns, all 21
+tests passed. For a specify-enabled control without SDF, list the PDK's
+timing-model sources explicitly. A plain `request.pdk` run without SDF
+selects the `FUNCTIONAL` branch. [Pin traces, controls and reproduction](../design/sdf-annotate-feasibility-spike.md#gf180-bit-counter-capture-at-10-ns)
+
 **Net-delay back-annotation only: `options.sdf.entries: "interconnect"`
 (issue #2364).** For a design whose post-route STA closes, the supported way
 to back-annotate the post-layout-specific net delays without the
@@ -1359,6 +1367,7 @@ the run and identify the affected cell arcs in `arcs`.
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
 | `iopath_cond_expression` | SDF-text normalization (issue #5296) | `count` is the number of `COND`-wrapped `IOPATH` entries removed before annotation. The `reason` explains that Icarus's SDF parser rejects operator expressions such as `~D` with `Invalid/malformed COND`, which aborts annotation. `arcs` lists distinct `{celltype, from, to}` objects sorted by those fields. This pass keeps unconditional `IOPATH` entries and simple conditions such as `COND D` or `COND D==1'b1`. The run omits the state-dependent SDF delays from the removed entries. |
+| `iopath_empty_delay` | SDF-text normalization (issue #7481) | OpenSTA's `write_sdf` can emit a sequential arc such as `(IOPATH CLK Q)` with no delay operands. Icarus rejects it. The annotation copy omits each such entry, `count` records the number removed, and `arcs` names the distinct cell types and port pairs. The run reports `partial: true`. These entries carried no delay value. Explicit zero delays and empty parentheses operands are preserved. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.

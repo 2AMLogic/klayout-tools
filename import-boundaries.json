@@ -189,6 +189,7 @@
         "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_rerun_replay",
+        "klayout_tools.drc_sg13g2_implant",
         "klayout_tools.drc_text_exempt"
       ]
     },
@@ -300,6 +301,7 @@
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
         "klayout_tools.extract_fragment_resistance",
+        "klayout_tools.extract_graph_ports",
         "klayout_tools.extract_mos_capacitor",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_inductors",
@@ -354,7 +356,6 @@
       "kind": "verb",
       "description": "`klt functional_verification` implementation: core modules plus CLI adapter.",
       "modules": [
-        "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
@@ -652,6 +653,7 @@
         "klayout_tools.decks.gf180mcu_unmodeled",
         "klayout_tools.decks.gf180mcu_untranscribed",
         "klayout_tools.decks.parasitics",
+        "klayout_tools.decks.plain_rules",
         "klayout_tools.decks.rules",
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
@@ -721,13 +723,16 @@
         "klayout_tools._c_stdout",
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
+        "klayout_tools.place_and_route_asap7",
         "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_batch_job",
         "klayout_tools.place_and_route_batch_single",
+        "klayout_tools.place_and_route_deck_warnings",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
+        "klayout_tools.place_and_route_layer_map",
         "klayout_tools.place_and_route_layers",
         "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
@@ -823,6 +828,7 @@
       "modules": [
         "klayout_tools",
         "klayout_tools._annotation",
+        "klayout_tools._artifact_envelope",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
@@ -915,6 +921,7 @@
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_base",
         "klayout_tools.signoff_characterization",
+        "klayout_tools.signoff_composition",
         "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
@@ -938,6 +945,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
@@ -996,6 +1004,7 @@
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_job_timeout",
+        "klayout_tools.sim_batch_knobs",
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
@@ -1141,7 +1150,10 @@
         "klayout_tools.cli.sta_cmd",
         "klayout_tools._sta_clock_transition",
         "klayout_tools._sta_clock_uncertainty",
+        "klayout_tools._sta_generated_clocks",
         "klayout_tools._sta_io_delay_clock",
+        "klayout_tools._sta_multicycle",
+        "klayout_tools.post_route_sta_multicycle",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
@@ -1178,6 +1190,7 @@
         "klayout_tools.synthesize_abc_stages",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_constrained_timing",
         "klayout_tools.synthesize_driving_cell",
         "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
@@ -1918,6 +1931,11 @@
     },
     {
       "consumer": "synthesize",
+      "exporter": "sta",
+      "reason": "Issue #6924: validate synthesis multicycle entries with the shared STA grammar and run standalone Verilog-mode STA on the final mapped netlist."
+    },
+    {
+      "consumer": "synthesize",
       "exporter": "arith_gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -2078,8 +2096,8 @@
     },
     {
       "consumer": "em",
-      "exporter": "functional_verification",
-      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
+      "exporter": "env_provenance",
+      "reason": "`klt em` discovers the request's repository root to anchor retained artifact paths."
     }
   ],
   "shared_private_permissions": [

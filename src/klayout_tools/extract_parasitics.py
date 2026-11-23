@@ -63,6 +63,13 @@ from .extract_cut_resistance import CutResistanceResolver, cut_resistance_resolv
 from .extract_detect_substrate_label import _is_synthesized_substrate_net_name
 from .extract_fragment_resistance import _n_squares as _n_squares
 from .extract_fragment_resistance import _region_n_squares
+from .extract_graph_ports import (
+    PinSite,
+    _boundary_sides,
+    _cut_edge_boxes,
+    add_promoted_pin_port,
+    promoted_pin_site,
+)
 from .extract_resistance_network import reduced_network_plan
 from .extract_terminal_topology import (
     _distributed_rc_order,  # noqa: F401 -- re-export; tests import it from here
@@ -322,49 +329,6 @@ def _net_port_regions(
     return contacts, vias
 
 
-def _cut_edge_boxes(region: kdb.Region, drawn: kdb.Region | None) -> list[kdb.Box]:
-    """Axis-aligned boxes (zero width or height) for the merged runs of
-    ``region``'s edges lying strictly inside ``drawn`` -- the device-body cut
-    edges :func:`_fragment_port_points_um` reads as points, kept here as the
-    edge runs a graph port attaches along (issue #2982). Non-axis-aligned runs
-    are skipped: the graph builder rejects non-Manhattan geometry anyway."""
-    if drawn is None or drawn.is_empty():
-        return []
-    import klayout.db as kdb
-
-    boxes: list[kdb.Box] = []
-    for edge in region.merged().edges().inside_part(drawn).merged().each():
-        if edge.p1.x == edge.p2.x or edge.p1.y == edge.p2.y:
-            boxes.append(kdb.Box(edge.p1, edge.p2))
-    return boxes
-
-
-def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
-    """The sides of ``box`` (as zero-width boxes, longest first, ties
-    left/right/bottom/top) that lie entirely on ``region``'s outline.
-
-    A contact/via with such a side shared by all its roles attaches along it
-    (Stage 3.D4's end-edge ports, issue #2982); one with none is attached by
-    its full bounding box instead (issue #4061)."""
-    import klayout.db as kdb
-
-    outline = region.merged().edges()
-    sides = [
-        kdb.Box(box.left, box.bottom, box.left, box.top),
-        kdb.Box(box.right, box.bottom, box.right, box.top),
-        kdb.Box(box.left, box.bottom, box.right, box.bottom),
-        kdb.Box(box.left, box.top, box.right, box.top),
-    ]
-    on_outline = [
-        side
-        for side in sides
-        if (side.width() or side.height())
-        and (kdb.Edges(kdb.Edge(side.p1, side.p2)) & outline).length()
-        == max(side.width(), side.height())
-    ]
-    return sorted(on_outline, key=lambda side: -max(side.width(), side.height()))
-
-
 def _graph_port_name(kind: str, box: kdb.Box, dbu: float) -> str:
     return f"{kind}@{box.center().x * dbu:.4f},{box.center().y * dbu:.4f}"
 
@@ -469,12 +433,23 @@ class _ResistanceGraphCollector:
 
     def __init__(
         self,
+        l2n: kdb.LayoutToNetlist,
         enabled: bool,
         r_cut_ohm: float | None = None,
         deck: ParasiticsDeck | None = None,
         *,
         caps: Mapping[str, int] | None = None,
     ) -> None:
+        self._l2n = l2n
+        self._label_layers = (
+            {
+                l2n.layer_index(name): name.removesuffix("_label")
+                for name in l2n.layer_names()
+                if name.endswith("_label")
+            }
+            if enabled
+            else {}
+        )
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
         self._deck = deck
@@ -511,7 +486,8 @@ class _ResistanceGraphCollector:
                 dbu,
                 entry["resistance_ohm"],
                 self._r_cut_ohm,
-                self._deck,
+                deck=self._deck,
+                pin_site=promoted_pin_site(self._l2n, net, self._label_layers),
                 caps=self._caps,
             )
 
@@ -560,6 +536,7 @@ def _resistance_graph_report(
     legacy_resistance_ohm: float,
     r_cut_ohm: float | None = None,
     deck: ParasiticsDeck | None = None,
+    pin_site: PinSite | None = None,
     *,
     caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -581,6 +558,7 @@ def _resistance_graph_report(
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
     ]
+    add_promoted_pin_port(ports, role_inputs, pin_site, dbu)
     graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
@@ -1218,6 +1196,7 @@ def _compute_parasitics(
     )
     contact_layer_index = layer_index.get("contact")
     graph_collector = _ResistanceGraphCollector(
+        l2n,
         resistance_graph,
         resistance_graph_r_cut_ohm,
         parasitics_deck,
