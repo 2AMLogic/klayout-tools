@@ -79,3 +79,17 @@ def test_plausible_dimensions_and_megohm_resistance_are_quiet(tmp_path):
     report, warnings = compare(tmp_path, text, text, deck="sg13cmos5l")
     assert report["status"] == "match"
     assert not warnings
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"combine_devices": True}, {"combine_devices_per_circuit": {"TOP": True}}],
+)
+def test_combined_parallel_width_does_not_flag_the_source_devices(tmp_path, options):
+    text = (
+        ".subckt top d g s b\n"
+        "M1 d g s b nch W=600000U L=1U\nM2 d g s b nch W=600000U L=1U\n.ends top\n"
+    )
+    report, warnings = compare(tmp_path, text, text, options=options)
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+    assert not warnings
