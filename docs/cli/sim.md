@@ -358,8 +358,12 @@ are unchanged.
 same `engine_host` contract as `ngspice_binary`: `version_banner` is
 `environment.remote.worker_environment.simulator.version_banner` when that
 capture's `capture` is `"ok"` (a sharded run reports one only when every
-member captured the same banner), and `binary_sha256` is `null` — the worker
-capture records no digest. With no usable worker banner, `version_banner` is
+member captured the same banner). A batch worker also hashes the executable it
+selected. `binary_sha256` contains its lowercase SHA-256 when every member
+captured the same valid digest. Older captures, missing hashes and mixed
+digests yield `null`. When every member reports the same usable banner but two
+observed hashes differ, `probe` is `"disagreement"` and `reason` names the
+hash mismatch. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
@@ -373,6 +377,16 @@ present only on off-host reports. `worker_environment.engine_build_comparison`
 (below) compares the two for you. A `local` report is unchanged: there
 `engine_build` is the local probe and there is no `client_engine_build`.
 Deck-list (`decks[]`) reports carry neither field.
+
+#### Numeric reproducibility across hosts
+
+A matching ngspice major version, version banner, and PDK snapshot do not
+guarantee a fixed number of matching digits in `.meas` results. Even with
+the same request and model inputs, different builds, linked numerical
+libraries, and host floating-point behavior can change the values. Use the
+batch worker's binary hash to identify its executable. Set absolute or
+relative comparison tolerances appropriate to the measurement and the
+circuit's requirements.
 
 **ngspice's working directory, and `.spiceinit` compatibility mode (issue
 #2520).** Every `ngspice`/`Xyce` subprocess this command spawns — per
@@ -918,11 +932,9 @@ baked image and which PDK snapshot produced this result, the same role
 `environment.models_lib_sha256` plays for `local`/`local-parallel`.
 `spin_up_s` is the measured wall-clock from provisioning start to the
 remote host being ready to accept the first corner (instance reaching
-`running` plus SSH becoming reachable) — `runtime_s`/`engine_version` remain
-the only fields that legitimately vary between a `local` and a `remote` run
-of the same request (see "Semantics and guarantees" below); given a matching
-`engine_version` and PDK snapshot hash, `.meas` measurements are expected to
-match bit-for-bit.
+`running` plus SSH becoming reachable). Comparing measurements across hosts
+requires a circuit-appropriate tolerance. See [Numeric reproducibility across
+hosts](#numeric-reproducibility-across-hosts).
 
 **Transport: SSH/SCP push-then-pull, no IAM instance profile on the
 guest.** `remote_launcher.select_instance_type()` sizes one instance for the
@@ -2812,7 +2824,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | Field | Meaning |
 | --- | --- |
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, preflight observations are `null`. The worker's simulation report supplies `ngspice_init` and `threads_per_worker` independently. |
-| `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
+| `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). Regular ngspice batch captures include `binary_sha256` when the worker resolves the executable. It is a lowercase SHA-256 digest, or `null` if hashing failed. Older captures, unresolved executables, deck-list requests and Xyce requests omit the key. |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
@@ -9117,7 +9129,7 @@ Seeding these sources per sample is not implemented. For what noise such a trans
 sample's seeds are keyed on the point's *position* in this request's expanded
 corner list, so sample *k* is a different die at every corner, a single-point
 request always uses position 0, and reordering axes or splitting a grid
-across requests changes the draws. Existing reports reproduce bit-for-bit.
+across requests changes the draws. The default preserves the previous seed sequence.
 Two opt-in scopes change only that key:
 
 | `seed_scope` | Seeds keyed on | Use it for |
