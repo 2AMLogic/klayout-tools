@@ -78,6 +78,11 @@ from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
 
+# Deck-known configuration warnings (issue #7311) for the two gf180mcu
+# `request.power` shapes the bundled deck is known to reject: pure, static
+# (no DRC run) strings kept out of this file for its size ceiling.
+from .place_and_route_deck_warnings import deck_warnings
+
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
 # the one name that subsystem calls back into this module for -- called once
@@ -98,6 +103,8 @@ from .place_and_route_gds_merge import (
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_hints import grt_hint, null_unconstrained_fmax
+from .place_and_route_layer_map import explain_spef_layer_map
+from .place_and_route_layer_map import layer_map_warnings as _layer_map_warnings
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -139,13 +146,6 @@ from .place_and_route_power_audit import (
 from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
-
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
 from .place_and_route_power_pins import _POWER_PIN_PATTERNS as _POWER_PIN_PATTERNS
 from .place_and_route_power_pins import rail_label_evidence
 from .place_and_route_reports import (
@@ -1184,19 +1184,6 @@ def _antenna_repair_warnings(
     ]
 
 
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
-    ]
-
-
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -1675,7 +1662,8 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    instance_groups = _validate_instance_groups(request.get("instance_groups"))
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -1691,7 +1679,6 @@ def _run_single_corner(
         request.get("constraints") or {}, PlaceAndRouteError
     )
     seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
@@ -1788,7 +1775,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
-            instance_groups=instance_groups,
+            instance_groups=groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -2058,27 +2045,28 @@ def _run_single_corner(
         # at the pipeline-step level instead). Off by default -- see
         # `_validate_post_route_spef`'s own docstring for why.
         if post_route_spef:
-            spef_sta = _post_route_spef_metrics(
-                threads=threads,
-                engine_logs=engine_logs,
-                output_dir=output_dir,
-                hdl_toplevel=hdl_toplevel,
-                gds_path=gds_path,
-                def_path=def_path,
-                cell_library=cell_library,
-                liberty_path=liberty_path,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
-                max_transition_ns=max_transition_ns,
-                max_capacitance_pf=max_capacitance_pf,
-                max_fanout=max_fanout,
-                input_delay_ns=input_delay_ns,
-                output_delay_ns=output_delay_ns,
-                checkpoint_in=checkpoint_path,
-                # Issue #1002: `write_sdf` inside that same session, right
-                # after its `read_spef` -- see `_validate_post_route_sdf`.
-                write_sdf=post_route_sdf,
-            )
+            with explain_spef_layer_map(layer_map_info):
+                spef_sta = _post_route_spef_metrics(
+                    threads=threads,
+                    engine_logs=engine_logs,
+                    output_dir=output_dir,
+                    hdl_toplevel=hdl_toplevel,
+                    gds_path=gds_path,
+                    def_path=def_path,
+                    cell_library=cell_library,
+                    liberty_path=liberty_path,
+                    clock_port=clock_port,
+                    clock_period_ns=clock_period_ns,
+                    max_transition_ns=max_transition_ns,
+                    max_capacitance_pf=max_capacitance_pf,
+                    max_fanout=max_fanout,
+                    input_delay_ns=input_delay_ns,
+                    output_delay_ns=output_delay_ns,
+                    checkpoint_in=checkpoint_path,
+                    # Issue #1002: `write_sdf` inside that same session, right
+                    # after its `read_spef` -- see `_validate_post_route_sdf`.
+                    write_sdf=post_route_sdf,
+                )
     else:
         def_path = None
 
@@ -2285,6 +2273,7 @@ def _run_single_corner(
     warnings.extend(_antenna_repair_warnings(target_stage, library))
     warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
+    warnings.extend(deck_warnings(cell_library, power, power_info))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2384,7 +2373,7 @@ def _run_single_corner(
         ),
         # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
-            read_def_instance_groups(audited_def_path, instance_groups)
+            read_def_instance_groups(audited_def_path, groups)
             if audited_def_path
             else None
         ),
@@ -3037,8 +3026,8 @@ def check_place_and_route_report(
 ) -> dict[str, Any]:
     """Compare committed netlist and Liberty digests to the current inputs.
 
-    Each rebuilt corner carries its own pair. This check requires no engine
-    run and the requested thread count does not enter either digest.
+    Each rebuilt corner has its own pair. This engine-free check excludes thread count.
+    See the ``--check`` / ``--rerun`` contract in ``docs/cli/place-and-route.md``.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     request = load_request(request_path, threads=threads)
