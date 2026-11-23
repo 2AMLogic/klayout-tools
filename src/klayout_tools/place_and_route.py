@@ -109,6 +109,8 @@ from .place_and_route_layer_map import layer_map_warnings as _layer_map_warnings
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
+
+# PDN preflight checks strap geometry against the requested core before pdngen (#2170).
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pin_connectivity import (
     apply_pin_connectivity,
@@ -345,8 +347,6 @@ from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_line
 from .place_and_route_sta import def_pin_names as def_pin_names
 from .place_and_route_threads import observed_threads, resolve_threads, validate_threads
 from .place_and_route_unconstrained import unconstrained_warnings
-
-# PDN preflight checks strap geometry against the requested core before pdngen (#2170).
 from .post_route_sta_multicycle import multicycle_request_error
 
 #: Bumped only on a non-additive (breaking) change to this command's own
