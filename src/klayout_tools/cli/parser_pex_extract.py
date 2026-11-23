@@ -93,7 +93,9 @@ def add_pex_extraction_args(
             "(e.g. IHP `Metal1.text` 8/25 under `sg13cmos5l`, which reads "
             "`Metal1.pin` 8/2) -- otherwise extraction promotes no top-level "
             "pins and the extracted DUT cannot bind. An unknown ROLE is an "
-            "error. Omitted by default -- byte-identical to today's "
+            "error. Under --engine klayout-runset it reads labels for the "
+            "curated leg of --deck and is refused without --deck (issue "
+            "#6606). Omitted by default -- byte-identical to today's "
             "behavior. The applied mapping is echoed in the JSON response's "
             "`extraction.label_layers`. See docs/cli/pex.md."
         ),
@@ -223,6 +225,63 @@ def add_pex_extraction_args(
         ),
     )
     pex_parser.add_argument(
+        "--resistance-graph-max-terminals",
+        dest="resistance_graph_max_terminals",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "terminals-per-net cap for --resistance-graph (positive integer, "
+            "default 64), passed through to `klt extract "
+            "--resistance-graph-max-terminals` (issue #6964); a net with more "
+            "terminals is `graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph. The effective caps are echoed under "
+            "`extraction.resistance_graph.caps`."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-cells",
+        dest="resistance_graph_max_cells",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "mesh-cells-per-polygon cap for --resistance-graph (positive "
+            "integer, default 4096), passed through to `klt extract "
+            "--resistance-graph-max-cells` (issue #6964); a polygon needing "
+            "more is `graph_too_large` and its net keeps the legacy R. "
+            "Requires --resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-nodes",
+        dest="resistance_graph_max_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "nodes-per-net cap for --resistance-graph (positive integer, "
+            "default 5000), passed through to `klt extract "
+            "--resistance-graph-max-nodes` (issue #6964); a larger net is "
+            "`graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-edges",
+        dest="resistance_graph_max_edges",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "edges-per-net cap for --resistance-graph (positive integer, "
+            "default 20000), passed through to `klt extract "
+            "--resistance-graph-max-edges` (issue #6964); a larger net is "
+            "`graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
         "--parasitic-variant",
         dest="parasitic_variants",
         type=_parasitic_variant_arg,
@@ -323,15 +382,21 @@ def _add_runset_engine_args(pex_parser: argparse.ArgumentParser) -> None:
             "parasitics, unchanged by this flag's existence. 'klayout-runset' "
             "extracts through the PDK's own KLayout LVS runset (--deck-file; "
             "`klt extract --engine klayout-runset`) -- the only way to reach "
-            "a device family the curated deck declares no class for. The leg "
-            "is a device-level netlist with NO parasitics, so the report does "
-            "not by itself satisfy docs/design-evidence-tiers.md T1 item 7; "
+            "a device family the curated deck declares no class for. Without "
+            "--deck the leg is a device-level netlist with NO parasitics, so "
+            "the report does not by itself satisfy "
+            "docs/design-evidence-tiers.md T1 item 7. With --deck (issue "
+            "#6606) the curated deck's lumped parasitic network is attached "
+            "to the runset devices through a geometric net correspondence; "
+            "nets that cannot be matched are listed in "
+            "`extraction.net_correspondence`, never dropped. "
             "`extraction.engine`/`parasitics_carried`/`params_not_carried` "
-            "say so. Every option only the parasitic-annotated engine can "
-            "honour (--critical-net*, --distributed-rc, --resistance-graph*, "
-            "--mom-rlc-*, --parasitic-variant, --substrate-tie-ohms, "
-            "--device-only-leg, --tie-net, --deck, --pdk, ...) is refused by "
-            "name. See docs/cli/pex.md, 'Runset engine'."
+            "say which leg this is. Every option only the parasitic-annotated "
+            "engine can honour (--critical-net*, --distributed-rc, "
+            "--resistance-graph*, --mom-rlc-*, --parasitic-variant, "
+            "--substrate-tie-ohms, --device-only-leg, --tie-net, --pdk, "
+            "--pdk-root, ...) is refused by name, with or without --deck. "
+            "See docs/cli/pex.md, 'Runset engine'."
         ),
     )
     pex_parser.add_argument(

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from klayout_tools import decks
 
 # Shared model definitions are outside the per-deck source pin.
-_SHARED = {"rules", "extraction", "finfet", "parasitics"}
+_SHARED = {"rules", "extraction", "extraction_inductor", "finfet", "parasitics"}
 
 # These siblings supply extraction, parasitics or coverage disclosures.
 # Rebuild with each sibling stubbed and compare every rule field before
@@ -21,7 +21,7 @@ _NON_DRC = {
         "gf180mcu_unmodeled",
         "gf180mcu_untranscribed",
     },
-    "sg13g2": {"sg13g2_unmodeled"},
+    "sg13g2": {"sg13g2_inductor", "sg13g2_unmodeled"},
     "sky130": {"sky130_lvt"},
 }
 

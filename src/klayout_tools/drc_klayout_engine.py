@@ -19,6 +19,7 @@ import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from typing import Any
 
 from . import env_provenance
@@ -31,6 +32,7 @@ from .coverage import (
     rollup_status,
     work_id,
 )
+from .deck_global_defaults import _record_deck_default
 from .drc import (
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
@@ -41,6 +43,7 @@ from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import (
     _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES,
     _klayout_deck_error_detail,
+    _klayout_deck_error_lines,
     deck_abort_info,
     deck_aborted_error,
 )
@@ -52,6 +55,12 @@ from .drc_klayout_app import (
 )
 from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
+from .drc_klayout_rdb_values import rdb_item_evidence
+from .drc_klayout_selection import (
+    native_selection,
+    selection_coverage,
+    selection_fields,
+)
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # --------------------------------------------------------------------------- #
@@ -210,16 +219,12 @@ def _parse_klayout_rdb_report(
 
         points_um: list[tuple[float, float]] = []
         polygon_points_um: list[tuple[float, float]] | None = None
-        values_el = item_el.find("values")
-        if values_el is not None:
-            for value_el in values_el.findall("value"):
-                if not value_el.text:
-                    continue
-                value_text = value_el.text
-                value_points = _rdb_value_points_um(value_text)
-                points_um.extend(value_points)
-                if value_text.lstrip().startswith("polygon:") and value_points:
-                    polygon_points_um = value_points
+        values = [el.text for el in item_el.findall("values/value") if el.text]
+        for value_text in values:
+            value_points = _rdb_value_points_um(value_text)
+            points_um.extend(value_points)
+            if value_text.lstrip().startswith("polygon:") and value_points:
+                polygon_points_um = value_points
 
         if points_um:
             xs = [round(x / dbu) for x, _ in points_um]
@@ -250,6 +255,7 @@ def _parse_klayout_rdb_report(
                 "source_path": None,
                 "bbox": bbox,
                 "polygon": polygon,
+                **rdb_item_evidence(values),
             }
         )
         rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
@@ -264,17 +270,6 @@ def _parse_klayout_rdb_report(
         rule_counts,
         sorted(set(rule_categories) | set(rule_counts)),
     )
-
-
-#: KLayout's own error prefix for a deck-script failure, as emitted by
-#: ``klayout -b -r`` (verified against a real 0.28.16 run for issue #1941:
-#: ``ERROR: In <deck>: undefined local variable or method '...'`` followed by
-#: ``ERROR: NameError: ... in Executable::execute``). Anchored at column 0:
-#: the backtrace lines KLayout prints after each ``ERROR:`` line are indented,
-#: and a deck's own rule names/progress output (``Executing rule
-#: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
-#: is what keeps this from misreading ordinary deck output as a failure.
-_KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
 
 
 _SIGNAL_NUMBER_RE = re.compile(r"Signal number:\s*(\d+)")
@@ -296,26 +291,6 @@ def _klayout_crash_signal(returncode: int, output: str) -> str | None:
         return signal.Signals(number).name
     except ValueError:
         return f"signal {number}"
-
-
-def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
-    """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
-    (issue #1941), in order, stdout before stderr.
-
-    ``klayout -b -r`` writes its deck-script diagnostics to one or the other
-    depending on build/platform, so both are scanned. An empty list means
-    KLayout itself reported no error -- not that the deck necessarily ran to
-    completion (see :func:`run_drc_klayout_engine`, which pairs this with the
-    exit status).
-    """
-    lines: list[str] = []
-    for stream in streams:
-        if not stream:
-            continue
-        lines.extend(
-            match.group(0).rstrip() for match in _KLAYOUT_ERROR_LINE_RE.finditer(stream)
-        )
-    return lines
 
 
 _DECK_OUTPUT_WORKDIR_PLACEHOLDER = "<klt-drc-klayout-workdir>"
@@ -358,7 +333,7 @@ def _check_klayout_run(
         # stdout/stderr rather than a bare "no report" message. Not
         # tolerable via allow_deck_errors: there is no partial report to
         # accept here, only nothing at all.
-        output = (completed.stdout or completed.stderr or "").strip()
+        output = "\n".join(filter(None, (completed.stdout, completed.stderr))).strip()
         crash = _klayout_crash_signal(completed.returncode, output)
         if crash is not None:
             # A crash (#3811) is a klayout/deck bug, not a deck script
@@ -513,55 +488,14 @@ _DECK_GLOBAL_IGNORED = frozenset(
     {
         "input", "report", "top_cell",
         "stdout", "stderr", "stdin", "PROGRAM_NAME", "LOAD_PATH",
-        "LOADED_FEATURES", "DEBUG", "VERBOSE", "FILENAME",
+        "LOADED_FEATURES", "DEBUG", "VERBOSE", "FILENAME", "CHILD_STATUS",
     }
 )  # fmt: skip
 
-#: ``if not defined? $x`` / ``unless defined? $x`` opening a default block.
-_DECK_DEFAULT_BLOCK_RE = re.compile(
-    r"^\s*(?:if\s+(?:not|!)\s*defined\?\s*\(?\s*\$(\w+)\s*\)?|"
-    r"unless\s+defined\?\s*\(?\s*\$(\w+)\s*\)?)\s*$"
-)
-#: ``$x = <value> unless defined? $x`` / ``... if not defined? $x``.
-_DECK_DEFAULT_INLINE_RE = re.compile(
-    r"^\s*\$(\w+)\s*=\s*(?P<value>.+?)\s+"
-    r"(?:unless\s+defined\?|if\s+(?:not|!)\s*defined\?)\s*\(?\s*\$(\w+)\s*\)?\s*$"
-)
-_DECK_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*(?:\|\|)?=\s*(?P<value>.+?)\s*$")
-_DECK_OR_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*\|\|=\s*(?P<value>.+?)\s*$")
 
-
-def _ruby_literal(value: str) -> str:
-    """``"false"``/``'3'`` -> ``false``/``3``; anything else is kept verbatim."""
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
-
-
-def _record_deck_default(
-    line: str, guarded: str | None, defaults: dict[str, str | None]
-) -> str | None:
-    """Fold one deck line into ``defaults`` (see :func:`scan_deck_globals`);
-    returns the ``defined?``-guarded global whose block is still open."""
-    block = _DECK_DEFAULT_BLOCK_RE.match(line)
-    if block:
-        guarded = block.group(1) or block.group(2)
-        defaults.setdefault(guarded, None)
-        return guarded
-    inline = _DECK_DEFAULT_INLINE_RE.match(line) or _DECK_OR_ASSIGN_RE.match(line)
-    if inline:
-        defaults.setdefault(inline.group(1), _ruby_literal(inline.group("value")))
-        return guarded
-    assign = _DECK_ASSIGN_RE.match(line)
-    if guarded and assign and assign.group(1) == guarded:
-        if defaults.get(guarded) is None:
-            defaults[guarded] = _ruby_literal(assign.group("value"))
-        return None
-    return guarded
-
-
-def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
+def scan_deck_globals(
+    deck_file: str, extra_ignored: Iterable[str] = (), *, runset_idioms: bool = False
+) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
     consumes (issue #3816), following literal Ruby and ``# %include``
     includes as :func:`_deck_script_files` does.
@@ -572,6 +506,8 @@ def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     with that assignment's literal as ``default``; every other ``$name``
     mentioned outside a comment is ``required_by_caller: True`` with
     ``default: None``. See :data:`_DECK_GLOBAL_IGNORED` for what is skipped.
+    ``extra_ignored`` names more; ``runset_idioms`` (LVS runsets, issue #5827)
+    adds the ``<helper>?($x)`` and ``$x || '<literal>'`` defaults (DRC: off).
 
     A heuristic, not a Ruby parser: a missing entry is not proof the deck
     ignores a variable, and an unreadable file contributes nothing.
@@ -588,9 +524,12 @@ def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
         for line in lines:
             if line.lstrip().startswith("#"):
                 continue
-            guarded = _record_deck_default(line, guarded, defaults)
+            guarded = _record_deck_default(
+                line, guarded, defaults, runset_idioms=runset_idioms
+            )
             seen.update(_DECK_GLOBAL_RE.findall(line))
-    names = {n for n in seen | set(defaults) if n not in _DECK_GLOBAL_IGNORED}
+    ignored = _DECK_GLOBAL_IGNORED | frozenset(extra_ignored)
+    names = {n for n in seen | set(defaults) if n not in ignored}
     # A name only ever assigned (never read, never default-guarded) is deck
     # internal state, not an input; but we cannot tell reads from writes
     # line-wise beyond the default forms, so every mentioned name is listed.
@@ -990,6 +929,7 @@ def _klayout_engine_coverage(
     unchecked_rules: list[dict[str, str]] | None = None,
     unmodeled_rules: list[str] | None = None,
     isolation_only_rules: list[dict[str, str]] | None = None,
+    selection: dict | None = None,
 ) -> dict[str, Any]:
     """The klayout engine's ``coverage`` block. Categories are declarations,
     not execution instrumentation, unless the caller's satisfied
@@ -1026,7 +966,11 @@ def _klayout_engine_coverage(
         "deck_scope": [],
         "unmodeled_rules": unmodeled_rules or [],
         "isolation_only_rules": isolation_only_rules or [],
-        **build_check_coverage(checked=checked, unknown=unknown),
+        **build_check_coverage(
+            checked=checked,
+            skipped=selection_coverage(selection, unknown),
+            unknown=unknown,
+        ),
     }
 
 
@@ -1502,9 +1446,21 @@ def run_drc_klayout_engine(
             timeout_s=timeout_s,
         )
 
-        error_lines, deck_errored = _check_klayout_run(
-            completed, report_path, allow_deck_errors=allow_deck_errors
+        selection = native_selection(
+            klayout_exe, deck_file, deck_vars, completed, work_dir, timeout_s
         )
+        try:
+            error_lines, deck_errored = _check_klayout_run(
+                completed, report_path, allow_deck_errors=allow_deck_errors
+            )
+        except DrcError as exc:
+            if selection is not None:
+                envelope = vars(exc)
+                details = envelope.get("details") or deck_abort_info(
+                    completed.stdout, completed.stderr
+                )
+                envelope["details"] = {**details, "deck_selection": selection}
+            raise
 
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
@@ -1543,6 +1499,7 @@ def run_drc_klayout_engine(
         _packaged_asap7_unchecked_rules(deck_file, layout),
         _unmodeled_rules_for_deck(deck_file),
         _packaged_asap7_isolation_only_rules(deck_file, layout),
+        selection,
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
@@ -1578,6 +1535,7 @@ def run_drc_klayout_engine(
                     "exit_status": completed.returncode,
                     "error_lines": error_lines,
                     **deck_abort_info(completed.stdout, completed.stderr, error_lines),
+                    **({"deck_selection": selection} if selection else {}),
                 }
             }
             if deck_errored
@@ -1588,6 +1546,7 @@ def run_drc_klayout_engine(
         # deck errors included) -- bounded, work-dir-scrubbed, and never a
         # status upgrade. See `_klayout_deck_output`.
         "deck_output": deck_output,
+        **selection_fields(selection),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": violation_count,

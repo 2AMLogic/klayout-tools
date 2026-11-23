@@ -38,6 +38,7 @@ from typing import Any
 
 from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: Keys a ``stress`` object may carry. Anything else is refused by name.
 _ALLOWED_KEYS = frozenset({"a", "b", "from", "to"})
@@ -244,8 +245,6 @@ def extract_corner_stress(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StressOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["stress"]
     name = spec["name"]
     if not os.path.isfile(raw_path):

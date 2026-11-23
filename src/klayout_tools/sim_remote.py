@@ -64,6 +64,8 @@ from typing import TYPE_CHECKING, Any
 
 from . import remote_fleet, remote_transport, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
+from .sim_echo_checks import check_ngspice_options_echo
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim import CornerPoint, RemoteLauncher, _Checkpoint
@@ -108,8 +110,6 @@ def _shard_corner_points(
     trailing shards are simply empty lists; :func:`_run_sharded` never calls
     the shard runner for an empty shard.
     """
-    from .sim import SimError
-
     if hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
     total = len(corner_points)
@@ -503,7 +503,7 @@ def _run_remote(
     *this* process's own host, which is not a representative sample of the
     provisioned remote box's hardware.
     """
-    from .sim import RemoteLauncher, SimError
+    from .sim import RemoteLauncher
 
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, checkpoint, probe_abort  # not yet honored
@@ -728,8 +728,6 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
-    from .sim import check_ngspice_options_echo
-
     check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
@@ -855,7 +853,7 @@ def _run_remote_fleet(
     nothing) -- an idle fleet member is still billed, so there is no benign
     reading of "more hosts than units" here.
     """
-    from .sim import SimError, _shard_corner_points
+    from .sim import _shard_corner_points
 
     if hosts > len(corner_points):
         raise SimError(
@@ -1132,15 +1130,15 @@ def _rewrite_remote_artifact_paths(
     filesystem (where the pulled report JSON was generated) to the local
     path :func:`remote_transport.pull_artifacts` just copied them to.
 
-    The response's ``artifacts`` block always describes paths on the machine
-    the caller is running on -- ``local``/``local-parallel``/``remote``
-    alike -- so a raw remote path would be meaningless (and unreadable) to a
-    caller inspecting the returned report.
+    The response's ``artifacts`` block always describes paths on the caller's
+    own machine (local, local-parallel and remote alike), so a raw remote
+    path would be meaningless there. Only path-valued entries are rewritten;
+    non-path metadata (``raw_bytes``, issue #5622) passes through untouched.
     """
     for corner in corners:
         artifacts = corner.get("artifacts") or {}
         for key, value in list(artifacts.items()):
-            if not value:
+            if not isinstance(value, str) or not value:
                 continue
             relative = os.path.relpath(value, remote_root)
             artifacts[key] = os.path.join(local_root, relative)

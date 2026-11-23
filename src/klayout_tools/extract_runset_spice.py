@@ -42,6 +42,7 @@ disclosed, and a netlist that drops nothing carries no disclosure at all.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Mapping
 from typing import Any
@@ -229,6 +230,53 @@ def _netlist_description(
     return description
 
 
+def _prepare_merged_node_names(circuit: Any) -> list[dict[str, Any]]:
+    """Give the SPICE writer and the appended R/C cards one node namespace.
+
+    KLayout prints a comma as a pipe but escapes a literal pipe. Dots in
+    reports become underscores. Resolve these differences on the actual nets
+    before writing and reserve names case-insensitively, including duplicates.
+    The saved LVS database keeps the original labels and cluster IDs.
+    """
+    from .extract_parasitics import spice_safe_net_name
+
+    candidates = []
+    for net in circuit.each_net():
+        raw = net.expanded_name()
+        candidate = re.sub(
+            r"[^a-zA-Z0-9_$,]",
+            lambda match: f"_{ord(match[0]):x}_",
+            raw.replace(".", "_").replace("|", ","),
+        )
+        if candidate.startswith(","):
+            candidate = "n_" + candidate
+        candidates.append((net, raw, candidate))
+    # An existing spelling has priority over a label that normalizes onto it.
+    candidates.sort(key=lambda row: (row[1] != row[2], row[0].cluster_id))
+    reserved = {candidate.casefold() for _, _, candidate in candidates}
+    used = set()
+    aliases = []
+    for net, raw, candidate in candidates:
+        node = candidate
+        if candidate.casefold() in used:
+            suffix = 1
+            while f"{candidate}_{suffix}".casefold() in reserved:
+                suffix += 1
+            node = f"{candidate}_{suffix}"
+            reserved.add(node.casefold())
+        used.add(node.casefold())
+        if node != raw:
+            net.name = node
+            aliases.append(
+                {
+                    "runset_cluster_id": net.cluster_id,
+                    "original": raw,
+                    "node": spice_safe_net_name(node),
+                }
+            )
+    return aliases
+
+
 def _write_netlist(
     *,
     netlist: Any,
@@ -246,6 +294,7 @@ def _write_netlist(
     import klayout.db as kdb
 
     from .extract import _finish_netlist_write, _resolve_netlist_target
+    from .extract_netlist_write import write_spice_netlist
     from .extract_progress import stage
 
     netlist_path, scratch_dir = _resolve_netlist_target(path, output, no_netlist)
@@ -256,7 +305,7 @@ def _write_netlist(
     description = _netlist_description(deck_basename, uncarried, bool(device_params))
     try:
         with stage("netlist_write"):
-            netlist.write(netlist_path, writer, description)
+            write_spice_netlist(netlist, netlist_path, writer, description)
     except Exception as exc:  # one error envelope
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)

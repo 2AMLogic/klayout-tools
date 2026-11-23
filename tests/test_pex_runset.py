@@ -183,6 +183,10 @@ REFUSED_BY_NAME = [
     ({"distributed_rc": True}, "--distributed-rc"),
     ({"resistance_graph": True}, "--resistance-graph"),
     ({"resistance_graph_r_cut_ohm": 1.0}, "--resistance-graph-r-cut"),
+    (
+        {"resistance_graph": True, "resistance_graph_caps": {"max_cells": 8}},
+        "--resistance-graph-max-cells",
+    ),
     ({"parasitic_variants": ["no-coupling"]}, "--parasitic-variant"),
     ({"substrate_tie_ohms": 5.0}, "--substrate-tie-ohms"),
     ({"mom_rlc_net": "n1"}, "--mom-rlc-net"),
@@ -207,11 +211,52 @@ def test_parasitic_only_option_is_refused_by_name(tmp_path, fake_klayout, kwargs
     assert "cmd" not in fake_klayout
 
 
-def test_curated_deck_name_is_refused_by_name_under_the_runset_engine(
+def test_curated_deck_under_the_runset_engine_is_the_merged_route(
     tmp_path, fake_klayout
 ):
-    with pytest.raises(PexError, match=r"cannot honour --deck\b"):
-        _extract_only(tmp_path, deck="sky130")
+    """Issue #6606: `--deck` under the runset engine is no longer refused --
+    it runs the curated leg and reports the correspondence. On this sky130-
+    invisible fixture (arbitrary layer numbers, no labels) nothing can
+    match, which the envelope states rather than guessing: no cards, so the
+    leg still carries no parasitics, and every runset net is listed
+    unmatched -- never silently dropped."""
+    report = _extract_only(tmp_path, deck="sky130")
+
+    extraction = report["extraction"]
+    assert extraction["deck"] == "sky130"
+    assert extraction["parasitics_carried"] is False
+    correspondence = extraction["net_correspondence"]
+    assert correspondence["deck"] == "sky130"
+    assert correspondence["attached_card_count"] == 0
+    assert correspondence["matched"] == []
+    assert correspondence["unmatched_runset_nets"]  # the fixture's \$N nets
+    assert correspondence["disagreements"] == []
+    # A leg nothing attached keeps its own honest header line.
+    text = open(str(tmp_path / "out.spice")).read()
+    assert "no parasitics: this engine extracts devices and connectivity" in text
+    assert "parasitics attached" not in text
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"pdk_variant": "sky130A"}, "--pdk"),
+        ({"pdk_root": "/nonexistent"}, "--pdk-root"),
+        ({"deck_options": {"poly_res": "2k"}}, "--deck-option"),
+        ({"critical_nets": ["n1"]}, "--critical-net"),
+    ],
+)
+def test_merged_route_refuses_what_the_docs_say_it_refuses(
+    tmp_path, fake_klayout, kwargs, flag
+):
+    """Issue #6606: `docs/cli/pex.md` promises the refusals hold "under the
+    merged route too" -- `--pdk`/`--pdk-root` included. The merged branch
+    builds its refusal dict by hand, so a key missing there is a flag silently
+    dropped (the curated leg would run at the default PDK resolution)."""
+    with pytest.raises(PexError, match=rf"cannot honour .*{flag}\b"):
+        _extract_only(tmp_path, deck="sky130", **kwargs)
+    # Refused before either extraction launched.
+    assert "cmd" not in fake_klayout
 
 
 def test_every_refusal_is_named_at_once(tmp_path, fake_klayout):
