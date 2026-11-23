@@ -112,12 +112,11 @@ def _corner_sweep_script_lines(
     ``report_worst_slack_metric -setup``/``-hold`` (run here for the first
     and only time in this session, so no scoping concern applies) writes
     this invocation's own ``-metrics`` dump's ``timing__setup__ws``/
-    ``timing__hold__ws`` keys -- automatically the worst value across every
-    corner :func:`klayout_tools.pdk.list_lib_corners` enumerated (confirmed
-    live: setup slack worst-cases at the slowest loaded corner, hold slack
-    at the fastest, exactly the industrial "setup at slow PVT, hold at fast
-    PVT" convention this survey's section 3.3 describes -- no manual
-    slow/fast corner classification needed in Python).
+    ``timing__hold__ws`` keys. Each is the worst slack across the loaded
+    ``corners``. The route stage uses descriptor keys for mapped libraries
+    and :func:`klayout_tools.pdk_cells.list_lib_corners` for conventional
+    discovery. A requested ``pdk.sweep_corners`` subset limits both metrics.
+    OpenROAD selects the worst setup and hold corners independently.
 
     ``report_tns_metric -setup``/``-hold`` (issue #1866) rides alongside the
     two ``report_worst_slack_metric`` calls above, in the same session and
