@@ -240,6 +240,20 @@ def assess_remote_runner_features(
     )
 
 
+# Development builds can share a release segment while accepting different request
+# fields. Have the worker's own CLI validate a self-contained deck before launch.
+_CROSSINGS_VALUE_FROM_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/deck.spice" "$probe/probe.json"; rmdir "$probe"' EXIT
+    echo 'V1 out 0 1' > "$probe/deck.spice" || exit 1
+    cat > "$probe/probe.json" <<'KLT_CROSSINGS_PROBE' || exit 1
+{"netlist":"deck.spice","analysis":{"kind":"tran","args":"1n 4n"},
+ "measurements":[{"name":"period","crossings":{"signal":"v(out)","level":0.5,
+ "value_from":"period.mean"}}]}
+KLT_CROSSINGS_PROBE
+    klt sim "$probe/probe.json" --backend local --dry-run --format json
+)"""
+
 # The first supported release segment also identifies development images built
 # before phase selection and stepped eyes. Exercise the installed worker CLI.
 _EYE_STEP_PROBE = """(
@@ -283,6 +297,7 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         for name in features
     )
     for name, probe in (
+        ("crossings_value_from", _CROSSINGS_VALUE_FROM_PROBE),
         ("eye_step_or_phase", _EYE_STEP_PROBE),
         ("osdi_pdk_relative", _OSDI_PDK_PROBE),
     ):
