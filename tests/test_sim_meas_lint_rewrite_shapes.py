@@ -324,6 +324,13 @@ def test_control_suggestion_keeps_signs_in_names_and_exponents():
         ("v(a)-v(b) * ++v(a)", -3),
         ("v(a)-v(b) * +-v(a)", 9),
         ("v(a)-v(b) * -+v(a)", 9),
+        ("max(v(a), +-v(b))", 3),
+        ("abs(+-v(a))*v(b)", 6),
+        ("+-v(a)*v(b)", -6),
+        ("v(a)*(+-v(b))", -6),
+        ("--v(a)*v(b)", 6),
+        ("v(a)*(++v(b))", 6),
+        ("max(+ - v(a), - - v(b))", 2),
     ],
 )
 def test_engine_agrees_with_file_and_control_suggestions(tmp_path, expr, expected):

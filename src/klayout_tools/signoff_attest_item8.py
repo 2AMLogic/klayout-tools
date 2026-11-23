@@ -1,4 +1,4 @@
-"""Item 8 (characterization report) envelope handling (issues #5688, #6939).
+"""Item 8 (characterization report) envelope handling (issues #5688, #6939, #7259).
 
 Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Item 8
 documents ``citations`` as paths to *evidence envelopes*, so each cited file is
@@ -22,6 +22,15 @@ period, so the frozen :mod:`signoff_attest` module stays at its size
 baseline: ``AttestationError`` and the repo-path normalizer arrive as
 callables, the way :mod:`signoff_attest_pins` takes its helpers (it cannot
 import :mod:`signoff_attest` -- that module imports this).
+
+Issue #7259 adds the declared gap: ``unmeasured_metrics`` names, per
+``{corner, metric, reason}``, a required metric nobody measured, so a
+partial characterization binds what it did measure instead of choosing
+between a red attestation and a metrics-free green one that binds nothing.
+The pair's slot in the check list holds a passing ``unmeasured_metric``
+disclosure in place of the ``metric`` check that would have failed -- item
+9's ``unbenched_rows`` is the precedent. The item's key allowlist lives here
+too (:data:`ITEM8_KEYS`), the way item 9's lives in its module.
 """
 
 from __future__ import annotations
@@ -39,6 +48,23 @@ from .signoff import (
 )
 from .signoff_attest_pins import json_node
 from .signoff_drc_crosscheck import crosscheck_project
+
+#: Item 8's accepted inventory keys (``signoff_attest._ITEM_KEYS[8]``).
+ITEM8_KEYS = frozenset(
+    {
+        "report",
+        "spec_rows",
+        "citations",
+        "envelope_checks",
+        "external_records",
+        "corners",
+        "metrics",
+        "unmeasured_metrics",
+    }
+)
+
+#: The keys one ``unmeasured_metrics`` entry carries, and no others.
+_UNMEASURED_KEYS = frozenset({"corner", "metric", "reason"})
 
 #: A metric-binding transform: ``value = scale / raw``, so a record carrying
 #: a minimum period binds the frequency metric (ns -> MHz with ``scale`` of
@@ -200,6 +226,71 @@ def validated_metrics(
     return list(corners), metrics
 
 
+def validated_unmeasured_metrics(
+    inventory: Mapping[str, Any],
+    corners: Sequence[str],
+    metrics: Mapping[str, Mapping[str, Any]],
+    error: Callable[[str], Exception],
+    required_metrics: Sequence[str],
+) -> dict[tuple[str, str], str]:
+    """Item 8's optional ``unmeasured_metrics`` (issue #7259), as the
+    ``(corner, metric) -> reason`` lookup :func:`metric_checks` consults:
+    ``[{corner, metric, reason}]``, each naming one declared corner and one
+    required metric that has **no** binding. The list belongs to the digital
+    block -- declaring it without ``corners``/``metrics`` is refused, there
+    being no corner set to check names against -- and so is a pair
+    ``metrics`` also binds: measured and unmeasured is a contradiction, not
+    a choice for klt. A duplicate pair, an unknown key or name, and a blank
+    reason are a malformed inventory like any other."""
+    raw = inventory.get("unmeasured_metrics")
+    if raw is None:
+        return {}
+    if not corners:
+        raise error(
+            "'unmeasured_metrics' declares a gap in a digital partition's "
+            "corner block -- declare 'corners' and 'metrics' too"
+        )
+    if not isinstance(raw, list):
+        raise error("'unmeasured_metrics' must be a list of {corner, metric, reason}")
+    declared: dict[tuple[str, str], str] = {}
+    for index, entry in enumerate(raw):
+        field = f"unmeasured_metrics[{index}]"
+        corner, name, reason = _unmeasured_entry(
+            field, entry, corners, required_metrics, error
+        )
+        if name in metrics.get(corner, {}):
+            raise error(
+                f"'{field}' declares {corner}/{name} unmeasured, but 'metrics' "
+                "binds it -- a pair is measured or unmeasured, not both"
+            )
+        if (corner, name) in declared:
+            raise error(
+                f"unmeasured metric '{corner}/{name}' is declared more than once"
+            )
+        declared[(corner, name)] = reason
+    return declared
+
+
+def _unmeasured_entry(
+    field: str,
+    entry: Any,
+    corners: Sequence[str],
+    required_metrics: Sequence[str],
+    error: Callable[[str], Exception],
+) -> tuple[str, str, str]:
+    """``(corner, metric, reason)`` of one well-formed declaration."""
+    if not isinstance(entry, Mapping) or set(entry) != _UNMEASURED_KEYS:
+        raise error(f"'{field}' must be an object with 'corner', 'metric' and 'reason'")
+    corner, name, reason = entry["corner"], entry["metric"], entry["reason"]
+    if not isinstance(corner, str) or corner not in corners:
+        raise error(f"'{field}.corner' must be one of 'corners': {', '.join(corners)}")
+    if not isinstance(name, str) or name not in required_metrics:
+        raise error(f"'{field}.metric' must be one of: {', '.join(required_metrics)}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise error(f"'{field}.reason' must be a non-empty string")
+    return corner, name, reason
+
+
 def _validated_corner_metrics(
     corner: str,
     bound: Any,
@@ -297,10 +388,25 @@ def metric_checks(
     path -- or whose named field is not consumable -- fails its check. A
     transformed binding's check additively records ``raw_value``,
     ``transform`` and ``scale`` (issue #6939); an untransformed one is
-    byte-identical to before."""
+    byte-identical to before. A pair declared in ``unmeasured_metrics``
+    (issue #7259) holds its slot with a passing ``unmeasured_metric``
+    disclosure -- corner, metric and reason, no value -- instead."""
     checks: list[dict[str, Any]] = []
+    unmeasured = normalized["unmeasured_metrics"]
     for corner in sorted(normalized["corners"]):
         for name in required_metrics:
+            if (corner, name) in unmeasured:
+                checks.append(
+                    {
+                        "check": "unmeasured_metric",
+                        "role": "digital",
+                        "corner": corner,
+                        "metric": name,
+                        "reason": unmeasured[(corner, name)],
+                        "passed": True,
+                    }
+                )
+                continue
             binding = normalized["metrics"].get(corner, {}).get(name)
             value: Any = None
             raw: Any = None

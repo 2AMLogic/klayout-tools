@@ -82,6 +82,12 @@ def validate_dc_context(
                 f"measurement '{name}': crossings.reduce is a time-series "
                 "reduction and is not supported on a dc sweep -- drop it"
             )
+        if body.get("value_from") is not None:
+            raise SimError(
+                f"measurement '{name}': crossings.value_from grades a "
+                "time-series reduction and is not supported on a dc sweep "
+                "-- drop it (the first crossing abscissa is the value)"
+            )
         level = body.get("level")
         if bounds is None or not isinstance(level, dict) or "sample_at" not in level:
             continue

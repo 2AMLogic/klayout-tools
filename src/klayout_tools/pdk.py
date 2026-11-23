@@ -110,6 +110,7 @@ from .pdk_compat import (
 from .pdk_corner_skew import (
     _flavour_devices,
     _gf180mcu_flavour_tokens,
+    _local_sub_library_bodies,
     _param_lines,
 )
 from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
@@ -2289,8 +2290,7 @@ def _parse_named_lib_blocks(text: str) -> dict[str, str]:
 def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
     """Scan gf180mcu's golden model deck for its per-family corner sections.
 
-    See :func:`list_corners` for the overall algorithm and its documented
-    granularity limits.
+    See :func:`list_corners` for the algorithm and its granularity limits.
     """
     text = _read_text(model_path)
     if text is None:
@@ -2337,7 +2337,7 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
                     flavours,
                     typical_flavours,
                     corner == "typical",
-                    blocks=blocks,
+                    blocks=_local_sub_library_bodies(model_path, blocks, tokens),
                     params=params,
                     typical_params=typical_params.get(family, frozenset()),
                 )
