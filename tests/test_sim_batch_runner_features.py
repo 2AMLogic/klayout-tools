@@ -356,3 +356,69 @@ def test_crossings_preflight_checks_the_worker_parser(
     if not accepts_selector:
         assert "crossings_value_from" in result.stderr
     assert not list(tmp_path.glob("*/probe.json"))
+
+
+@pytest.mark.parametrize(
+    "feature", ["crossings_value_from", "eye_step_or_phase", "osdi_pdk_relative"]
+)
+@pytest.mark.parametrize("supported", [True, False], ids=["accept", "refuse"])
+def test_same_release_runner_probes_the_requested_sim_feature(
+    tmp_path, feature, supported
+):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _mandatory_feature_probe_shell,
+    )
+
+    # Validate the files inside the stub, while the generated shell's temporary
+    # directory still exists. Record validation separately from the chosen exit
+    # status so a broken fixture cannot masquerade as a deliberate refusal.
+    worker = tmp_path / "klt"
+    worker.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+assert sys.argv[1] == "sim"
+assert sys.argv[3:] == ["--backend", "local", "--dry-run", "--format", "json"]
+request = Path(sys.argv[2])
+doc = json.loads(request.read_text())
+assert (request.parent / doc["netlist"]).read_text().strip()
+feature = os.environ["PROBE_FEATURE"]
+if feature == "crossings_value_from":
+    assert doc["measurements"][0]["crossings"]["value_from"] == "period.mean"
+elif feature == "eye_step_or_phase":
+    assert doc["analysis_steps"][0]["measurements"][0]["eye"]["phase"] == "500p"
+elif feature == "osdi_pdk_relative":
+    preload, = doc["options"]["osdi_preload"]
+    relative = Path(preload["pdk_relative"])
+    assert not relative.is_absolute()
+    models = doc["models"]
+    assert (request.parent / models["pdk_root"] / models["pdk"] / relative).is_file()
+else:
+    raise AssertionError(feature)
+with Path(os.environ["PROBE_LOG"]).open("a") as log:
+    print(feature, file=log)
+sys.exit(int(os.environ["PROBE_EXIT"]))
+"""
+    )
+    worker.chmod(0o755)
+    log = tmp_path / "validated"
+    shell = "rv=0.9.3.dev10; " + _mandatory_feature_probe_shell((feature,))
+    proc = subprocess.run(
+        ["bash", "-c", shell + 'printf "%s" "$mmiss"'],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PROBE_FEATURE": feature,
+            "PROBE_LOG": str(log),
+            "PROBE_EXIT": "0" if supported else "1",
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert log.read_text().splitlines() == [feature]
+    assert proc.stdout == ("" if supported else feature)

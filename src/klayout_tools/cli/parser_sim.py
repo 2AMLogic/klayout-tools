@@ -132,6 +132,25 @@ def add_sim_parser(
         ),
     )
     sim_parser.add_argument(
+        "--cancel",
+        dest="cancel",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "cancel one batch job by id through 2am's "
+            "batch-fleet-provision.sh cancel --apply: its pending/running "
+            "fleet instances are terminated and the job's status.json "
+            "reports cancelled, while its S3 prefix and partial results "
+            "are left in place (issue #4351). The positional request, "
+            "when given, supplies the bucket/region/profile; without one "
+            "they resolve from the KLT_BATCH_* environment and the fleet "
+            "batch-fleet.env. The bucket and jobs prefix must match that "
+            "file. --dry-run conflicts with --cancel. A job with nothing "
+            "live to terminate fails with error.code "
+            "batch_cancel_nothing_to_cancel. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "-o",
         "--outdir",
         default=None,

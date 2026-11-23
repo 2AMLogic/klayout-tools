@@ -87,12 +87,16 @@ def status_marker(status: str, palette: Palette) -> tuple[str, str]:
 
 
 def _print_composed_from(item: dict) -> None:
-    """The sub-block evidence behind a ``met_by_composition`` row (issue
-    #6927): each sub-block, the manifest it was read from (``<inline>``
-    for an inline object) and the content hash of the evidence its own
-    report item cited -- so staleness stays visible in the committed
-    artifact, exactly as a ``cite:`` line does for a direct citation."""
-    for entry in item.get("composed_from") or []:
+    """Print the sub-block evidence for a composed or partly composed row."""
+    if item["status"] == STATUS_MET_BY_COMPOSITION:
+        label = "composed from"
+        entries = item.get("composed_from") or []
+    elif item["status"] == "unmet":
+        label = "sub-block"
+        entries = (item.get("detail") or {}).get("composition", [])
+    else:
+        return
+    for entry in entries:
         source = entry["source"] if entry["source"] is not None else "<inline>"
         note = (
             f", content_hash={entry['content_hash']}"
@@ -100,7 +104,7 @@ def _print_composed_from(item: dict) -> None:
             else ""
         )
         print(
-            f"        composed from: {entry['block']} "
+            f"        {label}: {entry['block']} "
             f"(source={source}, status={entry['status']}{note})"
         )
 
@@ -145,6 +149,37 @@ def _print_justified_gaps(item: dict) -> None:
                 f"          finding: {FINDING_JUSTIFIED_GAP_WITHOUT_ISSUE_LINK} "
                 "-- no issue names what would close this gap"
             )
+
+
+def _print_partition_boundary(result: dict) -> None:
+    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
+    #2278) under the `block:`/`kind:` header, or nothing when it declared
+    none.
+
+    Printed **once per declared partition**, not on each of that partition's
+    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
+    beside the citation they qualify), the boundary is one constant statement
+    per partition, and restating it eleven times would bury the checklist it
+    qualifies. The JSON carries it per row as well, where a consumer
+    filtering `.items[]` needs each row to be self-contained.
+
+    Absent entirely when nothing was declared -- "no statement" must not read
+    as "the partitions were defined" -- exactly as an undeclared boundary is
+    absent from the JSON rather than rendered `null`.
+    """
+    boundary = result.get("partition_boundary") or {}
+    if not boundary:
+        return
+    print("partition boundary:")
+    for partition, text in boundary.items():
+        print(f"  {partition}: {text}")
+
+
+def print_upstream_source(result: dict, label: str) -> None:
+    """Print the manifest's upstream repository and commit when declared."""
+    upstream = result.get("upstream_source")
+    if upstream:
+        print(f"{label}: {upstream['repository']} @ {upstream['commit']}")
 
 
 def _print_structural_rows(item: dict) -> None:
