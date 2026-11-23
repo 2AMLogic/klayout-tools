@@ -74,6 +74,12 @@ A run that generates `driver.spice`, `a.spice`, and `b.spice` reports
 describe xschem's original bytes. No provenance header or port rewrite is
 applied. Other files already in the destination stay in place.
 
+Directory export checks every delivered deck for unresolved symbols and
+unevaluated `expr(...)` before replacing any destination file. A child error
+identifies its filename and line. With `--allow-unevaluated-expr`, the
+warning for a child includes its basename in `file` and its bytes are
+preserved. Unresolved symbols still prevent publication.
+
 With `--output FILE`, local generation still post-processes the top-level
 netlist. If xschem also writes split siblings, the `split_netlists_omitted`
 warning lists their basenames in `files` and echoes them to stderr.

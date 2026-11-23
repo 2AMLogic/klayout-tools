@@ -935,12 +935,15 @@ def run_netlist(
             )
 
         version = _probe_xschem_version(xschem_binary)
-        warnings = _unevaluated_expr_warnings(
-            fresh_data, version, allow_unevaluated_expr
-        )
+
+        def check_content(data: bytes) -> list[dict[str, Any]]:
+            result = _unevaluated_expr_warnings(data, version, allow_unevaluated_expr)
+            _check_no_unresolved_symbol(data, rcfile, exported_pdk_env)
+            return result
+
+        warnings = check_content(fresh_data)
         if pdk_block is not None and pdk_block["unestablished_warning"] is not None:
             warnings.append(pdk_block["unestablished_warning"])
-        _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -969,13 +972,12 @@ def run_netlist(
             payload["block"] = block_info
         if siblings and output_dir is None and not check:
             warnings.append(split_warning(siblings))
-        if warnings:
-            payload["warnings"] = warnings
 
         if output_dir is not None:
-            names = publish_split_netlists(
-                work_dir, output_dir, top, fresh_data, siblings
+            names, sibling_warnings = publish_split_netlists(
+                work_dir, output_dir, top, fresh_data, siblings, check_content
             )
+            warnings.extend(sibling_warnings)
             payload.update(
                 status=STATUS_GENERATED,
                 produced_files=names,
@@ -983,27 +985,29 @@ def run_netlist(
                 canonical_wrap=False,
                 netlist=_netlist_block(output, fresh_data),
             )
-            return payload
-
-        inputs = generation_inputs(version, rcfile, pdk_block)
-        written_data = inputs_record_line(inputs, provenance_header) + fresh_data
-        if check:
-            status, drift = _check_result(
-                output,
-                fresh_data,
-                ignore_comments,
-                xschem_version=version,
-                inputs=inputs,
-                sibling_symbol=_sibling_symbol(schematic) if block else None,
-            )
-            nb = _netlist_block(None, written_data)
-            payload.update(status=status, netlist=nb, drift=drift)
-            return payload
-
-        _write_output(output, written_data)
-        payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
-        payload["canonical_wrap"] = canonical_wrap
-        payload["netlist"] = _netlist_block(output, written_data)
+        else:
+            inputs = generation_inputs(version, rcfile, pdk_block)
+            written_data = inputs_record_line(inputs, provenance_header) + fresh_data
+            if check:
+                status, drift = _check_result(
+                    output,
+                    fresh_data,
+                    ignore_comments,
+                    xschem_version=version,
+                    inputs=inputs,
+                    sibling_symbol=_sibling_symbol(schematic) if block else None,
+                )
+                nb = _netlist_block(None, written_data)
+                payload.update(status=status, netlist=nb, drift=drift)
+            else:
+                _write_output(output, written_data)
+                payload.update(
+                    status=STATUS_GENERATED, provenance_header=provenance_header
+                )
+                payload["canonical_wrap"] = canonical_wrap
+                payload["netlist"] = _netlist_block(output, written_data)
+        if warnings:
+            payload["warnings"] = warnings
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

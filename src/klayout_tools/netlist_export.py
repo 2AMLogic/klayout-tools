@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -147,11 +148,29 @@ def split_warning(siblings: list[str]) -> dict[str, Any]:
     }
 
 
+def _stage_sibling(
+    source: Path, incoming: Path, check_content: Callable[[bytes], list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    data = source.read_bytes()
+    try:
+        warnings = check_content(data)
+    except NetlistError as exc:
+        raise NetlistError(f"{source.name}: {exc}", code=exc.code) from exc
+    (incoming / source.name).write_bytes(data)
+    return [{**warning, "file": source.name} for warning in warnings]
+
+
 def publish_split_netlists(
-    work_dir: str, output_dir: str, top: str, top_data: bytes, siblings: list[str]
-) -> list[str]:
+    work_dir: str,
+    output_dir: str,
+    top: str,
+    top_data: bytes,
+    siblings: list[str],
+    check_content: Callable[[bytes], list[dict[str, Any]]],
+) -> tuple[list[str], list[dict[str, Any]]]:
     """Stage every file before publishing and restore prior outputs on write failure."""
     names = sorted([top, *siblings])
+    warnings: list[dict[str, Any]] = []
     destination = Path(output_dir)
     try:
         with hold_output_dir(destination):
@@ -164,7 +183,9 @@ def publish_split_netlists(
                 backup.mkdir()
                 (incoming / top).write_bytes(top_data)
                 for name in siblings:
-                    shutil.copyfile(Path(work_dir) / name, incoming / name)
+                    warnings.extend(
+                        _stage_sibling(Path(work_dir) / name, incoming, check_content)
+                    )
                 for name in names:
                     target = destination / name
                     if target.is_symlink() or target.exists() and not target.is_file():
@@ -174,11 +195,15 @@ def publish_split_netlists(
                     if target.exists():
                         shutil.copy2(target, backup / name)
                 _replace_staged(incoming, backup, destination, names)
-    except (OSError, OutputLockError) as exc:
+    except OutputLockError as exc:
+        raise NetlistError(
+            f"could not publish netlists to {output_dir}: {exc}", code=exc.code
+        ) from exc
+    except OSError as exc:
         raise NetlistError(
             f"could not publish netlists to {output_dir}: {exc}"
         ) from exc
-    return names
+    return names, warnings
 
 
 def _replace_staged(

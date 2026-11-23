@@ -138,8 +138,10 @@ def run(args: argparse.Namespace) -> int:
         if entry["code"] in (PDK_VARIANT_UNESTABLISHED_CODE, "split_netlists_omitted"):
             _warn(entry["message"])
             continue
+        source = f"{entry['file']}: " if "file" in entry else ""
         _warn(
-            f"unevaluated expr(...) at line {entry['line']}: {entry['snippet']!r} "
+            f"{source}unevaluated expr(...) at line {entry['line']}: "
+            f"{entry['snippet']!r} "
             f"(xschem version: {entry['xschem_version'] or 'unknown'}); "
             "written anyway because --allow-unevaluated-expr was given"
         )
