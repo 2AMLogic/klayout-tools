@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_base import CONTACT_SIZE_UM
 from .gen_layer_tables import (
     CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
 )
+from .gen_snap import _GRID_DBU_UM, _snap_square_box_um
 
 Box = tuple[float, float, float, float]
 
@@ -41,8 +43,6 @@ def _cap_stack_layout(
     ``par`` is the :func:`~klayout_tools.gen._cap_parallel_layout` result for
     the same bank; ``geom`` is the family's
     :data:`~klayout_tools.gen_layer_tables._PDK_CAP_STACK_GEOMETRY_UM` entry."""
-    from .gen import _GRID_DBU_UM, CONTACT_SIZE_UM, _snap_square_box_um
-
     via4 = geom["cap2_via_side_um"]
     enc = geom["cap2_metal_via_enclosure_um"]
     pad_side = max(geom["cap2_metal_min_w_um"], via4 + 2 * enc)
