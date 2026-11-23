@@ -1584,6 +1584,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   or read its full report path from `requests[].report` in the completed
   aggregate envelope. When `-o` is relative, resolve these paths from the
   directory where the batch-set command ran.
+
+  A member refused with `not_launched` after it received a job ID also
+  records `requests[].expected_report`. This path may become readable after
+  a later collection. Before using it, match the file’s remote job ID or
+  fleet job IDs to that member’s `job_ids`. The original refusal keeps
+  `report: null`.
 - **Netlist identity.** For each corner batch job, collection compares the
   runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
   bytes, including rewritten include paths. A mismatch rejects the result
