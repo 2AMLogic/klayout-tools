@@ -10,10 +10,6 @@ import shlex
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .remote_launcher import (
-    RemoteLaunchError,
-    published_runner_identities,
-)
 from .sim_batch_contract import (
     _BATCH_PREFLIGHT_REJECT_EXIT,
     _DECKS_BASE_RELEASE,
@@ -393,7 +389,7 @@ def _capability_preflight_lines(
 
 def _assess_deck_support(request: dict[str, Any], config: BatchConfig) -> None:
     """Refuse a deck-list batch submit before any S3 write or launch when
-    every image the AMI manifest could boot is known to predate ``decks[]``
+    every image the batch image pointer could boot is known to predate ``decks[]``
     (issue #3303). Same candidate selection as
     :func:`_assess_published_runner`; anything less certain (no manifest,
     a legacy entry without ``klt_version``, a mix) proceeds to the
@@ -435,10 +431,7 @@ def _assess_capability_support(
     remedy: str,
 ) -> None:
     pdk = (request.get("models") or {}).get("pdk")
-    try:
-        images = published_runner_identities(str(pdk) if pdk else None, config.region)
-    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
-        return
+    images = config.runner_identities(str(pdk) if pdk else None)
     if not images:
         return
     support = [
@@ -454,7 +447,7 @@ def _assess_capability_support(
         for image in images
     )
     raise SimError(
-        f"backend 'batch' refused before submission: the AMI manifest "
+        f"backend 'batch' refused before submission: the batch image pointer "
         f"publishes the fleet runner image as {published}, which predates "
         f"{predates} -- the request was not submitted and no "
         f"instance was launched ({remedy})",
