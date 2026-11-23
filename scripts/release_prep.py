@@ -145,12 +145,8 @@ def add_changelog_heading(
         )
     remaining = text[section_end:]
     if previous is not None and previous != new:
-        entries = update_signoff_notes(entries, previous, new)
-        check_signoff_note_anchors(
-            entries,
-            previous,
-            source="CHANGELOG.md",
-            start_line=text.count("\n", 0, heading_end) + 1,
+        entries = _resolve_notes(
+            entries, previous, new, "CHANGELOG.md", text.count("\n", 0, heading_end) + 1
         )
     if fragments:
         legacy = entries.strip("\n")
