@@ -378,6 +378,22 @@ reference netlist is taken from the db when it carries one, else parsed from
 extracted layout devices (the runset genuinely did not compare) is still an
 error, as is a crashed runset. Additive; no `schema_version` bump.
 
+**A circuit the runset did not compare is `runset.incomplete`, not a
+mismatch.** One `runset.incomplete` entry (`severity: "error"`,
+`side: "both"`, `circuit: {layout, reference}`) is emitted for every circuit
+pair present on both sides whose cross-reference status is `Skipped` or
+`None`. Being an error it is counted in `error_count` and
+`category_error_counts` like any other, so a report can carry
+`error_count: 1` with `status: "inconclusive"`: the category is excluded
+from the error-based verdict, since it records a comparison that did not
+happen rather than a difference the runset found. A run that is otherwise
+clean therefore reports `status: "inconclusive"` (exit 4), the sibling of
+the `coverage.no_devices_recognized` path below — that one fires when the
+runset recognizes no device on either side, this one when it compared some
+circuits but skipped others. Any other error finding (an unmatched device on
+a compared circuit, say) still yields `mismatch`, and a run with a
+`runset.incomplete` entry is never `match`.
+
 **Coverage honesty.** Additive fields:
 
 - `device_census` — `{layout: {class: n}, reference: {class: n}}`, plus

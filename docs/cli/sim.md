@@ -398,6 +398,13 @@ runs, so `cwd=` now guarantees it is actually read.
 { "options": { "ngspice_init": ["set ngbehavior=hsa"] } }
 ```
 
+A batch worker runs with its own home directory. Declare any compatibility
+mode your model library requires in `options.ngspice_init` so the worker
+receives the same setting as the local run. If a corner-mode ngspice run aborts
+during model selection and the request has no init lines, `ngspice_model_selection_init_hint`
+appears in the report diagnostics. Check the model library's requirements
+and compare the recorded init settings before retrying.
+
 Unset (the default) writes no `.spiceinit` at all — behaviour is unchanged
 from before this issue, modulo the `cwd=` fix itself (which only matters if
 the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
@@ -1043,9 +1050,9 @@ recorded shard's `status.json` is read once, a shard whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
 `resume: reused N checkpointed corner(s)` summary and never re-billed.
-Harvested reuse is reported through `environment.resume.resumed_corners`,
-not as `environment.remote.fleet[]` entries with `resumed: true`; `fleet[]`
-lists only shards dispatched after the harvest. Shards the map records
+The reused unit count appears in `environment.resume.resumed_corners`. The
+invocation's `environment.remote.fleet[]` lists harvested jobs first, followed
+by dispatch observations. A job seen in both appears once. Shards the map records
 `submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
@@ -1704,7 +1711,7 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   the same set with the same `-o`: a sharded request harvests finished jobs
   recorded in its `batch-shards.json`, reports their reused units in
   `environment.resume.resumed_corners`, and dispatches only the outstanding
-  units (`environment.remote.fleet[]` covers that dispatch); a request with no
+  units (`environment.remote.fleet[]` covers both phases). A request with no
   prior directory runs fresh. A non-sharded or deck-list request resumes through its
   own checkpoint (the set always runs on `batch`, which supports `--resume`
   for both). A request whose resume is refused -- a shard map written for a
@@ -2201,11 +2208,44 @@ poll instead of another full window) is submitted again under a new id,
 overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
 the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
 the grace the first run already waited. A `batch_poll_timeout` shard is never
-resubmitted (that job may still be running). The shards dispatched after the
-harvest appear in `environment.remote.fleet[]`, with `resumed: true|false`
-describing dispatch-time re-attachment. Harvested shards are absent from
-`fleet[]`; their reused units count toward `environment.resume.resumed_corners`.
+resubmitted (that job may still be running). The invocation's `environment.remote.fleet[]` includes harvested jobs and
+jobs observed during dispatch. Harvested entries carry `resumed: true`; the
+dispatch entries record whether the client re-attached. Reused units count
+toward `environment.resume.resumed_corners`.
 A map written before these fields existed carries no `state` and is only ever polled.
+
+<a id="whole-run-batch-summary"></a>
+
+**Whole-run batch summary.** A sharded simulation reports
+`environment.remote.run` alongside the invocation's fleet. The original
+requested host count is `declared_hosts`. Each invocation that reaches dispatch
+or finishes by harvesting the full matrix counts as a round. `rounds` gives
+the total when recorded from the start. `observed_rounds` counts the rounds
+tracked in this output directory. `observed_launched_jobs` counts distinct job
+IDs with launch evidence, including failed jobs later replaced. A submission or
+a launch attempt alone contributes no launch. `first_launch` and `last_terminal`
+are the earliest recorded launch and the latest time a job first reached an
+observed terminal state, in UTC. Re-reading the same state leaves the span
+unchanged. Missing timestamps are null.
+
+`completed_units` counts requested units with a result, including electrical
+failures. Units that never ran remain outstanding: lost, interrupted,
+budget-skipped, orphaned, or aborted by the fail-fast probe
+(`timeout_budget_unreachable`).
+`complete` means `completed_units == total_units`. The existing
+`unlaunched_shards` and `resumable` fields describe the current dispatch.
+A sharded `--resume` that dispatches and harvests nothing, because every unit
+came from `checkpoint.json`, still reports the summary: `environment.remote`
+then holds only `run`, and `environment.models_lib_sha256_scope` reads
+`"client"` as on any other batch run, not `"local"`.
+
+The client stores observations in `batch-run-history.json` under the artifact
+directory before replacing the shard map. It binds them to the checkpoint
+fingerprint and request digest. A fresh run starts a new history. On a legacy
+resume, `history_coverage: "partial"` means the original `declared_hosts` and
+`rounds` are null. Job counts and the observed time span cover only available
+evidence; with no known launch, the count is null. `"from_start"` means the
+client tracked rounds from the first invocation.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, netlist) or an unreadable `batch-shards.json` is refused with
@@ -3223,6 +3263,16 @@ worker's solver).
 
 A difference in these fields is a lead, not a proof; only a reproducible
 difference justifies a simulator, model or runner-image change.
+
+### Local OSDI preflight and runner evidence
+
+`klt pdk osdi --load-probe` verifies the models declared by the local PDK
+and records their ordered digests. A harness can embed its `identity` block
+in a preflight record. A simulation records the files the request actually
+preloaded in `environment.osdi_preload[]`. For a batch run, compare the
+expected digests to `environment.remote.runner_osdi_preload` from the
+worker that performed the simulation. A client-machine preflight describes
+only that client's install. [Verification and pin-file format](pdk.md#klt-pdk-osdi)
 
 ## Pre-composed decks (`decks` requests)
 
@@ -9986,6 +10036,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `ngspice_model_selection_init_hint` | Corner-mode report warning on a local or batch ngspice model-selection abort with no request-declared init lines. Gives the request setting for a library-specific compatibility mode. |
 | `batch_ngspice_init_unverified` | Report-level warning. Corner-mode batch workers lack simulator acknowledgement for explicit `options.ngspice_init`. See the per-job request identities in `diagnostics[].jobs`. |
 | `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |

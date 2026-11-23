@@ -97,6 +97,7 @@ from . import (
     env_provenance,
     output_lock,
     sim_ac_waveform,
+    sim_batch_history,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -166,7 +167,8 @@ from ._paths import (
     resolve_tool_binary,
     validate_request_shape,
 )
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import sha256_file as sha256_file
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -179,6 +181,13 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
+from .ngspice_build import ENGINE_BANNER_MAX
+from .ngspice_build import (
+    engine_version as _extract_engine_version,
+)
+from .ngspice_build import (
+    probe_engine_build as _probe_engine_build,
+)
 from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -583,6 +592,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
+        sim_spiceinit.MODEL_SELECTION_INIT_HINT,
         # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
         "expr_no_value",
@@ -3951,6 +3961,18 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
+    shard_fingerprint = (
+        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
+    )
+    history = sim_batch_history.begin(
+        artifacts_dir,
+        shard_fingerprint,
+        request,
+        hosts,
+        bool(resume),
+        bool(pre_completed),
+        attach_job_id,
+    )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
         # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
@@ -3975,7 +3997,7 @@ def _run_sim_corners(
             **local_engine_kwargs,
             **(
                 {
-                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "shard_fingerprint": shard_fingerprint,
                     "netlist_sha256": netlist_digests.sha256,
                     "explicit_points": dispatch_points
                     if len(dispatch_points) < len(corner_points)
@@ -4002,7 +4024,7 @@ def _run_sim_corners(
         # already ran instead of paying for them again.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "shard_fingerprint": shard_fingerprint,
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4080,26 +4102,9 @@ def _run_sim_corners(
         harvested_env, remote_environment
     )
 
-    if resume:
-        # Reassemble the full corner list in the request's own order: a
-        # corner is either freshly run just now (`corners_new`) or reused
-        # verbatim from a matching checkpoint (`pre_completed`) -- every
-        # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Lost batch shards synthesize unrun reports
-        # per point, so every dispatched point still has a report.
-        new_by_id = {corner["corner_id"]: corner for corner in corners_new}
-        corners = [
-            new_by_id[point.corner_id]
-            if point.corner_id in new_by_id
-            else pre_completed[point.corner_id]
-            for point in corner_points
-        ]
-    else:
-        # The exact pre-#473 assignment -- `corners_new` is already the
-        # full, correctly-ordered report for every backend (including
-        # `remote`, whose corners this process never reconciles against a
-        # local `CornerPoint` list).
-        corners = corners_new
+    corners = sim_batch_resume.reassemble_corners(
+        bool(resume), corner_points, corners_new, pre_completed
+    )
     _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
@@ -4146,6 +4151,9 @@ def _run_sim_corners(
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
 
+    remote_environment = sim_batch_history.finish(
+        history, remote_environment, corners, len(corner_points)
+    )
     sharded_attach = attach_job_id is not None and attach_job_id.endswith(".json")
     if (
         backend == "batch"
@@ -4366,9 +4374,6 @@ def _run_sim_corners(
 
     remote = environment.get("remote")
     remote_diagnostics = pop_remote_diagnostics(remote)
-    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
-        backend, engine, ngspice_init_lines, remote
-    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4420,7 +4425,9 @@ def _run_sim_corners(
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     diag_candidates = (
         *remote_diagnostics,
-        init_diagnostic,
+        sim_spiceinit.report_init_diagnostic(
+            backend, engine, ngspice_init_lines, remote, corners
+        ),
         bin_diagnostic,
         save_diagnostic,
     )
@@ -6376,8 +6383,6 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 # Per-corner ngspice invocation
 # --------------------------------------------------------------------------- #
-
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 
 
 _WAVEFORM_KEYWORDS = frozenset(
@@ -8788,10 +8793,7 @@ def _write_xyce_deck(
         handle.write("\n".join(lines) + "\n")
 
 
-#: Bound on the recorded ``--version`` banner; matches the worker capture's
-#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
-_ENGINE_BANNER_MAX = 2000
-_ENGINE_BANNER_TIMEOUT_S = 10
+_ENGINE_BANNER_MAX = ENGINE_BANNER_MAX
 
 
 def _engine_build_with_comparison(
@@ -8809,66 +8811,6 @@ def _engine_build_with_comparison(
         attach_engine_build_comparison(remote_environment, engine_build)
         attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
-
-
-def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """The local ngspice build identity (issue #3095) -- ``--version`` banner plus
-    binary sha256 -- probed once per sweep into ``environment.engine_build`` on
-    ``local`` reports, ``client_engine_build`` off-host (#5566 rewrites ``engine_build``
-    to the worker's). ``engine_version`` is the major version only and two builds of one
-    major can differ in options (FFTW vs. padded FFT). ``None`` for engines without a
-    probe (xyce). A failed probe never fails the run; ``probe`` / ``reason`` say why."""
-    if ngspice_binary is None:
-        return None
-    build: dict[str, Any] = {
-        "version_banner": None,
-        "binary_sha256": None,
-        "probe": "ok",
-        "reason": None,
-    }
-    try:
-        build["binary_sha256"] = sha256_file(ngspice_binary)
-    except OSError:
-        pass
-    try:
-        proc = subprocess.run(
-            [ngspice_binary, "--version"],
-            capture_output=True,
-            text=False,
-            timeout=_ENGINE_BANNER_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        build.update(
-            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
-        )
-        return build
-    except Exception as exc:  # the probe must never fail the sweep
-        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
-        return build
-    raw = proc.stdout or proc.stderr or b""
-    text: str = (
-        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-    )[: _ENGINE_BANNER_MAX * 4]
-    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
-        :_ENGINE_BANNER_MAX
-    ]
-    if proc.returncode != 0 or not banner:
-        build.update(
-            probe="error",
-            reason=(
-                f"--version exited {proc.returncode}"
-                if proc.returncode != 0
-                else "--version printed no banner"
-            ),
-        )
-        return build
-    build["version_banner"] = banner
-    return build
-
-
-def _extract_engine_version(stdout: str) -> str | None:
-    match = _ENGINE_VERSION_RE.search(stdout or "")
-    return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------- #

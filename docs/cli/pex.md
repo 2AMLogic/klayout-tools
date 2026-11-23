@@ -377,11 +377,12 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   before this feature existed. See [`extract.md`](extract.md)'s "Distributed
   (multi-segment) RC ladder for critical nets" section.
 - `--parasitic-variant` (issue #3056) — passed through to `klt extract
-  --parasitic-variant` (`drop-r:NET|*`, `drop-c-ground:NET|*`,
-  `drop-c-coupling`; repeatable) to drop parasitic elements and attribute a
-  failing delta row. Echoed as `extraction.parasitic_variant` (present only
-  when given). See [`extract.md`](extract.md)'s `--parasitic-variant`
-  section.
+  --parasitic-variant` (`drop-r:NET|*`, `drop-r-body:NET|*`,
+  `drop-c-ground:NET|*`, `drop-c-coupling`; repeatable) to drop parasitic
+  elements and attribute a failing delta row (`drop-r-body` also serves the
+  near-floating-body ngspice transient workaround, issue #7317). Echoed as
+  `extraction.parasitic_variant` (present only when given). See
+  [`extract.md`](extract.md)'s `--parasitic-variant` section.
 - `--substrate-tie-ohms` — passed through to `klt extract
   --substrate-tie-ohms` (issue #3089): the substrate DC-tie resistance (default
   `1e12`, substrate capacitively floating in transient; `0` = hard tie). See

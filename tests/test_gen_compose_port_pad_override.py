@@ -158,3 +158,18 @@ def test_conflicting_pad_policies_precede_label_access(
     assert "minimal_ladder and request.routing.landing_pad_size_um" in message
     assert "cannot be combined" in message
     assert not (tmp_path / "top.gds").exists()
+
+
+@pytest.mark.parametrize("value", ["yes", 1])
+def test_non_boolean_minimal_ladder_rejects_truthy_values(
+    tmp_path, pdk_root, capsys, value
+):
+    path = _request(tmp_path, pdk_root, 0.8)
+    req = json.loads(path.read_text())
+    req["routing"]["minimal_ladder"] = value
+    path.write_text(json.dumps(req))
+    assert main(["gen-compose", str(path), "--format", "json"]) == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert "must be a boolean when given" in message
+    assert "cannot be combined" not in message
+    assert not (tmp_path / "top.gds").exists()
