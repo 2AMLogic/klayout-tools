@@ -44,6 +44,7 @@ from typing import Any
 
 from . import sim_noise_leaves
 from .sim_errors import SimError
+from .sim_measurement_grading import SAVE_MODE_NETLIST_NO_VALUE_HINT
 
 
 def requested(spec: dict[str, Any]) -> bool:
@@ -151,8 +152,6 @@ def attach(
     fine. An entry that already has no value carries its own error and gets
     no second one. Results gain a ``noise`` member only when the list exists.
     """
-    from . import sim as _sim
-
     for position, spec in enumerate(measurements_spec):
         if not requested(spec) or spec["noise"].get("mechanism") is not None:
             continue
@@ -175,7 +174,7 @@ def attach(
             else f"measurement '{name}': no per-contributor noise spectra were read"
         )
         if save_mode == "netlist" and reason == "noise_mechanism_rawfile_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
         diagnostics.append(
             {
                 "severity": "warning",
