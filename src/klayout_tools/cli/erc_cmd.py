@@ -44,6 +44,7 @@ exclusive with ``file``/``--check`` and refuses the layout-only flags.
 """
 
 import argparse
+import json
 
 from ..coverage_work import coverage_work_count
 from ..env_provenance import render_path_field
@@ -54,7 +55,9 @@ from ..erc import (
     run_erc,
     validate_erc_spec,
 )
+from ..erc_pnr import supply_spec_from_pnr
 from ..erc_spec import DISCLOSURE_KIND_UNEXPRESSIBLE
+from ._request_file import RequestFileError, load_request_file
 from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
@@ -72,8 +75,8 @@ _EXIT_CODE_BY_STATUS = {
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.validate_spec is not None:
-        return _run_validate_spec(args)
+    if args.validate_spec is not None or args.pnr_response is not None:
+        return _run_spec_mode(args)
 
     if args.check is not None:
         # `file` is in `--check`'s mutually exclusive argparse group
@@ -106,11 +109,8 @@ def run(args: argparse.Namespace) -> int:
     return _EXIT_CODE_BY_STATUS[report["status"]]
 
 
-def _run_validate_spec(args: argparse.Namespace) -> int:
-    # `file` and `--check` are in `--validate-spec`'s mutually exclusive
-    # argparse group (parser.py), so those combinations are usage errors
-    # (exit 2). The remaining flags are not positional, so they are refused
-    # here rather than silently ignored.
+def _run_spec_mode(args: argparse.Namespace) -> int:
+    mode = "--pnr-response" if args.pnr_response is not None else "--validate-spec"
     layout_only = {
         "--top": args.top is not None,
         "--pdk": args.pdk is not None,
@@ -124,13 +124,20 @@ def _run_validate_spec(args: argparse.Namespace) -> int:
     if conflicts:
         return emit_error(
             "erc",
-            f"--validate-spec reads no layout and runs no check, so it cannot "
+            f"{mode} reads no layout and runs no check, so it cannot "
             f"be combined with {', '.join(conflicts)}",
             args.format,
         )
     try:
+        if args.pnr_response is not None:
+            spec = supply_spec_from_pnr(load_request_file(args.pnr_response))
+            # Both formats emit the editable JSON document, ready for redirection.
+            emit_success(
+                spec, args.format, lambda data: print(json.dumps(data, indent=2))
+            )
+            return 0
         result = validate_erc_spec(args.validate_spec)
-    except ErcError as exc:
+    except (ErcError, RequestFileError) as exc:
         return emit_error("erc", str(exc), args.format)
 
     emit_success(result, args.format, _print_validate_spec_text)

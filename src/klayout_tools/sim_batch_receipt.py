@@ -7,8 +7,53 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+
+from . import sim_staging
+from .sim_batch_contract import BATCH_NETLIST_FILENAME, BATCH_REQUEST_FILENAME
+from .sim_batch_contract_spec import BatchJobSpec
+from .sim_errors import SimError
+
+COLLECTED_NETLIST_MISMATCH = "batch_netlist_digest_mismatch"
+
+
+def submitted_netlist_sha256(spec: BatchJobSpec, source_digest: str | None) -> str:
+    """Capture the expected runner digest before submitting the prepared inputs."""
+    deck = next(item for item in spec.inputs if item.name == BATCH_NETLIST_FILENAME)
+    if deck.content is None and source_digest is not None:
+        return source_digest
+    return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+
+
+def attached_netlist_sha256(request: dict[str, Any], netlist_path: str) -> str:
+    """Reconstruct the submitted netlist's flat include names for a collected job."""
+    try:
+        deck = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name=BATCH_NETLIST_FILENAME,
+            reserved_names=(BATCH_REQUEST_FILENAME,),
+            roots=sim_staging.host_resolved_roots(request),
+        ).netlist
+        return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+    except (OSError, sim_staging.IncludeStagingError) as exc:
+        raise SimError(f"cannot verify staged batch netlist: {exc}") from exc
+
+
+def check_collected_netlist(
+    job_id: str, report: dict[str, Any], expected_digest: Callable[[], str]
+) -> None:
+    reported = (report.get("environment") or {}).get("netlist_sha256")
+    if reported is None:
+        return
+    expected = expected_digest()
+    if not isinstance(reported, str) or reported.lower() != expected.lower():
+        raise SimError(
+            f"batch job {job_id}: expected staged netlist sha256 {expected}, "
+            f"runner reported {reported!r}",
+            code=COLLECTED_NETLIST_MISMATCH,
+        )
 
 
 def request_sha256(request: dict[str, Any]) -> str:
@@ -56,7 +101,6 @@ def check_attach_receipt(
     submitted from, when the local submit receipt says so. No receipt, an
     unreadable one, or one for a different job id -> proceed unchanged."""
     from . import sim_batch
-    from .sim import SimError
 
     path = os.path.join(artifacts_dir, sim_batch.BATCH_RECEIPT_FILENAME)
     try:
@@ -88,6 +132,15 @@ def check_attach_receipt(
         )
 
 
+def units_digest(corner_points: list[Any]) -> str | None:
+    """Use the same ordered corner identity as the fleet shard manifest."""
+    from .sim_batch import _units_digest
+
+    if all(hasattr(point, "corner_id") for point in corner_points):
+        return _units_digest(corner_points)
+    return None
+
+
 def new_receipt(
     config: Any,
     job_id: str,
@@ -99,7 +152,8 @@ def new_receipt(
     best-effort and must never break a run; no bucket (its name carries the
     cloud account id, issue #4079). ``unit_count`` (issue #5350) lets
     ``--resume`` re-attach only to a job that covered exactly the units it is
-    about to dispatch."""
+    about to dispatch. The digest distinguishes equal-sized subsets."""
+    digest = units_digest(corner_points)
     return {
         "job_id": job_id,
         "jobs_prefix": getattr(config, "jobs_prefix", None),
@@ -108,6 +162,7 @@ def new_receipt(
         "launched_at": datetime.now(timezone.utc).isoformat(),
         **corner_receipt_identity(request, netlist_sha256),
         "unit_count": len(corner_points),
+        **({"units_sha256": digest} if digest is not None else {}),
         "state": None,
     }
 
@@ -118,6 +173,9 @@ def resumable_job_id(
     unit_count: int,
     resume: bool,
     netlist_sha256: str | None = None,
+    *,
+    units_sha256: str | None = None,
+    require_units_digest: bool = False,
 ) -> str | None:
     """The job id ``--resume`` should re-attach to instead of resubmitting
     (issue #5350): the one a prior unsharded submit recorded in the local
@@ -142,6 +200,11 @@ def resumable_job_id(
     if receipt.get("netlist_sha256", netlist_sha256) != netlist_sha256:
         return None
     if receipt.get("unit_count") != unit_count:
+        return None
+    # A legacy whole-grid job is identified by request and count. On a
+    # partial resume its count alone cannot distinguish two different slices.
+    legacy_units = None if require_units_digest else units_sha256
+    if receipt.get("units_sha256", legacy_units) != units_sha256:
         return None
     accepted = {receipt_request_sha256(request)}
     if "netlist_sha256" not in receipt:

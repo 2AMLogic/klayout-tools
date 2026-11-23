@@ -46,6 +46,29 @@ def _two_store_request(tmp_path, monkeypatch, **models):
     return request, ciel, volare
 
 
+def test_sim_json_error_defers_both_pdk_and_init_advisories(
+    tmp_path, monkeypatch, capsys
+):
+    request, _, _ = _two_store_request(tmp_path, monkeypatch)
+    init = tmp_path / ".spiceinit"
+    init.write_text("set numdgt=8\n")
+    monkeypatch.setattr(
+        "klayout_tools.sim_spiceinit.home_spiceinit_path", lambda: str(init)
+    )
+    args = ["sim", str(request), "--backend", "local", "--format", "json"]
+
+    assert main([*args, "--wait-for-capacity", "1"]) == 1
+    failed = capsys.readouterr()
+    assert failed.out == ""
+    assert "requires backend 'batch'" in json.loads(failed.err)["error"]["message"]
+
+    assert main(args) == 4  # The request has no measurements and produces a report.
+    completed = capsys.readouterr()
+    assert json.loads(completed.out)["provenance"]["pdk"]["name"] == "sky130A"
+    assert completed.err.count("2 installs provide PDK variant") == 1
+    assert completed.err.count("this run reads the ambient init file") == 1
+
+
 def test_cli_pdk_root_flag_pins_the_second_install(tmp_path, monkeypatch, capsys):
     """Issue #4758: `klt sim --pdk-root` is the CLI route the ambiguity
     warning names; it pins the root and silences the warning."""
