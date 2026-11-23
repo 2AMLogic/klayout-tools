@@ -23,13 +23,11 @@ from collections.abc import Callable
 from typing import Any
 
 from . import asap7_bsimcmg
+from .sim_echo_checks import _OFFHOST_BACKENDS as OFFHOST_BACKENDS
 from .sim_errors import SimError
 
 #: Closed enum of ``adapt.kind`` values.
 SUPPORTED_KINDS = ("asap7_bsimcmg",)
-
-#: Mirrors ``sim._OFFHOST_BACKENDS`` (a test pins the equality).
-OFFHOST_BACKENDS = ("remote", "batch")
 
 
 class AdaptError(SimError):

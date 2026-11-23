@@ -243,6 +243,7 @@ from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
     TIE_SOURCE_DECLARED,
     _body_bias_report,
 )
+from .pex_errors import PexError as PexError
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -328,27 +329,6 @@ MEASURE_COMMAND_TIMEOUT_S = 1800.0
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
 #: measurement, so :func:`_row_status` needs no command-mode special case.
 _MEASUREMENT_STATUSES = ("pass", "fail", "error")
-
-
-class PexError(Exception):
-    """Raised when a `klt pex` run cannot be completed: a bad testbench
-    request, a testbench with no `.include`/`.inc` DUT reference, testbenches
-    that reference different schematic netlists, or a failure in the
-    extraction/simulation steps this command drives (wrapping the original
-    :class:`~klayout_tools.extract.ExtractError` /
-    :class:`~klayout_tools.sim.SimError`).
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other `klt` verb's error contract.
-
-    ``code`` is an optional machine-readable classification emitted as the
-    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
-    (every pre-#2889 error) keeps the envelope byte-identical.
-    """
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _validate_tie_nets(
