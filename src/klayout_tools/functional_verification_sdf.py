@@ -45,6 +45,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import cache
 from typing import Any
 
 from ._text import read_text
@@ -1801,6 +1802,46 @@ def _sdf_cell_celltype(text: str, cell_start: int) -> str | None:
     return match.group(1) if match else None
 
 
+def _drop_sdf_iopath_arcs(
+    text: str,
+    entry_arc: Callable[[str], tuple[str, str] | None],
+    *,
+    cell_arcs: Callable[[str], set[tuple[str, str]]] | None = None,
+) -> tuple[str, int, list[dict[str, str]]] | None:
+    """Remove matching entries and record the distinct affected cell arcs."""
+    lookup = cache(cell_arcs) if cell_arcs is not None else None
+    arcs: set[tuple[str, str, str]] = set()
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell in re.finditer(r"\(CELL\b", text):
+        celltype = _sdf_cell_celltype(text, cell.start())
+        allowed = None
+        if lookup is not None:
+            if celltype is None:
+                continue
+            allowed = lookup(celltype)
+            if not allowed:
+                continue
+
+        def droppable(entry_text: str, allowed=allowed, celltype=celltype) -> bool:
+            arc = entry_arc(entry_text)
+            if arc is None or (allowed is not None and arc not in allowed):
+                return False
+            arcs.add((celltype or "", *arc))
+            return True
+
+        spans, count = _sdf_cell_entry_removals(text, cell.start(), droppable)
+        removed_spans.extend(spans)
+        dropped += count
+    if not dropped:
+        return None
+    return (
+        _cut_sdf_spans(text, removed_spans),
+        dropped,
+        [{"celltype": cell, "from": src, "to": dst} for cell, src, dst in sorted(arcs)],
+    )
+
+
 def _drop_sdf_unsupported_edge_modpath_iopaths(
     sdf_path: str, source_paths: list[str]
 ) -> tuple[str, int, list[dict[str, str]]] | None:
@@ -1830,39 +1871,10 @@ def _drop_sdf_unsupported_edge_modpath_iopaths(
     if text is None or "IOPATH" not in text:
         return None
 
-    discarded_by_cell: dict[str, set[tuple[str, str]]] = {}
-    arcs: set[tuple[str, str, str]] = set()
-    removed_spans: list[tuple[int, int]] = []
-    dropped = 0
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        celltype = _sdf_cell_celltype(text, cell_match.start())
-        if celltype is None:
-            continue
-        if celltype not in discarded_by_cell:
-            discarded_by_cell[celltype] = _verilog_cell_discarded_arcs(
-                celltype, source_texts
-            )
-        discarded = discarded_by_cell[celltype]
-        if not discarded:
-            continue
-
-        def _droppable(entry_text: str, _discarded=discarded, _cell=celltype) -> bool:
-            arc = _sdf_iopath_arc(entry_text)
-            if arc is None or arc not in _discarded:
-                return False
-            arcs.add((_cell, *arc))
-            return True
-
-        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
-        removed_spans.extend(spans)
-        dropped += count
-
-    if not dropped:
-        return None
-    return (
-        _cut_sdf_spans(text, removed_spans),
-        dropped,
-        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
+    return _drop_sdf_iopath_arcs(
+        text,
+        _sdf_iopath_arc,
+        cell_arcs=lambda celltype: _verilog_cell_discarded_arcs(celltype, source_texts),
     )
 
 
@@ -1987,39 +1999,12 @@ def _drop_sdf_bit_selected_bus_iopaths(
     if text is None or "IOPATH" not in text or "[" not in text:
         return None
 
-    arcs_by_cell: dict[str, set[tuple[str, str]]] = {}
-    arcs: set[tuple[str, str, str]] = set()
-    removed_spans: list[tuple[int, int]] = []
-    dropped = 0
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        celltype = _sdf_cell_celltype(text, cell_match.start())
-        if celltype is None:
-            continue
-        if celltype not in arcs_by_cell:
-            arcs_by_cell[celltype] = _verilog_cell_whole_vector_arcs(
-                celltype, source_texts
-            )
-        whole = arcs_by_cell[celltype]
-        if not whole:
-            continue
-
-        def _droppable(entry_text: str, _whole=whole, _cell=celltype) -> bool:
-            arc = _sdf_bit_selected_iopath_arc(entry_text)
-            if arc is None or arc not in _whole:
-                return False
-            arcs.add((_cell, *arc))
-            return True
-
-        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
-        removed_spans.extend(spans)
-        dropped += count
-
-    if not dropped:
-        return None
-    return (
-        _cut_sdf_spans(text, removed_spans),
-        dropped,
-        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
+    return _drop_sdf_iopath_arcs(
+        text,
+        _sdf_bit_selected_iopath_arc,
+        cell_arcs=lambda celltype: _verilog_cell_whole_vector_arcs(
+            celltype, source_texts
+        ),
     )
 
 
