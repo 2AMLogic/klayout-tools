@@ -101,7 +101,7 @@ description alone):
    unconditionally, supply nets included ("always report the array, never
    silently drop... let the caller judge it benign"). Only BJT ``C`` is
    still such a terminal; MOS ``B`` was too until #5546 bound it
-   group-level -- see :func:`~klayout_tools.layout_plan_ports.bind_body_nets`.
+   group-level -- see :func:`~klayout_tools.layout_plan_body_nets.bind_body_nets`.
 6. **No ``klt`` CLI subcommand is added this phase**, mirroring Phase B's
    own decision and for the same reason: :func:`execute_layout_plan`/
    :func:`execute_layout_plan_document` are a complete library surface, and
@@ -177,7 +177,7 @@ import tempfile
 from collections.abc import Callable
 from typing import Any
 
-from . import layout_plan, layout_plan_ports
+from . import layout_plan, layout_plan_body_nets, layout_plan_ports
 from . import layout_plan_routing as nr
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
@@ -227,7 +227,7 @@ _ALLOWED_ROUTING_KEYS = {
 #: per-device port concept for connectivity derivation; a terminal name
 #: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) has
 #: no *per-device* port to map onto -- MOS ``B`` is bound group-level
-#: instead (``layout_plan_ports.bind_body_nets``, #5546); see decision 5.
+#: instead (``layout_plan_body_nets.bind_body_nets``, #5546); see decision 5.
 _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "mos_array": {"S": "S", "D": "D", "G": "G"},
     "diff_pair": {"S": "S", "D": "D", "G": "G"},
@@ -649,7 +649,7 @@ def _build_connectivity(
                 )
 
     layout_plan_ports.bind_ring_nets(device_groups, generated, net_pins, warnings)
-    layout_plan_ports.bind_body_nets(
+    layout_plan_body_nets.bind_body_nets(
         device_groups, digest_devices_by_key, generated, net_pins, warnings
     )
     connectivity: list[dict[str, Any]] = []
