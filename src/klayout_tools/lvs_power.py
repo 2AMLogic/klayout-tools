@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .extract_base import ExtractError
 from .lvs_base import (
     _POWER_INSTANCE_SAMPLE_LIMIT,
     POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
@@ -115,7 +116,6 @@ def _well_layer_lef_pins(lef_paths: tuple[str, ...]) -> frozenset[tuple[str, str
     unreadable path was already reported by the extraction itself)."""
     if not lef_paths:
         return frozenset()
-    from .extract import ExtractError
     from .extract_abstract import _load_abstract_cell_lefs
 
     try:
