@@ -60,9 +60,11 @@ guessed at.
 The module also hosts ``_members_rows_declared`` (moved from
 :mod:`.signoff_spec_row_table` as the size offset that pays for this
 form's hook lines there; the naming rule now spans the free-text gap, the
-justified gap and the joint forms) and :func:`citation_label` (moved from
-:mod:`.signoff`), each re-imported by its previous home so every
-``<module>.<name>`` keeps resolving exactly as before the split.
+justified gap and the joint forms), re-imported by its previous home so
+``signoff_spec_row_table._members_rows_declared`` keeps resolving exactly
+as before the split. ``citation_label`` is :mod:`.signoff_base`'s
+``_citation_label`` (its home on ``main``), imported here under the public
+spelling the joint readers use.
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ._jsonnum import is_number
+from .signoff_base import _citation_label as citation_label
 from .signoff_derived_rows import envelope_tagged_rows
 
 
@@ -84,20 +87,6 @@ def _multi_citation_rows(
     Moved from :mod:`.signoff` (issue #6969) for its size ceiling;
     ``signoff._multi_citation_rows`` keeps resolving through the re-import."""
     return (None, False) if report_list else (spec_rows, spec_rows_invalid)
-
-
-def citation_label(spec: Mapping[str, Any]) -> str:
-    """How a joint member name matches a citation: the joined command for a
-    ``command`` citation, the file path for every other kind."""
-    if spec["kind"] == "command":
-        return " ".join(spec["command"])
-    return str(spec["file"])
-
-
-#: ``signoff._citation_label`` keeps resolving under the name it carried
-#: before the move (:mod:`.signoff_grouped_citations` imports it from
-#: there); the joint readers use the public spelling above.
-_citation_label = citation_label
 
 
 def _members_rows_declared(
@@ -130,9 +119,7 @@ def _format_supply_value(value: int | float) -> str:
     legacy = f"{float(value):.3f}"
     if float(legacy) == float(value):
         return legacy
-    return repr(
-        int(value) if isinstance(value, float) and value.is_integer() else value
-    )
+    return repr(value)
 
 
 def _format_temperature(value: int | float) -> str:

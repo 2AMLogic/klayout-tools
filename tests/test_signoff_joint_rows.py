@@ -33,6 +33,7 @@ from klayout_tools.signoff_joint_rows import (
     member_shortfall,
     required_grid_points,
 )
+from klayout_tools.sim_corner_point import CornerPoint
 
 # --------------------------------------------------------------------------- #
 # The covered and the shortfall outcomes.
@@ -440,7 +441,9 @@ def test_a_manifest_without_joint_rows_renders_no_joint_keys(tmp_path):
     ],
 )
 def test_point_labels_mirror_the_corner_id_spelling(process, supply, temp, expected):
-    assert _point_label(process, supply, temp) == expected
+    # Pinned against `klt sim`'s real `corner_id`, not only the literals.
+    label = _point_label(process, supply, temp)
+    assert label == expected == CornerPoint(process, supply, temp).corner_id
 
 
 def test_supply_and_temperature_match_as_numbers():

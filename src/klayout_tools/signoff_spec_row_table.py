@@ -376,7 +376,8 @@ def _emit_slot_records(
 ) -> list[dict[str, Any]]:
     """One record per declared row, in declaration order, in the row's
     state: a disposition (``gap``, either form, or ``structural`` #6985)
-    outranks evidence (neither is ever covered), then any attributed
+    outranks evidence (neither is ever covered), then a ``joint_grid`` row
+    (#6969) takes its per-member ``joint`` record, then any attributed
     candidates grade the record, then the citation-named-but-untagged
     ``unattributable`` state, then ``no_evidence``. A partition-qualified
     slot marks its records with ``partition``."""

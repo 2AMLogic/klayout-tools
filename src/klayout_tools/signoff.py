@@ -254,7 +254,6 @@ from .signoff_generator_batch import (
 # `_grade_multi_citation` below; moved names are for this file's ceiling.
 from .signoff_joint_rows import (
     JointOutcome,
-    _citation_label,
     _members_rows_declared,
     _multi_citation_rows,
     evaluate_joint_rows,
@@ -6272,9 +6271,8 @@ def _grade_multi_citation(
     # Rows each member is credited with, whether that was machine-derived,
     # and the issue-#5490 `reported` case (needs kind + the unratified set).
     credited = member_credited_rows(graded, met_envelopes, spec_rows)
-    # Issue #6969: the joint-grid rows -- a member no citation names, or a
-    # Monte Carlo one, is invalid evidence for the whole item (decided with
-    # the other post-member outcomes, via `_post_member_outcome`).
+    # Issue #6969: the joint-grid rows; a member no citation names, or a Monte
+    # Carlo one, is invalid evidence (decided in `_post_member_outcome`).
     joint = evaluate_joint_rows(graded, spec_rows, met_envelopes)
     row_info = multi_row_info(
         graded, failed, spec_rows, credited, joint.covered, joint.rows
