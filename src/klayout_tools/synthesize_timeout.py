@@ -42,9 +42,7 @@ DEFAULT_YOSYS_TIMEOUT_S = 300.0
 #: report or the request, so a different budget on the fresh side is not
 #: drift. The synthesis *result* a rerun verifies is budget-independent; a
 #: consumer wanting the fresh budget reads the embedded ``fresh`` report.
-RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
-    {"yosys_timeout_s", "abc_timeout_s", "stats_path"}
-)
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"yosys_timeout_s", "abc_timeout_s"})
 
 #: Host-level budget override (``--yosys-timeout-s`` and
 #: ``request.yosys_timeout_s`` are the other two sources; see
