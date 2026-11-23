@@ -249,3 +249,53 @@ def test_pex_resistance_network_off_is_byte_identical(tmp_path, graph):
             assert all("network" not in net for net in echo["nets"])
         else:
             assert "resistance_graph" not in result
+
+
+@pytest.mark.parametrize("drop_body", [False, True])
+def test_reduced_network_respects_body_terminal_on_mixed_net(drop_body):
+    import klayout.db as kdb
+
+    from klayout_tools.extract_parasitic_body import parse_parasitic_variants
+    from klayout_tools.extract_parasitics import _inject_parasitics
+    from test_extract_parasitic_body import _shared_net_circuit
+
+    _netlist, circuit, net = _shared_net_circuit()
+    ground = circuit.net_by_name("0")
+    # Three distinct terminal positions allow a real graph reduction. Only the
+    # MOS bulk at the middle position is a body terminal.
+    selected = {("R1", "A"): 1.0, ("M41", "B"): 5.0, ("C1", "A"): 9.0}
+    for ref in list(net.each_terminal()):
+        device = ref.device()
+        term = device.device_class().terminal_definition(ref.terminal_id()).name
+        x = selected.get((device.name, term))
+        if x is None:
+            device.connect_terminal(ref.terminal_id(), ground)
+        else:
+            device.trans = kdb.DCplxTrans(1.0, 0.0, False, x, 1.8)
+    assert net.terminal_count() == 3
+    entry = {
+        **_plan_entry(),
+        "net_id": net.cluster_id,
+        "net": "N",
+        "resistance_ohm": 8.0,
+        "capacitance_ff": 2.0,
+    }
+    report = _inject_parasitics(
+        kdb,
+        circuit,
+        [entry],
+        [],
+        "0",
+        variants=parse_parasitic_variants(["drop-r-body:N"], ValueError)
+        if drop_body
+        else None,
+        emit_resistance_network=True,
+    )
+    result = report["nets"][0]
+    network = entry["resistance_graph"]["network"]
+    if drop_body:
+        assert network["fallback_reason"] == "parasitic_variant"
+        body = next(t for t in result["terminals"] if t["device"] == "M41")
+        assert body["leg_net"] == "N"
+    else:
+        assert network["written"] == "reduced"

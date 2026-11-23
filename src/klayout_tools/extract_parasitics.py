@@ -2149,11 +2149,15 @@ def _inject_parasitics(
         # A `drop-r`/`drop-c-ground` variant or a `--mom-rlc-net` R override
         # keeps the net on the star path below (the override/variant must
         # win), so only a clean plan takes the reduced branch.
+        # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
+        # stay on the hub -- all of them under `drop-r`, only the
+        # body-class ones under `drop-r-body`, none otherwise.
+        hub_only = star_hub_only_indices(variants, net_escaped, drop_r, terminal_refs)
         network, mapping = reduced_network_plan(
             entry,
             terminal_refs,
             emit_resistance_network=emit_resistance_network,
-            variant_dropped_r=drop_r,
+            variant_dropped_r=drop_r or bool(hub_only),
             variant_dropped_c=drop_c,
             emit_selected_resistance=emit_selected_resistance,
         )
@@ -2332,12 +2336,6 @@ def _inject_parasitics(
             hub = net
             hub_name = entry["net"]
             positions = _terminal_star_positions_um(terminal_refs)
-            # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
-            # stay on the hub -- all of them under `drop-r`, only the
-            # body-class ones under `drop-r-body`, none otherwise.
-            hub_only = star_hub_only_indices(
-                variants, net_escaped, drop_r, terminal_refs
-            )
             weights = body_adjusted_star_weights(positions, hub_only)
             for i, (term_ref, weight) in enumerate(
                 zip(terminal_refs, weights, strict=True)

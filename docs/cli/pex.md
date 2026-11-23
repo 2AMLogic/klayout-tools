@@ -372,7 +372,9 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   `extraction.resistance_graph.nets[].network` (`written`:
   `reduced`/`scalar`/`legacy`, `resistor_count`, `fallback_reason` — the
   #5747 vocabulary plus `terminal_mismatch`, `mom_rlc_override`,
-  `parasitic_variant`). `extraction.model.resistance_network` states the
+  `parasitic_variant`). When `drop-r-body` shorts a body terminal on a mixed
+  body/signal net, the writer keeps the star and records `parasitic_variant`.
+  `extraction.model.resistance_network` states the
   mode, so a `klt signoff --manifest` item-7 citation can tell a
   graph-derived network extraction from a series-sum one. Inherits the
   `--resistance-graph`/`--distributed-rc` refusal, and refused under
