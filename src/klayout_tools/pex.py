@@ -219,7 +219,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_runset, pex_sim_evidence
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
 from ._text import read_text as _read_text
@@ -260,6 +260,7 @@ from .pex_resistance_graph import (
 )
 from .sim import SimError, load_request, run_sim
 from .sim_osdi_pin import rebase_osdi_preload
+from .sim_request_overrides import refuse_corner_only_flags
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
 __all__ = [
@@ -1824,33 +1825,35 @@ def _resolve_reference_netlist_path(
     return dut_paths[0]
 
 
+def _validate_simulation_timeout(
+    timeout_s: float | None, measure_command: Sequence[str] | None, extract_only: bool
+) -> None:
+    if timeout_s is None:
+        return
+    if not is_finite_number(timeout_s) or timeout_s <= 0:
+        raise PexError("--timeout-s must be a finite positive number of seconds")
+    if extract_only or measure_command is not None:
+        raise PexError(
+            "--timeout-s requires testbench mode and cannot be used with "
+            "--extract-only or --measure-command (use --measure-timeout-s for commands)"
+        )
+
+
 def _validate_measure_mode(
     measure_command: Sequence[str] | None,
     testbench_paths: Sequence[str],
     reference_netlist: str | None,
     measure_timeout_s: float | None,
     *,
+    timeout_s: float | None = None,
     extract_only: bool = False,
     flatten_schematic: bool = False,
     device_only_leg: bool = False,
 ) -> list[str] | None:
-    """Resolve and validate which of :func:`run_pex`'s input contracts
-    this call uses (issue #2478) -- returning the measurement command's argv
-    when it is ``--measure-command`` mode, and ``None`` when it is the
-    default testbench mode (or ``--extract-only`` mode, issue #3739, which
-    measures nothing and so is validated here as a third, mutually exclusive
-    contract).
-
-    One place, one set of messages, so the library and the CLI can never
-    disagree about what "exactly one of the two" means (the CLI deliberately
-    does *not* express the exclusion with an argparse mutually-exclusive
-    group -- `<testbench>` is a positional, and argparse's own message for
-    that case says much less than these do).
-
-    Issue #5477: ``--extract-only`` accepts ``--reference-netlist`` -- it
-    buys the ``model_mismatch`` comparison alone (see :func:`run_pex`), so it
-    is not in the conflict list below; every other conflict is unchanged.
+    """Validate testbench, external measurement-command and extraction-only modes.
+    Both dry-run and execution use the same checks before extraction starts.
     """
+    _validate_simulation_timeout(timeout_s, measure_command, extract_only)
     if extract_only:
         _reject_extract_only_conflicts(
             [
@@ -2455,11 +2458,17 @@ def _device_only_result_fields(
     }
 
 
-def _load_testbench_request(testbench_path: str) -> dict[str, Any]:
+def _load_testbench_request(
+    testbench_path: str, timeout_s: float | None = None
+) -> dict[str, Any]:
     """``load_request`` with a :class:`SimError` re-raised as a
     :class:`PexError` naming the testbench."""
     try:
-        return load_request(testbench_path)
+        request = load_request(testbench_path)
+        refuse_corner_only_flags(
+            request, pdk_root=None, timeout_s=timeout_s, collect_partial=False
+        )
+        return request
     except SimError as exc:
         raise PexError(f"testbench '{testbench_path}': {exc}", code=exc.code) from exc
 
@@ -2492,6 +2501,7 @@ def run_pex(
     hosts: int | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -2617,34 +2627,20 @@ def run_pex(
     `delta[]` rows) reflect a MoM-grade parasitic on exactly the net a
     caller has singled out as critical. See ``run_extract``'s own
     ``mom_rlc_net`` docstring paragraph for the full substitution/validation
-    rules. ``None`` (the default) for all four skips this entirely --
-    byte-identical to before this feature existed. ``backend`` is passed
-    through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
-    extracted side, every testbench) -- see ``docs/cli/sim.md``'s
-    "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
-    (issue #4616) are likewise passed to each of those calls, so each side's
-    batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
-    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
-    its own ``batch-shards.json``).
-    ``artifacts_dir`` overrides where this command
-    writes its own generated artifacts (the extracted-side testbench body/
-    request copies, see :func:`_prepare_extracted_request`, and each `klt
-    sim` call's own ``options.keep_artifacts`` output, namespaced per
-    testbench and per side as ``<artifacts_dir>/<testbench label>/
-    schematic|extracted/``); it defaults to a ``.klt/pex/`` directory next
-    to ``layout_path`` (the same "next to the input" convention `klt
-    render`/`klt sim` already use).
+    rules. All four default to ``None``, which disables substitution.
+    Each testbench simulation receives ``backend`` and the optional per-corner
+    ``timeout_s`` override. See ``docs/cli/sim.md``, "Execution backends".
+    Each side shards its own grid with ``max_units_per_job``, ``max_concurrent_jobs``,
+    ``hosts``, ``resume`` and ``capacity_wait_s``, and attaches using its own
+    ``batch-shards.json``. Omitted overrides preserve the request's batch settings.
+    ``artifacts_dir`` defaults to ``.klt/pex/`` beside ``layout_path``. It holds
+    the generated testbench/request copies (see :func:`_prepare_extracted_request`)
+    and each simulation's ``options.keep_artifacts`` output under
+    ``<artifacts_dir>/<testbench label>/schematic|extracted/``.
 
-    Each testbench's schematic-side run reuses the testbench file
-    *completely unmodified* -- `run_sim(testbench_path, ...)`, exactly the
-    request a caller already runs today (AC #2's "reusing the existing
-    testbench conventions, no parallel testbench format"). The extracted-
-    side run re-points only the testbench's `.include`/`.inc` DUT reference
-    at the freshly-extracted netlist (see :func:`_prepare_extracted_request`)
-    and tags `netlist_source: "extracted"`, reusing `klt sim`'s existing
-    field (`docs/cli/sim.md`'s "Post-layout verification") rather than
-    inventing a parallel mechanism.
+    The schematic leg passes the original testbench file to `run_sim`. The
+    extracted leg redirects its DUT include to the extracted netlist and sets
+    `netlist_source: "extracted"` (see :func:`_prepare_extracted_request`).
 
     Every testbench must `.include`/`.inc` the *same* resolved schematic DUT
     file -- `klt pex` reports one `reference_netlist` for the whole run, not
@@ -2819,6 +2815,7 @@ def run_pex(
         testbench_paths,
         reference_netlist,
         measure_timeout_s,
+        timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
         device_only_leg=device_only_leg,
@@ -2840,7 +2837,7 @@ def run_pex(
     )
 
     # Validate side selectors on every testbench before running extraction.
-    requests = [_load_testbench_request(path) for path in testbench_paths]
+    requests = [_load_testbench_request(path, timeout_s) for path in testbench_paths]
     probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
 
     try:
@@ -3173,6 +3170,7 @@ def run_pex(
         hosts=hosts,
         resume=resume,
         capacity_wait_s=capacity_wait_s,
+        timeout_s=timeout_s,
     )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
@@ -3421,6 +3419,7 @@ def run_pex(
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
+        **({"simulation_timeout_s": timeout_s} if timeout_s is not None else {}),
         "layout": env_provenance.repo_relative_path(
             layout_path or None, repo_root=repo_root
         ),

@@ -1,0 +1,1 @@
+- **PEX testbench runs accept a per-corner simulation timeout override** (#7646, 2026-11-23). `--timeout-s` applies to each simulation leg and is recorded as `simulation_timeout_s`.
