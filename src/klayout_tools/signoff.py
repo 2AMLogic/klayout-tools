@@ -6646,7 +6646,7 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    # After all members grade, check artifact hashes and timing margins before partial coverage.
+    # Check artifact hashes and timing margins before grading partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
     )
