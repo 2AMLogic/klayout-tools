@@ -21,8 +21,8 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .signoff import SignoffError, _read_envelope
 from .signoff_attest_item9 import pin_checks
+from .signoff_base import SignoffError, _read_envelope
 
 
 def _resolve_section(

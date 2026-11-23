@@ -194,6 +194,11 @@ def _ring_gap_pair_request(tmp_path, pdk_root, poison=None):
         "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
         "connectivity": [
             {
+                # The net names its own plane (#1655): that disables the
+                # automatic plane climb (#6920/#6912), keeping the
+                # same-plane "lost its declared opening" outcome this
+                # helper's callers pin observable.
+                "layer_role": "metal",
                 "net": "N1",
                 "pins": [
                     {"block": "a", "port": "M1_1_D"},
@@ -322,6 +327,11 @@ def test_cli_unusable_bystander_pad_width_falls_back_to_trace_width(
         "placement": {"strategy": "row", "order": ["b1", "b2"], "spacing_um": 2.0},
         "connectivity": [
             {
+                # The net names its own plane (#1655): that disables the
+                # automatic plane climb (#6920/#6912), so the same-plane
+                # self-net pad-crossing rejection this test exists to
+                # exercise is still the verdict.
+                "layer_role": "metal",
                 "net": "S",
                 "pins": [
                     {"block": "b1", "port": "P1"},
