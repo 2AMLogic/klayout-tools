@@ -9225,12 +9225,11 @@ def _corner_deck_control_lines(
     if raw_path is not None:
         lines.append(f"write {raw_path}")
         if analysis["kind"] == "ac" and not measurements_spec:
-            lines.append("display frequency")  # Record the original AC point count.
+            # An aborted sweep has no frequency vector to count (#7293).
+            lines.extend(["if length(frequency) > 0", "display frequency", "end"])
     if analysis.get("linearize") is True:
-        # Issue #4014: resample onto a uniform grid, after any rawfile
-        # `write` (which keeps the solver's own points) and before the
-        # `expr` lets, so time-weighted sums are not biased by the
-        # adaptive timestep distribution.
+        # Resample after saving the solver's points and before expression measurements
+        # so adaptive timesteps do not bias time-weighted sums (#4014).
         lines.append("linearize")
     lines.extend(sim_post_commands.control_lines(analysis))  # issue #6080
     expr_specs = sim_noise.emittable_exprs(_expr_measurements(measurements_spec))
