@@ -16,12 +16,14 @@ the comparison idiom ``klt signoff``'s ``_grade_evidence()``
 already established: a mismatch always renders as a **failure to verify**,
 never a false pass.
 
-Both modes report the same two-value ``status``:
+The result carries a verification ``status``:
 
 - ``"match"`` -- every check passed (cheap mode: every hash matched; full
   mode: no verdict-bearing field drifted).
-- ``"drifted"`` -- at least one check failed (cheap mode: names which hash
-  moved; full mode: names which field(s) changed).
+- ``"drifted"`` -- a hash differs, a baseline is absent, or a full rerun
+  changed a verdict-bearing field.
+- ``"unverifiable"`` -- LVS/extract cheap checks could not hash a recorded input
+  and found no independent drift.
 
 ``drc.py``/``lvs.py``/``extract.py``/``synthesize.py``/``place_and_route.py``
 each supply the verb-specific pieces (which hashes to re-derive, how to re-run
@@ -250,6 +252,21 @@ def build_check_result(
     }
     if skipped is not None:
         result["skipped"] = skipped
+    return result
+
+
+def build_input_check_result(
+    *, report_path: str, checks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Distinguish an unavailable input from a changed digest for LVS and extract."""
+    result = build_check_result(report_path=report_path, checks=checks)
+    for check in checks:
+        if check["expected"] is not None and check["actual"] is None:
+            check["status"] = "unverifiable"
+    if result["status"] == "drifted" and all(
+        check["match"] or check.get("status") == "unverifiable" for check in checks
+    ):
+        result["status"] = "unverifiable"
     return result
 
 

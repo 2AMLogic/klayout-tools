@@ -11,6 +11,7 @@ from typing import Any
 from ._jsonnum import is_finite_number
 from ._paths import _resolve_relative
 from ._request_fields import check_known_fields
+from .gen_compose_base import GenComposeError
 
 #: Top-level request fields (``schema`` is accepted by ``check_known_fields``).
 _KNOWN_FIELDS = ("layout", "pdk", "routing", "nets", "options")
@@ -63,7 +64,6 @@ def _check_keys(raw: dict[str, Any], known: tuple[str, ...], where: str) -> None
 
 
 def _parse_pin(raw: Any, where: str) -> dict[str, Any]:
-    from .gen_compose import GenComposeError
     from .gen_compose_port_access import parse_ports_from_labels
 
     pin = _require_object(raw, where)

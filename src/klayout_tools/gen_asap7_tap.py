@@ -37,6 +37,7 @@ from .gen_asap7 import (
     Box,
     _col_x,
 )
+from .gen_base import GenError
 from .gen_spec import _GeneratorSpec
 
 __all__ = [
@@ -205,8 +206,6 @@ def all_boxes(info: dict[str, Any]) -> list[tuple[str, Box]]:
 
 
 def asap7_tap_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     problems = validate_tap_params(
         params["device"],
         params["nfin"],
@@ -222,7 +221,6 @@ def asap7_tap_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
     """No hidden layer params; only gates the PDK family."""
-    from .gen import GenError
     from .pdk_families import pdk_variant_family
 
     if pdk_variant_family(pdk_info["variant"]) != "asap7":

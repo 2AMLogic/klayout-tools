@@ -1,0 +1,1 @@
+- **`klt sim --attach` names the selected backend and gives the `--backend batch` retry flag when collection resolves to a different backend** (#7036, 2026-11-21).

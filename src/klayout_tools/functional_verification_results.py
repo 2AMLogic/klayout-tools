@@ -14,10 +14,8 @@ kept in the docstrings below.
 which tests and ``functional_verification_mutation`` reach through that module)
 resolves exactly as before.
 
-``FunctionalVerificationError`` is imported inside the two functions that
-raise it: ``functional_verification`` imports this module at load time, so a
-module-level import back would be circular (the same pattern as
-``functional_verification_pdk`` and ``functional_verification_sdf``).
+The parser and the runner share ``FunctionalVerificationError`` through
+``functional_verification_base``.
 """
 
 from __future__ import annotations
@@ -25,6 +23,10 @@ from __future__ import annotations
 import os
 import xml.etree.ElementTree as ElementTree
 from typing import Any
+
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
 
 # ---------------------------------------------------------------------------
 # `results.xml` parsing -- the only source of truth for the verdict
@@ -45,8 +47,6 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     Raises :class:`FunctionalVerificationError` if the file is missing or
     unparseable -- either means the run produced no trustworthy evidence.
     """
-    from .functional_verification import FunctionalVerificationError
-
     if not os.path.isfile(results_xml):
         raise FunctionalVerificationError(
             f"simulation produced no results file '{results_xml}' -- the "
@@ -93,8 +93,6 @@ def _executed_result_counts(
     tests: list[dict[str, Any]], module: str
 ) -> tuple[int, int, int]:
     """Count parsed outcomes, refusing regressions that verified nothing."""
-    from .functional_verification import FunctionalVerificationError
-
     if not tests:
         raise FunctionalVerificationError(
             f"testbench module '{module}' registered no tests -- the run "
