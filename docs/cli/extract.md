@@ -1380,6 +1380,13 @@ point" `warnings[]` entry below rather than as a silent short into a rail.
    matching LEF macro is an application error naming the cell type — never a
    silently dropped pin or an unconnected instance.
 
+When separate routes land on multiple pads of the same abstract pin, the
+extractor joins their nets using the cell’s declared or discovered internal
+pin connectivity. The `warnings[]` entry identifies the instance, pin and
+joined nets. Two different net names, including names from `--def-net-names`,
+keep the routes separate and produce a warning identifying the conflict. An
+unrouted pad with no other connection adds no join warning.
+
 **Global-net-only ports (issue #1911).** Steps 1 and 2 both resolve a pin
 from *drawn geometry*. A terminal that reaches its net only through the
 deck's synthesized substrate global (`ExtractionDeck.substrate_net`,

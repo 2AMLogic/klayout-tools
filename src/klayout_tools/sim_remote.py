@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import remote_fleet, remote_transport, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
+from .sim_echo_checks import check_ngspice_options_echo
 from .sim_errors import SimError
 
 if TYPE_CHECKING:
@@ -726,8 +727,6 @@ def _run_remote_dispatch(
         identity_file=ssh_key_path,
         remote_job_dir=remote_job_dir,
     )
-
-    from .sim import check_ngspice_options_echo
 
     check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])

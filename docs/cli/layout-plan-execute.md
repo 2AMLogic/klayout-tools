@@ -226,6 +226,33 @@ terminals' suffixes.
 | `res_array` | `A`, `B` | `_A`, `_B` |
 | `cap_array` | `A`, `B` | `_BOT`, `_TOP` |
 
+**`diff_pair` legs must be electrically distinct (#5765).** Differential
+inputs need distinct gate and drain nets. With `params.mirror: true`, a
+current mirror may share its gate when one device is diode-connected and
+the other has a distinct drain. The reference netlist in
+`examples/signoff/schematic.spice` connects both gates and the input
+device's drain to `VIN` and the output drain to `VOUT`. A shared drain,
+a repeated device or a shared differential input produces an application
+error (exit 1) naming both devices and the shared terminal and net.
+
+The usual way to hit this is a **folded MOS**: a `form: "subckt-call"`
+digest expands `XM1 ... nf=2` into per-finger devices `1_F0` and `1_F1`
+(each carrying the per-finger `W`; issue #1487) and offers no device named
+`1` at all — so a folded schematic instance cannot be declared as one leg.
+Declaring two fingers *of the same instance* (`["1_F0", "1_F1"]`) is the
+shorted-pair error above, not a pair. Two declarations do work:
+
+- Write the reference netlist's matched pair with no `nf` (or `nf=1`) and
+  let `params.splits` do the folding, so each leg is one digest device.
+- Drive [`klt gen-compose`](gen-compose.md) directly with explicit
+  `connectivity[]`.
+
+A `splits > 1` `diff_pair` also wires only one sub-instance per leg today
+(the generator draws each leg as several unstrapped sub-instances); that
+wiring gap and its generator-side strapping fix are tracked in #5557. A
+shared-gate `mos_array` group is unaffected — a bias rail is legitimate
+there; the check is scoped to `diff_pair`.
+
 **Tap/ring nets (`device_groups[].net`, #5095).** A `guard_ring` group may
 declare an optional `net` naming a digest net (e.g. `"VSS"`). The ring's
 first generated port (`TAP_N`; the four `TAP_*` ports sit on one closed ring,
@@ -490,7 +517,7 @@ capacitor class is `SKY130_FD_PR__MODEL__CAP_MIM` (easy to miss when writing
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Every device group generated, every row/abutment placed, every resolvable net routed, and `unmapped_netlist_nets[]` is empty. |
-| `1` | `LayoutPlanExecuteError` (or a propagated `klayout_tools.layout_plan.LayoutPlanError` from Phase B's own validation) — an unresolvable PDK, a generation failure (an invalid resolved `params` value), an empty `device_groups[]` (nothing to build), a `device_groups[]` entry with no `rows[]`/`abutment[]` path to a placed position, or a `gen-compose.compose()` failure. |
+| `1` | `LayoutPlanExecuteError` (or a propagated `klayout_tools.layout_plan.LayoutPlanError` from Phase B's own validation) — an unresolvable PDK, a generation failure (an invalid resolved `params` value), an empty `device_groups[]` (nothing to build), a `device_groups[]` entry with no `rows[]`/`abutment[]` path to a placed position, a `diff_pair` group whose declared devices are not electrically distinct legs (#5765), or a `gen-compose.compose()` failure. |
 | `2` | Reserved for a future CLI subcommand's own argparse usage-error layer — this phase adds none. |
 | `3` | Partial success — `partial_success(response)` is `True`: every group placed, but `unrouted_nets[]` and/or `unmapped_netlist_nets[]` is non-empty. `exit_code_for(response)` returns this. |
 
