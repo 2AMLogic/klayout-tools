@@ -1,6 +1,6 @@
 # `klt signoff`
 
-Four modes, one verb:
+Six modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
    more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield`/`klt pex`/`klt
@@ -52,6 +52,13 @@ Four modes, one verb:
    **no longer accept native envelopes** (item 2 still does; item 8 still
    accepts a bare generic envelope — `--attest 8` is the tool-produced
    alternative). See "Attesting items 1, 8, 9 and 10" below.
+6. **Compare two saved reports** (`--diff-reports OLD NEW`, issue #6850) —
+   diff the *checklist* surfaces of two previously committed tier reports
+   (the source doc + content hash and each row's `title`/`text`/`notes`),
+   reading nothing but the two files — for the evidence reviewer who has
+   the two snapshots but no longer has the manifest, the evidence, or the
+   grading build. See "Comparing two saved reports: `--diff-reports`"
+   below.
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
@@ -75,6 +82,7 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
 # The --attest 2 (stream) forms first ship in klt 0.9.0 (PyPI); 0.8.0 and earlier refuse --attest 2.
 klt signoff --attest 2 --input <stream> [--inventory <file>] [--generator CMD --regenerated-hash sha256:<hash>] [-o <envelope> [--skip-local-only]] [--format text|json]
 klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format text|json]
+klt signoff --diff-reports <old-report> <new-report> [--format text|json] [--color auto|always|never] [--no-color]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -111,6 +119,17 @@ klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format t
   `doc_drift: true` alongside `status: "match"` rather than failing the gate
   (issue #2526). Use this instead of byte-comparing a committed report
   against a fresh render — see "Verifying a committed report: `--check`"
+  below.
+- `--diff-reports` — two paths to previously committed `--manifest` tier
+  report JSON files (issue #6850): compare the two snapshots' *checklist*
+  surfaces instead of grading anything. Read-only and self-sufficient — it
+  needs neither the manifest nor the evidence nor the grading build, just
+  the two files. Rows are matched by `(tier, id, partition)`, so reordered
+  rows alone — or a verdict-only/build-only change — compare as unchanged.
+  Exits `0` for any completed comparison, movement included; `1` for an
+  unreadable file, a non-tier report, or an ambiguous duplicate row key.
+  Mutually exclusive with `<file>...`/`--manifest`/`--fleet`/`--check` and
+  every grading flag. See "Comparing two saved reports: `--diff-reports`"
   below.
 - `--describe-grader` — print which T1 item ids this build has grading rules
   for, plus its grading-code content hash. Mutually exclusive with
@@ -4013,6 +4032,76 @@ not pin the grading build (that is what `grading_ruleset_id` is for, below),
 and `--check` excludes the whole `build` block from its verdict precisely
 because two legitimate installs of the same commit disagree about it.
 
+### Comparing two saved reports: `--diff-reports` (issue #6850)
+
+`--check` answers "does this committed report still reproduce" by
+**re-grading its manifest** — so it needs the manifest, the evidence that
+manifest cites, and a working grading build. An evidence reviewer holding
+two *saved* tier reports and none of that (the manifest was never
+committed, the evidence was archived, the build was upgraded) still has one
+question to answer: *what changed in the checklist between these two
+snapshots?* `--diff-reports` answers it from the two files alone:
+
+```bash
+# What moved in the checklist between two committed tier reports.
+# Always exits 0 on a completed comparison -- read the JSON for the movement.
+klt signoff --diff-reports reports/block.signoff.v1.json \
+  reports/block.signoff.v2.json --format json
+```
+
+```json
+{
+  "schema_version": 1,
+  "mode": "diff-reports",
+  "old_report": "reports/block.signoff.v1.json",
+  "new_report": "reports/block.signoff.v2.json",
+  "changed": true,
+  "source": [
+    { "field": "source_doc_content_hash",
+      "old": "sha256:…", "new": "sha256:…" }
+  ],
+  "items": {
+    "changed": [
+      { "tier": "T1", "id": 7, "partition": null, "field": "text",
+        "old": "…", "new": "… (reworded)" }
+    ],
+    "added": [
+      { "tier": "T1", "id": 12, "partition": null,
+        "title": "…", "text": "…", "notes": [] }
+    ],
+    "removed": []
+  }
+}
+```
+
+- **The comparison covers exactly the checklist-describing surfaces**: the
+  top-level `source_doc`/`source_doc_content_hash` (which checklist doc the
+  report quotes, and the hash of what it said) and each matched row's
+  `title`/`text`/`notes` — the same three item fields `--check` excludes
+  from its verdict as `doc_drift` (issue #2526). Everything else — every
+  `status`/`reason`/`citation`, the `t1_*` counts, the `build` block — is
+  grading output or install identity, and a report pair differing *only*
+  there compares as unchanged. The mode is the read-only complement of
+  `--check`: it reports the movement `--check` deliberately ignores,
+  without needing anything the grading touched.
+- **Rows are matched by `(tier, id, partition)`** — the row identity the
+  report itself carries. Reordering `items[]` alone therefore compares as
+  unchanged; the analog and digital rows of a mixed-signal pair that share
+  a numeric id stay distinct; and the T2–T4 ladder rows (`id: null`) are
+  distinguished by their tier. Each row present on only one side is
+  identified **once**, in `added`/`removed`, with its full checklist
+  content (`title`/`text`/`notes`).
+- **`changed` is the boolean summary; the lists are the answer.** `source[]`
+  and `items.changed[]` entries carry both values as `old`/`new`.
+- **Exit `0` for any completed comparison, movement included** — reporting
+  movement is this mode's answer, not a failure. Exit `1` is a failure to
+  run: an unreadable/non-JSON file, a report that is not a tier report (a
+  fleet roll-up, an unrelated JSON object), or a report carrying two rows
+  with the same `(tier, id, partition)` key, which could not be matched
+  unambiguously.
+- Fleet roll-ups and attestation envelopes are out of scope: point the mode
+  at reports `--manifest` produced.
+
 ### Re-pinning a stale hash: `--repin` (issue #5527)
 
 When an attestation inventory changes, `klt signoff --attest` regenerates the
@@ -6813,6 +6902,14 @@ Fleet roll-up mode (`--fleet`):
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | Always, once argument validation passes — purely informational, cannot fail. |
 | `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`/`--repo-root`. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
+
+`--diff-reports` mode (issue #6850):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | Any completed comparison, movement included — the movement is the answer, not a failure. Gate on `.changed`, not the exit code. |
+| `1`       | `--diff-reports` was combined with another mode's flag (`<file>...`/`--manifest`/`--fleet`/`--check`/`--attest`/`--describe-grader`/`--repin`/a grading flag/`-o`); or either report was missing/unreadable/not valid JSON/not a JSON object, was not a tier report (no `items` array — a fleet roll-up, an attestation envelope, an unrelated file), or carried two rows with the same `(tier, id, partition)` key. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 
 `--attest` mode (issue #2844):
