@@ -650,6 +650,7 @@
         "klayout_tools.decks.gf180mcu_unmodeled",
         "klayout_tools.decks.gf180mcu_untranscribed",
         "klayout_tools.decks.parasitics",
+        "klayout_tools.decks.plain_rules",
         "klayout_tools.decks.rules",
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
