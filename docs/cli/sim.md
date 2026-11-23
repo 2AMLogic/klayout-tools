@@ -372,6 +372,16 @@ present only on off-host reports. `worker_environment.engine_build_comparison`
 `engine_build` is the local probe and there is no `client_engine_build`.
 Deck-list (`decks[]`) reports carry neither field.
 
+#### Numeric reproducibility across hosts
+
+A matching ngspice major version, version banner, and PDK snapshot do not
+guarantee a fixed number of matching digits in `.meas` results. Even with
+the same request and model inputs, different builds, linked numerical
+libraries, and host floating-point behavior can change the values. Use the
+batch worker's binary hash to identify its executable. Set absolute or
+relative comparison tolerances appropriate to the measurement and the
+circuit's requirements.
+
 **ngspice's working directory, and `.spiceinit` compatibility mode (issue
 #2520).** Every `ngspice`/`Xyce` subprocess this command spawns — per
 corner, and for the two-pass fail-fast probe's own calibration slice — now
@@ -905,14 +915,9 @@ baked image and which PDK snapshot produced this result, the same role
 `environment.models_lib_sha256` plays for `local`/`local-parallel`.
 `spin_up_s` is the measured wall-clock from provisioning start to the
 remote host being ready to accept the first corner (instance reaching
-`running` plus SSH becoming reachable).
-
-**Numeric reproducibility across hosts.** A matching ngspice major version
-and PDK snapshot do not guarantee a fixed number of matching digits in
-`.meas` results. Different builds, linked numerical libraries and host
-floating-point behavior can change the values. Use the worker's binary hash
-to identify the executable and set comparison tolerances appropriate to the
-quantity and the circuit's requirements.
+`running` plus SSH becoming reachable). Comparing measurements across hosts
+requires a circuit-appropriate tolerance. See [Numeric reproducibility across
+hosts](#numeric-reproducibility-across-hosts).
 
 **Transport: SSH/SCP push-then-pull, no IAM instance profile on the
 guest.** `remote_launcher.select_instance_type()` sizes one instance for the
