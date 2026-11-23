@@ -121,6 +121,26 @@ def check_port_delay_key(field: str, which: str, port: str, clock_port: str) -> 
         )
 
 
+def _declared_entry_clock(
+    field: str, port: str, entry: dict[str, Any], declared_clocks: set[str]
+) -> str | None:
+    """Read the optional per-port clock and check its declaration."""
+    if "clock" not in entry:
+        return None
+    given = entry["clock"]
+    if not isinstance(given, str) or not given:
+        raise PostRouteStaError(
+            f"{field}[{port!r}].clock must be a non-empty string naming "
+            "a declared clock"
+        )
+    if given not in declared_clocks:
+        raise PostRouteStaError(
+            f"{field}[{port!r}].clock names '{given}', which is not a "
+            "declared clock (declared: " + ", ".join(sorted(declared_clocks)) + ")"
+        )
+    return given
+
+
 def parse_port_delay_entry(
     field: str, port: str, entry: Any, declared_clocks: set[str]
 ) -> IoDelayEntry:
@@ -153,20 +173,7 @@ def parse_port_delay_entry(
                 f"(got {bound_value!r})"
             )
         values[bound] = float(bound_value)
-    clock: str | None = None
-    if "clock" in entry:
-        given = entry["clock"]
-        if not isinstance(given, str) or not given:
-            raise PostRouteStaError(
-                f"{field}[{port!r}].clock must be a non-empty string naming "
-                "a declared clock"
-            )
-        if given not in declared_clocks:
-            raise PostRouteStaError(
-                f"{field}[{port!r}].clock names '{given}', which is not a "
-                "declared clock (declared: " + ", ".join(sorted(declared_clocks)) + ")"
-            )
-        clock = given
+    clock = _declared_entry_clock(field, port, entry, declared_clocks)
     if not values:
         raise PostRouteStaError(
             f"{field}[{port!r}] has no bound -- 'clock' alone constrains "
