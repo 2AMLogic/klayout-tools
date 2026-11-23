@@ -25,6 +25,18 @@ import os
 from typing import Any
 
 from ._layout import load_layout, write_layout
+from .gen_compose_base import GenComposeError, orient_port
+from .gen_compose_draw import draw_routed_entry
+from .gen_compose_routing import (
+    _min_width_um_for_layer,
+    _pdk_family,
+    _resolve_label_layer,
+    _resolve_landing_pad_sizes,
+    _resolve_route_layer,
+    read_block_layer_geometry,
+    route_two_pin,
+)
+from .gen_compose_via_cuts import via_drop_cut_side_um
 from .route_instances import (
     _build_block,
     _enumerate_instances,
@@ -43,23 +55,12 @@ def _via_sizes(
 ) -> tuple[dict[Any, float], dict[Any, float]]:
     """Per-via-layer cut sizes and per-landing-pad sizes, resolved exactly as
     ``compose()`` does before it hands them to the drawing step."""
-    from .gen_compose import (
-        _VIA_DROP_SIZE_UM,
-        _fixed_cut_side_um,
-        _via_fixed_size_um,
-    )
-    from .gen_compose_routing import _min_width_um_for_layer, _resolve_landing_pad_sizes
-
     via_drop_size_um: dict[tuple[int, int], float] = {}
     for route in routed:
         for drop in route.get("via_drops", []):
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
-                floor = _min_width_um_for_layer(variant, via_pair)
-                via_drop_size_um[via_pair] = _fixed_cut_side_um(
-                    max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-                    _via_fixed_size_um(variant, via_pair),
-                )
+                via_drop_size_um[via_pair] = via_drop_cut_side_um(variant, via_pair)
     return via_drop_size_um, _resolve_landing_pad_sizes(
         routed, variant, via_drop_size_um
     )
@@ -70,13 +71,6 @@ def _resolve_routing(req: dict[str, Any]) -> tuple[Any, Any, Any]:
     and ``routing`` block, with the deck's minimum-width floor enforced."""
     from .decks import get_extraction_deck
     from .gen import GenError
-    from .gen_compose import GenComposeError
-    from .gen_compose_routing import (
-        _min_width_um_for_layer,
-        _pdk_family,
-        _resolve_label_layer,
-        _resolve_route_layer,
-    )
 
     variant = req["variant"]
     try:
@@ -103,7 +97,6 @@ def _attach_port(
     where: str,
 ) -> None:
     """Derive ``pin``'s label port on ``block`` (once per label)."""
-    from .gen_compose import GenComposeError, _orient_port
     from .gen_compose_port_access import derive_label_ports
 
     if pin["label"] in block["port_names"]:
@@ -118,7 +111,7 @@ def _attach_port(
             code="unknown_label",
             details={"cell": instance_id, "label": pin["label"]},
         ) from exc
-    port = _orient_port(ports[0], block["orientation"])
+    port = orient_port(ports[0], block["orientation"])
     if pin["direction_deg"] is not None:
         port["direction_deg"] = pin["direction_deg"]
     block["ports"][pin["label"]] = port
@@ -174,8 +167,6 @@ def _route_nets(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, Any]]]:
     """``(routes, unrouted_nets, legs)``: the report rows plus the raw legs
     (drawing and overlap input) for every net, via ``route_two_pin``."""
-    from .gen_compose_routing import read_block_layer_geometry, route_two_pin
-
     route_layer, label_layer, extraction_deck = routing
     offsets_um = {bid: dict(b["_offset_um"]) for bid, b in blocks.items()}
     placed_bboxes_um = {bid: dict(b["_placed_bbox_um"]) for bid, b in blocks.items()}
@@ -265,14 +256,12 @@ def _write_output(
     routing: tuple[Any, Any, Any],
 ) -> dict[str, str] | None:
     """Draw every routed leg into the (already analysed) layout and write it."""
-    from .gen_compose import _draw_routed_entry
-
     if req["output"] is None:
         return None
     route_layer, label_layer, _deck = routing
     via_drop_size_um, landing_pad_size_um = _via_sizes(legs, req["variant"])
     for leg in legs:
-        _draw_routed_entry(
+        draw_routed_entry(
             layout,
             top,
             leg,
