@@ -83,10 +83,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
 
-# This module is the engine's public face: `extract.py` and `cli/extract_cmd.py`
-# import every one of these from here, so the two sibling modules below stay an
-# internal split (file-size ratchet, `scripts/README.md`) rather than a second
-# import surface callers have to know about.
+# Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
     DEFAULT_ENGINE as DEFAULT_ENGINE,
 )
@@ -110,6 +107,9 @@ from .extract_runset_flags import (
 )
 from .extract_runset_flags import (
     provenance_hash_check as provenance_hash_check,
+)
+from .extract_runset_flags import (
+    refuse_batch_for_runset_engine as refuse_batch_for_runset_engine,
 )
 from .extract_runset_flags import (
     refuse_unsupported as refuse_unsupported,

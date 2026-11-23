@@ -182,6 +182,7 @@
         "klayout_tools.drc_klayout_launch",
         "klayout_tools.drc_klayout_selection",
         "klayout_tools.drc_klayout_list",
+        "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
@@ -195,6 +196,7 @@
         "klayout_tools.economy",
         "klayout_tools.economy_bands",
         "klayout_tools.economy_footprint",
+        "klayout_tools.economy_gaps",
         "klayout_tools.economy_leaves",
         "klayout_tools.economy_pnr",
         "klayout_tools.economy_whatif"
@@ -316,6 +318,7 @@
         "klayout_tools.extract_layer_coverage",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
+        "klayout_tools.extract_resistance_graph_caps",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
         "klayout_tools.extract_split_terminal",
@@ -707,6 +710,7 @@
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",
+        "klayout_tools.place_and_route_pin_connectivity",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_rerun",
@@ -979,6 +983,7 @@
         "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_corner_point",
+        "klayout_tools.sim_corner_rules",
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
