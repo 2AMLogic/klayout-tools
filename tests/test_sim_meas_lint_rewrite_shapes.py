@@ -23,8 +23,21 @@ import subprocess
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE
-from klayout_tools import sim, sim_steps
+from klayout_tools import _meas_lint, sim, sim_steps
 from test_sim_meas_lint import _file_scope_rewrite
+
+
+@pytest.mark.parametrize(
+    ("group", "expected"),
+    [
+        ("max(a,b", None),
+        ("min(a,b", None),
+        ("max(v(a,b))", None),
+        ("min(v(a),v(b))", 0),
+    ],
+)
+def test_min_max_callee_requires_a_complete_group(group, expected):
+    assert _meas_lint._callee_start(group, group.index("(")) == expected
 
 
 @pytest.mark.parametrize(
