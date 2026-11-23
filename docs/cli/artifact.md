@@ -336,6 +336,12 @@ With no `--keep`, the guard cannot run, and the output says so
 (`guard.checked: false`). An object that is already absent is `absent` and a
 success. Duplicate targets are collapsed.
 
+Keys get the same pre-flight: every `REF` is `stat`ed, and the key `stat`
+returns must name the requested digest and, when the `REF` carries one — an
+`artifact:<key>` URI or a `MANIFEST[#SELECTOR]` entry — be that key. If any
+key disagrees, `delete` exits `1` with `error.code: "key_mismatch"` before
+the first delete call, so nothing is deleted, whether or not `--yes` is given.
+
 The broker must implement `POST /v1/delete`. If the delete call itself is
 refused with 404, 405 or 501 — `stat` had already reported the object
 present, so the route, not the object, is what is missing — `delete` exits
