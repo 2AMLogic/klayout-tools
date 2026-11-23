@@ -53,9 +53,12 @@ from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 #: ("from behind") family and the block-interior crossings come from
 #: ``gen_compose_routing._obstacle_rejection_reason``; the two
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
-#: route-vs-route gate ``route_bundle()`` itself runs. Every other class
-#: (a too-narrow channel, a closed guard ring, an unresolvable via drop) is
-#: a property of the pin pair, not of the plane, and is left alone.
+#: route-vs-route gate ``route_bundle()`` itself runs; the #7325 fragment
+#: from ``gen_compose_pad_conflicts``' pad-vs-other-block contact check --
+#: a pad clear of the block on a higher plane lifts the leg. Every other
+#: class (a too-narrow channel, a closed guard ring, an unresolvable via
+#: drop) is a property of the pin pair, not of the plane, and is left
+#: alone.
 _CLIMBABLE_REASON_MARKERS = (
     "reaches the pin from behind",
     "through unrelated block",
@@ -64,6 +67,7 @@ _CLIMBABLE_REASON_MARKERS = (
     "crosses already-routed net",
     "overlaps already-routed net",
     "shares a conductive edge with already-routed net",
+    "a pad touches a block hosting no pin of its net",
 )
 
 

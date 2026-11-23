@@ -18,7 +18,9 @@ sizing policy:
 * ``_leg_conflict_message`` -- the #1057 overlap / #1386 spacing verdict,
   upgraded to consult the pad rejection first;
 * ``_landing_pad_conflict_reason`` -- the rejection itself;
-* ``_terminal_pitch_um`` -- centre-to-centre pitch of a pad vs a region.
+* ``_terminal_pitch_um`` -- centre-to-centre pitch of a pad vs a region;
+* ``_pad_other_block_contact_reason`` -- the #7325 pad-vs-other-block
+  electrical-contact rejection.
 
 ``gen_compose_landing_pads`` re-imports ``_pad_is_intermediate`` (its
 resolver needs it) and re-exports the message entry points, so every
@@ -341,3 +343,83 @@ def _terminal_pitch_um(
         (edge.euclidian_distance(centre) for edge in other_region.edges()), default=0
     )
     return (int(nearest) + int(round(side_um / 2.0 / dbu))) * dbu
+
+
+def _pad_other_block_contact_reason(
+    pad_boxes: list[Any],
+    net_label: str,
+    other_block_ids: list[str],
+    geometry_for: Any,
+) -> str | None:
+    """The pad-vs-other-block electrical-contact rejection (issue #7325).
+
+    Called from ``compose()``'s ``_leg_conflict`` after the #1520 own-block
+    notch loop: every pad a candidate leg draws
+    (:func:`.gen_compose_landing_pads._landing_and_widen_pad_boxes` -- a
+    via-drop's landings on *every* plane of its ladder, intermediate and
+    terminal alike, plus stub-widen boxes) is tested against every placed
+    block hosting **no** pin of the net being routed, on the pad's own
+    layer. A pad touching such a block's own drawn geometry merges with it
+    electrically, so both nets can compose ``routed: true`` while `klt
+    extract` reads one node -- the silent short #7325 records, invisible
+    to `klt drc` (two touching shapes on one layer are one polygon, never
+    a spacing violation) and to the route-vs-route half of the check
+    (block geometry never enters ``accepted_route_regions``).
+
+    The predicate is ``kdb.Region.interacting`` -- shares at least one
+    point: overlap, shared edge *or* shared corner -- the same rule
+    extraction resolves layer connectivity with, so a corner-only touch is
+    rejected exactly like the edge share of #7325's reproducer (#7024
+    applied the same predicate to already-routed *route* geometry).
+    Contact-only by design: a mere near miss against another block's metal
+    stays a plain `klt drc` finding on the composed GDS, the same honest
+    backstop the #1913 intermediate entries leave in place.
+
+    Own-block and same-net landings are excluded by construction: the pad's
+    own block (and every block hosting one of this net's pins) is absent
+    from ``other_block_ids`` -- a pad merging with the wire at its own
+    declared port is the intended landing (#1520), never a violation.
+
+    ``geometry_for(block_id, pad_layer, drop)`` mirrors the #1520 loop's
+    ``_own_block_layer_geometry`` call (the writer's grid for a via-drop
+    landing, the source layout's own dbu for a stub-widen box) and is
+    expected to cache per ``(block, layer, scale)`` -- the caller reads
+    each combination at most once per request.
+
+    Returns the rejection wording naming the pad, the block and the net --
+    carrying a ``_CLIMBABLE_REASON_MARKERS`` fragment so the #6920 plane
+    climb can lift the leg to a plane that clears the block -- or ``None``
+    when every pad keeps clear of every other block.
+    """
+    import klayout.db as kdb
+
+    for pad_layer, _own_block_id, box, drop in pad_boxes:
+        for other_block in other_block_ids:
+            geometry = geometry_for(other_block, pad_layer, drop)
+            if geometry is None:
+                continue
+            dbu = geometry["dbu"]
+            pad_region = kdb.Region(
+                kdb.Box(
+                    int(round(box[0] / dbu)),
+                    int(round(box[1] / dbu)),
+                    int(round(box[2] / dbu)),
+                    int(round(box[3] / dbu)),
+                )
+            )
+            if pad_region.interacting(geometry["region"]).is_empty():
+                continue
+            return (
+                f"draws a pad ({box[0]:.4g}, {box[1]:.4g}) - "
+                f"({box[2]:.4g}, {box[3]:.4g}) on layer {pad_layer} that "
+                f"touches block '{other_block}'s own drawn geometry on "
+                "that layer -- a pad touches a block hosting no pin of "
+                f"its net, so `klt extract` reads net '{net_label}' and "
+                "that block's metal as one node: a silent short the "
+                "'routed' verdict would otherwise hide (issue #7325). "
+                "Separate the blocks (placement.origins_um), reach this "
+                "net's pin from a clear side (waypoints_um), or route "
+                "this net on another plane (connectivity[].layer_role, "
+                "or routing.cross_block_layer_role)"
+            )
+    return None

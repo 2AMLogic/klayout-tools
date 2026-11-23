@@ -218,6 +218,7 @@ from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
     _make_landing_pad_side_um,
+    _pad_other_block_contact_reason,
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
@@ -3663,6 +3664,30 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     _min_spacing_um_for_layer = partial(_route_spacing_rule, pdk_info["variant"])
 
+    # --- Pad-vs-other-block contact geometry (issue #7325) ------------------
+    # `_leg_conflict`'s contact check reads, for every pad a candidate leg
+    # draws, every *other* placed block's drawn geometry on the pad's own
+    # layer -- the same `read_block_layer_geometry` reader the #1520
+    # own-block notch loop uses, cached per (block, layer, scale) so a
+    # request with many candidate legs reads each combination at most
+    # once. A via-drop landing reads on the writer's grid, a stub-widen
+    # box on the source layout's own dbu (mirroring the #1520 loop's
+    # choice), so the cache key carries the scale the reader was given.
+    pad_contact_geometry_cache: dict[
+        tuple[str, tuple[int, int], float | None], dict[str, Any] | None
+    ] = {}
+
+    def _pad_contact_geometry_for(
+        block_id: str, layer: tuple[int, int], drop: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        scale = _drawing_dbu() if drop is not None else None
+        key = (block_id, layer, scale)
+        if key not in pad_contact_geometry_cache:
+            pad_contact_geometry_cache[key] = _own_block_layer_geometry(
+                block_id, layer, scale
+            )
+        return pad_contact_geometry_cache[key]
+
     _snap_routed_ports_to_grid(
         connectivity,
         blocks,
@@ -3810,6 +3835,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+            _net_pin_blocks: frozenset[str] = frozenset(
+                {block for block, _port in net_pin_set}
+            ),
+            _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
         ) -> RouteConflict | None:
@@ -3857,7 +3886,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
             Intermediate and far pads are checked on their own physical layers.
             An area overlap or a shared edge can connect distinct nets through
-            one pad even when their backbones lie on different metals.
+            one pad even when their backbones lie on different metals. Since
+            #7325, every pad is also tested -- again on its own physical
+            layer, via ``kdb.Region.interacting`` -- against every placed
+            block hosting no pin of this net: a pad touching another net's
+            *block* metal merges with it exactly like one touching its route,
+            and neither `klt drc` nor the route-vs-route half above can see
+            it (block geometry never enters ``accepted_route_regions``).
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -4000,6 +4035,33 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "sits close to; move the declared port further along "
                         "its own wire, away from the corner)"
                     )
+
+            # Pad-vs-other-block contact (#7325): everything above either
+            # compares this leg's footprint against another net's
+            # already-accepted *route* geometry (block metal never enters
+            # `accepted_route_regions`) or its pads against its *own*
+            # block's shapes (#1520). Nothing yet tests a pad against a
+            # *different* block's drawn geometry on the pad's own plane --
+            # yet a touch there merges the two electrically (the same
+            # `interacting` predicate `klt extract` resolves connectivity
+            # with: edge, corner or overlap), so both nets can report
+            # `routed: true` while extraction reads one node, and `klt drc`
+            # is blind to it (two touching shapes on one layer are one
+            # polygon, never a spacing violation). Contact-only by design:
+            # a near miss stays `klt drc`'s finding, the same backstop the
+            # #1913 intermediate entries keep. The message carries a
+            # `_CLIMBABLE_REASON_MARKERS` fragment so the #6920 plane climb
+            # can lift a leg whose only obstacle is this block.
+            contact_reason = _pad_other_block_contact_reason(
+                pad_boxes,
+                _net_label,
+                sorted(
+                    block_id for block_id in blocks if block_id not in _net_pin_blocks
+                ),
+                _pad_contact_geometry_for,
+            )
+            if contact_reason is not None:
+                return RouteConflict(contact_reason)
 
             # Own-block approach spacing check (#1904): everything above is
             # either a route-vs-route comparison or a *pad*-sized one. Nothing
