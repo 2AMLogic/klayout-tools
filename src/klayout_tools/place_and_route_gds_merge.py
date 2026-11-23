@@ -7,8 +7,8 @@ subsystem: parsing a DEF's own ``DIEAREA`` in real microns
 into the DEF-derived layout at a consistent DBU (:func:`_merge_gds_view`),
 measuring a merged cell library's own abutment-box overhang
 (:func:`_cell_library_max_overhang_um`), resolving a LEF layer name to its
-routed-net GDS ``(layer, datatype)`` pair (:func:`_lef_net_layer_gds_map`),
-a region-based drawn-geometry coverage test
+routed-net GDS ``(layer, datatype)`` pair (``_lef_net_layer_gds_map``, now in
+``place_and_route_pin_conductor``), a region-based drawn-geometry coverage test
 (:func:`_box_is_inside_drawn_geometry`), stamping unrouted single-pin DEF
 nets with a recoverable name marker (:func:`_stamp_single_pin_def_net_names`,
 issue #1488), and the merge's own top-level orchestration

@@ -457,6 +457,11 @@ def test_merge_without_diearea_writes_routed_gds_and_reports_repair(tmp_path):
     merged = kdb.Layout()
     merged.read(str(tmp_path / "out.gds"))
     assert not merged.top_cell().bbox().empty()
-    # This three-metal fixture has no upper power stack to repair.
-    assert info["power_stack_repair"]["patches"] == 0
+    # This three-metal fixture's layer map names no M4/M5/V3/V4, so the pass
+    # reports a named skip: it did not look, which is not "ran, nothing to
+    # repair" (``status: "clean"``).
+    repair = info["power_stack_repair"]
+    assert repair["status"] == "skipped"
+    assert repair["reason"] == "no M4/M5/V3/V4 layer in the KLayout layer map"
+    assert repair["patches"] == 0
     assert info["via_pad_trim"]["tip_check"]["router_fill_violations"] == 1

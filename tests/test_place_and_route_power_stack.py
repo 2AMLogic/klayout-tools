@@ -25,8 +25,15 @@ from klayout_tools.decks.asap7_rules import DECK_PATH
 from klayout_tools.drc import run_drc_klayout_engine
 from klayout_tools.place_and_route_power_stack import (
     _ENCLOSURE_NM,
+    _S1_NM,
+    _S2_NM,
+    _S3_NM,
+    _S4_S5_NM,
+    _S6_NM,
     _SHORT_EDGE_MAX_NM,
     _STUB_TARGET_NM,
+    _TIP_MIN_NM,
+    _m3_spacing_violations,
     repair_power_stack,
 )
 
@@ -112,6 +119,72 @@ def _report_counts(report: dict) -> str:
     )
 
 
+def _deck_counts(path) -> dict[str, int]:
+    """Violations per rule the packaged ASAP7 deck reports on a GDS."""
+    counts: dict[str, int] = {}
+    for violation in run_drc_klayout_engine(str(path), str(DECK_PATH))["violations"]:
+        counts[violation["rule"]] = counts.get(violation["rule"], 0) + 1
+    return counts
+
+
+def _m3_s_total(counts: dict[str, int]) -> int:
+    return sum(n for rule, n in counts.items() if rule.startswith("M3.S."))
+
+
+def _with_neighbours(*neighbours, signal_m3: bool = True) -> _Builder:
+    """The shipped stack plus extra M3 boxes (nm) that are legal around it."""
+    b = _Builder()
+    b.stack(signal_m3=signal_m3)
+    for box in neighbours:
+        b.box(M3, *box)
+    return b
+
+
+def _stub_pair() -> _Builder:
+    """Two stack stubs on one M3 track, 50 nm apart (y 100-134 and 184-218),
+    with M3 under the lower one that blocks its downward extension -- so the
+    lower stub must go up, toward the upper one."""
+    b = _Builder()
+    b.box(M5, 0, 90, 216, 250)
+    for y in (105, 189):
+        b.box(V4, 0, y, 216, y + 24)
+        b.box(M4, 0, y, 216, y + 24)
+        b.box(V3, 99, y, 117, y + 24)
+        b.box(M3, 99, y - 5, 117, y + 29)
+    b.box(M3, 99, 40, 117, 62)
+    return b
+
+
+def _mirror_count(b: _Builder) -> int:
+    region = kdb.Region(b.top.begin_shapes_rec(b.layout.find_layer(*M3))).merged()
+    return _m3_spacing_violations(kdb, region, DBU).count()
+
+
+def _stub(y0: float, y1: float) -> kdb.Box:
+    return kdb.Box(_nm(99), _nm(y0), _nm(117), _nm(y1))
+
+
+#: Each layout is legal as drawn around the lower stub (99-117 x 187-221 nm)
+#: except for the stub's own M3.S.2 against the 18 nm-away signal wire, and
+#: each is a configuration a downward-only stub extension turns into a *new*
+#: M3 spacing violation or leaves unrepaired.
+_SCENARIOS = {
+    # 16 nm below the stub, 18 nm to its left: the extended stub's new bottom
+    # corner is 19 nm (Euclidean) from this one -- S.6 wants 20.
+    "diagonal_corner": lambda: _with_neighbours((63, 100, 81, 171)),
+    # Same, but the neighbour's top (178 nm) is 1 nm inside the strip, so its
+    # short 34 nm side edge starts facing the now-long stub edge -- S.2 wants 25.
+    "short_edge_enters_strip": lambda: _with_neighbours((63, 144, 81, 178)),
+    # Diagonal neighbours both below and above: no safe direction.
+    "no_safe_direction": lambda: _with_neighbours(
+        (63, 100, 81, 171), (135, 238, 153, 300), signal_m3=False
+    ),
+    # The control: 28 nm of clearance, the downward strip is fine.
+    "clear_neighbour": lambda: _with_neighbours((63, 100, 81, 160)),
+    "stub_pair": _stub_pair,
+}
+
+
 def test_all_three_families_are_repaired_with_the_documented_geometry():
     b = _Builder()
     b.stack()
@@ -182,6 +255,65 @@ def test_m3_extension_blocked_below_falls_back_upward():
     assert kdb.Box(_nm(99), _nm(187), _nm(117), _nm(231)) in b.merged(M3)
 
 
+@pytest.mark.parametrize(
+    ("scenario", "lower_stub"),
+    [
+        # Downward would leave the left neighbour's corner 19 nm from the new
+        # bottom corner (S.6): the pass takes the upward direction instead.
+        ("diagonal_corner", _stub(187, 231)),
+        # Downward would put the short neighbour's side edge 18 nm from the
+        # now-long stub edge (S.2, 25 nm): upward again.
+        ("short_edge_enters_strip", _stub(187, 231)),
+        # The control: clear enough, so the usual downward strip.
+        ("clear_neighbour", _stub(177, 221)),
+    ],
+)
+def test_m3_extension_takes_the_direction_that_adds_no_violation(scenario, lower_stub):
+    b = _SCENARIOS[scenario]()
+    report = b.run()
+    assert report["m3_stub_spacing"] == {"targets": 2, "repaired": 2, "left": 0}
+    stubs = b.merged(M3)
+    assert lower_stub in stubs
+    assert _stub(753, 797) in stubs
+
+
+def test_m3_stub_with_no_safe_direction_is_left_as_drawn():
+    """Diagonal neighbours below and above the lower stub: neither strip is
+    safe, so the stub is counted in ``left`` and not touched."""
+    b = _SCENARIOS["no_safe_direction"]()
+    report = b.run()
+    assert report["m3_stub_spacing"] == {"targets": 2, "repaired": 1, "left": 1}
+    stubs = b.merged(M3)
+    assert _stub(187, 221) in stubs
+    assert _stub(753, 797) in stubs
+
+
+def test_a_drawn_strip_is_seen_by_the_next_stub():
+    """The lower stub is forced upward to 144 nm; the upper stub's downward
+    strip would then end 30 nm above it (S.4 wants 31). Checking each stub
+    only against the layout as first read would draw it."""
+    b = _SCENARIOS["stub_pair"]()
+    report = b.run()
+    assert report["m3_stub_spacing"] == {"targets": 2, "repaired": 2, "left": 0}
+    assert b.merged(M3) == [_stub(40, 62), _stub(100, 144), _stub(184, 228)]
+
+
+def test_m5_cut_with_a_blocked_short_side_is_left_not_repaired():
+    """A cut short on both its top and bottom needs both strips: patching one
+    side leaves V4.M5.EN.2 failing, so the cut is ``left``."""
+    b = _Builder()
+    b.box(M5, 0, 192, 216, 216)
+    b.box(V4, 0, 192, 216, 216)
+    b.box(M4, 0, 192, 216, 216)
+    b.box(M5, 0, 240, 216, 280)  # inside the top strip's 40 nm along ring
+    report = b.run()
+    assert report["v4_m5_enclosure"] == {"targets": 1, "repaired": 0, "left": 1}
+    assert b.merged(M5) == [
+        kdb.Box(0, _nm(180), _nm(216), _nm(216)),
+        kdb.Box(0, _nm(240), _nm(216), _nm(280)),
+    ]
+
+
 def test_non_asap7_pdk_is_a_byte_identical_no_op(tmp_path):
     b = _Builder()
     b.stack()
@@ -225,6 +357,19 @@ def test_thresholds_match_the_deck():
     assert _STUB_TARGET_NM > _SHORT_EDGE_MAX_NM
     # M3.S.2's tip-to-side threshold, the rule the stub repair escapes.
     assert re.search(r"m_short\.separation\(m_long, 25\.nm, projection\)", text)
+    # The whole S.1-S.6 family the stub extension is re-checked against
+    # (:func:`_m3_spacing_violations` mirrors it rule for rule).
+    for rule in (
+        f"m_long.space({_S1_NM:g}.nm, projection)",
+        f"m_short.separation(m_long, {_S2_NM:g}.nm, projection)",
+        f"m_tip.space({_S3_NM:g}.nm, projection)",
+        f"m_narrow_tip.space({_S4_S5_NM:g}.nm, projection)",
+        f"m_tip.separation(m_narrow_tip, {_S4_S5_NM:g}.nm, projection)",
+        f"m.space({_S6_NM:g}.nm, euclidian, projection_limits(nil, 0.25.nm))",
+        f"m_tip = m.edges.with_length({_TIP_MIN_NM:g}.nm, {_SHORT_EDGE_MAX_NM:g}.nm)",
+        f"m_narrow_tip = m.edges.with_length(nil, {_TIP_MIN_NM:g}.nm)",
+    ):
+        assert rule in text, rule
 
 
 @_needs_klayout
@@ -237,17 +382,7 @@ def test_counts_match_the_real_deck(tmp_path):
     before = tmp_path / "stack.gds"
     b.layout.write(str(before))
 
-    def rule_counts(path) -> dict[str, int]:
-        return {rule: count for rule, count in _deck_counts(path).items() if count}
-
-    def _deck_counts(path) -> dict[str, int]:
-        report = run_drc_klayout_engine(str(path), str(DECK_PATH))
-        counts: dict[str, int] = {}
-        for violation in report["violations"]:
-            counts[violation["rule"]] = counts.get(violation["rule"], 0) + 1
-        return counts
-
-    before_counts = rule_counts(before)
+    before_counts = _deck_counts(before)
     assert before_counts.get("V4.M4.EN.1") == 2
     assert before_counts.get("V4.M5.EN.2") == 2
     assert before_counts.get("M3.S.2") == 2
@@ -255,7 +390,7 @@ def test_counts_match_the_real_deck(tmp_path):
     assert b.run()["status"] == "repaired"
     after = tmp_path / "stack-repaired.gds"
     b.layout.write(str(after))
-    after_counts = rule_counts(after)
+    after_counts = _deck_counts(after)
     assert after_counts.get("V4.M4.EN.1", 0) == 0
     assert after_counts.get("V4.M5.EN.2", 0) == 0
     assert after_counts.get("M3.S.2", 0) == 0
@@ -263,3 +398,30 @@ def test_counts_match_the_real_deck(tmp_path):
         if rule in ("V4.M4.EN.1", "V4.M5.EN.2", "M3.S.2"):
             continue
         assert count <= before_counts.get(rule, 0), (rule, before_counts, after_counts)
+
+
+@_needs_klayout
+@pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
+def test_stub_extension_leaves_no_m3_spacing_violation_in_the_real_deck(
+    scenario, tmp_path
+):
+    """Differential oracle for the M3 stub strip (issue #6909 review): every
+    layout starts legal apart from the stub's own M3.S.2, so after the repair
+    the deck must report no M3 spacing violation at all -- the per-rule
+    "count did not rise" comparison cannot see a new violation traded for a
+    fixed one inside the same family. The in-module S.1-S.6 mirror must agree
+    with the deck's count before and after, since the check rests on it."""
+    b = _SCENARIOS[scenario]()
+    gds = tmp_path / "before.gds"
+    b.layout.write(str(gds))
+    before = _deck_counts(gds)
+    assert _mirror_count(b) == _m3_s_total(before)
+
+    b.run()
+    gds = tmp_path / "after.gds"
+    b.layout.write(str(gds))
+    after = _deck_counts(gds)
+    assert _m3_s_total(after) == 0, after
+    assert _mirror_count(b) == 0
+    for rule in ("V4.M4.EN.1", "V4.M5.EN.2"):
+        assert after.get(rule, 0) <= before.get(rule, 0)

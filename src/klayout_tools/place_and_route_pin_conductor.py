@@ -62,8 +62,7 @@ def _pin_conductor_map_entries(map_path: str | None) -> list[tuple[str, int, int
     20``), or that declares only one of them, needs nothing and is skipped.
 
     Returns ``[]`` for ``None`` or an unreadable/malformed file, matching
-    :func:`~klayout_tools.place_and_route_gds_merge._lef_net_layer_gds_map`'s
-    degrade-gracefully posture.
+    :func:`_lef_net_layer_gds_map`'s degrade-gracefully posture.
     """
     if map_path is None:
         return []

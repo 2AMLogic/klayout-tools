@@ -42,17 +42,23 @@ they own:
 * **M3 stub spacing**: every stack stub whose side edges the deck would
   classify as short (<= 36.25 nm) is extended vertically to 44 nm. This
   moves its side edges into the *long* class, which strictly *lowers* the
-  spacing every horizontal neighbour can demand (25 -> 18 nm against a long
-  neighbour, 27/31 -> 25 nm against a short one) without moving any edge in
-  x, so no horizontal pair can start failing because of it; the pass also
-  verifies the extension strip keeps its 32 nm clearance (the family's
-  worst threshold is 31 nm) to every other M3 polygon below.
+  spacing every horizontal neighbour already facing the stub can demand
+  (25 -> 18 nm against a long neighbour, 27/31 -> 25 nm against a short
+  one) without moving any edge in x. Two checks gate the strip. The 32 nm
+  band past its new end edge (the family's worst threshold is 31 nm) must
+  hold no other M3 polygon. And re-evaluating the deck's whole M1-M3 spacing
+  family (S.1-S.6, :func:`_m3_spacing_violations`) on the local M3 with and
+  without the strip must show no violation the layout did not already have.
+  The second check covers what the band cannot see: a polygon diagonally off
+  the moved end edge (S.6, 20 nm corner-to-corner), and one whose short
+  side edge only starts facing the stub through the new strip (S.2).
 
-Every patch is drawn only when the region it adds, plus the rule-family
-spacing ring around it, contains no other polygon of the same layer -- so a
-patch can only ever merge with the conductor it repairs (the via stack's
-own landing, strap or stub): it cannot bridge two nets. A target it cannot
-repair safely is counted in ``left`` and reported, never forced.
+Every M4/M5 patch is drawn only when the region it adds, plus the
+rule-family spacing ring around it, contains no other polygon of the same
+layer; every M3 strip passes the two checks above. So a patch can only ever
+merge with the conductor it repairs (the via stack's own landing, strap or
+stub): it cannot bridge two nets. A target it cannot repair safely is
+counted in ``left`` and reported, never forced.
 
 It is a documented no-op for every other PDK family -- the GDS is not
 touched at all.
@@ -90,6 +96,18 @@ _STUB_TARGET_NM = 44.0
 #: threshold the moved edge can face is 31 nm (S.4/S.5), so 32 nm of empty
 #: M3 around the strip keeps every one of S.1-S.6 satisfied.
 _M3_CLEAR_NM = 32.0
+#: Table 3.12.1 M1-M3 spacing thresholds mirrored from ``decks/asap7.drc`` for
+#: :func:`_m3_spacing_violations` (``test_thresholds_match_the_deck`` pins
+#: them): S.1 side-to-side (both edges long), S.2 tip-to-side (short vs
+#: long), S.3 tip-to-tip (both 24..36 nm), S.4/S.5 (< 24 nm vs < 24 nm or
+#: 24..36 nm), S.6 corner-to-corner (Euclidean, no projection overlap), and
+#: the 24 nm lower bound of the "tip" edge-length class.
+_S1_NM = 18.0
+_S2_NM = 25.0
+_S3_NM = 27.0
+_S4_S5_NM = 31.0
+_S6_NM = 20.0
+_TIP_MIN_NM = 24.0
 
 _LEF_LAYERS = ("M3", "M4", "M5", "V3", "V4")
 
@@ -192,7 +210,11 @@ def _repair_m5_enclosure(
     report: dict[str, Any],
 ) -> Any:
     """Extend the M5 strap 12 nm past every endmost V4 cut whose top/bottom
-    M5 enclosure is short. Returns the updated M5 region."""
+    M5 enclosure is short. Returns the updated M5 region.
+
+    The deck wants 11 nm on *both* the top and the bottom, so a cut counts
+    as ``repaired`` only when every short side was patched; a cut with a
+    blocked short side is ``left`` even if its other side was patched."""
     enc = _nm_to_dbu(_ENCLOSURE_NM, dbu_um)
     ext = _nm_to_dbu(_ENCLOSURE_NM + _PATCH_MARGIN_NM, dbu_um)
     along = _nm_to_dbu(_ALONG_SPACE_NM, dbu_um)
@@ -207,7 +229,7 @@ def _repair_m5_enclosure(
     for via in targets.each():
         b = via.bbox()
         strap = m5.interacting(_region(kdb, b))
-        repaired = False
+        blocked = False
         for side in ("bottom", "top"):
             # The 11 nm strip past this end of the cut, inside the cut's
             # x range (V4.M5.AUX.2 keeps the cut exactly as wide as the
@@ -240,16 +262,114 @@ def _repair_m5_enclosure(
                 - patch_region
             )
             if not _others_clear(patch_region | ring, m5 - strap):
+                blocked = True
                 continue
             top_cell.shapes(m5_index).insert(patch)
             m5 += patch_region
             report["patches"] += 1
-            repaired = True
-        if repaired:
-            counts["repaired"] += 1
-        else:
-            counts["left"] += 1
+        counts["left" if blocked else "repaired"] += 1
     return m5
+
+
+def _m3_spacing_violations(kdb: Any, region: Any, dbu_um: float) -> Any:
+    """Every Table 3.12.1 spacing violation (S.1-S.6) in the M3 ``region``,
+    as an ``EdgePairs``, rule for rule what ``decks/asap7.drc`` measures.
+
+    Edge lengths are classed on integer dbu the way the repair classes a
+    stub's own height (``> 36.25 nm`` is long), so an edge exactly on the
+    bound takes the stricter short-class threshold. The explicit ``False``
+    keeps ``with_length`` on its (min, max, inverse) overload.
+    """
+
+    def nm(value: float) -> int:
+        return _nm_to_dbu(value, dbu_um)
+
+    cut = nm(_SHORT_EDGE_MAX_NM) + 1
+    edges = region.edges()
+    long_ = edges.with_length(cut, None, False)
+    short = edges.with_length(None, cut, False)
+    tip = edges.with_length(nm(_TIP_MIN_NM), cut, False)
+    narrow = edges.with_length(None, nm(_TIP_MIN_NM), False)
+    projection = kdb.Edges.Projection
+    found = kdb.EdgePairs()
+    found += long_.space_check(nm(_S1_NM), False, projection)
+    found += short.separation_check(long_, nm(_S2_NM), False, projection)
+    found += tip.space_check(nm(_S3_NM), False, projection)
+    found += narrow.space_check(nm(_S4_S5_NM), False, projection)
+    found += tip.separation_check(narrow, nm(_S4_S5_NM), False, projection)
+    # Corner-to-corner: facing edges that overlap in projection are the
+    # side/tip rules above, so only a projection under one dbu counts.
+    found += region.space_check(nm(_S6_NM), False, kdb.Region.Euclidian, None, 0, 1)
+    return found
+
+
+def _adds_spacing_violation(kdb: Any, m3: Any, patch: Any, dbu_um: float) -> bool:
+    """True when drawing ``patch`` would give the M3 layer an S.1-S.6 spacing
+    violation it does not already have.
+
+    Compares :func:`_m3_spacing_violations` on the M3 polygons within the
+    family's worst reach of the patch, with and without it. A violation the
+    patch *removes* (the stub's own ``M3.S.2``) never counts; one it leaves
+    untouched never counts either, so an unrelated pre-existing defect
+    cannot block a repair. Judging each strip against the deck's own rules
+    is what catches a neighbour the clearance band cannot see.
+    """
+    reach = _nm_to_dbu(_M3_CLEAR_NM, dbu_um)
+    local = m3.interacting(_region(kdb, patch.enlarged(reach, reach))).merged()
+    drawn = (local + _region(kdb, patch)).merged()
+    before = _m3_spacing_violations(kdb, local, dbu_um).edges()
+    after = _m3_spacing_violations(kdb, drawn, dbu_um).edges()
+    return not (after - before).is_empty()
+
+
+def _extend_stub(
+    kdb: Any,
+    *,
+    top_cell: Any,
+    m3_index: int,
+    m3: Any,
+    stub: Any,
+    dbu_um: float,
+) -> Any | None:
+    """Draw the extension strip of one short stack stub and return its
+    region, or ``None`` when no direction is safe (the stub is then left as
+    drawn).
+
+    Downward first (the direction pdngen's own DRCFILL patches take), upward
+    only when below is not safe. The side edges stay at the same x and every
+    pair already facing them only has its threshold drop, so no lateral
+    clearance is demanded (it would block on the very adjacent-track
+    neighbour the repair exists for). The strip must overlap no foreign M3,
+    the 31 nm-plus-a-nanometre band past its new end edge must be empty, and
+    the deck's spacing family must not gain a violation
+    (:func:`_adds_spacing_violation`).
+    """
+    b = stub.bbox()
+    target = _nm_to_dbu(_STUB_TARGET_NM, dbu_um)
+    clear = _nm_to_dbu(_M3_CLEAR_NM, dbu_um)
+    foreign = m3 - _region(kdb, stub)
+    for y0, y1, band in (
+        (
+            b.top - target,
+            b.bottom,
+            kdb.Box(b.left, b.top - target - clear, b.right, b.top - target),
+        ),
+        (
+            b.top,
+            b.bottom + target,
+            kdb.Box(b.left, b.bottom + target, b.right, b.bottom + target + clear),
+        ),
+    ):
+        if y1 <= y0:
+            continue
+        patch = kdb.Box(b.left, y0, b.right, y1)
+        zone = _region(kdb, patch) | _region(kdb, band)
+        if _others_clear(zone, foreign) and not _adds_spacing_violation(
+            kdb, m3, patch, dbu_um
+        ):
+            top_cell.shapes(m3_index).insert(patch)
+            return _region(kdb, patch)
+    return None
 
 
 def _repair_m3_stubs(
@@ -266,60 +386,31 @@ def _repair_m3_stubs(
 ) -> None:
     """Lengthen every M2 -> M5 stack stub whose side edges the deck
     classifies as short, moving them into the long class where the 18 nm
-    side-to-side spacing a neighbour track is entitled to applies."""
+    side-to-side spacing a neighbour track is entitled to applies. Every
+    strip drawn is added to ``m3`` so the next stub is checked against it."""
     short_max = _nm_to_dbu(_SHORT_EDGE_MAX_NM, dbu_um)
-    target = _nm_to_dbu(_STUB_TARGET_NM, dbu_um)
-    clear = _nm_to_dbu(_M3_CLEAR_NM, dbu_um)
     # Stack stubs: the M3 polygons carrying the V3 cuts of the wide-V4
     # stack -- V3 cuts that land on an M4 polygon carrying a V4 cut.
     landings = m4.interacting(v4)
     stack_v3 = v3.interacting(landings)
     if stack_v3.is_empty():
         return
-    stubs = m3.interacting(stack_v3)
     counts = report["m3_stub_spacing"]
-    for stub in stubs.each():
-        b = stub.bbox()
-        height = b.height()
-        if height > short_max:
+    for stub in m3.interacting(stack_v3).each():
+        if stub.bbox().height() > short_max:
             # Side edges are already long: no tip-to-side classification to
             # escape, and the 18 nm adjacent-track gap already passes.
             continue
         counts["targets"] += 1
-        stub_region = _region(kdb, stub)
-        # Extend downward (the direction pdngen's own DRCFILL patches take)
-        # past the current height to the target height; upward only when
-        # below is not clear. Safety is about the edges that MOVE: the side
-        # edges stay at the same x and every horizontal pair's threshold
-        # only drops when they grow long, so no lateral clearance is needed
-        # (demanding one would block on the very adjacent-track neighbour
-        # the repair exists for). The strip itself must overlap no foreign
-        # M3, and the band past its new end edge -- the family's worst
-        # threshold, 31 nm, plus a nanometre -- must be empty.
-        for y0, y1, band in (
-            (
-                b.top - target,
-                b.bottom,
-                kdb.Box(b.left, b.top - target - clear, b.right, b.top - target),
-            ),
-            (
-                b.top,
-                b.bottom + target,
-                kdb.Box(b.left, b.bottom + target, b.right, b.bottom + target + clear),
-            ),
-        ):
-            if y1 <= y0:
-                continue
-            patch = kdb.Box(b.left, y0, b.right, y1)
-            patch_region = _region(kdb, patch)
-            if not _others_clear(patch_region | _region(kdb, band), m3 - stub_region):
-                continue
-            top_cell.shapes(m3_index).insert(patch)
-            counts["repaired"] += 1
-            report["patches"] += 1
-            break
-        else:
+        drawn = _extend_stub(
+            kdb, top_cell=top_cell, m3_index=m3_index, m3=m3, stub=stub, dbu_um=dbu_um
+        )
+        if drawn is None:
             counts["left"] += 1
+            continue
+        m3 += drawn
+        counts["repaired"] += 1
+        report["patches"] += 1
 
 
 def repair_power_stack(
