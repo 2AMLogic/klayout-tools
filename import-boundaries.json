@@ -321,6 +321,7 @@
         "klayout_tools.extract_runset_spice",
         "klayout_tools.extract_netlist_target",
         "klayout_tools.extract_pdk_resolve",
+        "klayout_tools.extract_pin_clusters",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
