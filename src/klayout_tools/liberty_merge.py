@@ -18,7 +18,8 @@ group's *name* alone may differ -- the merged header keeps the first
 file's spelling, and a renamed file whose retained text still references
 its local name refuses instead of dangling. Top-level ``lu_table_template``
 and ``power_lut_template`` groups are a second exception: they are unioned
-by name (same name with different content is an error) and the ones the
+by name. Differing direct index values are safe only when every referencing
+table supplies all its own axes. The first definition is kept, and the ones the
 first file lacks are appended after its header. Each file's cell groups are
 appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
@@ -35,20 +36,22 @@ import tempfile
 from .liberty_header_diff import header_mismatch
 from .liberty_merge_syntax import (
     _CELL_NAME_RE,
+    _TEMPLATE_KINDS,
     _find_matching,
     _find_terminator,
     _next_significant,
     _normalize_header,
     _scan_cells,
     _skip_ws,
+    _template_shape,
     _tokens,
+    inherited_table_axis,
 )
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
 
-_TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
 #: Header attributes ignored when comparing files for a merge: free text with
 #: no electrical content (a per-file timestamp, a version string, a vendor
@@ -126,6 +129,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     first_condition_count = 0
     seen: dict[str, str] = {}
     templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
+    ambiguous_axes: dict[str, set[str]] = {}
     extra: list[str] = []
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
@@ -150,18 +154,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
             )
             if mismatch:
                 raise LibertyMergeError(mismatch + context)
-        for name, raw in file_templates:
-            tnorm = _normalize_header(raw)
-            known = templates.get(name)
-            if known is None:
-                templates[name] = (tnorm, raw, path)
-                if path is not first_path:
-                    extra.append(raw)
-            elif known[0] != tnorm:
-                raise LibertyMergeError(
-                    f"Liberty template '{name}' differs between '{known[2]}' "
-                    f"and '{path}' (cannot merge cell groups)"
-                )
+        _union_templates(
+            file_templates, path, first_path, templates, extra, ambiguous_axes
+        )
         for cell in cells:
             if cell in seen:
                 raise LibertyMergeError(
@@ -170,7 +165,41 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 )
             seen[cell] = path
         bodies.append(body)
+    if ambiguous_axes:
+        for path, text in zip(paths, texts, strict=True):
+            if inherited := inherited_table_axis(text, ambiguous_axes):
+                name, axis = inherited
+                raise LibertyMergeError(
+                    f"Liberty template '{name}' differs across members and a table "
+                    f"in '{path}' inherits {axis} (cannot merge cell groups)"
+                )
     return header, extra, bodies
+
+
+def _union_templates(
+    file_templates: list[tuple[str, str]],
+    path: str,
+    first_path: str,
+    templates: dict[str, tuple[str, str, str]],
+    extra: list[str],
+    ambiguous_axes: dict[str, set[str]],
+) -> None:
+    """Keep first definitions and record axes requiring local values in every member."""
+    for name, raw in file_templates:
+        tnorm = _normalize_header(raw)
+        known = templates.get(name)
+        if known is None:
+            templates[name] = (tnorm, raw, path)
+            if path is not first_path:
+                extra.append(raw)
+        elif known[0] != tnorm:
+            shape, axes = _template_shape(raw)
+            if not axes or (shape, axes) != _template_shape(known[1]):
+                raise LibertyMergeError(
+                    f"Liberty template '{name}' differs between '{known[2]}' "
+                    f"and '{path}' (cannot merge cell groups)"
+                )
+            ambiguous_axes[name] = axes
 
 
 def _header_fields(path: str, header: str) -> dict[str, str]:
