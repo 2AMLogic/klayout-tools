@@ -185,8 +185,8 @@ from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
+    apply_derived_flavors,
     apply_gate_contact,
-    apply_resistor_flavor,
     device_owned_port_names,
     extract_raw_params_by_id,
     port_pins,
@@ -1079,7 +1079,7 @@ def execute_layout_plan(
                 },
             }
             try:
-                warnings.extend(apply_resistor_flavor(group, params, pdk_spec, family))
+                warnings.extend(apply_derived_flavors(group, params, pdk_spec, family))
                 generated[group["id"]] = generate(gen_request)
             except GenError as exc:
                 raise LayoutPlanExecuteError(
