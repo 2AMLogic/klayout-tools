@@ -109,6 +109,10 @@ from .place_and_route_layers import _signal_routing_layers as _signal_routing_la
 # PDN-0185. Same "self-contained subsystem in its own module" split as the
 # power audit below.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
+from .place_and_route_pin_connectivity import (
+    apply_pin_connectivity,
+    audit_pin_connectivity,
+)
 from .place_and_route_pins import (
     check_io_pin_constraints,
     netlist_top_ports,
@@ -1717,12 +1721,7 @@ def _run_single_corner(
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
     exclusions = cell_exclusion_fields(
-        cell_library,
-        library,
-        liberty_path,
-        _CTS_BUFFER_CELLS,
-        _ANTENNA_DIODE_CELLS,
-        error_cls=PlaceAndRouteError,
+        cell_library, library, liberty_path, error_cls=PlaceAndRouteError
     )
     # Select hard-macro Liberties for the resolved corner.
     macro_liberty_paths = [
@@ -2007,13 +2006,10 @@ def _run_single_corner(
     via_pad_trim_info: dict[str, Any] | None = None
     pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
+    route_open = False
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
-        # Same deterministic path `_stage_script_lines`'s own `"route"`
-        # branch just handed `write_verilog` (issue #996) -- recomputed here
-        # rather than threaded back out, exactly as `def_path` above and the
-        # `-output_drc` report path earlier already are.
         verilog_path = os.path.join(output_dir, f"{hdl_toplevel}.v")
         merge_info = _merge_def_to_gds(
             def_path=def_path,
@@ -2026,6 +2022,14 @@ def _run_single_corner(
             out_path=gds_path,
             output_dbu_um=output_dbu_um,
         )
+        check = audit_pin_connectivity(
+            def_path,
+            gds_path,
+            hdl_toplevel,
+            _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library),
+            cell_lef,
+        )
+        route_open = apply_pin_connectivity(stages[-1], check)
         gds_dbu_um = merge_info["output_dbu_um"]
         layer_map_info = {
             "path": merge_info["path"],
@@ -2281,8 +2285,7 @@ def _run_single_corner(
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
     engine_version = _openroad_version()
-    # Match synthesis provenance by naming the library and timing corner.
-    # The separate interconnect_corner field identifies the parasitic corner (#1100).
+    # Input naming follows the resolved Liberty corner.
     deck_name = f"{cell_library}__{corner}"
     provenance = build_provenance(
         deck_name=deck_name,
@@ -2312,7 +2315,7 @@ def _run_single_corner(
         "netlist": repo_relative_path(
             netlist_path, repo_root=find_repo_root(request_dir)
         ),
-        "status": "ok",
+        "status": "failed" if route_open else "ok",
         "stage_reached": target_stage,
         "seed": seed,
         # Additive field (issue #4914): what `estimated_power_mw` was

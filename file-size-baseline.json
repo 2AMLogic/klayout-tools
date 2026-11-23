@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1593
+      "lines": 1586
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3148
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",

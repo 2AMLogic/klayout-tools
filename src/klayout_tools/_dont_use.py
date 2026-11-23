@@ -39,16 +39,17 @@ def cell_exclusion_fields(
     cell_library: str,
     library: dict[str, Any] | None,
     liberty_path: str,
-    cts_buffers: dict[str, str],
-    antenna_diodes: dict[str, tuple[str, str]],
     *,
     error_cls: type[Exception],
 ) -> dict[str, dict[str, list[str]]]:
     if not library or "dont_use" not in library:
         return {}
+    # The orchestrator owns these tables and imports this module at startup.
+    from .place_and_route import _ANTENNA_DIODE_CELLS, _CTS_BUFFER_CELLS
+
     requested = library["dont_use"]
-    diode = library.get("antenna_diode", antenna_diodes.get(cell_library))
-    buffer = library.get("cts_buffer", cts_buffers.get(cell_library))
+    diode = library.get("antenna_diode", _ANTENNA_DIODE_CELLS.get(cell_library))
+    buffer = library.get("cts_buffer", _CTS_BUFFER_CELLS.get(cell_library))
     for role, cell in (
         ("CTS buffer", buffer),
         ("antenna diode", diode[0] if diode else None),
