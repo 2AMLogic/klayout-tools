@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9825
+      "lines": 9157
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 542
+      "lines": 525
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -305,15 +305,15 @@
     },
     {
       "path": "src/klayout_tools/extract_parasitics.py",
-      "lines": 3147
+      "lines": 3013
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
-      "lines": 1160
+      "lines": 1126
     },
     {
       "path": "src/klayout_tools/extract_report.py",
-      "lines": 919
+      "lines": 878
     },
     {
       "path": "src/klayout_tools/extract_resistance_graph.py",
@@ -321,7 +321,7 @@
     },
     {
       "path": "src/klayout_tools/extract_spef.py",
-      "lines": 1038
+      "lines": 992
     },
     {
       "path": "src/klayout_tools/extract_subcircuit.py",
@@ -449,7 +449,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
-      "lines": 668
+      "lines": 628
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
@@ -473,7 +473,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2080
+      "lines": 2073
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",

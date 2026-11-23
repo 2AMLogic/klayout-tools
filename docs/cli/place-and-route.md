@@ -2451,7 +2451,16 @@ the diode check.
 Every post-floorplan stage applies the built-in library patterns first, then the
 requested patterns, keeping the first occurrence of each. With this field set,
 the response records the original deduplicated list in `cell_exclusions.requested`,
-the built-ins in `library_defaults`, and the emitted order in `effective`.
+the built-ins in `library_defaults`, the emitted order in `effective`, and
+whether the zero-match check actually ran in `cell_exclusions.validated`
+(issue #7388): `true` when each requested pattern was matched against the
+resolved Liberty's own cell names, `null` when that cell list could not be
+established and the check was skipped — never passing off an unchecked list as
+a checked one, the same disclosure `klt synthesize`'s always-present
+`cell_exclusions` makes. Unlike synthesize's block, this one is present only
+when `library.dont_use` is supplied (omitted otherwise); that presence
+divergence is deliberate and recorded in
+[`docs/json-contract.md`](../json-contract.md).
 Existing instances in the input netlist can still appear in the output.
 
 ### Unknown request keys are errors (issue #4230)
