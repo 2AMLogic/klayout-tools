@@ -83,8 +83,7 @@ _TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
 
 
 #: The keys each part of the ``klt erc`` spec file recognises (issue #2243).
-#: Any other key is rejected with its full path rather than ignored -- see
-#: ``docs/cli/erc.md``'s "Unrecognised spec keys". Keep these in step with
+#: Unknown keys are rejected with their full path. Keep these in step with
 #: the ``_validate_*``/``_parse_*`` readers below when a spec field is added.
 _SPEC_KEYS = (
     "stackup",
@@ -95,6 +94,7 @@ _SPEC_KEYS = (
     "common_native_substrate",
     "devices",
     "antenna_limits",
+    "keepouts",
 )
 _STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
 _NET_KEYS = (

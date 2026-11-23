@@ -66,6 +66,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_noise_contributors, sim_noise_leaves
+from .sim_errors import SimError
+from .sim_measurement_grading import _vector_measurement_result
+from .sim_raw import parse_ascii_rawfile
 
 #: The ``noise.mechanism`` values.
 NOISE_MECHANISMS = sim_noise_leaves.NOISE_MECHANISMS
@@ -272,8 +275,6 @@ def extract_corner(
 
 def _read_plot(raw_path: str) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
     """``(waveform, None)`` or ``(None, (code, message))``."""
-    from .sim import SimError, parse_ascii_rawfile
-
     if not os.path.isfile(raw_path):
         return None, (
             "noise_mechanism_rawfile_missing",
@@ -450,50 +451,25 @@ def measurement_result(
     is *incomplete* is still reported -- a sound lower bound beats no number --
     but carries a warning naming what was not classified, so the gap cannot
     pass silently into an evidence record."""
-    from . import sim as _sim
-
-    name, unit = spec["name"], spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no noise mechanism value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "noise_mechanism_rawfile_missing"
-        )
-        if save_mode == "netlist" and reason == "noise_mechanism_rawfile_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        return {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    status, margin, diagnostics = _sim._grade_measurement_value(spec, outcome.value)
-    if outcome.incomplete:
+    result, diagnostics = _vector_measurement_result(
+        spec,
+        outcome,
+        save_mode=save_mode,
+        key="noise",
+        default_reason="noise_mechanism_rawfile_missing",
+        hint_reason="noise_mechanism_rawfile_missing",
+        missing_noun="noise mechanism value",
+    )
+    # The one-off that stays here: an incomplete decomposition is still
+    # reported, with the completeness warning appended to the grading
+    # diagnostics.
+    if outcome is not None and outcome.incomplete:
         diagnostics = [
             *diagnostics,
             {
                 "severity": "warning",
                 "code": INCOMPLETE_DIAGNOSTIC_CODE,
-                "message": outcome.incomplete_message(name),
+                "message": outcome.incomplete_message(spec["name"]),
             },
         ]
-    return {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": status,
-        "margin": margin,
-        "noise": outcome.report(),
-    }, diagnostics
+    return result, diagnostics

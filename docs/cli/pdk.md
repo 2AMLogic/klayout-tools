@@ -196,8 +196,12 @@ installs, tarballs without the header, other install kinds) — never guessed.
 `version` is unchanged. The fleet-bundle `.pdk-store.json` is written outside
 this repo (2AMLogic/2am) -- read, never written, here (issue #5318): when
 `SOURCES`, `.fetched-version` and git give nothing, `version` falls back to
-`store:<version>` from that file's string `version` (one level above the real
-variant dir). It carries no commit; recording one is out of scope here.
+`store:<version>` from that file's string `version`. Both placements are
+accepted (issue #5624): at the variant root (`<root>/<variant>/.pdk-store.json`,
+where the fleet's provisioner writes it) and one level above the real
+(symlink-resolved) variant dir (issue #5318's documented placement); the
+nearest one wins, and a present-but-unusable stamp is never skipped in favour
+of a farther one. It carries no commit; recording one is out of scope here.
 
 ## PDK layouts: what resolves and what doesn't
 
@@ -246,10 +250,17 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Every differing field between the first file and
-  the offending one is reported in the same error (up to 10, then a count of
+  and both files' values. One exception (issue #6940): when each file
+  declares exactly one `operating_conditions` group selected by its own
+  `default_operating_conditions` and the group bodies agree, the group's
+  name alone may differ between files — the merged header keeps the first
+  listed file's spelling and default, so the input order picks the emitted
+  name. A condition *content* difference, a default pointing at another
+  name, more than one group per file, or retained cell text referencing the
+  discarded name still refuses the merge. Every differing field between the
+  first file and the offending one is reported in the same error (up to 10, then a count of
   the rest), long group values are shown around their first difference, and
-  a group renamed between files (`operating_conditions (typ)` vs
+  a group rename outside the exception above (`operating_conditions (typ)` vs
   `operating_conditions (slow)`) is reported once as the same group under a
   different name.
   A differing `default_max_transition` is refused
@@ -624,6 +635,52 @@ unreadable or in another namespace; `installed` is `null` when unreadable).
 emitted, one stderr line names both revisions, and the verb exits `6`. If
 `check` also finds dangling symlinks, the lower code `4` wins. Without the
 flag nothing changes.
+
+A third identity namespace serves object-store installs (issue #5624). An
+install provisioned from a bundle carries no `SOURCES`; its identity is the
+string `version` (an upstream commit SHA) of the nearest `.pdk-store.json` --
+accepted at the variant root or one level above the real variant dir, nearest
+wins (see "Version stamp (`version`)" above). The installed identity is
+resolved in this order: `SOURCES`, then `.fetched-version`, then the store
+stamp, so an install carrying a real `SOURCES` stamp behaves exactly as
+before. A bare hex pin against a store install names the store's commit (both
+are SHAs), so it resolves into the store namespace and matches by the same
+7+ hex prefix rule — `--expect-version <sha>` works on precisely the installs
+a fleet provisions. An explicit `open_pdks <sha>` stamp against a store
+install stays `unknown` (different namespaces, by design), and a store
+install against a lambdapdk `.fetched-version` string is compared exactly in
+the store namespace.
+
+### Asserting a bundle (`--expect-bundle-sha256`, issue #5624)
+
+`check` (not `find`) additionally accepts a content-integrity pin:
+
+```bash
+klt pdk check --pdk sky130A --expect-bundle-sha256 64-hex-digest || exit 1
+```
+
+The nearest `.pdk-store.json` records the provisioned bundle’s SHA-256 digest
+in its `sha256` field. The field must contain exactly 64 ASCII hexadecimal
+digits. Comparison with the supplied pin is case-sensitive. With the flag,
+JSON output includes a `bundle_expectation` object with the same fields as
+`version_expectation`, and text output includes a `bundle_expectation:` line.
+A match exits `0`. A mismatch or an absent, unreadable, or malformed digest
+exits `6`, with one stderr line per failed expectation. An unusable recorded
+digest yields `status: "unknown"` and `installed: null`. Both expectation
+flags may be given together. Dangling symlinks take precedence with exit `4`.
+
+**Limitation — the stamp is trusted, the tree is not rehashed.** This
+compares the install's *recorded* bundle hash, so it detects "provisioned
+from a bundle other than the one my pin names" — the mis-bundling failure
+this issue was filed over. It cannot detect in-place edits to already-
+unpacked files: an unpacked tree cannot be hashed back to its tar bytes
+reproducibly, so recorded-stamp comparison is the honest ceiling for a local
+check. It also cannot detect upstream relative symlinks that were
+*materialized* into regular files during bundling — that would need to know
+which paths upstream holds as symlinks at the declared revision, which no
+local signal provides. A faithful bundle and a symlink-materialized one are
+different bundles with different hashes, so pinning the hash of the bundle
+you verified is what makes this leg bite.
 
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
@@ -1412,20 +1469,18 @@ classified against that flavour's own typical-corner evidence:
 
 - `"skewed"` — the flavour's include tokens differ from its typical corner's
   (token evidence always wins);
-- `"param"` — tokens identical, but at least one `.param` value that differs
-  from the typical section's is **consumed** by the flavour's own
-  sub-library. Attribution is by consumption: the differing `.param` names
-  are matched against the sub-library bodies the flavour's tokens point at.
-  Only when a flavour's sub-library body is not resolvable in the deck does
-  a name-prefix fallback (`nfet_06v0_vth0` → `06v0`) attribute instead;
-- `"typical"` — provably unmoved: identical tokens, and either no `.param`
-  differs from typical at all or the flavour's resolvable sub-libraries
-  consume none of the differing values;
-- `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
-  do differ, but the flavour's sub-library is unresolvable in the deck and
-  no differing `.param`'s name-prefix maps to it. `klt sim` reports these
-  under `environment.corner_coverage`'s `unknown_devices` key, never folded
-  into `unmoved_devices`;
+- `"param"` — with identical tokens, a visible use of a differing parameter
+  in any referenced sub-library establishes skew. The scanner matches both
+  the include file and the named section to the deck it read. If some bodies
+  remain unresolved and none of the visible bodies consumes a differing
+  parameter, a matching parameter prefix (such as `nfet_06v0_vth0` for
+  `06v0`) also establishes skew.
+- `"typical"` — identical tokens and either no differing parameters or a
+  complete set of referenced bodies that consume none of those parameters.
+- `"unknown"` — parameters differ and the available bodies and parameter
+  prefixes leave the flavour undecided. Ambiguous parameter assignments
+  also give this result. `klt sim` lists these devices under
+  `environment.corner_coverage.unknown_devices`.
 - `null` — the typical corner ships the flavour but the section does not.
 
 For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
@@ -2111,7 +2166,7 @@ at `resolve_pdk_dbu`.
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 | `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
-| `6` | `find`/`check --expect-version` ran fine, but the installed PDK identity is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin"). `check`'s `4` takes precedence. |
+| `6` | `find`/`check --expect-version` or `check --expect-bundle-sha256` ran fine, but the installed PDK identity (or the recorded bundle sha256) is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin" / "Asserting a bundle"). `check`'s `4` takes precedence. |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a

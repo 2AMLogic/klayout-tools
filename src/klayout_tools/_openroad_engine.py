@@ -59,9 +59,7 @@ def _is_unconstrained_slack(value: float | None) -> bool:
     :data:`_UNCONSTRAINED_SLACK_NS`. ``None`` (a metric the run never
     populated at all) is **not** the sentinel: absence is a different thing
     from "reported, but not a measurement"."""
-    if value is None:
-        return False
-    return abs(value) >= _UNCONSTRAINED_SLACK_NS
+    return value is not None and abs(value) >= _UNCONSTRAINED_SLACK_NS
 
 
 def _timing_status(values: Iterable[float | None]) -> str | None:
@@ -104,7 +102,9 @@ class _OpenRoadResult:
         try:
             yield
         except error_cls as exc:
-            raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
+            wrapped = error_cls(_log_error_context(str(exc), self.engine_log))
+            wrapped.__dict__.update(exc.__dict__)  # keep fields (#6952)
+            raise wrapped from exc
 
 
 #: The version-independent shape of "the Docker daemon is not reachable"
@@ -167,8 +167,8 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
       invoking user lacks access to the daemon socket. Checked first, as the
       narrower of the two signatures.
 
-    Like ``place_and_route.py``'s :func:`~klayout_tools.place_and_route.
-    _mount_namespace_hint` (issue #1868), this is safe to *append* to an
+    Like :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`
+    (issue #1868), this is safe to *append* to an
     existing engine-error message rather than replace it: the engine's own
     captured diagnosis is still the primary evidence, the hint only says what
     that diagnosis means and what to do next. A caller that does not recognize
@@ -194,10 +194,9 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
         for stream in (completed.stdout or "", completed.stderr or "")
         for line in stream.splitlines()
     ]
-    matchers = [_runtime_unreachable_hint]
+    matchers = [_runtime_unreachable_hint, _image_missing_hint]
     if completed.returncode == 127:
-        matchers.append(_docker_missing_hint)
-    matchers.append(_image_missing_hint)
+        matchers.insert(1, _docker_missing_hint)
     for matcher in matchers:
         for lowered in lines:
             hint = matcher(lowered, batch_host)
@@ -385,8 +384,7 @@ class _LiveLogs:
 
     def popen_streams(self) -> dict[str, Any]:
         return {
-            stream: handle if handle is not None else subprocess.PIPE
-            for stream, handle in self.handles.items()
+            s: h if h is not None else subprocess.PIPE for s, h in self.handles.items()
         }
 
     def finish(
@@ -445,21 +443,11 @@ def _run_openroad(
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    threads: int | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
-    """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    streaming raw stdout/stderr into separately retained log files *while
-    the process runs* (``tail -f`` shows progress; an interrupted run keeps
-    whatever OpenROAD had flushed). The result exposes UTF-8 text
-    (replacement decoding) for existing parsers; an invalid output byte
-    cannot mask the engine failure or lose its logs. Raises ``error_cls``
-    if the ``openroad`` binary itself cannot be launched; a non-zero exit
-    from a launched run is the caller's to inspect via ``returncode``. No
-    timeout is introduced; a runner-supplied timeout retains its partial
-    streams, as does KeyboardInterrupt (keeping its type). Logs are local
-    debugging evidence, not a success signal. ``repo_root`` (issue #6764)
-    anchors the record's ``{path, scope}`` fields on the request repo: one
-    request, one report from any directory (default cwd; ``None`` = no repo)."""
+    """Stream both logs to disk, retaining partial output on interruption.
+    Anchor paths on the request repo and raise ``error_cls`` on launch failure."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -478,9 +466,18 @@ def _run_openroad(
             engine_logs.append(record)
         return data, record
 
+    thread_args = [] if threads is None else ["-threads", str(threads)]
     try:
         completed = subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
+            [
+                "openroad",
+                "-no_init",
+                "-exit",
+                *thread_args,
+                "-metrics",
+                metrics_path,
+                script_path,
+            ],
             **logs.popen_streams(),
         )
     except OSError as exc:
@@ -539,9 +536,7 @@ def _openroad_version() -> str | None:
     if not stdout:
         return None
     banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
+    return banner_match.group(1) if banner_match else stdout.split()[0]
 
 
 #: ``report_check_types`` flags whose union is the **setup-side** timing-check
@@ -597,16 +592,16 @@ def _timing_violation_report_lines(
     prints one row per failing endpoint per path group, so the count unit is
     *violating endpoints*, not enumerated timing paths.
     """
+
+    def report_line(flags: tuple[str, ...]) -> str:
+        return f"report_check_types {' '.join(flags)} -violators -format end"
+
     return [
         f'puts "{setup_begin}"',
-        "report_check_types "
-        + " ".join(_SETUP_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_SETUP_CHECK_FAMILY_FLAGS),
         f'puts "{setup_end}"',
         f'puts "{hold_begin}"',
-        "report_check_types "
-        + " ".join(_HOLD_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_HOLD_CHECK_FAMILY_FLAGS),
         f'puts "{hold_end}"',
     ]
 

@@ -7,7 +7,8 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     0 - place-and-route reached (at least) the requested target_stage
         (for a `pdk.rebuild_corners` request: in every corner)
-    1 - failed to run (bad request, unresolvable netlist/PDK/LEF, a
+    1 - confirmed open routing (emits full report), or failed to run
+        (bad request, unresolvable netlist/PDK/LEF, a
         floorplan spec with more than one method set, or an OpenROAD engine
         error that stops the run before reaching the requested
         target_stage) -- returned by ``emit_error`` as
@@ -17,9 +18,7 @@ Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     3 - ``--check`` only: the committed report no longer reproduces
         (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. A *fresh* run never exits 3 -- place-and-route has no pass/fail
-concept of its own; timing slack/violation counts are data, not a built-in
-gate. See ``docs/design/digital-flow-contracts-spike.md`` section 5.)
+subcommand. Timing slack and violation counts are reported measurements.)
 
 ``--check <report>`` (issue #2224) switches this verb from running a fresh
 flow to *verifying a previously committed one* still reproduces from the
@@ -43,8 +42,7 @@ from ..place_and_route import (
 from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
-#: split `klt drc --check` uses. This verb has no exit 3 of its own (see this
-#: module's docstring: place-and-route has no built-in pass/fail gate), so 3
+#: split `klt drc --check` uses. Fresh runs use 0 and 1, so 3
 #: is unambiguous here: it means, and only means, "the committed report no
 #: longer reproduces".
 EXIT_MATCH = 0
@@ -66,6 +64,22 @@ RERUN_HELP_EXTRA = (
 )
 
 
+def add_threads_argument(parser: argparse.ArgumentParser) -> None:
+    def argument(value: str) -> int | str:
+        # Preserve invalid tokens so all modes emit the same JSON request error.
+        try:
+            return int(value) if value.isascii() and value.isdecimal() else value
+        except ValueError:
+            return value
+
+    parser.add_argument(
+        "--threads",
+        type=argument,
+        metavar="N|max",
+        help="OpenROAD threads per process (overrides request.threads, default 1)",
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
         if args.resume:
@@ -84,6 +98,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = run_place_and_route(
             args.request,
+            threads=getattr(args, "threads", None),
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             backend=args.backend,
@@ -116,7 +131,7 @@ def run(args: argparse.Namespace) -> int:
     for warning in report.get("warnings", ()):
         print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
-    return 0
+    return 0 if report["status"] == "ok" else 1
 
 
 def _emit_flow_error(exc: PlaceAndRouteError, fmt: str) -> int:
@@ -140,6 +155,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = rerun_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
                 backend=args.backend,
@@ -148,6 +164,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = check_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
             )

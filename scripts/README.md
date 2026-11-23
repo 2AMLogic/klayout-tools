@@ -18,6 +18,7 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-xschem.sh              # install the fleet-pinned xschem from the 2AMLogic/xschem fork's public release asset, sha256-verified before unpack; self-contained for chip-CI copy (#6219)
   install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
@@ -154,6 +155,22 @@ upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
 ```
 scripts/install-sv2v.sh
 uv run pytest tests/test_synthesize_netlist_normalize.py -rs
+```
+
+## `install-xschem.sh`
+
+Credential-free install of the fleet's pinned xschem (issue #6219, fleet rule
+2am#7275): downloads the public release asset of the `2AMLogic/xschem` fork
+(`tools.xschem.release_repo` / `release_tag` / `asset` in
+`docker/eda-sim/pdk-versions.json`), checks it against `tools.xschem.sha256`
+**before** unpacking, and unpacks it as shipped at `/opt/eda/xschem` (via
+`sudo -n` when that is not writable): the build is not relocatable, so there is
+no other supported prefix. Self-contained so chip CI can copy the single file.
+See `docker/eda-sim/README.md` for the full route.
+
+```
+scripts/install-xschem.sh [--force]
+uv run pytest tests/test_xschem_release_asset.py
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`
@@ -529,11 +546,17 @@ python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HE
 ```
 
 To explicitly regenerate the proposed baseline, use `--update-baseline`.
-It records exact candidate sizes and carries forward vendor pins whose
-bytes still match. Run check mode afterward to validate the result.
+It carries forward vendor pins whose bytes still match, keeps a recorded
+entry whose ceiling still covers the measured file (so a shrinking PR
+leaves the ledger byte-identical and cannot conflict with main, #7414),
+and records exact sizes only for new or grown paths. Do not edit a
+ledger entry just because a file shrank. On a ledger conflict in a
+long-lived PR, take main's version of the line, then validate:
 
 ```
 python scripts/check_file_size_baseline.py --update-baseline
+python scripts/check_file_size_baseline.py \
+  --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
 CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the

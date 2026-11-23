@@ -22,40 +22,25 @@ The ``devices[].skew`` values a flavour can take:
   corner's. Token evidence always wins: a flavour that switched to a
   different sub-library is ``"skewed"`` no matter what its ``.param`` table
   says.
-* ``"param"`` -- tokens identical, but at least one ``.param`` value that
-  differs from the typical section's is **consumed** by the flavour's own
-  sub-library. Attribution is by consumption: each differing ``.param`` name
-  is word-matched against the sub-library bodies the flavour's include
-  tokens point at (``_parse_named_lib_blocks`` already parsed every
-  bare-name block in the deck, sub-libraries included -- no new parsing).
-  When a flavour's sub-library body is not resolvable in the deck (e.g.
-  pulled in by ``.include`` from another file), a **name-prefix fallback**
-  attributes instead: a differing ``nfet_06v0_vth0``-shaped param maps to
-  the ``06v0`` flavour by the same shape rule
-  :func:`_gf180mcu_flavour_tokens` uses. The fallback is deliberately not
-  consulted when the body *is* resolvable -- direct consumption evidence
-  outranks a spelling guess -- and a param whose prefix maps to no flavour
-  (gf180mcuD's real ``rsh_nplus_u_m`` -> phantom ``nplus_u``) mints no
-  entry.
-* ``"typical"`` -- provably unmoved: identical tokens, and either no
-  ``.param`` differs from typical at all, or the flavour's resolvable
-  sub-library bodies consume none of the differing params. With no
-  ``.param`` evidence passed at all (the issue #3794 call shape), every
-  unchanged-token flavour is ``"typical"``, exactly as before #5663.
-* ``"unknown"`` -- undecidable (issue #5663): identical tokens, ``.param``
-  values do differ from typical, but the flavour's sub-library body cannot
-  be resolved in the deck and no differing param's name-prefix maps to it.
-  A changed parameter block with ambiguous assignments is also unknown.
-  Reported as its own value -- never silently folded into ``"typical"``
-  (the false "nothing moved" answer this issue fixes) -- and surfaced by
-  ``klt sim`` under ``environment.corner_coverage``'s ``unknown_devices``
-  key rather than ``unmoved_devices``.
+* ``"param"`` -- with identical tokens, any referenced sub-library body
+  that visibly consumes a differing parameter establishes skew. A body
+  belongs to a token when its file resolves to the scanned deck and the
+  named section is present. If some bodies are unresolved and none of the
+  visible bodies consumes a differing parameter, a parameter name such as
+  ``nfet_06v0_vth0`` can still establish the ``06v0`` flavour by prefix.
+* ``"typical"`` -- identical tokens and either no differing parameters or a
+  complete set of referenced bodies that consume none of those parameters.
+* ``"unknown"`` -- identical tokens, differing parameters, and incomplete
+  bodies with no evidence of consumption or matching parameter prefix.
+  Ambiguous parameter assignments also give this result. ``klt sim`` lists
+  these devices under ``environment.corner_coverage.unknown_devices``.
 * ``None`` -- the typical corner ships the flavour but this corner's
   section does not (unlisted); unchanged from issue #3794.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -147,10 +132,28 @@ def _prefix_flavour(param_name: str) -> str:
     return "_".join(parts[1:-1]) if len(parts) >= 3 else param_name
 
 
+def _local_sub_library_bodies(
+    model_path: str, blocks: dict[str, str], tokens: set[tuple[str, str]]
+) -> dict[tuple[str, str], str]:
+    """Return bodies for includes whose file and section identify the scanned deck."""
+    bodies = {}
+    for path, name in tokens:
+        if name in blocks:
+            try:
+                if os.path.samefile(
+                    os.path.join(os.path.dirname(model_path), path), model_path
+                ):
+                    bodies[path, name] = blocks[name]
+            except OSError:
+                # An unavailable include leaves the token unresolved.
+                continue
+    return bodies
+
+
 def _unchanged_token_skew(
     flavour: str,
     tokens: set[tuple[str, str]],
-    blocks: dict[str, str],
+    blocks: dict[tuple[str, str], str],
     differing: frozenset[str] | None,
 ) -> str:
     """Classify a flavour whose include tokens are identical to its typical
@@ -158,8 +161,7 @@ def _unchanged_token_skew(
     is ``"skewed"``; the caller never reaches here.)
 
     ``tokens`` are the ``(path, name)`` include tokens this corner's section
-    carries for the flavour; ``blocks`` is the whole deck's
-    ``{block_name: body}`` map (:func:`klayout_tools.pdk._parse_named_lib_blocks`).
+    carries for the flavour. ``blocks`` maps resolved tokens to their bodies.
     """
     if differing is None:
         return "unknown"
@@ -169,24 +171,17 @@ def _unchanged_token_skew(
         # behaviour, preserved verbatim so token-only input classifies
         # exactly as before).
         return "typical"
-    bodies = [blocks[name] for _, name in tokens if name in blocks]
-    if bodies:
-        consumed = {
-            name
-            for name in differing
-            if any(
-                re.search(rf"\b{re.escape(name)}\b", body, re.IGNORECASE)
-                for body in bodies
-            )
-        }
-        # Resolvable sub-library bodies are direct consumption evidence:
-        # consuming a differing param is a real skew; consuming none is
-        # proof of unmoved (a differing param this deck's other blocks
-        # reference cannot reach a card that never names it).
-        return "param" if consumed else "typical"
-    # Sub-library bodies unresolvable in this deck (e.g. pulled in by
-    # `.include` from another file): the documented name-prefix fallback,
-    # then the undecidable answer.
+    bodies = [blocks[token] for token in tokens if token in blocks]
+    if any(
+        re.search(rf"\b{re.escape(name)}\b", body, re.IGNORECASE)
+        for body in bodies
+        for name in differing
+    ):
+        return "param"
+    # An omitted sibling can still consume a changed parameter. Only a
+    # complete set of bodies can establish the absence of consumption.
+    if tokens and len(bodies) == len(tokens):
+        return "typical"
     if any(_prefix_flavour(name) == flavour for name in differing):
         return "param"
     return "unknown"
@@ -224,7 +219,7 @@ def _flavour_devices(
     typical: dict[str, set[tuple[str, str]]],
     is_typical_corner: bool,
     *,
-    blocks: dict[str, str] | None = None,
+    blocks: dict[tuple[str, str], str] | None = None,
     params: frozenset[str] | None = None,
     typical_params: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -233,7 +228,7 @@ def _flavour_devices(
     extended by issue #5663 with ``.param`` attribution -- this module's
     docstring documents the full ``skew`` value set).
 
-    ``blocks`` is the deck's ``{block_name: body}`` map;
+    ``blocks`` maps resolved (file, section) pairs to their bodies;
     ``params`` / ``typical_params`` are the corner section's and its family's
     typical section's :func:`_param_lines` sets. Passing only the token
     groupings (the issue #3794 call shape) reproduces the old token-only

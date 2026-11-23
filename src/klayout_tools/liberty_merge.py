@@ -10,12 +10,17 @@ Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
-(units, operating conditions, ``default_*``, ...) is an error naming every
-conflicting field and both values (issue #7011). Top-level ``lu_table_template`` and
-``power_lut_template`` groups are the exception: they are unioned by name
-(same name with different content is an error) and the ones the first file
-lacks are appended after its header. Each file's cell groups are appended in
-listed order; a duplicate cell name is an error. The
+(units, operating conditions, ``default_*``, ...) reports every
+conflicting field and both values (issue #7011). One exception (issue #6940): when
+each file declares a single ``operating_conditions`` group that its own
+``default_operating_conditions`` selects and the group bodies agree, the
+group's *name* alone may differ -- the merged header keeps the first
+file's spelling, and a renamed file whose retained text still references
+its local name refuses instead of dangling. Top-level ``lu_table_template``
+and ``power_lut_template`` groups are a second exception: they are unioned
+by name (same name with different content is an error) and the ones the
+first file lacks are appended after its header. Each file's cell groups are
+appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
 """
@@ -24,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 
 from .liberty_header_diff import header_mismatch
@@ -117,22 +123,33 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     header = ""
     header_fields: dict[str, str] = {}
     first_path = paths[0]
+    first_condition_count = 0
     seen: dict[str, str] = {}
     templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
     extra: list[str] = []
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
-        file_header, body, cells = _split(path, text)
+        file_header, body, cells, condition_count = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
         fields = _header_fields(path, stripped)
         if path is first_path:
             header, header_fields = file_header, fields
+            first_condition_count = condition_count
         else:
+            retained = "".join(raw for _, raw in file_templates) + body
+            first_fields, other_fields, context = _reconcile_conditions(
+                first_path,
+                header_fields,
+                path,
+                fields,
+                retained,
+                single_condition=first_condition_count == condition_count == 1,
+            )
             mismatch = header_mismatch(
-                first_path, header_fields, texts[0], path, fields, text
+                first_path, first_fields, texts[0], path, other_fields, text
             )
             if mismatch:
-                raise LibertyMergeError(mismatch)
+                raise LibertyMergeError(mismatch + context)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -246,6 +263,98 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
 
 
+def _unquote(value: str) -> str:
+    """``value`` without one pair of surrounding double quotes."""
+    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
+
+
+def _local_condition(fields: dict[str, str]) -> tuple[str, str, str] | None:
+    """``(group key, name, body)`` when the header declares exactly one
+    ``operating_conditions`` group whose name the
+    ``default_operating_conditions`` attribute selects; ``None`` otherwise
+    (no group, several groups, or a default pointing elsewhere -- none of
+    those is an unambiguous local rename, so the normal field comparison
+    decides)."""
+    groups = {k: v for k, v in fields.items() if k.startswith("operating_conditions(")}
+    if len(groups) != 1:
+        return None
+    key, body = next(iter(groups.items()))
+    name = _unquote(key[len("operating_conditions(") : -1])
+    if not name or name != _unquote(fields.get("default_operating_conditions", "")):
+        return None
+    return key, name, body
+
+
+def _references_condition(text: str, name: str) -> bool:
+    """Look for the discarded condition in retained Liberty references."""
+    value_attrs = {
+        "related_condition",
+        "default_operating_conditions",
+        "operating_conditions",
+    }
+    for kind, start, end in _tokens(text):
+        keyword = text[start:end]
+        if kind != "ident" or keyword not in value_attrs and keyword != "scaled_cell":
+            continue
+        pos, char = _next_significant(text, end)
+        if keyword in value_attrs and char == ":":
+            stop = _find_terminator(text, pos + 1)
+            value = _normalize_header(text[pos + 1 : stop])
+        elif keyword == "scaled_cell" and char == "(":
+            stop = _find_matching(text, pos, "(", ")")
+            args = _normalize_header(text[pos + 1 : stop])
+            # scaled_cell(existing_cell, operating_conditions_group)
+            match = re.fullmatch(r'(?:"(?:[^"\\]|\\.)*"|[^",]+)\s*,\s*(.+)', args)
+            value = match[1] if match else ""
+        else:
+            continue
+        if _unquote(value) == name:
+            return True
+    return False
+
+
+def _reconcile_conditions(
+    first_path: str,
+    first: dict[str, str],
+    path: str,
+    other: dict[str, str],
+    retained: str,
+    *,
+    single_condition: bool,
+) -> tuple[dict[str, str], dict[str, str], str]:
+    """The header field maps with the operating-condition pair removed when
+    the two headers differ only by its local name (issue #6940).
+
+    Each header must declare exactly one ``operating_conditions`` group its
+    own default selects and the group bodies must agree; the merged header
+    then keeps the first file's spelling, so the second file must not
+    reference its local name in ``retained`` (its body and template text --
+    a reference would dangle in the output). Anything else about the pair
+    (content, count, a foreign or missing default) is left in place for the
+    normal field-by-field comparison to refuse. The last return value adds
+    context when the retained text refers to a discarded name."""
+    if not single_condition:
+        return first, other, ""
+    a = _local_condition(first)
+    b = _local_condition(other)
+    if a is None or b is None or a[1] == b[1] or a[2] != b[2]:
+        return first, other, ""
+    if _references_condition(retained, b[1]):
+        return (
+            first,
+            other,
+            f"\n'{path}' references operating condition '{b[1]}' "
+            f"outside its header, but the merged header keeps only "
+            f"'{first_path}' spelling '{a[1]}'",
+        )
+    drop = {a[0], b[0], "default_operating_conditions"}
+    return (
+        {k: v for k, v in first.items() if k not in drop},
+        {k: v for k, v in other.items() if k not in drop},
+        "",
+    )
+
+
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
     """``(header without template groups, [(name, group text), ...])``."""
     found: list[tuple[str, str]] = []
@@ -295,16 +404,16 @@ def _read(path: str) -> str:
         raise LibertyMergeError(f"cannot read Liberty file '{path}': {exc}") from exc
 
 
-def _split(path: str, text: str) -> tuple[str, str, list[str]]:
-    """``(header, body, cell names)`` for one ``library(){}`` file.
+def _split(path: str, text: str) -> tuple[str, str, list[str], int]:
+    """Split a library and report its cell names and condition count.
 
     ``body`` runs from the first top-level ``cell (`` to just before the
     library's closing brace.
     """
     first_ident = next((text[p:e] for k, p, e in _tokens(text) if k == "ident"), None)
-    first_cell, cells, close = _scan_cells(text)
+    first_cell, cells, close, conditions = _scan_cells(text)
     if close is None or first_ident != "library":
         raise LibertyMergeError(f"'{path}' is not a complete Liberty library group")
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
-    return text[:first_cell], text[first_cell:close], cells
+    return text[:first_cell], text[first_cell:close], cells, conditions

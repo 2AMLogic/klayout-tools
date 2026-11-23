@@ -11,9 +11,12 @@ was:
 * ``PlaneClimbContext.climb_leg`` -- the automatic metals-stack **plane
   climb** (issue #6920): a leg the fixed one-jog backbone cannot route on
   its own plane -- because the shape reaches a pin from behind (#1895),
-  plows through a placed block's drawn metal, or crosses a net routed
-  earlier -- is retried, plane by plane up the resolved PDK's own
-  ``metals`` stack, before the net is reported unroutable.
+  plows through a placed block's drawn metal, crosses a net routed
+  earlier, crosses a self-net's or own-block's own pad metal (#433/#453/
+  #1527), or would merge with a guard/collector ring's own loop (#199
+  case 2 / #434, plane-conditional since #1960) -- is retried, plane by
+  plane up the resolved PDK's own ``metals`` stack, before the net is
+  reported unroutable.
 
 The climb is the automated form of the escape the #1895 rejection text
 already names by hand ("route to a layer_role with a metal2/via stack
@@ -47,14 +50,37 @@ from .gen_compose_layer_rules import (
     _port_own_layer,
     _route_spacing_rule,
 )
+from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 
 #: Rejection-reason fragments a higher plane can lift. The #1895 far-side
 #: ("from behind") family and the block-interior crossings come from
-#: ``gen_compose_routing._obstacle_rejection_reason``; the two
+#: ``gen_compose_routing._obstacle_rejection_reason``; the three
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
-#: route-vs-route gate ``route_bundle()`` itself runs. Every other class
-#: (a too-narrow channel, a closed guard ring, an unresolvable via drop) is
-#: a property of the pin pair, not of the plane, and is left alone.
+#: route-vs-route gate ``route_bundle()`` itself runs.
+#:
+#: The self-net classes (``#433``'s pad footprint, ``#453``'s degenerate
+#: same-facing jog and drawn-metal overlap, ``#1527``'s own-block escape,
+#: and the ``leg's drawn``-family deck-spacing conflict ``#1904`` reports)
+#: each name the met2/via escape in their own remedy text and are
+#: layer-guarded at the point of the check -- ``#433`` skips a pad on
+#: another physical layer outright, and the drawn-metal reads read the
+#: obstacle's geometry *on the route layer* (empty for a generator block on
+#: a plane it draws nothing on) -- so the climbed retry re-evaluates every
+#: one against the candidate plane's own geometry exactly as the climb's
+#: full re-run contract requires (#6912).
+#:
+#: The ring classes (``#199`` case 2's closed ring, ``#434``'s
+#: opening-crossing family) were deliberately left out of the #6920 climb
+#: on the theory they were "a property of the pin pair, not of the plane".
+#: They are plane-conditional since #1960: ``_leg_plane_clears_ring``
+#: proves a backbone drawn on a plane at least one via above the ring's
+#: own conductor -- with every via-drop landing pad clear of the ring's
+#: trace -- shares no conductor with the loop, and the retry runs it with
+#: the climbed plane as the route layer (#6912: an own-ringed ``mos_array``
+#: group in a mixed row is otherwise unroutable, the exact "needs no
+#: floorplan change at all" escape #1960 documented for ``gen-compose``).
+#: Still left alone: a too-narrow channel, an unresolvable via drop, and a
+#: gapped ring that reports too few side ports to check at all.
 _CLIMBABLE_REASON_MARKERS = (
     "reaches the pin from behind",
     "through unrelated block",
@@ -62,6 +88,14 @@ _CLIMBABLE_REASON_MARKERS = (
     "still crossed a placed block",
     "crosses already-routed net",
     "overlaps already-routed net",
+    "shares a conductive edge with already-routed net",
+    "shares a conductive corner with already-routed net",
+    "self-net backbone crosses",
+    "self-net between two same-facing ports",
+    "self-net's drawn",
+    "leg's drawn",
+    "has a closed guard/collector ring",
+    "'s ring on its",
 )
 
 
@@ -128,8 +162,8 @@ class PlaneClimbContext(NamedTuple):
         from ``route_bundle()``: re-run the identical pin pair with the
         primary/cross layer roles swapped so every ``route_two_pin()`` check
         runs exactly as it would for a leg drawn on
-        ``cross_block_route_layer`` from the start, then re-gate the result
-        with ``leg_conflict``. One level of retry, no further fallback."""
+        ``cross_block_route_layer`` from the start. The caller checks the
+        returned candidate for an electrical conflict."""
         from .gen_compose_routing import route_two_pin
 
         if self.cross_block_route_layer is None or self.leg_conflict is None:
@@ -154,17 +188,7 @@ class PlaneClimbContext(NamedTuple):
             block_geometry_for=self.cross_block_geometry_for,
             grid_um=self.grid_um,
         )
-        if not retry["routed"]:
-            return None
-        retry_reason = self.leg_conflict(
-            retry["points_um"],
-            retry.get("via_drops", []),
-            retry.get("stub_widen", []),
-            retry.get("route_layer"),
-        )
-        if retry_reason is not None:
-            return None
-        return retry
+        return retry if retry["routed"] else None
 
     def planes_above(self) -> tuple[tuple[int, int], ...]:
         """The deck's own metals-stack planes strictly above this net's
@@ -190,16 +214,25 @@ class PlaneClimbContext(NamedTuple):
         width_um: float,
         cross_geometry: Any,
         result: dict[str, Any],
-        reason: str,
-    ) -> dict[str, Any] | None:
-        """Try the configured collision fallback, then eligible higher metals."""
+        conflict: RouteConflict,
+    ) -> tuple[dict[str, Any], RouteConflict | None]:
+        """Try configured and automatic planes, preserving any fallback diagnostic."""
         tried_cross = self.cross_block_route_layer == result.get("route_layer")
         if result["routed"] and self.leg_conflict is not None and not tried_cross:
             retry = self.retry_leg_on_cross_layer(i, j, cross_geometry, waypoints)
             if retry is not None:
-                return retry
+                fallback = _leg_conflict_reason(retry, self.leg_conflict)
+                if fallback is None:
+                    return retry, None
+                conflict = RouteConflict(
+                    f"{conflict.reason}; cross-block fallback {fallback.reason}",
+                    conflict.blocking_net or fallback.blocking_net,
+                )
             tried_cross = True
-        return self.climb_leg(i, j, waypoints, width_um, reason, tried_cross)
+        climbed = self.climb_leg(
+            i, j, waypoints, width_um, conflict.reason, tried_cross
+        )
+        return (climbed, None) if climbed is not None else (result, conflict)
 
     def climb_leg(
         self,

@@ -4,10 +4,10 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--expect-deck-hash <hash>] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--klayout-binary <path>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--klayout-binary <path>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--expect-deck-hash <hash>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <file> --deck <name> -o <report.json[.gz]> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
@@ -70,6 +70,9 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   deck's family in the root is recorded (never an unrelated family's), and a
   `--pdk`/`$PDK` of a different family, or a root with no variant of the
   deck's family, fails with a `DrcError` naming both families.
+  With `--check --rerun`, these flags select the PDK the fresh re-run
+  resolves into `provenance.pdk` (issue #6986) — see "Full mode (`--rerun`)"
+  below.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
 - `--allow-deck-errors` — accept a *partial* report from a deck run
@@ -116,6 +119,17 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   must declare. An unreadable file, invalid UTF-8, or a manifest with no
   names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
   → "Opt-in rule-category set assertion".
+- `--expect-deck-hash HASH` — opt-in deck-pin assertion (issue #5806): vouch
+  for the deck bytes this run uses by passing the exact
+  `provenance.deck.content_hash` value to expect (`sha256:<64 hex>`; take it
+  from an earlier report). Compared against the run's own recorded hash after
+  the run: a mismatch — or a run that recorded no deck hash at all — fails
+  with the error envelope (exit `1`) naming the deck, the expected and the
+  observed hash, so a deck bump becomes a loud, reviewed event instead of a
+  silent re-score of locked expectations. A matching run is unchanged (exit
+  code and report bytes; the assertion is not recorded in the report).
+  Rejected with `--check`, `--engine both` and the listing modes. Request
+  field: `expect_deck_hash`. See "Deck-pin assertion" below.
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). The input path is read from the
   report itself unless `<file>` is also given, which overrides it
@@ -191,6 +205,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `negative_control_categories` | string | `--negative-control-categories` (comma-separated) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
+| `expect_deck_hash` | string | `--expect-deck-hash` (`sha256:<64 hex>` — the exact form `provenance.deck.content_hash` emits; anything else is rejected as a clean error before the run). See "Deck-pin assertion". |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
@@ -546,6 +561,52 @@ alters what a glob matches surfaces as drift; a report with no
 interpretation. A present but malformed `rule_selection` is a clean error
 rather than a silent full-deck rerun.
 
+## Deck-pin assertion (`--expect-deck-hash`)
+
+Every `klt drc`/`klt lvs` report records which deck bytes it ran under
+(`provenance.deck.content_hash`), but nothing forced a runner to *assert* it —
+so a toolchain pin bump that changed deck bytes re-scored every locked
+expectation silently, with no field anywhere failing. `--expect-deck-hash`
+(issue #5806) closes that gap: the caller vouches for the hash, and the run
+fails loudly when it drifts.
+
+```bash
+# 1. take the hash from the accepted run's report
+klt drc layout.gds --deck sky130 --format json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["provenance"]["deck"]["content_hash"])'
+#    sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+# 2. assert it on every later run of the same locked expectation
+klt drc layout.gds --deck sky130 \
+  --expect-deck-hash sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad \
+  --format json
+```
+
+Rules:
+
+- The value must be exactly what `provenance.deck.content_hash` emits —
+  `sha256:` plus 64 lowercase hex digits. Anything else (a bare digest, another
+  algorithm's hash) is a usage error (exit `2`) before any deck runs, naming
+  the form.
+- The comparison happens **after** the run, against the run's own recorded
+  hash, before anything is written or emitted. A **mismatch** is the error
+  envelope (exit `1`), naming the deck, both hashes, and
+  `klt deck resolve --content-hash <observed>` to identify the revision that
+  moved — a deck change becomes a one-reviewed-change event.
+- An assertion against a run that recorded **no deck hash** never passes
+  silently: it is the same error envelope, because an expectation that cannot
+  be checked must fail loudly, not vacuously.
+- A **matching** run is byte-identical to a run without the flag: no exit-code
+  change, no report field, no `schema_version` bump. The assertion is an
+  input, not a recorded result.
+- Not combinable with `--check` (which re-verifies the committed report's own
+  recorded hash — a different use), `--engine both` (the cross-check compares
+  each engine's whole-deck report unchanged) or the listing modes. Request
+  field: `expect_deck_hash`.
+
+Pin the hash, not a deck version: the hash is the identity (see
+`docs/json-contract.md`).
+
 ## Engine
 
 ### `"curated"` (default)
@@ -835,23 +896,51 @@ PDK README's note; KLayout 0.28.16 was observed aborting the deck with "Heap
 lost: the DeepShapeStore container no longer exists"), so an old application
 fails up front with `klayout_version_too_old`. The report gains an additive
 `native_deck` block (kind, variant, script path, defaulted globals, floor) and
-the usual `provenance.deck` hash/options. The rule groups executed are the
-report's `coverage.rule_categories`; pair with `--expect-rule-categories` to
-fail on an empty run. An older gf180mcu layout (fragments under
+the usual `provenance.deck` hash/options. The report lists RDB category declarations in `coverage.rule_categories`.
+Use `--expect-rule-categories` to assert their count. An older gf180mcu layout (fragments under
 `drc/rule_decks/*.drc` plus `drc/run_drc.py`) is not driven: resolution
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
-**Known limitation: 3LM gf180mcu variants.** As reported in issue #5091 (not
-re-verified by klt), the native deck's `rule_decks/mslot.rb` uses
-`metal4_drawn` unguarded, so on a 3-metal-layer stack the deck aborts after
-`Executing deck mslot1 ...` with `undefined local variable or method
-'metal4_drawn'`, and `--deck-var metal_level=3LM --deck-var metal_top=30K`
-does not help. The run ends as an error (`klayout_deck_aborted`; the structured
-`error.abort` names the deck and symbol) and any partial report is never
-`clean` (`--allow-deck-errors` only records it under `engine_deck_errors`).
-Not yet reported upstream to gf180mcu-pdk. A per-deck subset runner is not
-provided.
+#### GF180 3LM deck selection
+
+On the installed gf180mcuA three-metal/30 kÅ stack, the default PDK
+`gf180mcu.drc` starts the MSLOT deck `mslot1` and aborts when its rule
+references `metal4_drawn`. That stack has three routing metals. Repeating
+the same metal globals leaves the missing fourth layer unresolved. Issue
+#6916 tracks the MSLOT implementation. An upstream PDK filing is pending.
+
+The native runner accepts the PDK's comma-separated deck tags. Additions and
+exclusions apply from left to right starting with an empty selection. Run
+one of these commands to check MT30 on this stack:
+
+```sh
+klt drc layout/buck.gds --engine klayout --pdk gf180mcuA --deck-var decks=metaltop_30k --format json
+klt drc layout/buck.gds --engine klayout --pdk gf180mcuA --deck-var decks=all,-mslot --format json
+```
+
+On the pinned buck layout, KLayout 0.30.12 reported one `MT30.8` violation
+with the MT30-only selection (1 of 177 default deck IDs). The broader
+selection started 171 decks and reported 600,751 findings in 11 categories,
+including one `MT30.7` and one `MT30.8`. It omitted `mslot1` through
+`mslot6`. Both commands exited 3 for violations. A narrow, isolated Metal3
+rectangle also triggers `MT30.1a` under either selector. [Measured layout](https://github.com/2AMLogic/gf180-buck/blob/6fb02b8/layout/buck.gds)
+
+With the MT30-only selector a 4 × 10 µm rectangle on layer 42/0 returned
+zero findings and eight declared RDB categories: `MT30.1a`, `MT30.1b`,
+`MT30.2`, `MT30.3`, `MT30.4`, `MT30.5`, `MT30.6`, and `MT30.8`.
+With `--expect-rule-categories 8` satisfied, the verdict was still
+`clean_partial`: the excluded deck IDs appear in `coverage.skipped` with
+reason `not_selected`. Signoff withholds full DRC credit, including T1 item 3.
+
+Read `native_deck.deck_selection` for the registry IDs selected, omitted,
+observed starting and never reached. A start establishes only that the
+runner entered a deck. The default buck run started 161 decks, including
+the failing `mslot1`, and never reached the remaining 16. On an abort,
+`error.deck_selection` accompanies the existing `abort` and `decks_executed`
+fields. Tolerating an abort with `--allow-deck-errors` also records the
+selection under `engine_deck_errors`. When a parallel run fails, `abort.decks`
+lists the workers the runner identified as failed. See the [JSON contract](../json-contract.md#gf180-native-drc-deck-selection).
 
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
@@ -877,6 +966,17 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Measurements attached to a finding.** `violations[].values` lists the
+  non-geometry RDB item values in document order. For example, a deck that
+  runs `evaluate_nets` and calls `put('RATIO', ar)` can emit
+  `["[#RATIO] float: 16"]`. The strings preserve KLayout's tags and
+  formatting. A finding with only geometry omits the field. With
+  `--engine both`, look under `reports.native.violations[]`.
+  `--check --rerun` compares this ordered list. KLayout 0.30.12 can emit
+  multiple `put()` properties in different orders on repeated runs, so a
+  reorder alone can appear as drift. The deck supplies these strings
+  as evidence only. They have no effect on coverage, `coverage_unknown`,
+  or the meaning of `--expect-rule-categories`.
 - **Deck stdout as additive evidence (issue #6613).** Every `--engine
   klayout` run that produced a report carries the deck's own captured
   stdout in the additive top-level `deck_output` field:
@@ -4418,8 +4518,9 @@ klt drc --check design.drc.json --rerun           # full mode
 always read from `<report.json>` itself, and so is the input path unless you
 pass the positional `<file>` (below). `-o/--output`, `--waivers`, `--tile` and
 `--rules` are clean exit-1 errors (the report's own recorded values are
-replayed). The two honoured overrides are the positional `<file>` (input) and
-`--deck-file` (deck).
+replayed). The honoured overrides are the positional `<file>` (input),
+`--deck-file` (deck) and — full mode only — `--pdk`/`--pdk-root` (PDK
+selection, below).
 
 **Deck resolution order (issue #5709)**, shared by `--check`, `--check
 --rerun` and both sides of an `--engine both` report: (1) `--deck-file
@@ -4605,6 +4706,40 @@ Response shape:
 complete report `--rerun` just produced, so a consumer can inspect the
 current state without a second invocation.
 
+**PDK selection on the rerun (issue #6986).** A fresh run resolves
+`provenance.pdk` when `--pdk`/`--pdk-root` is given; `--rerun` used to
+rebuild its request with no PDK selection at all, so a report produced
+*with* a resolved PDK always drifted `provenance.pdk` with
+`fresh: null` — the sole drift entry even when every verdict-bearing field
+agreed. The rerun now resolves the PDK for its fresh run with this
+priority: the rerun invocation's own `--pdk`/`--pdk-root` flags first, then
+the variant name the committed report itself recorded
+(`provenance.pdk.name`) — with `--pdk-root`, `$PDK_ROOT` and the standard
+search locations handled by the same resolver a fresh run uses. `$PDK` is
+deliberately not a tier: a fresh run never resolves a PDK from `$PDK`
+alone (`provenance.pdk` stays `null`), so honouring it on the rerun would
+drift or fail a report that reproduces exactly. So the round trip closes:
+
+```
+# produce with the PDK resolved ...
+klt drc design.gds --deck gf180mcu --pdk gf180mcuD --pdk-root ~/pdks \
+    --format json > design.drc.json
+# ... and re-verify in full mode with the same flags (exit 0, "match")
+klt drc --check design.drc.json --rerun \
+    --pdk gf180mcuD --pdk-root ~/pdks --format json
+```
+
+A rerun with no flags still re-resolves the recorded variant when the
+install is discoverable (`$PDK_ROOT`/standard search locations), whatever
+`$PDK` is set to. Two rules
+keep the replay honest: a report produced with `provenance.pdk: null`
+re-runs with no PDK at all — even on a host with `$PDK` set, it stays
+`null` exactly as it was produced — and an explicit selection that
+resolves to nothing, or names the *other* installed variant of the family,
+behaves exactly as on a fresh run: the former is the normal exit-1 error,
+the latter drifts on `provenance.pdk.name` (exit 3). Cheap mode
+(`--check` without `--rerun`) never resolves a PDK; it stays hash-only.
+
 **Known limitation**: neither engine's report records which `--top` (if
 any) the original run used, so `--rerun` always re-checks every top cell —
 a report originally scoped to one top cell via `--top` can legitimately
@@ -4741,7 +4876,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | the native deck aborted part-way (issue #5091). `error.abort` names the failing deck (`deck`, `deck_file`, from the last `Executing deck <name> from <path>` line), the Ruby `message`, the offending `symbol` and `location` (`file:line`) when klayout printed them; `error.decks_executed` lists decks klayout logged as started, the last being the one that aborted. Fields are omitted when the output has none to parse. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. When the GF180 3LM `mslot1` deck aborts on `metal4_drawn`, `error.abort.hint` points to the [deck selectors and their coverage](#gf180-3lm-deck-selection). `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.

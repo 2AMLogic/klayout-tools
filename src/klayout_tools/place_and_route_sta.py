@@ -51,6 +51,7 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from ._tcl import tcl_literal as _tcl_literal
 
 
@@ -260,9 +261,8 @@ def _spef_sta_script_lines(
     net names?) runs **before** ``read_spef`` -- deliberately independent of
     whatever `read_spef` itself does with an unmatched name, so an uncaught
     Tcl error partway through that call cannot also silently skip this check.
-    It is measured in **both directions**, because they answer different
-    questions and only the second one decides whether the timing numbers
-    below are a real-parasitics measurement:
+    It is measured in **both directions**; only the second one decides
+    whether the timing numbers below are a real-parasitics measurement:
 
     - *SPEF-side* (``get_nets -quiet <name>`` per SPEF net): how many of the
       names the SPEF declares exist in the linked design. Flat extraction
@@ -271,10 +271,9 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` in the design, looked up in the
-      SPEF's own name set): how many of the design's nets the SPEF actually
-      names. **This** is the ratio that says whether every net OpenSTA times
-      got real routed parasitics.
+    - *design-side* (linked nets after excluding confirmed empty or
+      driver-only internal nets, as in standalone ``klt sta``):
+      how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
     wraps each in Tcl braces, and brace-quoting performs no backslash
@@ -339,6 +338,7 @@ def _spef_sta_script_lines(
         "set klt_design_total 0",
         "set klt_design_annotated 0",
         "foreach klt_design_net [get_nets -quiet *] {",
+        *SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",
@@ -483,6 +483,7 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
 ) -> dict[str, Any]:
@@ -723,6 +724,7 @@ def _post_route_spef_metrics(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
         repo_root=repo_root,
     )
@@ -822,6 +824,7 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
@@ -977,6 +980,7 @@ def _run_corner_sweep(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
         repo_root=repo_root,
     )
@@ -1090,6 +1094,7 @@ def _run_corner_sweep(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
             repo_root=repo_root,
         )
@@ -1130,12 +1135,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* effective design-rule
-                # verdict, from its own single-corner invocation's stdout --
-                # the per-corner counterpart of the combined aggregates
-                # above, letting a caller see which deck's limits a pin
-                # actually breaks (exactly the per-corner attribution #1092
-                # added for slack).
+                # Count violations against this corner's Liberty limits.
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,
