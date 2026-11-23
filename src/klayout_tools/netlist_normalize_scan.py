@@ -139,7 +139,7 @@ def recovery_subckt_names(
     source_path = os.path.realpath(source_path)
     names, pending = _scan_recovery_file(text, source_path)
     defined = names & candidates
-    seen = {(source_path, None)}
+    seen: set[tuple[str, str | None]] = {(source_path, None)}
     while pending and defined != candidates:
         path, section = pending.pop()
         if not os.path.isfile(path):
