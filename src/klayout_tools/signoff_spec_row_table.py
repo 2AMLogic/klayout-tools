@@ -428,6 +428,53 @@ def _verdict_marker(verdict: Any, palette: Any) -> tuple[str, str]:
     return f"{str(verdict or 'grade')[:5].upper():<5}", ""
 
 
+def _graded_detail(record: dict[str, Any]) -> str:
+    """The detail text of a ``graded`` record's line: the limit, then the
+    worst-case measurement and the yield estimate when present."""
+    detail = f"limit {json.dumps(record['limits'], sort_keys=True)}"
+    if record["unit"]:
+        detail += f" {record['unit']}"
+    worst = record["worst"]
+    if isinstance(worst, dict):
+        detail = (
+            f"worst {worst.get('value')} @ {worst.get('corner_id')} "
+            f"(margin {worst.get('margin')}, "
+            f"rel {worst.get('relative_margin')}) -- {detail}"
+        )
+    if isinstance(record["yield"], dict):
+        interval = record["yield"].get("confidence_interval") or {}
+        detail += (
+            f" -- yield {record['yield'].get('estimate')} "
+            f"CI [{interval.get('low')}, {interval.get('high')}] "
+            f"({record['yield'].get('method')})"
+        )
+    return detail
+
+
+def _state_marker_and_detail(
+    record: dict[str, Any], palette: Any
+) -> tuple[str, str, str]:
+    """``(marker, colour, detail)`` for one record's text-table line, keyed
+    on its ``state`` (anything unrecognised reads as ``no_evidence``)."""
+    state = record["state"]
+    if state == "graded":
+        marker, colour = _verdict_marker(record["verdict"], palette)
+        return marker, colour, _graded_detail(record)
+    if state == "gap":
+        return "GAP  ", "", f"declared gap: {record['gap']}"
+    if state == "structural":
+        artifact = record["artifact"]
+        return (
+            "STRCT",
+            "",
+            f"{record['claim']} (artifact {artifact['file']}, "
+            f"content_hash={artifact['content_hash']})",
+        )
+    if state == "unattributable":
+        return "UNATT", "", "cited, but its envelope declares no spec_row tags"
+    return "MISS ", "", "no cited evidence names this row"
+
+
 def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> None:
     """Render the ``spec_rows[]`` block for ``--format text`` -- one line
     per record plus its sources, after the item rows it qualifies. Silent
@@ -438,42 +485,7 @@ def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> 
     print()
     print(f"spec rows ({len(records)}):")
     for record in records:
-        state = record["state"]
-        if state == "graded":
-            marker, colour = _verdict_marker(record["verdict"], palette)
-            detail = f"limit {json.dumps(record['limits'], sort_keys=True)}"
-            if record["unit"]:
-                detail += f" {record['unit']}"
-            worst = record["worst"]
-            if isinstance(worst, dict):
-                detail = (
-                    f"worst {worst.get('value')} @ {worst.get('corner_id')} "
-                    f"(margin {worst.get('margin')}, "
-                    f"rel {worst.get('relative_margin')}) -- {detail}"
-                )
-            if isinstance(record["yield"], dict):
-                interval = record["yield"].get("confidence_interval") or {}
-                detail += (
-                    f" -- yield {record['yield'].get('estimate')} "
-                    f"CI [{interval.get('low')}, {interval.get('high')}] "
-                    f"({record['yield'].get('method')})"
-                )
-        elif state == "gap":
-            marker, colour = "GAP  ", ""
-            detail = f"declared gap: {record['gap']}"
-        elif state == "structural":
-            marker, colour = "STRCT", ""
-            artifact = record["artifact"]
-            detail = (
-                f"{record['claim']} (artifact {artifact['file']}, "
-                f"content_hash={artifact['content_hash']})"
-            )
-        elif state == "unattributable":
-            marker, colour = "UNATT", ""
-            detail = "cited, but its envelope declares no spec_row tags"
-        else:
-            marker, colour = "MISS ", ""
-            detail = "no cited evidence names this row"
+        marker, colour, detail = _state_marker_and_detail(record, palette)
         reset = palette.reset if colour else ""
         print(f"[{colour}{marker}{reset}] {record['id']}: {detail}")
         for source in record["sources"]:
