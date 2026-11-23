@@ -4,7 +4,7 @@
 the ``klt sta`` known-request-key list (issue #5065), the SPEF net-name
 mismatch hint, the SPEF missing-nets sample parser, and the marker-block
 extractor every ``klt sta`` stdout parser shares (issue #6767) live here,
-as does the driver-only skip both SPEF correlation loops splice (#7267).
+alongside the connectivity test shared by both SPEF correlation loops.
 """
 
 from __future__ import annotations
@@ -37,23 +37,21 @@ SPEF_NAME_MISMATCH_HINT = (
 SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
 SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 
-#: Tcl lines spliced at the top of a design-side SPEF correlation loop's
-#: ``foreach klt_design_net [get_nets -quiet *]`` body to skip a confirmed
-#: driver-only internal net -- exactly one connected pin, that pin an
-#: instance *output*, and no connected top-level port (#6970) -- before it
-#: can increment either design-side counter. Shared by standalone ``klt
-#: sta`` (:mod:`post_route_sta`) and the in-flow P&R timing report
-#: (:mod:`place_and_route_sta`, #7267) so the two verbs cannot disagree
-#: about which nets the design-side coverage ratio counts; a net whose
-#: connectivity cannot be established (any of the three lookups erroring)
-#: stays counted, the conservative direction.
+#: Both STA flows exclude internal nets with no pins or just one output
+#: pin from design-side SPEF coverage (#6970, #7367). OpenSTA omits some
+#: physical terminals, including supply pins, from get_pins. Confirm empty
+#: connectivity against OpenDB before dropping a zero-pin net. A port
+#: keeps the net eligible. If connectivity cannot be queried, keep the net
+#: in the counts and missing-name sample.
 SPEF_SKIP_DRIVER_ONLY = (
     "    if {![catch {",
     "        set klt_pins [get_pins -quiet -of_objects $klt_design_net]",
-    "        expr {[llength $klt_pins] == 1",
-    '            && [get_property [lindex $klt_pins 0] direction] eq "output"',
+    "        expr {(([llength $klt_pins] == 0",
+    "                && [[sta::sta_to_db_net $klt_design_net] getTermCount] == 0)",
+    "            || ([llength $klt_pins] == 1",
+    '            && [get_property [lindex $klt_pins 0] direction] eq "output"))',
     "            && [llength [get_ports -quiet -of_objects $klt_design_net]] == 0}",
-    "    } klt_driver_only] && $klt_driver_only} {continue}",
+    "    } klt_no_load] && $klt_no_load} {continue}",
 )
 
 

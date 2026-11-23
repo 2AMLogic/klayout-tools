@@ -195,8 +195,8 @@ def _apply_sdf_alias_port_drop(
     all and cannot be made annotatable by rewriting the endpoint either;
     when such an entry is zero-delay at every corner, dropping it cannot
     change simulated timing, so it is removed here and counted under
-    :data:`SDF_ALIAS_PORT_DROPPED_CLASS`. A non-zero entry is left in
-    place and still fails the diagnostic gate loudly. Returns the path
+    :data:`SDF_ALIAS_PORT_DROPPED_CLASS`. A nonzero delay on a separately
+    assigned bit raises before the simulator build. Returns the path
     the next step should read -- ``annotate_source_path`` unchanged when
     nothing was dropped.
     """
