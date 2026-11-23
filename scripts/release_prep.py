@@ -22,10 +22,13 @@ version changes nothing):
   and removed after assembly. ``## Unreleased`` stays empty for the next
   cycle. With no entries from either source, the run refuses (``PrepError``,
   before any file is written) to cut an empty release (issue #6086);
-- ``docs/cli/signoff.md``: "first release after `vPREV`" availability notes
-  become "`klt X.Y.Z`" (PREV is the version being superseded). A placeholder
-  anchored on a release older than PREV can never be resolved again; the prep
-  run refuses (``PrepError``) naming the line rather than let it ship stale.
+- ``docs/cli/signoff.md``, each pending ``changelog.d/`` fragment, and the
+  ``## Unreleased`` body of ``CHANGELOG.md``: "first release after `vPREV`"
+  availability notes become "`klt X.Y.Z`" (PREV is the version being
+  superseded). A placeholder anchored on a release older than PREV can never
+  be resolved again; the prep run refuses (``PrepError``) naming the source
+  file and its physical line rather than let it ship stale. Historical
+  ``CHANGELOG.md`` sections are left untouched.
 
 The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
 RELEASING.md's batch-runner rule (a contract change never ships in a patch)
