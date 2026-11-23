@@ -223,6 +223,10 @@ from .gen_compose_base import (
     _apply_orientation_um as _apply_orientation_um,
 )
 from .gen_compose_base import (
+    _nearest_grid_point_within,
+    _port_probe_position_um,
+)
+from .gen_compose_base import (
     _orient_port as _orient_port,
 )
 from .gen_compose_base import (
@@ -244,6 +248,7 @@ from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
     _make_landing_pad_side_um,
+    _pad_other_block_contact_reason,
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
@@ -1200,6 +1205,7 @@ def _merge_label_ports(
     block_id: str,
     parsed_cell: dict[str, Any],
     pdk_variant: str | None,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
     its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
@@ -1219,7 +1225,12 @@ def _merge_label_ports(
             "declared in both ports[] and ports_from_labels -- ambiguous"
         )
     derived, reports, warnings = derive_label_ports(
-        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+        block_id,
+        parsed_cell["gds_path"],
+        parsed_cell["cell_name"],
+        spec,
+        pdk_variant,
+        pad_override_um,
     )
     return declared + derived, reports, warnings
 
@@ -1228,6 +1239,7 @@ def _parse_blocks(
     raw_blocks: Any,
     request_dir: str | None = None,
     pdk_variant: str | None = None,
+    pad_override_um: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1279,7 +1291,7 @@ def _parse_blocks(
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports, derived_reports, derived_warnings = _merge_label_ports(
-                block_id, parsed_cell, pdk_variant
+                block_id, parsed_cell, pdk_variant, pad_override_um
             )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
@@ -2789,34 +2801,6 @@ def _snap_port_to_grid(
     return new_port
 
 
-def _nearest_grid_point_within(
-    composed: float, grid: float, limit: float | None
-) -> float | None:
-    """The grid point nearest ``composed`` that lies within ``limit`` of it
-    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
-    steps = composed / grid
-    base = math.floor(steps + 0.5 + 1e-9)
-    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
-    for cand in candidates:
-        value = cand * grid
-        if limit is None or abs(value - composed) <= limit + 1e-9:
-            return value
-    return None
-
-
-def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
-    """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
-    numeric position (the same "nothing to check" case the rest of the
-    landing-connectivity path tolerates rather than fails). ``bool`` is
-    rejected explicitly because it is a subclass of ``int``."""
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_finite_number(x_um):
-        return None
-    if not is_finite_number(y_um):
-        return None
-    return float(x_um), float(y_um)
-
-
 def _pin_landed_on_block(
     pin: dict[str, Any],
     blocks: dict[str, dict[str, Any]],
@@ -2998,18 +2982,42 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
+    routing = request.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise GenComposeError("request.routing must be a JSON object")
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    landing_pad_override_um = None
+    raw_minimal_ladder = routing.get("minimal_ladder")
+    if request.get("connectivity") and routing:
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
+        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
     blocks = _parse_blocks(
-        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+        request.get("blocks"),
+        request_dir or os.getcwd(),
+        pdk_info["variant"],
+        landing_pad_override_um,
     )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
     promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
-
-    routing = request.get("routing") or {}
-    if not isinstance(routing, dict):
-        raise GenComposeError("request.routing must be a JSON object")
 
     options = request.get("options") or {}
     if not isinstance(options, dict):
@@ -3116,13 +3124,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
-    landing_pad_override_um = None
     # routing.minimal_ladder (issue #6058): False keeps every pad at today's
     # sizing; True sizes a ladder's intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together below.
+    # rejected together before label-derived landings are searched.
     minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
@@ -3171,31 +3177,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        landing_pad_override_um = _parse_landing_pad_override(
-            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
-        )
-        raw_minimal_ladder = routing.get("minimal_ladder")
         if raw_minimal_ladder is not None:
             if not isinstance(raw_minimal_ladder, bool):
                 raise GenComposeError(
                     "request.routing.minimal_ladder must be a boolean when given"
                 )
             minimal_ladder = raw_minimal_ladder
-        if minimal_ladder and landing_pad_override_um is not None:
-            # Issue #6058: the two fields are competing pad-sizing policies
-            # -- the override replaces the fixed baseline for *every* pad,
-            # the mode drops the baseline from *intermediate* pads only --
-            # so honouring both would silently pick one per hop. Name both
-            # fields and let the caller choose.
-            raise GenComposeError(
-                "request.routing.minimal_ladder and "
-                "request.routing.landing_pad_size_um select two different "
-                "pad-sizing policies and cannot be combined -- "
-                "minimal_ladder sizes a ladder's intermediate hop pads at "
-                "their own per-pair enclosure/area floors while keeping "
-                "the terminal pads, landing_pad_size_um replaces the fixed "
-                "baseline for every pad; set one or the other"
-            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
@@ -3672,6 +3659,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+            _net_pin_blocks: frozenset[str] = frozenset(
+                {block for block, _port in net_pin_set}
+            ),
+            _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
         ) -> RouteConflict | None:
@@ -3718,8 +3709,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad.
 
             Intermediate and far pads are checked on their own physical layers.
-            An area overlap, a shared edge or corner can connect distinct nets
-            through one pad even when their backbones lie on different metals.
+            Area, edge or corner contact can short a pad to another route or
+            a block hosting no pin of this net, even on a different backbone layer.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -3799,38 +3790,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     if message is not None:
                         return RouteConflict(message, other_net)  # #6961
 
-            # Own-block pad self-notch check (#1520): everything above
-            # compares this leg's drawn footprint against a *different*
-            # net's already-accepted geometry. Nothing yet checks a
-            # via-drop's landing pad or a stub-widen box -- both drawn
-            # independent of routing.width_um, at a fixed size sized from
-            # the PDK's own contact-enclosure convention -- against the
-            # *same* block's own other drawn shapes on the pad's own layer.
-            # A pad legitimately lands on (merges with) the wire at its own
-            # declared port; that touch is never a violation. But when that
-            # port was hand-declared on a pre-existing `blocks[].cell`
-            # stream's own internal wire (the only way to declare a port on
-            # a cell no `klt` verb generated -- see the module docstring's
-            # "blocks[].cell" note), the pad can still land close enough to
-            # a *different* part of that same wire (e.g. a perpendicular leg
-            # near a corner the port sits close to) to violate the resolved
-            # deck's own same-layer spacing rule -- a real `klt drc` finding
-            # even though both shapes are the same electrical node, since a
-            # rule-deck space check is net-agnostic.
-            # :func:`_pad_self_notch_violation_um` catches exactly this via
-            # ``kdb.Region.notch_check`` (a same-*polygon* self-space check),
-            # which the overlap/inflate comparisons above cannot see -- the
-            # pad and the wire it lands on merge into one polygon, so there
-            # is no *other* shape here to intersect against.
-            #
-            # The box collection lives in :func:`_landing_and_widen_pad_boxes`
-            # (issue #5803: shared with the pad-vs-pitch message path).
+            # A pad can merge with its port wire and leave a notch against
+            # another part of the same wire. Check that spacing first (#1520).
+            drawing_dbu = _drawing_dbu()
             pad_boxes = _landing_and_widen_pad_boxes(
                 via_drops,
                 stub_widen,
                 layer,
                 side_for_pair,
-                _drawing_dbu(),
+                drawing_dbu,
             )
 
             for pad_layer, block_id, box, drop in pad_boxes:
@@ -3839,7 +3807,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
                 pad_geometry = _own_block_layer_geometry(
-                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                    block_id, pad_layer, drawing_dbu if drop is not None else None
                 )
                 if pad_geometry is None:
                     continue
@@ -3861,6 +3829,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "sits close to; move the declared port further along "
                         "its own wire, away from the corner)"
                     )
+
+            contact_reason = _pad_other_block_contact_reason(
+                pad_boxes,
+                _net_label,
+                sorted(
+                    block_id for block_id in blocks if block_id not in _net_pin_blocks
+                ),
+                _own_block_layer_geometry,
+                drawing_dbu,
+            )
+            if contact_reason is not None:
+                return RouteConflict(contact_reason)
 
             # Own-block approach spacing check (#1904): everything above is
             # either a route-vs-route comparison or a *pad*-sized one. Nothing

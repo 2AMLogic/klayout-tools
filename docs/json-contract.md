@@ -106,6 +106,12 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+When a `klt sim` measurement declares a supply-relative `limits.min` or
+`limits.max`, its per-corner result gains `limits_resolved` containing
+the numeric bounds for that corner. The aggregate measurement retains the
+declared `limits`, including its `{"frac_of": "<rail>", "fraction": k}`
+object. A measurement with only literal bounds keeps its existing shape.
+
 `measurements[].optional` (issue #2925) is an opt-in boolean (default
 `false`) that extends the per-measurement `status` vocabulary with an
 additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
@@ -587,6 +593,26 @@ Consumers that switch on `body_bias.status` already must tolerate an unknown
 value per the rule above. No `schema_version` bump on either verb. See
 [`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
 
+## Same-name response field on two verbs: `cell_exclusions`
+
+`klt synthesize` and `klt place-and-route` both report a `cell_exclusions`
+block for cell exclusions, and deliberately differ in **presence** (issue
+#7388): synthesize's is always present (issue #2382), while place-and-route's
+appears only when the request supplied `library.dont_use` — the safer
+additive choice for a verb whose whole block describes a request-supplied
+list. Within the block, the shared keys mean the same thing on both verbs,
+including `validated`: `true` when each requested pattern was matched
+against the resolved Liberty's cell names, `null` when that cell list could
+not be established and the zero-match check was skipped — the check-performed
+disclosure of the "Requested-but-unperformed analysis" rule below, so a
+caller mirroring one `dont_use` list between the two verbs gets the same
+signal from each. (`validated` cannot take the third value it can on
+synthesize, "nothing to check": place-and-route validates the request list
+non-empty before emitting the block.) Synthesize additionally reports `mode`
+and `engine_supports_dont_use`, which have no place-and-route analogue.
+Per-verb details: [`docs/cli/synthesize.md`](cli/synthesize.md) and
+[`docs/cli/place-and-route.md`](cli/place-and-route.md).
+
 ## Requested-but-unperformed analysis
 
 When a request asks for an analysis or capability, its response must make
@@ -767,6 +793,14 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+For sharded batch simulation, `environment.remote.run` records whole-run
+completion, the original host count, observed rounds, distinct jobs with launch
+evidence and the observed launch-to-terminal span. `environment.remote.fleet`
+covers jobs harvested or dispatched during the reporting invocation. The
+`history_coverage` field identifies partial history from older artifacts.
+See the [simulation report contract](cli/sim.md#whole-run-batch-summary) for
+the fields and their null semantics.
+
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
@@ -800,6 +834,19 @@ Xyce or malformed worker observations are `null`; no client value is used
 as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
+
+When a collected corner-mode ngspice batch request declares
+`options.ngspice_init`, top-level `diagnostics[]` includes a warning with
+`code: "batch_ngspice_init_unverified"`, `feature: "options.ngspice_init"`
+and `simulator_application: "unverified"`. Its `jobs[]` contains one record
+per job, in fleet order. Each record has `job_id` (string or null),
+`fleet_index` (zero-based integer for a fleet, null for a single job) and
+`request_identity`. The two identity values are `"digest_reported"` when
+the worker reports the requested lines and their matching digest, including
+any worker thread pin, and `"unverified"` otherwise. The digest identifies
+the reported contents. Application by ngspice remains unverified for every
+job. This warning preserves the simulation grade and is absent when the
+request omits the init lines.
 
 The same worker block carries `threads_per_worker`, the positive integer pin
 from the worker report's `environment.threads_per_worker`. Each shard,
@@ -1892,7 +1939,9 @@ and the two coexist deliberately rather than by oversight:
   is committable evidence; a machine-specific absolute path is not).
   `scope` is not decoration: the resolution rule differs per value — a
   `"repo"` path must be joined to *the invoking repo's* root (the cwd `klt`
-  was run from), `"external"`/`"absent"` carry no usable path at all.
+  was run from), except for the request-anchored fields whose table rows
+  below name their own resolution root (#6762, #6764) — those join to that
+  root instead; `"external"`/`"absent"` carry no usable path at all.
 - **Plain string** — a bare absolute filesystem path (or `null` before the
   artifact exists), with no `scope` alongside it. The historical shape every
   path field used before the envelope existed.
@@ -1937,7 +1986,8 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
-| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
+| `em` | `artifacts.{mesh,spec,report,log}` (retained layout runs also `layout`, `mesh_report`, `mesh_log`), each with additive `sha256` — the hashed envelope #4931 defines. All of them use the repo containing the request file (#6764): same request, same report from any invoking directory; present paths outside that repo (or no repo at all) have scope `external` | 1 | #5616 |
+| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path`. Since #6764 every field resolves against the repo containing the request file (never the invoking cwd); an `outputs.dir` outside that repo makes the P&R fields `external` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |

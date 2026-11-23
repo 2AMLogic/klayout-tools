@@ -110,7 +110,6 @@ from . import (
     sim_batch_receipt,
     sim_staging,
 )
-from ._jsonnum import is_finite_number
 from .pdk_families import family_subset, pdk_variant_family
 from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
@@ -137,6 +136,7 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
+from .sim_echo_checks import check_ngspice_options_echo
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
@@ -150,7 +150,8 @@ from .sim_remote import (
 )
 
 if TYPE_CHECKING:
-    from .sim import CornerPoint, _Checkpoint
+    from .sim_checkpoint import _Checkpoint
+    from .sim_corner_point import CornerPoint
 
 # Keep the contract names that callers import from sim_batch (issue #4065).
 from .sim_batch_contract import (  # noqa: F401
@@ -257,6 +258,15 @@ from .sim_batch_job_timeout import (
     _resolve_max_units_per_job,
     assess_caller_job_timeout,
     resolve_job_timeout_s,
+)
+from .sim_batch_knobs import (
+    _resolve_interrupted_grace_s,
+    _resolve_max_concurrent_jobs,
+    _resolve_max_job_seconds,
+    _resolve_runner_version_check,
+    _validate_batch_request_knobs,
+    resolve_capacity_retries,
+    resolve_capacity_wait_s,
 )
 
 # --------------------------------------------------------------------------- #
@@ -556,9 +566,9 @@ def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
     raise SimError(
         f"backend 'batch': models.pdk_root {root!r} is a directory on the "
         "submitting host, but it is forwarded to the runner verbatim, where "
-        "that path does not exist. Drop models.pdk_root and name the variant "
-        "with models.pdk (the runner uses its own PDK install); nothing was "
-        "submitted",
+        "that path does not exist. Drop models.pdk_root, name the variant with "
+        "models.pdk (the runner uses its own install) and pin this client's "
+        "install with $PDK_ROOT if needed; nothing was submitted",
         code=BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE,
     )
 
@@ -716,7 +726,13 @@ def dry_run_runner_check(
     runner_out: dict[str, Any] | None = None,
     config_out: dict[str, BatchConfig] | None = None,
 ) -> dict[str, Any] | None:
-    """Run submit preflight for batch dry runs (#4120). Unconfigured hosts return None.
+    """Run submit preflight for batch dry runs before upload or launch (#4120).
+
+    :func:`_validate_batch_request_knobs` checks request values before a dry run
+    can return None for missing host configuration. Polling fields
+    ``poll_interval_s`` and ``poll_timeout_s`` are parsed only after the provision
+    script and bucket resolve.
+
     Return a warned or unverified feature diagnostic, otherwise None. runner_out stores
     status, client_klt_version and images for match, unknown and warn-mode mismatch
     (#4675). An enforce mismatch raises BATCH_RUNNER_MISMATCH_CODE first (#4680).
@@ -724,6 +740,7 @@ def dry_run_runner_check(
     configuration so the caller avoids resolving and warning twice (#5674)."""
     from .sim import ENGINE_VERSION_UNMET_CODE
 
+    _validate_batch_request_knobs(request.get("batch") or {})
     try:
         config = _resolve_batch_config(
             request, corner_count=corner_count, timeout_s=timeout_s
@@ -912,62 +929,6 @@ def _enforce_published_runner_features(
     )
 
 
-def _resolve_max_job_seconds(
-    batch_spec: dict[str, Any], fleet: dict[str, str]
-) -> tuple[float, str]:
-    """The fleet's whole-job ceiling and its provenance (issue #2833).
-
-    Resolution order: ``request.batch.max_job_seconds`` (``"request"``),
-    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), ``BATCH_MAX_JOB_SECONDS`` in
-    the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
-    the value 2am's ``launch`` tags the instance with), else
-    :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
-    fallback). A present but not positive-finite number is a SimError
-    naming its source, raised before any S3 write, never a silent fall
-    through to a less specific source.
-    """
-    candidates: tuple[tuple[str, str, Any], ...] = (
-        ("request", "request.batch.max_job_seconds", batch_spec.get("max_job_seconds")),
-        ("env", f"${MAX_JOB_SECONDS_ENV}", os.environ.get(MAX_JOB_SECONDS_ENV)),
-        (
-            "fleet_config",
-            f"{FLEET_MAX_JOB_SECONDS_KEY} in {FLEET_CONFIG_FILENAME}",
-            fleet.get(FLEET_MAX_JOB_SECONDS_KEY),
-        ),
-    )
-    for source, label, raw in candidates:
-        if raw is None or (isinstance(raw, str) and not raw.strip()):
-            continue
-        value: Any = raw
-        if isinstance(raw, str):
-            try:
-                value = float(raw.strip())
-            except ValueError:
-                value = None
-        if not is_finite_number(value) or value <= 0:
-            raise SimError(
-                f"{label} must be a positive number of seconds (got {raw!r})"
-            )
-        return float(value), source
-    return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
-
-
-def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
-    """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
-    bound on the shard jobs in flight at once, else
-    :class:`~klayout_tools.sim.SimError` before any S3 write."""
-    value = batch_spec.get("max_concurrent_jobs")
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise SimError(
-            "request.batch.max_concurrent_jobs must be a positive integer "
-            f"(got {value!r})",
-            code=BATCH_MAX_CONCURRENT_CODE,
-        )
-    return value
-
-
 def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     """The effective ``remote.hosts`` for an opted-in split (issue #3446).
 
@@ -1104,60 +1065,6 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             code=BATCH_JOB_CEILING_CODE,
         )
     print(f"klt sim: warning: {warning}", file=sys.stderr)
-
-
-def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.runner_version_check``: ``"enforce"`` (default) or
-    ``"warn"``, else :class:`~klayout_tools.sim.SimError` before any S3 write."""
-    value = batch_spec.get("runner_version_check", "enforce")
-    if value not in RUNNER_VERSION_CHECK_MODES:
-        raise SimError(
-            "request.batch.runner_version_check must be one of "
-            f"{', '.join(repr(m) for m in RUNNER_VERSION_CHECK_MODES)} "
-            f"(got {value!r})"
-        )
-    return value
-
-
-def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
-    """``request.batch.capacity_wait_s``: a finite, non-negative number of
-    seconds (default ``0``), else :class:`~klayout_tools.sim.SimError` --
-    raised from :func:`_resolve_batch_config`, i.e. before any S3 write.
-
-    A ``bool`` is refused even though it is an ``int`` subclass: ``true``
-    reading as "wait one second" is never what a request author meant.
-    """
-    value = batch_spec.get("capacity_wait_s", 0)
-    if not is_finite_number(value) or value < 0:
-        raise SimError(
-            "request.batch.capacity_wait_s must be a non-negative number of "
-            f"seconds (got {value!r})"
-        )
-    return float(value)
-
-
-def resolve_capacity_retries(batch_spec: dict[str, Any]) -> int:
-    """The ``--capacity-retries`` value for a sharded request (issue #5567):
-    a non-negative integer (default ``0``, off), else
-    :class:`~klayout_tools.sim.SimError`. A ``bool`` is refused."""
-    value = batch_spec.get("capacity_retries", 0)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SimError(f"--capacity-retries must be >= 0 (got {value!r})")
-    return value
-
-
-def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
-    """``request.batch.interrupted_grace_s``: a finite, non-negative number of
-    seconds (default :data:`DEFAULT_INTERRUPTED_GRACE_S`; ``0`` disables the
-    fail-fast), else :class:`~klayout_tools.sim.SimError` -- raised before any
-    S3 write. A ``bool`` is refused, as for ``capacity_wait_s``."""
-    value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
-    if not is_finite_number(value) or value < 0:
-        raise SimError(
-            "request.batch.interrupted_grace_s must be a non-negative number "
-            f"of seconds (got {value!r})"
-        )
-    return float(value)
 
 
 # --------------------------------------------------------------------------- #
@@ -2776,11 +2683,10 @@ class _ShardManifest:
     """The persisted shard-to-job-id map of a sharded batch run (issues #3300,
     #3896).
 
-    ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
-    resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
-    count, where the jobs live (``jobs_prefix``/``region``/``profile``,
-    like ``batch-receipt.json``; never the bucket, issue #4079), and one entry
-    per shard: its index, the job id it was submitted as, a digest of the corner ids it
+    ``<artifacts_dir>/batch-shards.json`` records the resume fingerprint from
+    :func:`sim_checkpoint._checkpoint_fingerprint`, shard count, and job location
+    (``jobs_prefix``, ``region``, ``profile``; the bucket is omitted, issue #4079).
+    Each shard entry records its index, submitted job ID, a digest of the corner IDs it
     carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
     minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
     started, outcome unknown), ``launched`` or ``collected``, with the
@@ -3305,8 +3211,6 @@ def _poll_and_collect(
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
-        from .sim import check_ngspice_options_echo
-
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)

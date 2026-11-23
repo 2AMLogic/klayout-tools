@@ -684,12 +684,6 @@ def along_space(m, dir, d)
   dir == :h ? hspace(m, d) : vspace(m, d)
 end
 
-# Edges whose distance apart is the width across the track (horizontal
-# edges for a horizontally routed layer).
-def track_edges(m, dir)
-  dir == :h ? horz(m) : vert(m)
-end
-
 # Off-grid vertices, checking only the coordinate across the track.
 def across_ongrid(l, dir, g)
   dir == :h ? l.ongrid(0.25.nm, g) : l.ongrid(g, 0.25.nm)
@@ -706,9 +700,14 @@ end
   (dir == :h ? m.sized(0, -(wmax / 2).nm) : m.sized(-(wmax / 2).nm, 0))
     .output("#{name}.W.2", "Table #{t}.1: max #{across} #{name} width #{wmax} nm")
   # Even integer multiples of the minimum width up to the W.2 maximum (wider
-  # shapes are W.2 violations): 2g, 4g, ..., wmax.
+  # shapes are W.2 violations): 2g, 4g, ..., wmax. Region#width, so both
+  # edges of a pair lie in one polygon: an edge-set width also pairs a wide
+  # shape's edge with a separate shape's edge across the gap, a distance
+  # that is a spacing (S.1), not a width (#7226). with_angle keeps only the
+  # across-track measurement, which Region#width cannot restrict itself.
   (2 * g).step(wmax, 2 * g).map do |w|
-    track_edges(m, dir).width((w + 0.25).nm, projection).with_distance(w.nm, (w + 0.25).nm)
+    m.width((w + 0.25).nm, projection).with_distance(w.nm, (w + 0.25).nm)
+      .with_angle(dir == :h ? 0 : 90)
   end.inject(:+)
     .output("#{name}.W.3", "Table #{t}.1: #{across} #{name} width may not be an even integer multiple of #{g} nm")
   along_width(m, dir, 44.nm)

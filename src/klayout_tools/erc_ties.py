@@ -85,6 +85,67 @@ REASON_DEGENERATE_WELL_SELECTION = "degenerate_well_selection"
 #: :func:`_degenerate_tie_reasons`.
 REASON_EMPTY_WELL_REGION = "empty_well_region"
 
+#: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
+#: ``connect_to`` stackup role has **no plan-view interaction** with any of
+#: the tie's own tap sites (issue #7419): the direct
+#: ``l2n.connect(tap_sites, target)`` join that grades a through-less tie
+#: can then never fire, so every well reports ``erc.missing_tie`` whether
+#: or not the block is actually tied -- byte-identical to a genuinely
+#: untied layout. Whether the stackup omits the conductor path the PDK
+#: uses (ASAP7 without LISD: a tap reaches M1 only through
+#: SDT -> LISD -> V0) or the block simply is untied is a fact about the
+#: stream this envelope cannot decide, so the skip is additive: the
+#: findings stand, and a genuinely untied block can legitimately carry
+#: both. Never graded for a ``through`` tie, whose join is
+#: contact-qualified (see :func:`_degenerate_tie_reasons`).
+REASON_DEGENERATE_CONNECT_TARGET = "degenerate_connect_target"
+
+
+def _tie_skip_record(identity: str, reason: str, tie: dict[str, Any]) -> dict[str, Any]:
+    """Keep the primary skip reason and identify the missing physical contact."""
+    record: dict[str, Any] = {"id": identity, "reason": reason}
+    if tie.get("connect_target_disjoint") and reason in (
+        REASON_DEGENERATE_TAP_DECLARATION,
+        REASON_DEGENERATE_CONNECT_TARGET,
+    ):
+        record["missing"] = [f"tap-site contact with connect_to {tie['connect_to']!r}"]
+    return record
+
+
+def _register_tie_join(
+    l2n: Any, regions: dict[str, Any], tie: dict[str, Any], tap_sites: Any
+) -> tuple[int, bool]:
+    """Register this tie's tap sites in the tie extraction graph and wire
+    them to the declared ``connect_to`` role -- a pure move out of
+    :func:`_extract_connectivity` (issue #7419), so the connect-target
+    degeneracy measurement lives beside the join it grades.
+
+    Returns ``(tap_index, connect_target_disjoint)``: the tap region's
+    layer index in the graph, and whether -- for a through-less tie, whose
+    direct ``l2n.connect(tap_sites, target)`` overlap join is its only
+    pass path -- no tap site interacts with the target role's conductor
+    region anywhere in the stream. Always ``False`` for a ``through``
+    tie, whose join is contact-qualified and out of scope. Measured once
+    here, where both regions exist; read by
+    :func:`_degenerate_tie_reasons`.
+    """
+    tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
+    l2n.connect(tap_sites)
+    target = regions[tie["connect_to"]]
+    connect_target_disjoint = (
+        tie["through"] is None and tap_sites.interacting(target).is_empty()
+    )
+    if tie["through"] is None:
+        l2n.connect(tap_sites, target)
+    else:
+        # Keep each whole cut that lands on both sides. A cut landing only
+        # on the other endpoint of the declared via cannot tie this role.
+        contacts = regions[tie["through"]].overlapping(target).overlapping(tap_sites)
+        l2n.register(contacts)
+        l2n.connect(tap_sites, contacts)
+        l2n.connect(contacts, target)
+    return tap_index, connect_target_disjoint
+
 
 def _tie_findings(
     l2n: Any, circuit: Any, tie_layers: list[dict[str, Any]]
@@ -170,7 +231,7 @@ def _tie_findings(
 
 def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     """The declared ties whose ``erc.missing_tie`` verdict is unfalsifiable
-    (issues #2199, #2255, #2339 and #2377), each mapped to the stable
+    (issues #2199, #2255, #2339, #2377 and #7419), each mapped to the stable
     ``erc_coverage.skipped[].reason`` naming *why* -- reported as skipped
     work by :func:`_connectivity_coverage` rather than as a check that
     passed.
@@ -255,13 +316,37 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     iterations, which is exactly the absence-of-evidence pass every test in
     this function exists to reject.
 
+    A through-less tie is **connect-target-degenerate**
+    (:data:`REASON_DEGENERATE_CONNECT_TARGET`, issue #7419) when its
+    resolved tap region is non-empty yet no tap site interacts with the
+    ``connect_to`` role's conductor region anywhere in the stream
+    (``connect_target_disjoint``, measured in
+    :func:`_extract_connectivity` where both regions exist -- a property
+    of the stream's geometry, not of the spec text, which is why it is a
+    skip reason rather than a spec error: a real layout whose taps merely
+    lack the conductor over them has the same zero overlap and must keep
+    its reportable findings). The direct ``l2n.connect(tap_sites, target)``
+    join is the only way such a tie can pass, so zero interaction means
+    the tie cannot pass by construction -- yet the run reports one
+    ordinary ``erc.missing_tie`` per well, indistinguishable from a
+    genuinely untied layout. The skip separates the two states without
+    touching the findings; check the stackup declares the conductor path
+    the PDK uses (e.g. LISD for ASAP7). Never graded for a ``through``
+    tie: a through tie with zero qualifying cuts is the legitimate
+    "untied pad" case, out of scope here.
+
     **The well tests are applied first**, and win when more than one holds,
     because the tap measurement is taken *inside* the well region:
     ``tap_narrowed`` is ``(drawn_tap ∩ well) - tap_sites``, so an
     unfalsifiable well makes the tap-side answer a statement about the die
     rather than about a tap. Reporting "narrow your tap" for a declaration
     whose actual defect is "you claimed the whole die" (or "your well layer
-    draws nothing") would send a reader to fix the wrong half.
+    draws nothing") would send a reader to fix the wrong half. The
+    connect-target test is applied last, after the tap test, so a
+    declaration degenerate on both keeps the reason that names the nearer
+    defect: "narrow your tap" still wins over "your stackup cannot reach
+    the tap", because a tap region that cannot be told apart from a
+    source/drain contact was never a tap to reach in the first place.
 
     Deliberately *not* a change to ``erc_findings``: the same findings are
     emitted for the same geometry as before. What changes is that the
@@ -282,4 +367,10 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
             and not tie["tap_region"].is_empty()
         ):
             reasons[tie["name"]] = REASON_DEGENERATE_TAP_DECLARATION
+        elif (
+            tie["through"] is None
+            and not tie["tap_region"].is_empty()
+            and tie["connect_target_disjoint"]
+        ):
+            reasons[tie["name"]] = REASON_DEGENERATE_CONNECT_TARGET
     return reasons
