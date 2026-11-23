@@ -64,6 +64,12 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from .decks.finfet import FinFETExtractionDeck
+from .extract_abstract import (
+    _DEF_NET_NAME_PROPERTY_ID,
+    _apply_def_net_name_overrides,
+    _def_net_name_probes,
+)
+from .extract_detect_diode_near_miss import _extraction_deck_name
 from .extract_spef import ExtractError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -806,10 +812,7 @@ def _def_net_name_warnings(
     probes: dict[str, Any],
     top_name: str,
 ) -> list[str]:
-    """Apply ``--def-net-names`` (issue #951) to the FinFET netlist and return
-    the same loud warnings the planar path emits."""
-    from .extract import _DEF_NET_NAME_PROPERTY_ID, _apply_def_net_name_overrides
-
+    """Apply DEF net names and report unresolved probes as on the planar path."""
     renamed, unresolved = _apply_def_net_name_overrides(l2n, metals, probes)
     if not probes:
         return [
@@ -851,7 +854,6 @@ def _extract_with_parasitics(
 
     from .extract import (
         _apply_declared_pins,
-        _def_net_name_probes,
         _extract_connected_netlist,
         _promote_orphan_named_nets,
         _purge_preserving_named_nets,
@@ -966,8 +968,6 @@ def extract_netlist_tuple(
     **options: Any,
 ) -> tuple[Any, ...]:
     """Return the planar extraction tuple with defaults for planar-only results."""
-    from .extract import _extraction_deck_name
-
     parasitics_options = {
         key: options[key]
         for key in (
