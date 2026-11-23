@@ -87,6 +87,20 @@ def test_parse_constrained_abc_script_reads_the_engines_own_help():
     assert recovery.parse_constrained_abc_script(_HELP_ABC) == _CTR_SCRIPT
 
 
+def test_parse_constrained_abc_script_ends_at_eof():
+    help_text = "for -liberty/-genlib with -constr:\n  map; stime -p"
+    assert recovery.parse_constrained_abc_script(help_text) == "map; stime -p"
+
+
+def test_failed_help_probe_disables_capture_even_with_valid_stdout(monkeypatch):
+    monkeypatch.setattr(
+        recovery,
+        "run_in_group",
+        lambda *args, **kwargs: fake_completed(stdout=_HELP_ABC, returncode=1),
+    )
+    assert recovery._probe_help_abc() == ""
+
+
 def test_parse_constrained_abc_script_returns_none_without_the_section():
     """An engine whose help does not document the constrained script (the
     pre-stime era, or a reworded future help) disables the capture rather
@@ -132,20 +146,21 @@ def test_parse_abc_stats_dump_accepts_only_absolute_records():
     assert recovery.parse_abc_stats_dump("garbage") is None
 
 
-def test_read_abc_stats_timing_shapes_the_single_region_case(tmp_path):
+@pytest.mark.parametrize("target_ps", [None, 771])
+def test_read_abc_stats_timing_shapes_the_single_region_case(tmp_path, target_ps):
     abc_log = tmp_path / "top_abc.log"
     abc_log.write_text(_SINGLE_REGION_BANNER + "no stime line at all\n")
     dump = tmp_path / "stats.txt"
     dump.write_text(_SINGLE_REGION_DUMP)
 
-    timing = recovery.read_abc_stats_timing(str(abc_log), str(dump), None)
+    timing = recovery.read_abc_stats_timing(str(abc_log), str(dump), target_ps)
 
     assert timing == {
         "source": "abc_stime_stats_file",
         "wire_load": None,
         "critical_path_ps": 771,
         "precision_ps": 1,
-        "delay_target_ps": None,
+        "delay_target_ps": target_ps,
         "regions": [{"module": "top", "critical_path_ps": 771}],
     }
 
@@ -166,6 +181,10 @@ def test_read_abc_stats_timing_rejects_every_ambiguous_case(tmp_path):
         recovery.read_abc_stats_timing(str(abc_log), str(tmp_path / "gone"), None)
         is None
     )
+
+    abc_log.unlink()
+    assert recovery.read_abc_stats_timing(str(abc_log), str(dump), None) is None
+    assert recovery.read_abc_stats_timing(None, str(dump), None) is None
 
 
 def _patch_help(monkeypatch, text):
@@ -228,6 +247,46 @@ def test_plan_declines_every_case_it_cannot_preserve(tmp_path, monkeypatch):
     assert recovery.plan_abc_stats_capture(str(spaced), **kwargs) is None
     _patch_help(monkeypatch, "no constrained section here")
     assert recovery.plan_abc_stats_capture(str(tmp_path), **kwargs) is None
+
+
+def test_inline_plan_clears_the_dump_without_staging_a_script(tmp_path):
+    stale = tmp_path / recovery.ABC_STATS_DUMP_FILENAME
+    stale.write_text(_SINGLE_REGION_DUMP)
+
+    capture = recovery.plan_abc_stats_capture(
+        str(tmp_path),
+        constrained=True,
+        user_script=None,
+        abc_fast="inline",
+        delay_target_ps=771,
+    )
+
+    assert capture == recovery.AbcStatsCapture(None, str(stale))
+    assert not stale.exists()
+    assert not (tmp_path / recovery.ABC_STIME_CAPTURE_SCRIPT).exists()
+
+
+@pytest.mark.parametrize(
+    "blocked_name",
+    [recovery.ABC_STIME_CAPTURE_SCRIPT, recovery.ABC_STATS_DUMP_FILENAME],
+)
+def test_plan_declines_capture_if_run_files_cannot_be_prepared(
+    tmp_path, monkeypatch, blocked_name
+):
+    _patch_help(monkeypatch, _HELP_ABC)
+    blocked = tmp_path / blocked_name
+    blocked.mkdir()
+
+    capture = recovery.plan_abc_stats_capture(
+        str(tmp_path),
+        constrained=True,
+        user_script=None,
+        abc_fast=None,
+        delay_target_ps=None,
+    )
+
+    assert capture is None
+    assert blocked.is_dir()
 
 
 def test_write_script_emits_absolute_run_lines_for_the_capture(tmp_path, monkeypatch):
