@@ -20,7 +20,7 @@ def _record_run_sim(monkeypatch):
         seen.append(kwargs)
         raise sim.SimError("stop here")
 
-    monkeypatch.setattr(characterize.sim, "run_sim", _fake_run_sim)
+    monkeypatch.setattr(sim, "run_sim", _fake_run_sim)
     return seen
 
 

@@ -17,7 +17,18 @@ from pathlib import Path
 
 import pytest
 
-from helpers.ihp_sg13g2_root import OSDI_MODEL, STDCELL_LIB, VARIANT, find_ihp_sg13g2
+from helpers.ihp_sg13g2_root import (
+    CORNER_MOS_LIB,
+    OSDI_MODEL,
+    STDCELL_LIB,
+    VARIANT,
+    find_ihp_sg13g2,
+)
+
+
+@pytest.fixture(autouse=True)
+def clear_host_ihp_override(monkeypatch):
+    monkeypatch.delenv("KLT_IHP_SG13G2_ROOT", raising=False)
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -28,6 +39,9 @@ def _git(cwd: Path, *args: str) -> None:
 def _install(root: Path, *, with_model: bool = True) -> Path:
     """Lay down a fake IHP variant at ``root``; complete unless ``with_model``."""
     (root / STDCELL_LIB).mkdir(parents=True, exist_ok=True)
+    corner = root / CORNER_MOS_LIB
+    corner.parent.mkdir(parents=True, exist_ok=True)
+    corner.touch()
     if with_model:
         model = root / OSDI_MODEL
         model.parent.mkdir(parents=True, exist_ok=True)
@@ -100,3 +114,27 @@ def test_without_git_discovery_uses_the_active_checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "")  # no git: nothing names a shared checkout
     assert find_ihp_sg13g2(repo) == local
     assert find_ihp_sg13g2(tmp_path / "elsewhere") is None
+
+
+def test_model_only_override_and_incomplete_corner_fall_back(tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    vendor = _install(checkout / VARIANT)
+    model_only = _install(tmp_path / "models")
+    (model_only / STDCELL_LIB).rmdir()
+    monkeypatch.setenv("KLT_IHP_SG13G2_ROOT", str(model_only))
+    assert find_ihp_sg13g2(checkout) == vendor
+    assert find_ihp_sg13g2(checkout, require_stdcell=False) == model_only
+    (model_only / CORNER_MOS_LIB).unlink()
+    assert find_ihp_sg13g2(checkout, require_stdcell=False) == vendor
+
+
+def test_model_only_shared_checkout_requires_git_metadata(main_checkout, monkeypatch):
+    monkeypatch.delenv("KLT_IHP_SG13G2_ROOT", raising=False)
+    repo = main_checkout / ".loom/worktrees/worker"
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(repo))
+    shared = _install(main_checkout / VARIANT)
+    (shared / STDCELL_LIB).rmdir()
+    assert find_ihp_sg13g2(repo, require_stdcell=False) == shared
+
+    monkeypatch.setenv("PATH", "")
+    assert find_ihp_sg13g2(repo, require_stdcell=False) is None

@@ -1422,6 +1422,16 @@ the deck does not read — reaches the `.SUBCKT`. A merged pin on a
 point (issue #4571: a routed signal over the LEF box centre cannot capture
 it), and the warning above is not emitted for that cell. No new flag or JSON field.
 
+**Isolated substrate global (issue #5632).** If the extracted netlist connects
+the substrate global only to LEF-merged substrate pins, `warnings[]` identifies
+the net and counts the affected instances and cell types. This can happen
+when a physical tap is abstracted and its LEF has only rail pins. The same
+warning can arise on a layout with no tap. If you have verified the physical
+tie, disclose it for comparison with `hints.layout_short_nets`
+(`{"nets": [["vsubs", "VGND"]]}`, see `docs/cli/lvs.md`). To represent a tie
+in extraction, draw and label it in the cells. A device terminal or another
+pin on the substrate net suppresses this warning.
+
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
 not — see "Abstraction never changes net identity outside the black box"
@@ -6926,6 +6936,11 @@ resolves the bare form is a property of that netlist (hierarchical vs.
 flattened with escaped names); the writer follows the DEF rather than
 guessing.
 
+The writer also preserves DEF bus indices and literal brackets on non-port
+nets and instance names. For example, the DEF spelling `u_cap/mem\[0\][3]`
+keeps both its literal word index and its bus bit in the SPEF. Regenerate
+the SPEF with the routed DEF connections to apply this fix to older output.
+
 Measured against a real OpenSTA session (issue #3448, OpenROAD
 `26Q3-1510-g6cb3f2b704`, sky130_fd_sc_hd `tt_025C_1v80`, `klt sta` in `def`
 mode with `spef`): a two-inverter DEF whose instances are named
@@ -8269,7 +8284,7 @@ without the flag — output is byte-identical to a run that never had it):
 | Field | Meaning |
 |---|---|
 | `status` | `ok`; `skipped` (fewer than two terminals, `too_few_terminals`); or `unsupported` (no graph — see `diagnostics`). `skipped`/`unsupported` nets keep the legacy scalar exactly. |
-| `terminals` | Terminal names, sorted. `via@x,y` is a contact/via where current leaves the modelled conductor (µm, centre of the cut); `device@x,y` is a device-body cut edge (a fragment edge strictly inside the role's drawn layer). `[]` when `unsupported`. |
+| `terminals` | Terminal names, sorted. `via@x,y` is a contact/via where current leaves the modelled conductor (µm, centre of the cut); `device@x,y` is a device-body cut edge (a fragment edge strictly inside the role's drawn layer). `pin:<name>@x,y` is a promoted pin at its drawn anchor. `[]` when `unsupported`. |
 | `pair_resistance_ohm` | `T x T` symmetric effective resistance between terminals, ohms, `0.0` diagonal, `null` for two terminals in different connected components (with `terminals_disconnected`). `[]` unless `ok`. |
 | `legacy_resistance_ohm` | The unchanged series-sum `resistance_ohm` of the same net, as a cross-check. |
 | `selected_resistance_ohm` / `resistance_source` / `resistance_source_reason` | Scalar selection (issue #2983, see below). `resistance_source` is `"graph"` or `"legacy"`; `selected_resistance_ohm` is the number a caller wanting the topology-aware scalar should read (never `null`). |
@@ -8278,6 +8293,13 @@ without the flag — output is byte-identical to a run that never had it):
 
 **Boundary conditions and limits.**
 
+- A net with one device face and one promoted top-level pin can use the pin
+  as its second terminal. Its `pin:<name>@<x>,<y>` entry gives the drawn
+  anchor in µm. The solver attaches it across the shorter conductor span
+  through that point on the pin's own layer. On a pad with equal spans,
+  it uses a two-database-unit square centered on the anchor. Multiple
+  distinct matching label locations or missing conductor geometry leave
+  the single-device net on the legacy resistance.
 - A contact or via with a side on the conductor's outline attaches along
   that side (Stage 3.D4's end-edge ports). One wholly inside a conductor (a
   strap's contact/via array) attaches by its whole footprint, which becomes

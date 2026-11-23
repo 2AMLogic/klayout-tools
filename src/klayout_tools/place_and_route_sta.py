@@ -112,12 +112,11 @@ def _corner_sweep_script_lines(
     ``report_worst_slack_metric -setup``/``-hold`` (run here for the first
     and only time in this session, so no scoping concern applies) writes
     this invocation's own ``-metrics`` dump's ``timing__setup__ws``/
-    ``timing__hold__ws`` keys -- automatically the worst value across every
-    corner :func:`klayout_tools.pdk.list_lib_corners` enumerated (confirmed
-    live: setup slack worst-cases at the slowest loaded corner, hold slack
-    at the fastest, exactly the industrial "setup at slow PVT, hold at fast
-    PVT" convention this survey's section 3.3 describes -- no manual
-    slow/fast corner classification needed in Python).
+    ``timing__hold__ws`` keys. Each is the worst slack across the loaded
+    ``corners``. The route stage uses descriptor keys for mapped libraries
+    and :func:`klayout_tools.pdk_cells.list_lib_corners` for conventional
+    discovery. A requested ``pdk.sweep_corners`` subset limits both metrics.
+    OpenROAD selects the worst setup and hold corners independently.
 
     ``report_tns_metric -setup``/``-hold`` (issue #1866) rides alongside the
     two ``report_worst_slack_metric`` calls above, in the same session and
@@ -482,6 +481,7 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
@@ -591,7 +591,7 @@ def _post_route_spef_metrics(
     flow's original names verbatim). Passed through as ``run_extract``'s
     ``def_net_connections``, this makes every real design pin on an
     unambiguously-named net a genuine, resolvable node in the written
-    SPEF's RC network -- see :func:`~klayout_tools.extract._write_spef`'s
+    SPEF's RC network -- see :func:`~klayout_tools.extract_spef._write_spef`'s
     docstring for the exact ``*CONN``/``*RES`` shape and the duplicate-net-
     name guard (a net name shared by several un-strapped islands, e.g.
     `gcd`'s 105 ``VGND`` islands, is skipped rather than asserting
@@ -725,6 +725,7 @@ def _post_route_spef_metrics(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
     )
     with completed.diagnostics(PlaceAndRouteError):
@@ -824,6 +825,7 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
 ) -> tuple[
@@ -978,6 +980,7 @@ def _run_corner_sweep(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
     )
     with completed.diagnostics(PlaceAndRouteError):
@@ -1091,6 +1094,7 @@ def _run_corner_sweep(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
         )
         with corner_completed.diagnostics(PlaceAndRouteError):
@@ -1130,12 +1134,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* effective design-rule
-                # verdict, from its own single-corner invocation's stdout --
-                # the per-corner counterpart of the combined aggregates
-                # above, letting a caller see which deck's limits a pin
-                # actually breaks (exactly the per-corner attribution #1092
-                # added for slack).
+                # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,
