@@ -149,12 +149,19 @@ def test_unrecoverable_grouping_skips_with_a_notice(tmp_path, monkeypatch, capsy
     assert after["shards"][1]["state"] == "collected"
 
 
-def test_submitted_and_known_shards_stay_silent(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("recoverable", [True, False])
+def test_submitted_and_known_shards_stay_silent(
+    tmp_path, monkeypatch, capsys, recoverable
+):
     """A ``submitted`` (never launched) shard and one whose units the
     checkpoint already holds are deliberate skips: no notice, no launch."""
     runner, request, payload = _harvest_fixture(tmp_path, monkeypatch)
     document = json.loads(open(payload["manifest_path"]).read())
-    document["shards"][0]["state"] = "submitted"
+    submitted = document["shards"][0]
+    submitted["state"] = "submitted"
+    if not recoverable:
+        submitted.pop("units")
+        submitted["units_sha256"] = "0" * 64
     open(payload["manifest_path"], "w").write(json.dumps(document))
     # Shard 2's units (7-9) are exactly what the checkpoint already holds.
     known = [p.corner_id for p in _corner_points(10)][7:]

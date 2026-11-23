@@ -185,17 +185,17 @@ def _collect_resume_entry(
     all stay untouched for the dispatch, each skip but the deliberate
     submitted/known ones announced on stderr. A terminal entry is collected
     through the attach machinery: probe, never wait, never launch."""
-    unit_ids = _entry_unit_ids(entry, by_id, partition)
-    if unit_ids is None:
-        _skip_notice(entry, "shard grouping not recoverable")
-        return None
-    if all(unit in known for unit in unit_ids):
-        return None
     if entry.get("state") == "submitted":
         # Never launched: no results exist to harvest, and launching is the
         # dispatch's decision (`launch_if_unlaunched`), never a harvest's (a
         # shard the map says was submitted is launched, not re-minted, when
         # the partition is unchanged).
+        return None
+    unit_ids = _entry_unit_ids(entry, by_id, partition)
+    if unit_ids is None:
+        _skip_notice(entry, "shard grouping not recoverable")
+        return None
+    if all(unit in known for unit in unit_ids):
         return None
     job_id = str(entry["job_id"])
     status = _shard_status(config, job_id)
