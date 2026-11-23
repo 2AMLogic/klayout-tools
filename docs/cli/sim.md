@@ -5809,6 +5809,22 @@ known runner/client version mismatch with `batch_runner_version_mismatch`
 under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
 version skew"); passing that check does not establish mechanism support.
 
+## Supply-relative measurement limits
+
+Either `measurements[].limits.min` or `.max` can be a number or a fraction
+of a named supply. For example, `"limits": {"min": {"frac_of": "vdd",
+"fraction": 0.9}, "max": 2}` grades a measurement against a floor of
+1.458 V at 1.62 V supply and 1.782 V at 1.98 V supply, with a 2 V ceiling
+in both cases. Every selected corner must define the rail. The fraction must
+be finite and nonnegative. A pooled Monte Carlo sigma window requires a
+common numeric bound, so declaring `k_sigma` for the measurement or run
+with a supply-relative bound is refused before the sweep.
+
+For affected measurements, `corners[].measurements[].limits_resolved` gives
+the numeric bounds used for that corner. Aggregate `measurements[].limits`
+retains the request declaration. Off-host jobs require a runner that supports
+supply-relative limits. Older runners cannot grade an object-valued bound.
+
 ## Optional measurements (`measurements[].optional`)
 
 By default a `spice`/`expr` measurement that produces no value grades its
