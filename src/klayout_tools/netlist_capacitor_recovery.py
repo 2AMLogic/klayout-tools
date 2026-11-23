@@ -100,8 +100,11 @@ model, so the factory's ``defined_subckt_names`` parameter exempts them.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING
+
+from .netlist_class_registry import shared_device_class as _shared_device_class
+from .netlist_inductor_recovery import recover_inductor_x_card
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -314,61 +317,6 @@ def bulk_resistor_device_class(name: str) -> kdb.DeviceClass:
     return device_class
 
 
-def _shared_device_class(
-    netlist: kdb.Netlist,
-    class_name: str,
-    make_class: Callable[[], kdb.DeviceClass],
-    registry: dict[str, kdb.DeviceClass],
-) -> kdb.DeviceClass:
-    """The one ``kdb.DeviceClass`` object every recovery of ``class_name``
-    in one read must share -- looked up in ``registry`` first, then in
-    ``netlist``'s registered classes by exact name, and only then built via
-    ``make_class`` and registered (issue #1157, PR #2336 CI regression).
-
-    Why not ``Netlist.device_class_by_name``: that lookup misses a class
-    this recovery registered earlier in the same read twice over (both
-    verified against ``klayout==0.30.10``). First, it does not see a class
-    ``netlist.add()``-ed from inside a ``NetlistSpiceReaderDelegate
-    .element()`` callback for the rest of that read, even though
-    ``each_device_class()`` lists it immediately. Second, even after the
-    read completes it normalizes its argument through the netlist's own
-    case convention (SPICE netlists read case-insensitively, so it
-    *uppercases*) but compares against each registered class's stored name
-    verbatim -- a deck's canonical lowercase ``res_high_po`` never matches.
-    Either miss alone sends a naive create-and-``add`` fallback down the
-    per-card path: one fresh class object *per recovered card*.
-    ``Netlist.combine_devices()`` groups devices by ``DeviceClass`` object
-    identity (``tl::id_of`` of the device's class against the class being
-    combined for), so a per-card class object means no two devices ever
-    group and the series fold silently never happens (PR #2336: three
-    sky130 ``res_high_po`` segments survived as three devices on Linux CI).
-    One class object per name -- what this helper guarantees -- is also
-    what makes the fold robust against the klayout-side detail that
-    ``DeviceClass``'s copy constructor copies an indeterminate
-    ``tl::UniqueId`` (verified against ``klayout==0.30.10``: a
-    ``Netlist.dup()`` clone's ``id()`` is 0 on macOS but distinct garbage
-    on Linux), so the fold no longer depends on which platform's heap
-    happens to make the clone ids coincide.
-
-    ``registry`` is the per-reader cache the caller owns (one
-    ``make_capacitor_class_recovery_reader`` build serves exactly one
-    ``Netlist.read`` call -- every caller in this repo does); the exact-name
-    scan covers a class the *default* reader handler already registered
-    under the same verbatim name earlier in the same read.
-    """
-    device_class = registry.get(class_name)
-    if device_class is not None:
-        return device_class
-    for registered in netlist.each_device_class():
-        if registered.name == class_name:
-            registry[class_name] = registered
-            return registered
-    device_class = make_class()
-    netlist.add(device_class)
-    registry[class_name] = device_class
-    return device_class
-
-
 def _recover_bulk_resistor_x_card(
     circuit: kdb.Circuit,
     name: str,
@@ -540,6 +488,7 @@ def make_capacitor_class_recovery_reader(
     *,
     custom_device_classes: Mapping[str, str] | None = None,
     resistor_classes: Mapping[str, str] | None = None,
+    inductor_classes: Mapping[str, str] | None = None,
     defined_subckt_names: Collection[str] | None = None,
 ) -> kdb.NetlistSpiceReader:
     """Build a ``kdb.NetlistSpiceReader`` whose delegate reattaches a
@@ -583,6 +532,12 @@ def make_capacitor_class_recovery_reader(
     ``1e-5`` -- and are converted to the micrometre domain it reports).
     ``None``/``{}`` leaves every such card to the default handling, unchanged.
 
+    ``inductor_classes`` (issue #6726, see
+    :func:`~klayout_tools.netlist_inductor_recovery.inductor_classes_for_deck`)
+    recognises an ``X`` card naming a deck spiral-inductor class as a real
+    3-terminal device (``A``/``B``/``SUB``); ``None``/``{}`` leaves it to the
+    default handling, unchanged.
+
     ``defined_subckt_names`` (issue #5665) is the set of (upper-cased)
     ``.subckt`` names the text itself defines -- a defined name is a real
     circuit, never a device model, so neither lookup may claim it (see the
@@ -592,6 +547,7 @@ def make_capacitor_class_recovery_reader(
 
     custom_lookup: dict[str, str] = dict(custom_device_classes or {})
     resistor_lookup: dict[str, str] = dict(resistor_classes or {})
+    inductor_lookup: dict[str, str] = dict(inductor_classes or {})
     defined_subckts = {name.upper() for name in defined_subckt_names or ()}
     # One reader instance serves exactly one `Netlist.read` call (every
     # caller in this repo builds it per call), so a plain per-class-name
@@ -603,7 +559,8 @@ def make_capacitor_class_recovery_reader(
         def wants_subcircuit(self, name: str) -> bool:
             if defined_subckts and name.upper() in defined_subckts:
                 return super().wants_subcircuit(name)
-            if name.upper() in custom_lookup or name.upper() in resistor_lookup:
+            claimed = (custom_lookup, resistor_lookup, inductor_lookup)
+            if any(name.upper() in table for table in claimed):
                 return True
             return super().wants_subcircuit(name)
 
@@ -659,6 +616,10 @@ def make_capacitor_class_recovery_reader(
                     return True
                 if _recover_resistor_x_card(
                     circuit, name, model, nets, params, resistor_lookup, class_registry
+                ):
+                    return True
+                if recover_inductor_x_card(
+                    circuit, name, model, nets, inductor_lookup, class_registry
                 ):
                     return True
             return super().element(
