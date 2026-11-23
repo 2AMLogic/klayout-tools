@@ -625,7 +625,7 @@
     },
     {
       "path": "src/klayout_tools/size.py",
-      "lines": 2115
+      "lines": 2113
     },
     {
       "path": "src/klayout_tools/size_topology.py",
