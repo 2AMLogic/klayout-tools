@@ -105,7 +105,7 @@ def test_host_default_batch_keeps_a_single_unit_local(fake, monkeypatch):
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert "environment" not in report
+    assert report["environment"]["threads"] == 1
 
 
 def test_explicit_batch_resolves_for_one_unit(monkeypatch):
