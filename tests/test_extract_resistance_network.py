@@ -291,9 +291,19 @@ def test_pex_resistance_network_trunk_fixture(tmp_path):
         "resistor_count": 10,
         "fallback_reason": None,
     }
+    cards = out.read_text().splitlines()
     for stub in ("R1", "R2", "S1", "S2", "S3"):
-        assert nets[stub]["network"]["written"] == "legacy"
-        assert nets[stub]["network"]["fallback_reason"] == "graph_status_skipped"
+        # Each labelled outer island has one device head and one promoted pin.
+        net = nets[stub]
+        assert len(net["terminals"]) == 2
+        assert any(port.startswith(f"pin:{stub}@") for port in net["terminals"])
+        assert net["network"] == {
+            "written": "scalar",
+            "resistor_count": None,
+            "fallback_reason": None,
+        }
+        card = next(row for row in cards if row.startswith(f"R{stub}_t0 "))
+        assert float(card.split()[3]) == pytest.approx(net["selected_resistance_ohm"])
 
     # Leg -> graph-terminal index, from the netlist's device placements.
     terminal_names = trunk["terminals"]
@@ -334,29 +344,6 @@ def test_pex_resistance_network_trunk_fixture(tmp_path):
 
     # The model disclosure names the mode (a signoff item-7 citation key).
     assert "resistance_network" in (report["extraction"]["model"] or {})
-
-
-def test_pex_resistance_network_off_is_byte_identical(tmp_path):
-    """Without the flag the written netlist and report carry nothing new."""
-    layout = make_sky130_trunk_stub_layout()
-    plain_report, plain_out = _run_pex_trunk(tmp_path, "plain", layout)
-    graph_report, graph_out = _run_pex_trunk(
-        tmp_path,
-        "graph",
-        layout,
-        resistance_graph=True,
-        resistance_graph_r_cut_ohm=0.0,
-    )
-    assert plain_out.read_bytes() == graph_out.read_bytes()
-    assert (
-        plain_report["extraction"]["netlist_sha256"]
-        == graph_report["extraction"]["netlist_sha256"]
-    )
-    assert "resistance_graph" not in plain_report["extraction"]
-    for net in graph_report["extraction"]["resistance_graph"]["nets"]:
-        assert "network" not in net
-    assert "resistance_network" not in (graph_report["extraction"]["model"] or {})
-    assert "resistance_network" not in graph_report["extraction"]["resistance_graph"]
 
 
 def test_pex_resistance_network_terminal_mismatch_keeps_star(tmp_path):

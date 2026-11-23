@@ -23,7 +23,7 @@ from klayout_tools.parasitic_integrity import (
     ParasiticNetworkRecord,
     check_parasitic_network,
 )
-from test_extract_resistance_network import _run_pex_trunk
+from test_extract_resistance_network import _run_pex_trunk, _trunk_network_cards
 
 # A net with three graph terminals along y = 1.8 (x = 1, 5, 9 um).
 GRAPH = ["poly_contact@1.0,1.8", "cuts@5.0,1.8", "cuts@9.0,1.8"]
@@ -222,3 +222,30 @@ def test_pex_reduced_trunk_net_passes_the_integrity_open_check(tmp_path):
     opened = nets["NT"]["integrity"]["open"]
     assert opened["status"] == "pass"
     assert opened["disconnected_count"] == 0
+
+
+@pytest.mark.parametrize("graph", [False, True], ids=["plain", "two_terminal_graph"])
+def test_pex_resistance_network_off_is_byte_identical(tmp_path, graph):
+    """Omitting reduction preserves the output of each existing PEX mode."""
+    layout = make_sky130_trunk_stub_layout()
+    options = (
+        {"resistance_graph": True, "resistance_graph_r_cut_ohm": 0.0} if graph else {}
+    )
+    default, default_out = _run_pex_trunk(tmp_path, "default", layout, **options)
+    disabled, disabled_out = _run_pex_trunk(
+        tmp_path, "disabled", layout, resistance_network=False, **options
+    )
+    assert default_out.read_bytes() == disabled_out.read_bytes()
+    assert (
+        default["extraction"]["netlist_sha256"]
+        == disabled["extraction"]["netlist_sha256"]
+    )
+    assert not _trunk_network_cards(default_out)
+    for result in (default["extraction"], disabled["extraction"]):
+        assert "resistance_network" not in (result["model"] or {})
+        if graph:
+            echo = result["resistance_graph"]
+            assert "resistance_network" not in echo
+            assert all("network" not in net for net in echo["nets"])
+        else:
+            assert "resistance_graph" not in result
