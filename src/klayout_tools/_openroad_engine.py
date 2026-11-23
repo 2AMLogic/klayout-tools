@@ -446,8 +446,8 @@ def _run_openroad(
     threads: int | None = None,
     repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
-    """Stream both logs to disk, retaining partial output on interruption.
-    Anchor paths on the request repo and raise ``error_cls`` on launch failure."""
+    """See “Retained OpenROAD logs” in docs/cli/place-and-route.md for log streaming.
+    Keep partial logs; anchor on ``repo_root``; raise ``error_cls`` if launch fails."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
