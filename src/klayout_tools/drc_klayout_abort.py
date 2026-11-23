@@ -17,7 +17,18 @@ from .drc import DrcError
 CODE_KLAYOUT_DECK_ABORTED = "klayout_deck_aborted"
 
 _EXECUTING_DECK_RE = re.compile(
-    r"^Executing deck\s+(?P<name>\S+)(?:\s+from\s+(?P<path>\S+))?\s*$", re.MULTILINE
+    r"^(?:[^\n]*?Memory Usage \([^\n()]*\)\s*:\s*)?Executing deck[ \t]+(?::[ \t]*)?"
+    r"(?P<name>\S+)(?:[ \t]+from[ \t]+(?P<path>[^\n]+?))?[ \t]*$",
+    re.MULTILINE,
+)
+_WORKER_FAILURE_RE = re.compile(
+    r"^(?:[^\n]*?Memory Usage \([^\n()]*\)[ \t]*:[ \t]*)?"
+    r"Deck ([\w.-]+) failed:[ \t]*(.*)$",
+    re.MULTILINE,
+)
+_WORKER_SUMMARY_RE = re.compile(
+    r"^(?:ERROR\b[^\n]*?)?DRC failed for decks:[ \t]*([\w.-]+(?:,[ \t]*[\w.-]+)*)",
+    re.MULTILINE,
 )
 _RUBY_UNDEFINED_SYMBOL_RE = re.compile(
     r"undefined (?:local variable or )?method [`'‘\"]?(?P<symbol>[^`'’\"\s]+)"
@@ -86,6 +97,37 @@ def _klayout_deck_error_detail(
     return "\n".join(head + kept)
 
 
+#: KLayout's own error prefix for a deck-script failure, as emitted by
+#: ``klayout -b -r`` (verified against a real 0.28.16 run for issue #1941:
+#: ``ERROR: In <deck>: undefined local variable or method '...'`` followed by
+#: ``ERROR: NameError: ... in Executable::execute``). Anchored at column 0:
+#: the backtrace lines KLayout prints after each ``ERROR:`` line are indented,
+#: and a deck's own rule names/progress output (``Executing rule
+#: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
+#: is what keeps this from misreading ordinary deck output as a failure.
+_KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
+
+
+def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
+    """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
+    (issue #1941), in order, stdout before stderr.
+
+    ``klayout -b -r`` writes its deck-script diagnostics to one or the other
+    depending on build/platform, so both are scanned. An empty list means
+    KLayout itself reported no error -- not that the deck necessarily ran to
+    completion (see :func:`run_drc_klayout_engine`, which pairs this with the
+    exit status).
+    """
+    lines: list[str] = []
+    for stream in streams:
+        if not stream:
+            continue
+        lines.extend(
+            match.group(0).rstrip() for match in _KLAYOUT_ERROR_LINE_RE.finditer(stream)
+        )
+    return lines
+
+
 class KlayoutDeckAborted(DrcError):
     """A native deck aborted part-way. ``vars(exc)`` is exactly the
     ``emit_error`` keyword set (``code``, ``details``), so ``klt drc`` can
@@ -96,8 +138,41 @@ class KlayoutDeckAborted(DrcError):
         self.details = details
 
 
+def deck_starts(stream: str) -> list[tuple[str, str | None]]:
+    return [(m["name"], m["path"]) for m in _EXECUTING_DECK_RE.finditer(stream)]
+
+
+def _worker_abort(text: str) -> dict[str, Any]:
+    failures = dict(_WORKER_FAILURE_RE.findall(text))
+    for summary in _WORKER_SUMMARY_RE.findall(text):
+        for name in summary.split(","):
+            failures.setdefault(name.strip(), "")
+    if not failures:
+        return {}
+    abort: dict[str, Any] = {"decks": list(failures)}
+    if len(failures) == 1:
+        name, message = next(iter(failures.items()))
+        abort["deck"] = name
+        if message:
+            abort["message"] = message
+    return abort
+
+
+def _abort_diagnostic(message: str, combined: str) -> dict[str, str]:
+    diagnostic = {"message": message}
+    symbol = _RUBY_UNDEFINED_SYMBOL_RE.search(message)
+    if symbol:
+        diagnostic["symbol"] = symbol.group("symbol")
+    # Look for the location at or after the causal line, including the Ruby backtrace.
+    start = combined.find(message)
+    location = _RUBY_FILE_LINE_RE.search(combined[start:] if start >= 0 else message)
+    if location:
+        diagnostic["location"] = location.group("loc")
+    return diagnostic
+
+
 def deck_abort_info(
-    stdout: str | None, stderr: str | None, error_lines: list[str]
+    stdout: str | None, stderr: str | None, error_lines: list[str] | None = None
 ) -> dict[str, Any]:
     """Structured abort cause of a failed native-deck run.
 
@@ -107,33 +182,31 @@ def deck_abort_info(
     the truncated error detail) and never raises.
     """
     combined = "\n".join(stream for stream in (stdout, stderr) if stream)
-    decks = [
-        (m.group("name"), m.group("path"))
-        for m in _EXECUTING_DECK_RE.finditer(combined)
-    ]
+    decks = deck_starts(combined)
     info: dict[str, Any] = {}
     if decks:
         info["decks_executed"] = [name for name, _ in decks]
-    if not error_lines and not decks:
-        return info
-    abort: dict[str, Any] = {}
-    if decks and error_lines:
+    if error_lines is None:
+        error_lines = _klayout_deck_error_lines(combined)
+    abort = _worker_abort(combined)
+    if (
+        not abort
+        and decks
+        and error_lines
+        and "Starting DRC in isolated parallel mode" not in combined
+    ):
         name, path = decks[-1]
         abort["deck"] = name
         if path:
             abort["deck_file"] = path
-    if error_lines:
-        abort["message"] = error_lines[0]
-        symbol = _RUBY_UNDEFINED_SYMBOL_RE.search(error_lines[0])
-        if symbol:
-            abort["symbol"] = symbol.group("symbol")
-        # The Ruby backtrace line (``file:line:in ...``) usually follows the
-        # first ERROR line; fall back to the ERROR line itself.
-        start = combined.find(error_lines[0])
-        tail = combined[start:] if start >= 0 else error_lines[0]
-        location = _RUBY_FILE_LINE_RE.search(tail)
-        if location:
-            abort["location"] = location.group("loc")
+    message = abort.get("message") or next(iter(error_lines), "")
+    if message:
+        abort.update(_abort_diagnostic(message, combined))
+    if abort.get("deck") == "mslot1" and abort.get("symbol") == "metal4_drawn":
+        abort["hint"] = (
+            "For the GF180 3LM stack, see docs/cli/drc.md#gf180-3lm-deck-selection "
+            "for the metaltop_30k and all,-mslot selectors and their coverage."
+        )
     if abort:
         info["abort"] = abort
     return info

@@ -40,18 +40,16 @@ joined the set as one new entry in :data:`_INVOKE_FNS` plus one in
 :data:`_DEFAULT_STATUS_FNS`, and its ``status: "pass"``/``"fail"`` collapses
 into ``valid`` exactly the way ``drc``'s ``clean``/``violations`` already
 does. ``synthesize`` and ``place-and-route`` (Epic #391 Phase 5) join the
-same way, wiring the digital synth/P&R metric surfaces -- cell count/area
-(Phase 2), and wirelength/slack/DRC (Phase 4, plus a DRC/layout-metrics gate
-run over the P&R-produced GDS) -- into the identical descriptor-driven gate/
-objective/metrics contract an analog descriptor already uses: a digital
-descriptor is not a different shape, just a different set of ``check``
-names strung together (``synthesize`` -> ``functional-verification`` ->
-``place-and-route`` -> ``drc``/``layout-metrics``), each one a new entry in
-:data:`_INVOKE_FNS` and nothing else. ``op-sanity`` (issue #1718 -- the
-per-device operating-point lint in :mod:`klayout_tools.op_sanity`) joined on
-exactly those terms too, and is the cheapest useful analog gate to put
-*first* in a descriptor: it names the dead/mis-wired device directly, so a
-turn that trips it need never pay for the corner sweep behind it.
+same way, wiring the digital synth/P&R metric surfaces (cell count/area,
+wirelength/slack/DRC) into the identical descriptor-driven gate/objective/
+metrics contract an analog descriptor already uses: a digital descriptor is
+not a different shape, just a different set of ``check`` names strung
+together (``synthesize`` -> ``functional-verification`` -> ``place-and-route``
+-> ``drc``/``layout-metrics``, the last two over the P&R-produced GDS), each
+a new entry in :data:`_INVOKE_FNS` (and in :data:`_DEFAULT_STATUS_FNS` where
+the verb has a verdict). ``op-sanity`` (issue #1718, :mod:`klayout_tools.op_sanity`)
+joined on those terms too; it is the cheapest useful analog gate, so put it
+*first* in a descriptor (``docs/cli/eval.md`` has the rationale).
 
 Descriptor shape (see ``docs/cli/eval.md`` for the full field reference)::
 
@@ -79,21 +77,19 @@ JSON object of ``${name}``-style substitution values -- ``${layout}``/
 check. This is what lets one descriptor be reused, unmodified, across many
 candidates in an optimizer loop, rather than being rewritten per turn.
 
-``layout-metrics``, ``synthesize``, and ``place-and-route`` have no gate
-semantics of their own -- ``layout-metrics`` has no exit code above 2 (see
-``docs/cli/layout-metrics.md``), and ``synthesize``/``place-and-route``
-always report ``"status": "ok"`` (they either produce a netlist/DEF+GDS or
-raise :class:`~klayout_tools.synthesize.SynthesizeError`/
-:class:`~klayout_tools.place_and_route.PlaceAndRouteError`, per their own
-module docstrings -- there is no "ran but found a problem" outcome to
-default to). A gate naming any of the three *must* declare a ``threshold``
-(a ``metric`` path plus ``min``/``max``/``equals``) to derive pass/fail --
-all three are deliberately excluded from :data:`_DEFAULT_STATUS_FNS`, so
-omitting ``threshold`` on one of their gates raises :class:`EvalError`
-rather than silently always passing. Any gate may declare a ``threshold`` to
-override its check's default status derivation (e.g. gating ``drc`` on a
-violation-count ceiling instead of "any violation fails", or gating
-``place-and-route`` on ``worst_slack_ns`` >= 0 for timing closure).
+``layout-metrics`` and ``synthesize`` have no gate semantics of their own --
+``layout-metrics`` has no exit code above 2 (see ``docs/cli/layout-metrics.md``)
+and ``synthesize`` always reports ``"status": "ok"`` (it produces a netlist or
+raises :class:`~klayout_tools.synthesize.SynthesizeError`). A gate naming either
+*must* declare a ``threshold`` (a ``metric`` path plus ``min``/``max``/
+``equals``); both are excluded from :data:`_DEFAULT_STATUS_FNS`, so omitting it
+raises :class:`EvalError` rather than silently always passing.
+``place-and-route`` *does* have such an outcome (issue #6905: ``"status":
+"failed"``, exit ``1``, on a confirmed routed open), so its gate defaults to
+that verdict and needs no ``threshold``. Any ``threshold`` **replaces** a
+check's default derivation, verdict included (``drc`` on a violation-count
+ceiling, ``place-and-route`` on ``worst_slack_ns`` >= 0); to keep ``status``
+*and* a ceiling, declare two gates with identical ``args`` (run once, cached).
 
 Exit codes (mirrored in ``cli/eval_cmd.py`` -- see ``docs/cli/eval.md``):
     0 - ran, ``valid: true``
@@ -471,16 +467,20 @@ def _status_functional_verification(report: dict[str, Any]) -> tuple[str, int, A
     return status, (0 if status == "pass" else 3), report.get("failed_count")
 
 
-# Deliberately excludes "layout-metrics"/"synthesize"/"place-and-route" -- none
-# of the three has an exit code above 2 / a "ran but found a problem" outcome
-# of its own (see this module's docstring), so a gate naming one of them must
-# declare `threshold`; see `_derive_status`.
+def _status_place_and_route(report: dict[str, Any]) -> tuple[str, int, Any]:
+    """`klt place-and-route`'s exit split (issue #6905): `ok` -> pass/0, else fail/1."""
+    return ("pass", 0, None) if report["status"] == "ok" else ("fail", 1, None)
+
+
+# Excludes "layout-metrics"/"synthesize": no "ran but found a problem" outcome
+# (see this module's docstring), so their gates must declare `threshold`.
 _DEFAULT_STATUS_FNS: dict[str, Callable[[dict[str, Any]], tuple[str, int, Any]]] = {
     "drc": _status_drc,
     "lvs": _status_lvs,
     "sim": _status_sim,
     "op-sanity": _status_op_sanity,
     "functional-verification": _status_functional_verification,
+    "place-and-route": _status_place_and_route,
 }
 
 

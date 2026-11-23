@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
+from .lvs_base import CATEGORY_DEVICE_UNMERGED_FINGERS
 from .lvs_mismatch import _mismatch, _values_differ
 
 
@@ -62,7 +63,7 @@ def _group_unmerged_fingers(
     leave the group untouched. Error severity is kept -- only the wording and
     grouping change.
     """
-    from .lvs import CATEGORY_DEVICE_UNMERGED_FINGERS, _name_or_none
+    from .lvs import _name_or_none
 
     layout_devices = [a for a, b in unmatched if b is None]
     layout_devices += [a for a, _b in param_pairs]

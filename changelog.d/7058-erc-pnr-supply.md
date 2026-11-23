@@ -1,0 +1,1 @@
+- `klt erc --pnr-response run.json` generates a Sky130 HD supply spec from a routed PDN, including verified rail aliases and a contact-aware n-well tie (#7058).
