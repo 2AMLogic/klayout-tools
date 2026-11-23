@@ -1649,6 +1649,52 @@ instead. (`examples/design-pipeline/12-pex-external.probe.py` inlines the
 netlist it is handed — that still works, and is still the simplest thing a
 harness can do.)
 
+## Oscillators: a `crossings` measurement is delta'd on its `value`
+
+Issue [#6913](https://github.com/2AMLogic/klayout-tools/issues/6913). A
+`measurements[].crossings` entry in a testbench request is compared like any
+other measurement: each `delta[]` row's `schematic_value` /
+`extracted_value` are that side's entry **`value`**, and `delta_pct` is
+computed from the two. There is no special crossings handling — which is
+exactly why the *graded quantity* matters: by default a transient crossings
+entry's `value` is the **crossing count**, a quantised edge number that also
+carries start-up bias, so an oscillator would be delta'd on "177 vs 139
+edges" instead of its frequency.
+
+The fix lives in the request, not in `klt pex`: declare
+`crossings.value_from` (see [`sim.md`](sim.md) → "Grading a reduction
+(`crossings.value_from`)") and both sides' `value` becomes the selected
+reduction — `"period.mean"` in seconds, or `"frequency"` = `1/period.mean`
+in Hz — so `delta_pct` is a real schematic-vs-extracted frequency shift.
+Exclude start-up with the existing `from` window:
+
+```json
+{
+  "name": "f_ro1",
+  "unit": "Hz",
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "200n",
+    "value_from": "frequency"
+  }
+}
+```
+
+A side with too few edges for the reduction (a non-oscillating extracted
+cell reporting 0 or 1 edges, for instance) is an ordinary `status: "error"`
+`klt sim` measurement — its diagnostic message starts with the stable
+`[crossings_insufficient_edges]` token — so the `delta[]` row is an **error
+row** blaming that side (`error.side`), `delta_pct: null`: distinguishable
+from a small value, never a frequency that quietly passes a floor.
+
+`klt pex` itself needed no code change for this (the delta reads `value` as
+of #2872's per-side evidence), and no `schema_version` bump: `value_from` is
+an additive request field into the existing `value` slot. It first ships in
+`klt` v0.9.3, and is a mandatory runner feature on the `batch` backend — an
+older fleet runner is refused pre-launch instead of returning counts.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
