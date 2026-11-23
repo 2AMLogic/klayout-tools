@@ -31,6 +31,13 @@ import os
 import re
 from typing import Any
 
+from .signoff_base import SignoffError
+from .signoff_unmet_reasons import (
+    _REASON_EVIDENCE_NOT_KLT_NATIVE,
+    _REASON_NO_EVIDENCE,
+    _REASON_UNREADABLE_EVIDENCE,
+)
+
 #: The item keys a disclosure map accepts: ``"<item id>"`` or
 #: ``"<item id>.<analog|digital>"`` -- exactly the ``evidence`` map's key
 #: grammar, resolved with the same partition-qualified precedence by
@@ -96,8 +103,6 @@ def read_disclosed_evidence(manifest: dict[str, Any]) -> dict[str, str]:
     not list is *not* refused -- it is simply never looked up, exactly as
     an ``evidence`` key for an uncited item id behaves.
     """
-    from .signoff import SignoffError
-
     raw = manifest.get("disclosed_evidence", {})
     if not isinstance(raw, dict):
         raise SignoffError(
@@ -147,12 +152,6 @@ def apply_disclosed_evidence(
     so a valid native envelope at a disclosed path still cannot confer
     credit.
     """
-    from .signoff import (
-        _REASON_EVIDENCE_NOT_KLT_NATIVE,
-        _REASON_NO_EVIDENCE,
-        _REASON_UNREADABLE_EVIDENCE,
-    )
-
     if not disclosed:
         return row
     if row.get("status") != "unmet" or row.get("reason") != _REASON_NO_EVIDENCE:

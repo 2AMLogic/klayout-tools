@@ -3643,9 +3643,9 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv_sequential, "run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_replay, "run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv_sequential, "sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_replay, "sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
@@ -3695,9 +3695,9 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
     ):
         return (replies[backend], None, {})
 
-    monkeypatch.setattr(equiv_sequential, "run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv_replay, "run_replay_backend", _fake_replay)
     monkeypatch.setattr(
-        equiv_sequential, "sim_backend_version", lambda backend, binary=None: "0.0"
+        equiv_replay, "sim_backend_version", lambda backend, binary=None: "0.0"
     )
 
     diagnostics: list[dict] = []
