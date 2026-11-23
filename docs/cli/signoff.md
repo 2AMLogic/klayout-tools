@@ -4816,6 +4816,53 @@ The same rule reads a `klt yield` envelope's `spec_row`-tagged
 `measurements[]` for item 6, with one additional covering case — see "Item 6
 with several statistical rows" below.
 
+**Configuration slices for items 5 and 6 (issue #7006).** A specification
+row can require evidence at several configurations. Give the row an
+`extent` containing the slice labels it requires. Each citation can then
+declare which slices it covers for each row it names.
+
+```json
+{
+  "kind": "analog",
+  "spec_rows": {
+    "5": [{"id": "ratio", "extent": ["N=4", "N=33", "N=64"]}],
+    "6": [{"id": "startup_yield", "extent": ["mode A", "mode B"]}]
+  },
+  "evidence": {
+    "5": [
+      {"file": "sim/divider-33.json", "rows": ["ratio"], "covers": {"ratio": ["N=33"]}}
+    ],
+    "6": [
+      {"file": "yield/mode-a.json", "rows": ["startup_yield"], "covers": {"startup_yield": ["mode A"]}},
+      {"file": "yield/mode-b.json", "rows": ["startup_yield"], "covers": {"startup_yield": ["mode B"]}}
+    ]
+  }
+}
+```
+
+With passing reports credited to their named rows, item 5 grades
+`unmet` / `partial_coverage`. Its `detail.partial_rows` lists `ratio`
+with `covered: ["N=33"]` and `missing: ["N=4", "N=64"]`.
+Item 6 grades `met` because its two citations cover the whole extent.
+For both items, `row_coverage.row_slices` records each extent row's
+covered and missing labels in declaration order. Naming a row without
+`covers` contributes zero slices. Repeated claims count once. A failing
+citation contributes zero slices and keeps its own failure reason.
+
+**The manifest author asserts the slice labels.** A passing measurement's
+`spec_row` tag authenticates the row it evaluates. The envelope does not
+attest which divider or mode the simulation exercised. When item 5 sets
+`require_derived_rows`, every required slice needs a citation with derived
+credit for the row. The configuration label still comes from that citation's
+manifest entry.
+
+An `extent` must be a non-empty list of non-empty strings. Labels are
+opaque, so a label such as `N=4..64` denotes one slice. `covers` maps
+row ids to lists of labels. Each key must be in the citation's `rows` and
+refer to a row with an extent. Unknown slices and malformed declarations
+grade the affected item `invalid_evidence`. Rows without an extent keep
+their existing coverage rules.
+
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by
 itself: an item whose coverage is entirely `"asserted"` grades exactly like a
 fully tagged one. A project that has finished tagging its envelopes can ratchet
