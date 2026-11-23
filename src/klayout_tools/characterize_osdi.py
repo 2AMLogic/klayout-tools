@@ -56,6 +56,7 @@ def resolve_osdi_preload(
                 request_dir,
                 skip_indices=frozenset(skip),
                 pdk_root=osdi_pdk_root_pin(request),
+                pdk_variant=(request.get("models") or {}).get("pdk"),
             )
         )
     except sim.SimError as exc:
