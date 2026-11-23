@@ -470,6 +470,29 @@ def test_refused_with_attest_even_before_the_inventory_is_read(tmp_path):
     assert "only applies to --manifest/--fleet" in _error_message(err)
 
 
+def test_repin_with_grading_pin_refuses_before_reading_manifest(tmp_path):
+    manifest = tmp_path / "absent.json"
+    rc, out, err = _run(
+        [
+            "signoff",
+            "--repin",
+            "--manifest",
+            str(manifest),
+            "--format",
+            "json",
+            "--require-grading-ruleset",
+            grading_ruleset_id(),
+        ]
+    )
+    assert rc == 1
+    assert out == ""
+    assert (
+        "--repin cannot be combined with --require-grading-ruleset"
+        in _error_message(err)
+    )
+    assert not manifest.exists()
+
+
 def test_flag_is_registered_on_the_parser(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["signoff", "--help"])

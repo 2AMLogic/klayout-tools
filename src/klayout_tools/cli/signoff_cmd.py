@@ -154,9 +154,9 @@ from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 from .signoff_flags import (
-    pre_dispatch_problem,
     describe_grader_problem,
     mode_flag_problem,
+    pre_dispatch_problem,
 )
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
