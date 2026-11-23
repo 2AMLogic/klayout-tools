@@ -10,7 +10,13 @@ from klayout_tools.signoff import (
     check_fleet_report,
     check_tier_report,
 )
-from test_signoff import DRC_CLEAN_ENVELOPE, _fleet_block_manifest, _manifest, _write
+from test_signoff import (
+    DRC_CLEAN_ENVELOPE,
+    _fleet_block_manifest,
+    _full_t1_evidence,
+    _manifest,
+    _write,
+)
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -318,3 +324,17 @@ def test_cli_fleet_text_states_the_declared_upstream_source_per_row(tmp_path, ca
     out = capsys.readouterr().out
     assert out.count(f"upstream: {_UPSTREAM_REPOSITORY} @ {_UPSTREAM_COMMIT}") == 2
     assert "[not-T1] unpinned" in out
+
+
+def test_cli_fleet_text_identifies_a_fully_graded_upstream_block(tmp_path, capsys):
+    block = _pinned_manifest(block="upstream-t1", evidence=_full_t1_evidence(tmp_path))
+    fleet = _write(tmp_path, "fleet.json", {"blocks": [block]})
+
+    assert main(["signoff", "--fleet", fleet, "--format", "text"]) == 0
+
+    text = capsys.readouterr().out
+    assert "1/1 blocks at T1" in text
+    assert "upstream-t1" in text
+    assert f"upstream: {_UPSTREAM_REPOSITORY} @ {_UPSTREAM_COMMIT}" in text
+    assert "blocking:" not in text
+    assert "ungraded (no klt verb, uncited)" not in text
