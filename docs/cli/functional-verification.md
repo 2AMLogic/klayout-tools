@@ -986,22 +986,19 @@ failure:
 - An entry is dropped only when *every* `min:typ:max` member of *every*
   rvalue it carries is zero, so dropping it cannot change simulated timing at
   any corner, not just the one `options.sdf.corner` selected.
-- A **non**-zero-delay entry on the identical aliased destination (including
-  one that is zero at `min`/`typ` but not at `max`) is left in place, fails to
-  annotate exactly as before, and still fails the run with exit 1. Real delay
-  is never silently discarded.
+- When an output is connected by separate bit assignments such as
+  `assign y[0] = b0;`, an arc with any nonzero rise, fall, min, typ or max
+  value is rejected before the simulator build. The error identifies the
+  driver and the destination bit. This applies to ANSI and non-ANSI headers.
+  Direct cell-to-port connections and a whole-vector assignment such as
+  `assign y = {b1,b0};` retain their output delays (#6937).
 - Only `INTERCONNECT` entries are eligible; an `IOPATH` or any other delay
   entry is never dropped, however its endpoints are spelled.
 
-The alias map comes from the same gate-level `assign` parser
-[`klt lvs`](lvs.md) already uses for its own alias-joining fix (issue
-#2021), read from `hdl_toplevel`'s own module in `request.sources`. It
-requires the **non-ANSI** module-header form (`module top (a, y); input a;
-output [1:0] y;`) — which is what every real `write_verilog` post-route
-netlist emits, and the only kind that carries this shape. A top module the
-parser cannot read (an ANSI-style header, hand-written RTL) simply yields no
-alias map: nothing is dropped, and the run behaves exactly as it did before
-this normalization existed.
+The gate-level alias parser inspects the requested top module. It accepts
+both Yosys-style declarations in the module body and simple ANSI declarations
+in the header, such as `output wire [1:0] y`. Klt keeps the original arcs
+when it cannot establish the top-level connectivity.
 
 The normalized copy is written as a build artifact,
 `.klt/functional-verification/klt_sdf_alias_dropped.sdf`, and is what the
