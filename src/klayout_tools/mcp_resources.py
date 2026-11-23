@@ -18,6 +18,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .mcp_doc_links import link_cli_docs
+
 #: URI scheme for the schema resources: ``klt://schemas/<file name>``, e.g.
 #: ``klt://schemas/socket.schema.json``. Documented in
 #: ``docs/guides/mcp-server.md``; changing it is a breaking change.
@@ -111,7 +113,11 @@ def derive_resources(directory: Path | None = None) -> list[SchemaResource]:
                 uri=SCHEMA_URI_PREFIX + path.name,
                 name=path.name,
                 title=title or path.name,
-                description=description
+                # The bare ``docs/cli/<page>.md`` pointer a schema's own
+                # description still carries is rewritten to a URL here, so a
+                # client without a checkout gets a link it can open (issue
+                # #6819); the file's bytes are served verbatim regardless.
+                description=link_cli_docs(description)
                 or f"{path.name} from the klayout-tools JSON contract.",
                 path=path,
                 size=path.stat().st_size,

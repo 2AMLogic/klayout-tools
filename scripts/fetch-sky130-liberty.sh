@@ -37,10 +37,10 @@ set -euo pipefail
 # shellcheck source=scripts/_install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
-# Pinned upstream release -- bump this tag, the asset checksum below, and
-# CHANGELOG.md together in the same change if this is ever refreshed. Fails
-# closed on checksum mismatch, same discipline as fetch-pdks.sh/
-# fetch-cell-netlists.sh.
+# Pinned upstream release -- bump this tag, the asset checksum below, and a
+# changelog fragment (`changelog.d/README.md`) together in the same change
+# if this is ever refreshed. Fails closed on checksum mismatch, same
+# discipline as fetch-pdks.sh/fetch-cell-netlists.sh.
 VOLARE_TAG="sky130-bdc9412b3e468c102d01b7cf6337be06ec6e9c9a"
 ASSET_URL="https://github.com/efabless/volare/releases/download/${VOLARE_TAG}/sky130_fd_sc_hd.tar.zst"
 # Computed by downloading the pinned asset once and hashing it:

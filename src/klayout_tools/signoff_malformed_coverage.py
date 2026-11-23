@@ -103,21 +103,13 @@ def malformed_coverage_item_detail(
 
 
 def power_delivery_part_refusal(
-    by_kind: Mapping[str, Mapping[str, Any]],
-    citation_of: Callable[[Mapping[str, Any]], dict[str, Any]],
-) -> tuple[str, str | None, None, dict[str, Any]] | None:
-    """Item 11's per-part coverage gate (issue #5643): the ``(status,
-    reason, citation, detail)`` verdict for the first resolved part whose
-    ``coverage`` block does not validate -- ``None`` when every part's does.
+    by_kind: Mapping[str, dict[str, Any]],
+    citation_of: Callable[[dict[str, Any]], dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the first malformed part's reason and evidence in canonical order.
 
-    Walks the parts in :data:`~klayout_tools.signoff_power_delivery.
-    _POWER_DELIVERY_PART_ORDER` (imported lazily -- ``signoff_power_delivery``
-    imports this module at top level), one part at a time and never a
-    merged view, so the gate keeps working when item 11 grades a *set* of
-    ``(erc, lvs)`` groups (issue #5597) rather than today's single
-    last-wins pair. ``citation_of`` is :func:`~klayout_tools.signoff.
-    _citation`, passed in for the same no-cycle reason; the refusal's
-    ``detail`` names the refusing part alone, not the whole cited set.
+    Each citation group is graded independently. The caller supplies its normal
+    citation builder and retains the group's own parts list on a refusal.
     """
     from .signoff_power_delivery import _POWER_DELIVERY_PART_ORDER
 
@@ -128,10 +120,5 @@ def power_delivery_part_refusal(
         envelope = part["envelope"]
         refusal = malformed_coverage_refusal(envelope)
         if refusal is not None:
-            return (
-                "unmet",
-                refusal,
-                None,
-                malformed_coverage_item_detail(envelope, citation_of(part)),
-            )
+            return refusal, malformed_coverage_item_detail(envelope, citation_of(part))
     return None

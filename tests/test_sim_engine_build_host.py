@@ -210,6 +210,28 @@ def test_sharded_fleet_agreement_and_disagreement():
         assert build["probe"] == ("ok" if expected else "disagreement")
 
 
+@pytest.mark.parametrize(
+    "codes", [("timeout", "error"), ("error", "exit_1", "timeout"), ("ok", "timeout")]
+)
+def test_sharded_members_failing_the_probe_differently_are_not_reported_absent(codes):
+    """Issue #6260: each member recorded a concrete reason, so the report must
+    not read as "no worker capture at all" (`probe: "absent"`) and must name
+    every code, in sorted order, regardless of member order."""
+    fleet = [_banner_block("ok", None, code) for code in codes]
+    for members in (fleet, fleet[::-1]):
+        build = _offhost({"fleet": members})["engine_build"]
+        assert build["version_banner"] is None and build["binary_sha256"] is None
+        assert build["probe"] == "error"
+        listed = ", ".join(repr(code) for code in sorted(codes))
+        assert listed in build["reason"]
+
+
+def test_sharded_members_failing_the_probe_identically_keep_the_single_code():
+    remote = {"fleet": [_banner_block("ok", None, "timeout")] * 2}
+    build = _offhost(remote)["engine_build"]
+    assert build["probe"] == "timeout" and "'timeout'" in build["reason"]
+
+
 def test_whitespace_only_difference_between_shards_still_agrees():
     remote = {
         "fleet": [

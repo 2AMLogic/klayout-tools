@@ -74,14 +74,16 @@ def _item_3(result: dict) -> dict:
 @pytest.mark.parametrize("erc_coverage", [False, True], ids=["no-scope", "with-scope"])
 @pytest.mark.parametrize("part", ["erc", "lvs"])
 def test_item_11_refuses_a_malformed_coverage_block(tmp_path, part, erc_coverage):
-    erc: dict = {**ERC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()}
+    erc: dict = dict(ERC_CLEAN_ENVELOPE)
+    if part == "erc":
+        erc["coverage"] = _malformed_coverage()
     if erc_coverage:
         # A valid connectivity scope must not suppress the refusal the way
         # `_coverage_refusal`'s erc widening suppresses a vacuous one -- the
         # widening exists for #2179's table-less PDK, not for a block that
         # claims coverage it cannot validate.
         erc["erc_coverage"] = _erc_coverage_block(
-            checked=['erc.net_connectivity:["VPWR"]']
+            checked=['erc.missing_tie:["nwell_tie"]', 'erc.net_connectivity:["VPWR"]']
         )
     lvs: dict = {
         **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
@@ -90,7 +92,7 @@ def test_item_11_refuses_a_malformed_coverage_block(tmp_path, part, erc_coverage
 
     item = _grade_item_11(
         tmp_path,
-        erc=erc if part == "erc" else None,
+        erc=erc,
         lvs=lvs if part == "lvs" else None,
     )
 
@@ -284,3 +286,26 @@ def test_a_failing_part_outranks_its_malformed_coverage(tmp_path):
 
     assert item["status"] == "unmet"
     assert item["reason"] == "lvs_did_not_pass"
+
+
+def test_malformed_group_keeps_every_parts_citation(tmp_path):
+    good = _power_delivery_evidence(tmp_path, prefix="good")
+    bad = _power_delivery_evidence(
+        tmp_path,
+        prefix="bad",
+        lvs_envelope={
+            **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+            "coverage": _malformed_coverage(),
+        },
+    )
+    for groups in ([good, bad], [bad, good]):
+        item = _item_11(
+            build_tier_report(_manifest(kind="analog", evidence={"11": groups}))
+        )
+        assert item["status"] == "unmet"
+        assert item["reason"] == "malformed_coverage"
+        assert item["detail"]["cited_evidence"]["file"] == bad[1]
+        assert [
+            [part["file"] for part in citation["parts"]]
+            for citation in item["citations"]
+        ] == groups

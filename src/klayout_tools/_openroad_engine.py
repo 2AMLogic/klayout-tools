@@ -31,8 +31,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import path_envelope as _log_path
 from ._provenance import sha256_file
-from .env_provenance import find_repo_root, repo_relative_path
+from ._tcl import tcl_literal as _tcl_literal
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 
@@ -57,9 +59,7 @@ def _is_unconstrained_slack(value: float | None) -> bool:
     :data:`_UNCONSTRAINED_SLACK_NS`. ``None`` (a metric the run never
     populated at all) is **not** the sentinel: absence is a different thing
     from "reported, but not a measurement"."""
-    if value is None:
-        return False
-    return abs(value) >= _UNCONSTRAINED_SLACK_NS
+    return value is not None and abs(value) >= _UNCONSTRAINED_SLACK_NS
 
 
 def _timing_status(values: Iterable[float | None]) -> str | None:
@@ -102,7 +102,9 @@ class _OpenRoadResult:
         try:
             yield
         except error_cls as exc:
-            raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
+            wrapped = error_cls(_log_error_context(str(exc), self.engine_log))
+            wrapped.__dict__.update(exc.__dict__)  # keep fields (#6952)
+            raise wrapped from exc
 
 
 #: The version-independent shape of "the Docker daemon is not reachable"
@@ -165,8 +167,8 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
       invoking user lacks access to the daemon socket. Checked first, as the
       narrower of the two signatures.
 
-    Like ``place_and_route.py``'s :func:`~klayout_tools.place_and_route.
-    _mount_namespace_hint` (issue #1868), this is safe to *append* to an
+    Like :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`
+    (issue #1868), this is safe to *append* to an
     existing engine-error message rather than replace it: the engine's own
     captured diagnosis is still the primary evidence, the hint only says what
     that diagnosis means and what to do next. A caller that does not recognize
@@ -192,10 +194,9 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
         for stream in (completed.stdout or "", completed.stderr or "")
         for line in stream.splitlines()
     ]
-    matchers = [_runtime_unreachable_hint]
+    matchers = [_runtime_unreachable_hint, _image_missing_hint]
     if completed.returncode == 127:
-        matchers.append(_docker_missing_hint)
-    matchers.append(_image_missing_hint)
+        matchers.insert(1, _docker_missing_hint)
     for matcher in matchers:
         for lowered in lines:
             hint = matcher(lowered, batch_host)
@@ -306,13 +307,6 @@ def _captured_text(value: str | bytes | None) -> str:
     return value or ""
 
 
-def _log_path(path: Path | None) -> dict[str, Any]:
-    root = find_repo_root()
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
-
-
 def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
     # str(exc) can include an absolute filename; keep the new diagnostic
     # paths subject to the same privacy rule as successful artifact paths.
@@ -323,7 +317,7 @@ def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> Non
 
 def _write_log_artifact(
     directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
-) -> dict[str, Any]:
+) -> Path | None:
     path = directory / name
     data = content.encode("utf-8") if isinstance(content, str) else content or b""
     try:
@@ -331,8 +325,8 @@ def _write_log_artifact(
             handle.write(data)
     except OSError as exc:
         _retention_error(record, name, exc)
-        return _log_path(None)
-    return _log_path(path)
+        return None
+    return path
 
 
 class _LiveLogs:
@@ -351,22 +345,24 @@ class _LiveLogs:
         *,
         invocation_id: str,
         script_hash: str | None,
+        repo_root: RepoRoot = ANCHOR_CWD,
     ) -> None:
+        self.repo_root = repo_root
         self.directory = (
             Path(script_path).absolute().parent / "openroad-logs" / invocation_id
         )
         self.record: dict[str, Any] = {
             "invocation_id": invocation_id,
             "script_name": Path(script_path).name,
-            "script_path": _log_path(Path(script_path)),
+            "script_path": _log_path(Path(script_path), repo_root=repo_root),
             "script_sha256": script_hash,
-            "metrics_path": _log_path(Path(metrics_path)),
+            "metrics_path": _log_path(Path(metrics_path), repo_root=repo_root),
             "outcome": None,
             "returncode": None,
-            "directory": _log_path(None),
-            "stdout_path": _log_path(None),
-            "stderr_path": _log_path(None),
-            "metadata_path": _log_path(None),
+            "directory": _log_path(None, repo_root=repo_root),
+            "stdout_path": _log_path(None, repo_root=repo_root),
+            "stderr_path": _log_path(None, repo_root=repo_root),
+            "metadata_path": _log_path(None, repo_root=repo_root),
             "retention_errors": [],
         }
         self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
@@ -376,7 +372,7 @@ class _LiveLogs:
             _retention_error(self.record, "directory", exc)
             self.directory = None  # type: ignore[assignment]
             return
-        self.record["directory"] = _log_path(self.directory)
+        self.record["directory"] = _log_path(self.directory, repo_root=self.repo_root)
         for stream in self._STREAMS:
             try:
                 # Unbuffered: the child writes through the shared descriptor.
@@ -388,8 +384,7 @@ class _LiveLogs:
 
     def popen_streams(self) -> dict[str, Any]:
         return {
-            stream: handle if handle is not None else subprocess.PIPE
-            for stream, handle in self.handles.items()
+            s: h if h is not None else subprocess.PIPE for s, h in self.handles.items()
         }
 
     def finish(
@@ -421,7 +416,7 @@ class _LiveLogs:
             finally:
                 handle.close()
             path = self.directory / f"{stream}.log"
-            self.record[f"{stream}_path"] = _log_path(path)
+            self.record[f"{stream}_path"] = _log_path(path, repo_root=self.repo_root)
             try:
                 data[stream] = path.read_bytes()
             except OSError as exc:
@@ -430,13 +425,15 @@ class _LiveLogs:
         self.record["outcome"] = outcome
         self.record["returncode"] = returncode
         if self.directory is not None:
-            self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
-            self.record["metadata_path"] = _write_log_artifact(
+            metadata = self.directory / "invocation.json"
+            self.record["metadata_path"] = _log_path(metadata, repo_root=self.repo_root)
+            written = _write_log_artifact(
                 self.directory,
                 "invocation.json",
                 json.dumps(self.record, indent=2) + "\n",
                 self.record,
             )
+            self.record["metadata_path"] = _log_path(written, repo_root=self.repo_root)
         return data, self.record
 
 
@@ -446,20 +443,11 @@ def _run_openroad(
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    threads: int | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
-    """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    streaming raw stdout/stderr into separately retained log files *while the
-    process runs* (``tail -f`` shows progress; an interrupted run keeps
-    whatever OpenROAD had flushed). The result exposes UTF-8 text
-    (replacement decoding) for existing parsers; an invalid output byte
-    cannot mask the engine failure or lose its logs.
-    Raises ``error_cls`` if the ``openroad``
-    binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
-    from a successfully-launched run is left for the caller to inspect via
-    returned result's ``returncode``. No timeout is introduced. If a runner
-    supplies a timeout exception, its available partial streams are retained;
-    KeyboardInterrupt retains available data and keeps its interruption type.
-    Logs are local debugging evidence, not a successful-stage signal."""
+    """See “Retained OpenROAD logs” in docs/cli/place-and-route.md for log streaming.
+    Keep partial logs; anchor on ``repo_root``; raise ``error_cls`` if launch fails."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -467,6 +455,7 @@ def _run_openroad(
         metrics_path,
         invocation_id=invocation_id,
         script_hash=script_hash,
+        repo_root=repo_root,
     )
 
     def retain(outcome, returncode, stdout, stderr):
@@ -477,9 +466,18 @@ def _run_openroad(
             engine_logs.append(record)
         return data, record
 
+    thread_args = [] if threads is None else ["-threads", str(threads)]
     try:
         completed = subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
+            [
+                "openroad",
+                "-no_init",
+                "-exit",
+                *thread_args,
+                "-metrics",
+                metrics_path,
+                script_path,
+            ],
             **logs.popen_streams(),
         )
     except OSError as exc:
@@ -538,9 +536,7 @@ def _openroad_version() -> str | None:
     if not stdout:
         return None
     banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
+    return banner_match.group(1) if banner_match else stdout.split()[0]
 
 
 #: ``report_check_types`` flags whose union is the **setup-side** timing-check
@@ -573,9 +569,8 @@ def write_sdf_line(sdf_path: str) -> str:
     feed the same consumer (``klt functional-verification``'s
     ``options.sdf``). The rationale for each of the two flags is documented on
     ``place_and_route_sta._spef_sta_script_lines``.
-    Must be emitted after ``read_spef`` so the delays it writes are the
-    real routed-parasitic ones."""
-    return f"write_sdf -divider . -include_typ {sdf_path}"
+    Emit after ``read_spef`` for real routed-parasitic delays."""
+    return f"write_sdf -divider . -include_typ {_tcl_literal(sdf_path)}"
 
 
 def _timing_violation_report_lines(
@@ -597,16 +592,16 @@ def _timing_violation_report_lines(
     prints one row per failing endpoint per path group, so the count unit is
     *violating endpoints*, not enumerated timing paths.
     """
+
+    def report_line(flags: tuple[str, ...]) -> str:
+        return f"report_check_types {' '.join(flags)} -violators -format end"
+
     return [
         f'puts "{setup_begin}"',
-        "report_check_types "
-        + " ".join(_SETUP_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_SETUP_CHECK_FAMILY_FLAGS),
         f'puts "{setup_end}"',
         f'puts "{hold_begin}"',
-        "report_check_types "
-        + " ".join(_HOLD_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_HOLD_CHECK_FAMILY_FLAGS),
         f'puts "{hold_end}"',
     ]
 
