@@ -227,6 +227,7 @@ from .signoff_generator_batch import (
 from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
     _check_justified_gap_rationales,
+    _check_structural_artifacts,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -6569,11 +6570,10 @@ def _grade_multi_citation(
       undeclared (or declared-``gap``) row -> ``unmet``/``invalid_evidence``;
     - any failing member -> ``unmet`` with that member's reason, the failing
       envelopes named under ``detail.failed_citations``;
-    - all members pass but a declared row is uncovered or a declared gap ->
-      ``unmet``/``partial_coverage`` with ``failed_rows``, ``uncovered_rows``
-      and ``declared_gaps`` listed separately under ``detail``; a declared
-      row with ``ratified: false`` (``unratified_rows``) is likewise
-      provisional and never ``met`` (issue #2908);
+    - all members pass but a declared row is uncovered or dispositioned (a
+      gap, justified gap, structural row #6985) or unratified -> ``unmet``/
+      ``partial_coverage`` with ``failed_rows``, ``uncovered_rows``,
+      ``declared_gaps`` and ``unratified_rows`` under ``detail`` (#2908);
     - ``required_kind_pair`` (issue #3741): when every member passed and the
       passing kinds include any kind of the pair, all of them must be
       present, else ``unmet``/``partial_coverage`` with
@@ -6646,9 +6646,8 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    # Issue #5599 + #4314: the justified-gap declaration check and the
-    # timing-margin rule are the two outcomes decided after every member has
-    # graded but before partial coverage.
+    # The declared-artifact hash checks (#5599/#6985) and the timing-margin
+    # rule (#4314) run after every member graded, before partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
     )
@@ -6660,9 +6659,10 @@ def _grade_multi_citation(
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
-        # Issue #5599: a justified gap is still a gap -- it forces
-        # `partial_coverage` exactly as the free-text form does.
+        # Issues #5599 + #6985: a justified gap and a structural row are
+        # dispositions, not coverage -- each forces `partial_coverage`.
         or row_info.get("justified_gaps")
+        or row_info.get("structural_rows")
         or row_info["unratified_rows"]
         or asserted
     ):
@@ -6731,17 +6731,16 @@ def _grade_required_kinds(
     )
 
 
-def _justified_gap_rationale_outcome(
-    spec_rows: list[dict[str, Any]] | None,
+def _declared_artifact_outcome(
+    failure: tuple[str, dict[str, Any]] | None,
     row_info: dict[str, Any],
     extra: dict[str, Any],
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet`` outcome when a justified gap's rationale artifact fails
-    to check (issue #5599); ``None`` when every one checks. A broken
-    declaration is a distinct documented reason -- it is never silently
-    demoted to the free-text form, whose reason would be
-    ``partial_coverage``."""
-    failure = _check_justified_gap_rationales(spec_rows)
+    """The ``unmet`` outcome for a failing declared-artifact hash check (a
+    justified gap's rationale, issue #5599, or a structural row's artifact,
+    #6985); ``None`` when it passed. A broken declaration is a distinct
+    documented reason -- never silently demoted to a lesser form, whose
+    reason would be ``partial_coverage``."""
     if failure is None:
         return None
     reason, detail = failure
@@ -6757,12 +6756,13 @@ def _post_member_outcome(
     extra: dict[str, Any],
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
-    before partial coverage: the justified-gap declaration check (issue
-    #5599) first, then the timing-margin rule (issue #4314). ``None`` when
-    neither applies."""
-    rationale_unmet = _justified_gap_rationale_outcome(spec_rows, row_info, extra)
-    if rationale_unmet is not None:
-        return rationale_unmet
+    before partial coverage: the declared-artifact hash checks (justified-gap
+    rationale #5599, structural artifact #6985) first, then the timing-margin
+    rule (issue #4314). ``None`` when none applies."""
+    for check in (_check_justified_gap_rationales, _check_structural_artifacts):
+        declared_unmet = _declared_artifact_outcome(check(spec_rows), row_info, extra)
+        if declared_unmet is not None:
+            return declared_unmet
     return _grade_timing_margin(
         required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
     )

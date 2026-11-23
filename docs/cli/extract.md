@@ -1061,6 +1061,48 @@ bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
 name `net_id` and `parasitics.nets[]` ordering as the same class of
 extractor-internal bookkeeping.
 
+**A stable handle per anonymous net: `nets[].structural_id` (issue #5735).**
+The numbering-independent identity above is not only used for hashing —
+every `nets[]` entry also carries it as `structural_id`, the `$anon<...>`
+token built from that net's own sorted `<device>.<terminal>` attachment
+list (the same equivalence `netlist_normalized_sha256` is defined by, and
+the exact spelling `--check --rerun` rewrites an anonymous name to). A
+testbench that measures a voltage across an unlabeled internal node — the
+series stack whose middle node carries no layout label — can pin its
+`meas`/`let` card to that token instead of a `$N` spelling: on a
+re-extraction the probe either resolves by joining the old and new reports
+on `structural_id`, or fails loudly, instead of silently landing on a
+*different* node (a renumbered `$N` name still exists, so a stale probe
+resolves to a plausible-but-wrong measurement). Two extractions of one GDS
+differing only in numbering report the same value per corresponding net; a
+genuine connectivity change reports a different one.
+
+An external runset's LVS database can give an unnamed net a generated `$N`
+name and renumber its clusters when the database is read. The runset engine
+identifies numbered pins and labels attached to the individual net. It checks
+retained text and, for polygon layers, the label's recorded point on its
+original stream layer. An unrelated drawing note can share the same spelling.
+A numeric name supplied only by a custom deck can be indistinguishable from a
+generated name when the database contains no pin or label evidence.
+
+The field is `null` when no structural identity is derivable: a **named**
+net (its `name` is the label a consumer already joins on — and, per the
+"Net-name collisions" caveat below, no unique per-net identity would be
+sound where names collide, so none is minted) and an anonymous net with
+**zero** device terminals (nothing to disambiguate by). And the stability
+bound is exactly #3407's, no stronger: the token is built from device
+*instance* names, which are themselves KLayout-synthesized `$<n>`
+spellings — the empirical "every named net and every device stays
+byte-identical" observation above is what carries it, not a contract.
+`--check --rerun` strips the field alongside `net_id` before diffing — not
+because it is unstable (it is **content** class in the field-class table
+below, derived from the same numbering-normalized connectivity) but for
+backward compatibility: a report committed before the field existed lacks
+the key, so keeping it would flag every such report as drifted — so
+reports committed before the field existed still verify `match`, and
+`netlist_normalized_sha256` keeps its value. The field is emitted on
+top-level `nets[]` entries only — `parasitics.nets[]` does not carry it.
+
 ### Top-level `.SUBCKT` port order without `--pins` is NOT a cross-build contract (issue #5534)
 
 > **Evidence pins:** same as the `$N` caveat above — `netlist_sha256` embeds
@@ -2235,6 +2277,54 @@ at `Metal4.pin` (its `Metal5` is on the deck's own forbidden-layer list),
 so a cmos5l instance can only populate `m1p`..`m4p`. For `sg13cmos5l` this
 is the deck's *only* capacitor family — its forbidden-layer rule blocks the
 MiM stack outright, so `ExtractionDeck.capacitors` stays empty there.
+
+### Spiral inductor devices (issue #6726)
+
+IHP's `inductor2` PyCell is plain TopMetal1/TopMetal2 under an `IND` marker, so
+an extractor that ignores it shorts the inductor's two terminals through the
+winding: before this, a layout with one winding and two differently named pin
+labels reported `merged_net_labels` `a|b`, no device, and no warning. The
+`sg13g2` deck now recognises the winding and extracts it as one three-terminal
+`inductor` device (terminals `A`/`B`, equivalent, plus `SUB`):
+
+```json
+{"name": "$1", "class": "inductor",
+ "nets": {"a": "a", "b": "b", "sub": "vsubs"}, "params": {}}
+```
+
+```
+XD_$1 a b vsubs inductor PARAMS:
+```
+
+**Recognition** follows the PDK's own LVS rule (`ind_derivations.lvs`): an `IND`
+polygon (27/0) carrying a `inductor2*` label on TEXT (63/0), whose winding
+metal touches exactly one pin (27/2) labelled `LA` and one labelled `LB` (both
+on 27/25, case-insensitive) at the marker's edge, and no `LC` pin.
+
+**Terminals.** Each pin is conductor in its own right: external routing joins
+it by touching the pin on TopMetal2, and a net label on TopMetal2.text over the
+pin names the terminal's net. The winding itself is *cut out* of TopMetal1 and
+TopMetal2 (the PDK's `topmetal*_con` excludes `IND`), which is what keeps the
+two terminals apart; only recognised windings are cut, so ordinary unmarked
+top-metal routing is untouched. `SUB` is the NWell net when the marker lies
+over an NWell, the isolation island's `vsubs_iso<n>` inside one, and the
+deck's `vsubs` otherwise.
+
+**Not a device, and said so.** A marker that carries an `inductor*` label but
+is not recognised — a centre-tapped `inductor3`, an `LC` pin, a missing or
+duplicated `LA`/`LB` pin — leaves its winding as plain wire (the terminals stay
+merged, as before) and adds a `warnings[]` entry naming why. An `IND` marker
+with no `inductor*` label (27/0 is also an exclusion layer in both MiM
+capacitor flavours, `mimcap_exclude` and `rfmimcap_exc`, so a bare marker is
+not an inductor claim) or no winding metal under it (an isolated label) is
+silent.
+
+**Not modelled.** The device carries connectivity only: no `w`/`s`/`d`/turns
+parameters are measured (so a reference's `w=`/`s=`/`d=`/`nr_r=` are not
+compared), nothing computes inductance, `inductor3` is not recognised, and the
+PDK's own three-node `L` card spelling is not read back (see `klt lvs`'s
+"Custom device classes" section). IHP's `ind_exc` — other device layers
+subtracted from the winding metal before the pin test — is not transcribed.
 
 ### Device-recognition-only layers (issue #619)
 
@@ -8967,6 +9057,7 @@ scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
 | `pin`          | boolean | Whether this net is promoted to a top-cell pin (a named net at the top level). |
 | `device_count` | integer | Number of device terminals connected to this net.                             |
 | `net_id`       | integer | Additive field (issue #1540). The net's KLayout `cluster_id` — unique across every net *object* in this circuit, unlike `name` (see "Net-name collisions from internally-repeated sub-cells" below). The same identity `parasitics.nets[].net_id` already reports for the identical "several distinct nets share one label" shape (issue #765/#811). |
+| `structural_id` | string \| `null` | Additive field (issue #5735). This net's numbering-independent structural handle: the `$anon<...>` token the net's own sorted `<device>.<terminal>` attachment list derives — the exact identity `netlist_normalized_sha256` (issue #3407) and `klt extract --check <report> --rerun` already rewrite every anonymous `\$N` spelling to, now also emitted per net so a testbench probing an unlabeled internal node can pin its `meas`/`let` card to a token that survives a re-extraction. Two extractions of one GDS that differ only in anonymous-net numbering report the **same** value for a corresponding net; a genuine connectivity change reports a **different** one — exactly the equivalence `netlist_normalized_sha256` is defined by, and no stronger promise: the token is built from device *instance* names, which are themselves KLayout-synthesized `$<n>` spellings whose cross-build stability is asserted empirically, not contracted (see "Anonymous net numbering" above). `null` exactly when the net has no derivable structural identity: a **named** net (its `name` is the label a consumer already joins on; the "Net-name collisions" caveat below is why no unique per-net identity is minted for it) or an anonymous net with **zero** device terminals (nothing to disambiguate by — real floating geometry or a synthesized ground/substrate net). A consumer holding an older report maps an anonymous net to the current one by joining the two reports on `structural_id` directly — no `devices[]` re-derivation per re-extraction. `--check --rerun` strips the field alongside `net_id` before diffing — not because it is unstable (it is **content** class, per this table) but for backward compatibility: a report committed before the field existed lacks the key, so stripping is what keeps those reports from drifting against fresh ones and keeps `netlist_normalized_sha256` byte-identical. Present on top-level `nets[]` entries only; `parasitics.nets[]` is a different array and does not carry the field. |
 | `pin_index`    | integer \| `null` | Additive field (issue #1540). This net's 0-based position in the written `.SUBCKT`/instance-line port order (`Circuit.each_pin()`, the same sequence `NetlistSpiceWriter` iterates) when `pin` is `true`; `null` when it is not a promoted pin. Lets a caller resolve a specific `.SUBCKT` port index straight back to a `nets[]` entry, positionally, with no separate `klt lvs` run against a reference schematic. |
 | `label_positions_um` | array\<object\> | Additive field (issue #1540). Every drawn text-label shape naming this net, `[{"text": str, "x_um": number, "y_um": number}, ...]`, sorted by `(text, x_um, y_um)`; `[]` for a net with no drawn label. `(x_um, y_um)` is each label's anchor point in the top cell's own local coordinate frame — the mechanism a caller with independent floorplan knowledge (e.g. a known physical pin location from `klt place-and-route`'s DEF, or its own generator's placement record) uses to positively identify *which* of several identically-named entries it means, without guessing from `name` alone. |
 
@@ -8982,7 +9073,7 @@ Every field in this report falls into exactly one of four classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `nets[].structural_id` (issue #5735 — the per-net `$anon<...>` identity derived from that same numbering-normalized content, so it reproduces exactly whenever `netlist_normalized_sha256` does; `null` for named and zero-terminal anonymous nets), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 | **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift. Rather than hand-rolling a comparer that drops it, pipe the report through `klt evidence canonicalize --kind extract` (issue #5541), which emits exactly the `--rerun` view; the full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |

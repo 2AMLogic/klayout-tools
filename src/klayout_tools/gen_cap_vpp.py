@@ -16,6 +16,9 @@ import functools
 import os
 from typing import Any
 
+from .gen_base import GenError
+from .gen_snap import _grid_snapped
+
 #: Name prefix of the fixed-layout capacitor cells this generator arrays.
 CAP_VPP_PREFIX = "sky130_fd_pr__cap_vpp_"
 
@@ -28,7 +31,6 @@ _DRAWING_DATATYPE = 20
 
 
 def _gds_path(pdk_info: dict[str, Any]) -> str:
-    from .gen import GenError
     from .gen_layer_params import _pdk_family
 
     family = _pdk_family(pdk_info["variant"])
@@ -112,8 +114,6 @@ def _cell_table(pdk_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cap_vpp_array_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["num"] < 1:
         raise GenError("generator 'cap_vpp_array': params.num must be >= 1")
     if params["pitch_um"] < 0:
@@ -122,8 +122,6 @@ def _cap_vpp_array_validate(params: dict[str, Any]) -> None:
 
 def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
     """Return the named cell's info, rejecting unknown names / overlapping pitch."""
-    from .gen import GenError
-
     table = _cell_table(pdk_info)
     entry = table.get(params["pdk_cell"])
     if entry is None:
@@ -162,8 +160,6 @@ def _cap_vpp_array_describe(
     entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe the array; ``entry`` lets ``pdk_cell`` supply its own lookup."""
-    from .gen import _grid_snapped
-
     if entry is None:
         entry = _lookup(params, pdk_info)
     pitch = effective_pitch_um(params, entry)
