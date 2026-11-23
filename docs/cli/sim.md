@@ -1058,7 +1058,10 @@ that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).
 **What `--resume` does with a retained shard map**
 ([#5775](https://github.com/2AMLogic/klayout-tools/issues/5775)). Before the
 outstanding units are dispatched, `--resume` **harvests** the map: each
-recorded shard's `status.json` is read once, a shard whose remote job is
+recorded shard's `status.json` is read (an unreadable read is re-read a
+small fixed number of times before it counts as `unknown`,
+[#7115](https://github.com/2AMLogic/klayout-tools/issues/7115)), a shard
+whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
 `resume: reused N checkpointed corner(s)` summary and never re-billed.
@@ -1068,7 +1071,11 @@ by dispatch observations. A job seen in both appears once. Shards the map record
 `submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
-grouping is unchanged is launched under its recorded job id instead). A map
+grouping is unchanged is launched under its recorded job id instead), and
+each such skip of a launched shard prints one stderr notice —
+`klt sim: notice: --resume did not harvest shard <i> (job <id>): <reason>`
+with the reason `status unreadable`, `remote state <state>`, or
+`shard grouping not recoverable`. A map
 written for a different request refuses with
 `error.code: "resume_fingerprint_mismatch"` rather than attaching stale
 results. `--attach <batch-shards.json> --collect-partial` remains the
