@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from . import env_provenance
+from ._drc_gf180_3lm import prelude_files
 from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
@@ -35,9 +36,9 @@ from .coverage import (
 from .deck_global_defaults import _record_deck_default
 from .drc import (
     CODE_MULTIPLE_TOP_CELLS,
-    CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
+    _grade_negative_control,
 )
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import (
@@ -62,6 +63,7 @@ from .drc_klayout_selection import (
     selection_fields,
 )
 from .pdk import PdkNotFoundError, find_pdk_for_deck
+from .pdk_native_drc import gf180_main_path
 
 # --------------------------------------------------------------------------- #
 # "klayout" engine (issue #565): opt-in subprocess wrapper around the
@@ -648,6 +650,7 @@ def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     it is not a git checkout or git is unavailable). Computed-path includes
     are not followed (see :func:`_deck_script_files`).
     """
+    deck_file = gf180_main_path(deck_file) or deck_file
     files = _deck_script_files(deck_file)
     if len(files) < 2:
         return None
@@ -694,27 +697,7 @@ def _run_negative_control(
     :class:`DrcError` (code ``negative_control_failed``) when the fixture
     yields no violation, or misses an expected rule category."""
     control = run_drc_klayout_engine(control_path, deck_file, **engine_kwargs)
-    found = sorted({v["rule"] for v in control["violations"]})
-    missing = sorted(set(categories or []) - set(found))
-    if control["violation_count"] < 1 or missing:
-        detail = (
-            f"missing expected categories {missing}"
-            if control["violation_count"] and missing
-            else "no violations reported"
-        )
-        raise DrcError(
-            f"negative control {control_path!r} failed on the same deck: "
-            f"{detail} -- the deck may not have executed its rules, so a "
-            "clean verdict on the real layout cannot be trusted",
-            code=CODE_NEGATIVE_CONTROL_FAILED,
-        )
-    return {
-        "file": control_path,
-        "status": "passed",
-        "violation_count": control["violation_count"],
-        "rules_found": found,
-        "expected_categories": sorted(categories or []),
-    }
+    return _grade_negative_control(control, control_path, categories)
 
 
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
@@ -1144,6 +1127,7 @@ def run_drc_klayout_engine(
     deck_name: str | None = None,
     max_violations: int | None = None,
     klayout_binary: str | None = None,
+    native_deck: dict | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1152,18 +1136,10 @@ def run_drc_klayout_engine(
     :func:`run_drc`'s curated, pip-only engine (see ``docs/cli/drc.md``,
     "Engine").
 
-    Invokes::
-
-        klayout -b -r <deck_file> -rd input=<path> -rd report=<tmp>.lyrdb
-
-    -- the standard batch-mode DRC-DSL invocation KLayout's own tooling
-    documents and open_pdks' sky130 deck itself embeds as a usage comment
-    (verified for this issue against a real ``volare``-fetched sky130A
-    install's ``libs.tech/klayout/drc/sky130A.lydrc``). The report path is
-    always a ``.lyrdb`` (RDB XML) file, regardless of what ``deck_file``
-    itself would otherwise default to, so the result is always the
-    structured format :func:`_parse_klayout_rdb_report` reads -- never
-    KLayout's plain-text list alternative.
+    Runs ``klayout -b -r <deck_file> -rd input=<path> -rd report=<tmp>.lyrdb``.
+    The resolved ``native_deck`` can select a packaged startup macro (``-rm``)
+    ahead of the main script. The ``.lyrdb`` suffix requests the structured
+    RDB XML consumed by :func:`_parse_klayout_rdb_report`.
 
     ``deck_vars`` (issue #1302, CLI: repeatable ``--deck-var name=value``)
     appends additional ``-rd name=value`` pairs to the invocation, after the
@@ -1401,6 +1377,7 @@ def run_drc_klayout_engine(
             allow_deck_errors=allow_deck_errors,
             allow_missing_host_tools=allow_missing_host_tools,
             klayout_binary=klayout_binary,
+            native_deck=native_deck,
         )
 
     # Validates `path` (missing/directory/unreadable) before the subprocess
@@ -1433,14 +1410,13 @@ def run_drc_klayout_engine(
             # reaches the deck; the caller's file is untouched.
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
-        # Issue #5444: the invocation shape is shared with
-        # `--list-rule-categories`' empty-layout listing, so it lives in one
-        # place rather than two copies that can drift.
+        # The category listing uses the same launch path and prelude.
         completed = launch_klayout_deck(
             klayout_exe,
             deck_file,
             input_path=input_path,
             report_path=report_path,
+            prelude_files=prelude_files(native_deck),
             deck_vars=deck_vars,
             timeout_s=timeout_s,
         )
@@ -1512,7 +1488,7 @@ def run_drc_klayout_engine(
         klayout_version_override=klayout_app_version,
         klayout_version_override_active=True,
     )
-    _with_deck_tree(provenance, deck_file)  # adds deck.tree, in place
+    _with_deck_tree(provenance, deck_file, native_deck)
     _warn_binary_mismatch(provenance)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1541,12 +1517,9 @@ def run_drc_klayout_engine(
             if deck_errored
             else {}
         ),
-        # Additive (issue #6613): the deck's own captured stdout, kept as
-        # citable execution evidence on every successful run (tolerated
-        # deck errors included) -- bounded, work-dir-scrubbed, and never a
-        # status upgrade. See `_klayout_deck_output`.
+        # The captured deck log is evidence only (#6613).
         "deck_output": deck_output,
-        **selection_fields(selection),
+        **selection_fields(selection, native_deck),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": violation_count,
@@ -1577,10 +1550,14 @@ def run_drc_klayout_engine(
     }
 
 
-def _with_deck_tree(provenance: dict[str, Any], deck_file: str) -> dict[str, Any]:
-    """Add ``provenance.deck.tree`` (issue #3076) for a multi-file deck."""
+def _with_deck_tree(
+    provenance: dict[str, Any], deck_file: str, native_deck: dict | None = None
+) -> dict[str, Any]:
+    """Record the included files and any loaded macro in the deck identity."""
     tree = _deck_tree_identity(deck_file)
     deck = provenance.get("deck")
     if tree is not None and isinstance(deck, dict):
         deck["tree"] = tree
+    if native_deck and "preludes" in native_deck:
+        provenance["deck"]["preludes"] = native_deck["preludes"]
     return provenance

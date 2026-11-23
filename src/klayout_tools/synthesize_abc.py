@@ -155,6 +155,14 @@ def resolve_mapping(
     return AbcMapping(False, os.path.relpath(path, directory), data, timeout_s)
 
 
+def _stime_flags(stats_dump: bool) -> str:
+    """The ``stime`` report flags for :func:`liberty_command`'s inline form:
+    ``-p`` (critical-path summary) always, plus ``-d`` (statistics-file
+    dump, issue #7010) when the run executes from its own directory so the
+    dump is recoverable there."""
+    return "-pd" if stats_dump else "-p"
+
+
 def generic_abc(fast: FastMode) -> str:
     if fast is None:
         return "abc"
@@ -174,6 +182,7 @@ def liberty_command(
     *,
     constrained: bool,
     delay_ps: int | None,
+    stats_dump: bool = False,
 ) -> str:
     if fast == "native":
         return f"abc -fast -liberty {liberty}"
@@ -184,7 +193,10 @@ def liberty_command(
         retime = f";retime,-o{target}" if target else ""
         commands = f"strash;dretime{retime};map{target}"
         if constrained:
-            commands += f";buffer;upsize{target};dnsize{target};stime,-p"
+            # Issue #7010: `-pd` keeps the log report and additionally dumps
+            # ABC's statistics file, recovered when the log line is lost.
+            stime = _stime_flags(stats_dump)
+            commands += f";buffer;upsize{target};dnsize{target};stime,{stime}"
         script_text = "+" + commands
     elif script_text and script_text.startswith("+"):
         # ABC reserves a leading '+' for inline commands, even in a file path.

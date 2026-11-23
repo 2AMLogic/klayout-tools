@@ -64,6 +64,7 @@ RERUN_PATH_FIELD_KEYS: frozenset[str] = frozenset(
         "lib",
         "spef_path",
         "sdf_path",
+        "library_limit_report_path",
     }
 )
 

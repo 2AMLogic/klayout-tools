@@ -58,7 +58,13 @@ from ..erc import (
 from ..erc_pnr import supply_spec_from_pnr
 from ..erc_spec import DISCLOSURE_KIND_UNEXPRESSIBLE
 from ._request_file import RequestFileError, load_request_file
-from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
 #: exit codes, #2109). `"clean_partial"` reports the same exit `0` as
@@ -79,6 +85,10 @@ def run(args: argparse.Namespace) -> int:
         return _run_spec_mode(args)
 
     if args.check is not None:
+        if args.output is not None:
+            return emit_error(
+                "erc", "--output cannot be combined with --check", args.format
+            )
         # `file` is in `--check`'s mutually exclusive argparse group
         # (parser.py), and `spec` cannot be given without it -- so
         # file/spec alongside --check is already a usage error (exit 2).
@@ -105,6 +115,13 @@ def run(args: argparse.Namespace) -> int:
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
+    if args.output is not None:
+        try:
+            write_json_file(report, args.output)
+        except OSError as exc:
+            return emit_error(
+                "erc", f"could not write report {args.output!r}: {exc}", args.format
+            )
     emit_success(report, args.format, _print_text)
     return _EXIT_CODE_BY_STATUS[report["status"]]
 
@@ -112,6 +129,7 @@ def run(args: argparse.Namespace) -> int:
 def _run_spec_mode(args: argparse.Namespace) -> int:
     mode = "--pnr-response" if args.pnr_response is not None else "--validate-spec"
     layout_only = {
+        "--output": args.output is not None,
         "--top": args.top is not None,
         "--pdk": args.pdk is not None,
         "--deck": args.deck is not None,

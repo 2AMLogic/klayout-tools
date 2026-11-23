@@ -2,12 +2,15 @@
 own KLayout LVS runset in batch and take the **extracted netlist** out of the
 ``.lvsdb`` it writes.
 
-The engine shares the launcher, timeout handling and error reporting of
-``klt lvs --engine klayout-runset`` through :mod:`.lvs_runset`.
+Both engines call :mod:`.lvs_runset` for the launcher, timeout and error handling.
+``import-boundaries.json`` grants ``shared_private_permissions`` for ``_run_runset``
+and its peers. Look them up through the module so monkeypatches cover both engines.
+``lvs_runset.py`` is at its size ceiling. Promote the helpers when it is next split.
 
-A vendor runset can extract device families outside the curated decks, such
-as IHP's ``pnpMPA`` on ``sg13cmos5l``. Its extracted circuit feeds the same
-device and net report as a curated run.
+The curated deck has no class for IHP's ``pnpMPA`` on ``sg13cmos5l`` and reports
+zero such devices. The vendor runset recognizes them. Reading its extracted
+circuit gives the caller a simulatable netlist and the usual device and net
+report, where an LVS comparison alone supplied only a verdict.
 
 **What it does NOT do.** No parasitics (``--parasitics`` and everything built
 on it is refused by name, not silently ignored): joining runset devices with
@@ -68,7 +71,7 @@ from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
-from .extract_base import SCHEMA_VERSION, _build_metrics
+from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
 from .extract_report_canonicalize import _normalized_netlist_sha256
 
@@ -125,7 +128,6 @@ from .extract_runset_spice import (
     _check_device_params,
     _device_params_echo,
     _dropped_parameter_warnings,
-    _instantiated_device_counts,
     _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
@@ -373,7 +375,7 @@ def run_extract_klayout_runset(
         )
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
-        instantiated = _instantiated_device_counts(circuit)
+        instantiated = instantiated_device_counts(circuit)
         nets = _staged(
             "describe_nets",
             _describe_nets,

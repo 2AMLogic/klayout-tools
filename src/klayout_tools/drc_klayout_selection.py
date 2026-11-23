@@ -134,10 +134,15 @@ def selection_coverage(
     ]
 
 
-def selection_fields(selection: dict[str, Any] | None) -> dict[str, Any]:
+def selection_fields(
+    selection: dict[str, Any] | None, native_deck: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Keep the resolved family script and its measured execution in one block."""
     if selection is None:
-        return {}
-    fields: dict[str, Any] = {"native_deck": {"deck_selection": selection}}
+        return {"native_deck": native_deck} if native_deck is not None else {}
+    fields: dict[str, Any] = {
+        "native_deck": {**(native_deck or {}), "deck_selection": selection}
+    }
     if selection["narrowed"] is not False:
         fields["rule_selection"] = {
             "selectors": [selection["requested"]]
