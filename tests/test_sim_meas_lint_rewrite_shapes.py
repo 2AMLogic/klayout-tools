@@ -24,6 +24,7 @@ import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools import _meas_lint, sim, sim_steps
+from klayout_tools._meas_lint_expression import control_expression
 from test_sim_meas_lint import _file_scope_rewrite
 
 
@@ -322,6 +323,33 @@ def test_control_suggestion_keeps_signs_in_names_and_exponents():
     )
 
 
+@pytest.mark.parametrize(
+    ("expression", "folded"),
+    [
+        # issue #7314: a lone `+` is unary in three positions (expression
+        # start, after `(`, after an argument comma -- spacing free) ...
+        ("+v(a)*v(b)", "v(a)*v(b)"),
+        ("+ v(a)", " v(a)"),
+        ("(+v(a))", "(v(a))"),
+        ("max(v(a), +v(b))", "max(v(a), v(b))"),
+        ("max(v(a),+v(b))", "max(v(a),v(b))"),
+        ("min(v(a), + v(b))", "min(v(a),  v(b))"),
+        ("+1e+3", "1e+3"),
+        # ... and binary everywhere else: the operand's own text stays
+        ("v(a) + v(b)", "v(a) + v(b)"),
+        ("v(a)+v(b)", "v(a)+v(b)"),
+        # signs chained behind an operator were folded before and still are
+        ("v(a)-+v(b)", "v(a)-v(b)"),
+        ("v(a)* +v(b)", "v(a)* v(b)"),
+        # exponent literals and vector names keep their own signs
+        ("1e+3*v(a)", "1e+3*v(a)"),
+        ("v(net+x)", "v(net+x)"),
+    ],
+)
+def test_control_expression_folds_lone_unary_plus_positions(expression, folded):
+    assert control_expression(expression) == folded
+
+
 @SKIP_NO_NGSPICE
 @pytest.mark.parametrize(
     ("expr", "expected"),
@@ -344,6 +372,13 @@ def test_control_suggestion_keeps_signs_in_names_and_exponents():
         ("--v(a)*v(b)", 6),
         ("v(a)*(++v(b))", 6),
         ("max(+ - v(a), - - v(b))", 2),
+        # issue #7314: a lone unary `+` at the start of the expression,
+        # after a `(`, or after an argument comma used to survive the
+        # control-scope suggestion, and ngspice rejects the resulting let
+        ("+v(a)*v(b)", 6),
+        ("max(v(a), +v(b))", 3),
+        ("abs(+v(a))*v(b)", 6),
+        ("v(a)*(+v(b))", 6),
     ],
 )
 def test_engine_agrees_with_file_and_control_suggestions(tmp_path, expr, expected):

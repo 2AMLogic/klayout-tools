@@ -51,7 +51,9 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
   absent from the stream exits `1` with a clean error. With `--engine
   klayout`, a multi-top stream **requires** `--top` (see "Engine" →
-  "klayout" below).
+  "klayout" below). The exact requested name is recorded on the report as
+  the top-level `top` field (issue #7000), so `--check --rerun` replays
+  the scope.
 - `--engine` — `curated` (default) or `klayout` (issue #565, opt-in). See
   "Engine" below.
 - `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
@@ -958,7 +960,9 @@ real open_pdks install never pays for the extra probe.
   subtree (your input file is untouched). A stream with more than one top
   cell and no `--top` exits `1` before KLayout is launched, with
   `error.code` `multiple_top_cells` and a message listing the top cells.
-  Single-top streams are passed to the deck as-is.
+  Single-top streams are passed to the deck as-is. The requested name is
+  recorded on the report as the top-level `top` field (issue #7000)
+  whenever `--top` is given, and `--check --rerun` replays it.
 - **External rule execution is unknown without instrumentation.** A deck
   gated by `--deck-var` can produce an empty RDB, but neither an empty report
   nor nonempty category declarations proves which checks executed. DRC v2
@@ -3229,16 +3233,16 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | `V2.W.1` | Table 3.13.1 | stated along the M3 length; checked in both directions (the via is as wide as M3 across the track per V2.M3.AUX.2) |
 | `V3.W.1` | Table 3.13.1 | stated along the M4 length; checked in both directions (the via is as wide as M4 across the track per V3.M4.AUX.2) |
 | `V3.M3.EN.1` | Table 3.13.1 | stated by Table 3.13.1 note 2 |
-| `M4.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M4.W.2 only |
+| `M4.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum, measured per polygon across the track; wider shapes are reported by M4.W.2 only |
 | `M4.AUX.1` | Table 3.14.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
 | `M4.AUX.2` | Table 3.14.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
-| `M5.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M5.W.2 only |
+| `M5.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum, measured per polygon across the track; wider shapes are reported by M5.W.2 only |
 | `M5.AUX.1` | Table 3.14.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
 | `M5.AUX.2` | Table 3.14.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
-| `M6.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M6.W.2 only |
+| `M6.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum, measured per polygon across the track; wider shapes are reported by M6.W.2 only |
 | `M6.AUX.1` | Table 3.16.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
 | `M6.AUX.2` | Table 3.16.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
-| `M7.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M7.W.2 only |
+| `M7.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum, measured per polygon across the track; wider shapes are reported by M7.W.2 only |
 | `M7.AUX.1` | Table 3.16.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
 | `M7.AUX.2` | Table 3.16.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
 | `V4.S.1` | Table 3.15.1 | checked between any two vias whatever their nets: the same-net (S.1) and different-net (V4.S.2) thresholds are equal, so different-net pairs are reported under S.1 |
@@ -4041,6 +4045,7 @@ On a run with findings:
 | `schema_version`  | integer                  | Version of this command's JSON shape (`3`; per-command).       |
 | `file`            | object                   | The input layout this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 3 — it was the raw input path string through `schema_version` 2): `scope: "repo"` with a repo-relative POSIX `path` when the layout lives inside the repo the invocation resolved, `{"path": null, "scope": "external"}` when it does not. The producing host's absolute path is never echoed. This is the field `provenance.input.content_hash` covers, so it is also the one a consumer re-hashes to verify that hash against the artifact rather than against another claim — `klt signoff --manifest`'s `input_verified` gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, which is what lets a committed `klt drc` envelope be re-verified from any clone instead of only on the machine that wrote it. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
+| `top`             | string                   | Present only when `--top` named the cell to check (issue #7000): the exact requested top-cell name, recorded verbatim — including on a single-top stream — so `klt drc --check --rerun` replays the recorded scope for either engine. Absent on an unscoped run, so a default run's report is unchanged; a report without it reruns with the engine's default scope (see "Full mode (`--rerun`)" below). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
@@ -4740,11 +4745,20 @@ behaves exactly as on a fresh run: the former is the normal exit-1 error,
 the latter drifts on `provenance.pdk.name` (exit 3). Cheap mode
 (`--check` without `--rerun`) never resolves a PDK; it stays hash-only.
 
-**Known limitation**: neither engine's report records which `--top` (if
-any) the original run used, so `--rerun` always re-checks every top cell —
-a report originally scoped to one top cell via `--top` can legitimately
-drift under `--rerun` if the stream has others. Use cheap mode if that
-matters.
+A scoped run's report records the requested cell as a top-level `top`
+string (issue #7000), and `--rerun` replays it for either engine: a report
+committed with `--top <cell>` re-checks exactly that cell, so coverage
+fields and verdict compare like-for-like even on a stream with
+heterogeneous tops. An unscoped run omits the field. **Legacy replay**: a
+report committed before #7000 records no `top`, so its rerun uses the
+engine's existing default — every top cell for the curated engine (a
+per-cell report on a multi-top stream legitimately drifts in its coverage
+fields and violation list, the drift this issue was filed for), and the
+single-top requirement for `--engine klayout` (a multi-top stream fails
+with the standard error envelope, exit `1`). Regenerating the report is
+what acquires the recorded name; there is deliberately no `--top` override
+on `--check --rerun`, because the replay's scope must be the report's own
+recorded evidence, not the re-runner's independent memory of it.
 
 ### `--check` on an `--engine both` (crosscheck) report
 

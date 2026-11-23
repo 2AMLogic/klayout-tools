@@ -270,8 +270,8 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` net but a confirmed driver-only
-      internal one, as standalone ``klt sta`` also skips (#6970/#7267)):
+    - *design-side* (linked nets after excluding confirmed empty or
+      driver-only internal nets, as in standalone ``klt sta``):
       how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
@@ -482,6 +482,7 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
@@ -725,6 +726,7 @@ def _post_route_spef_metrics(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
     )
     with completed.diagnostics(PlaceAndRouteError):
@@ -824,6 +826,7 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
 ) -> tuple[
@@ -978,6 +981,7 @@ def _run_corner_sweep(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
     )
     with completed.diagnostics(PlaceAndRouteError):
@@ -1091,6 +1095,7 @@ def _run_corner_sweep(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
         )
         with corner_completed.diagnostics(PlaceAndRouteError):
@@ -1130,12 +1135,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* effective design-rule
-                # verdict, from its own single-corner invocation's stdout --
-                # the per-corner counterpart of the combined aggregates
-                # above, letting a caller see which deck's limits a pin
-                # actually breaks (exactly the per-corner attribution #1092
-                # added for slack).
+                # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,

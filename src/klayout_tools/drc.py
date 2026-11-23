@@ -1234,6 +1234,7 @@ class _DrcSetup:
     # for a default run.
     tile: tuple[int, int] | None = None
     tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    top: str | None = None
 
 
 @dataclass
@@ -1475,6 +1476,7 @@ def _prepare_drc(
         stream_layer_tuples=stream_layer_tuples,
         tile=tile,
         tile_windows=tile_windows,
+        top=top,
     )
 
 
@@ -2144,6 +2146,7 @@ def _assemble_report(
             if setup.tile is None
             else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
         ),
+        **({} if setup.top is None else {"top": setup.top}),
     }
     report["provenance"] = build_provenance(
         deck_name=setup.deck_name,
@@ -2181,6 +2184,7 @@ def run_drc(
             "schema_version": 3,
             "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
+            "top": <cell name>,  # only when `top` is given (issue #7000)
             "dbu_um": <database unit in micrometres, float>,
             "status": "clean" | "clean_partial" | "violations" | "not_checked",
             "violation_count": <int>,
@@ -2394,7 +2398,9 @@ def run_drc(
     ``layers_report(path, top=top)`` -- to one named top cell, instead of
     every top cell in the stream (today's default, unchanged when omitted).
     A named cell absent from the stream is a :class:`DrcError`, matching
-    ``klt ring-check --top``.
+    ``klt ring-check --top``. A given ``top`` is recorded verbatim as the
+    top-level ``top`` field (issue #7000) for :func:`rerun_drc_report` to
+    replay; an unscoped run omits the field.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) resolve no rule content -- this curated engine's rules come
@@ -2592,18 +2598,10 @@ def rerun_drc_report(
     ``report_path`` by actually re-running the DRC deck it names and
     diffing the fresh report against the committed one.
 
-    Re-runs against exactly the ``file``/``deck``/``engine`` the committed
-    report itself names -- :func:`run_drc_klayout_engine` when
-    ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
-    engine) otherwise -- replaying a curated ``--rules`` subset's recorded
-    ``rule_selection.selectors`` (issue #2768; replay helpers in
-    :mod:`klayout_tools.drc_rerun_replay`).
-    **Known limitation**: neither the curated nor the
-    ``klayout`` engine's report records which ``--top`` (if any) the
-    original run used, so ``--rerun`` always re-checks every top cell
-    (``top=None``) -- a report originally scoped to one top cell via
-    ``--top`` will legitimately drift under ``--rerun`` if the stream has
-    others. Use ``--check`` (cheap mode) to avoid this if that matters.
+    Replays the recorded file and deck using the original engine. Both engines
+    replay the recorded ``top`` cell. Reports without it use each engine's
+    default (all tops for curated, a single top required for KLayout).
+    Curated reruns also replay the recorded rule selectors and tile dimensions.
 
     Diffs the fresh report against the committed one via
     :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
@@ -2639,6 +2637,7 @@ def rerun_drc_report(
     from .drc_rerun_replay import (
         _recorded_rule_selectors,
         _recorded_tile,
+        _recorded_top,
         _rerun_pdk_selection,
     )
 
@@ -2662,6 +2661,7 @@ def rerun_drc_report(
         raise DrcError(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
+    top = _recorded_top(committed)
     # Issue #6986: the fresh run resolves `provenance.pdk` too -- explicit
     # flags first, then the variant the committed report itself recorded
     # (never `$PDK`) -- so a PDK-resolved report re-verifies instead of
@@ -2688,7 +2688,7 @@ def rerun_drc_report(
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
-            top=None,
+            top=top,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             pdk_variant=eff_variant,
             pdk_root=eff_root,
@@ -2706,7 +2706,7 @@ def rerun_drc_report(
         fresh = run_drc(
             file_path,
             deck,
-            top=None,
+            top=top,
             pdk_variant=eff_variant,
             pdk_root=eff_root,
             rules=_recorded_rule_selectors(committed),
