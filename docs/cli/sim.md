@@ -4643,6 +4643,47 @@ byte-identical. A changed `save_vectors` invalidates a `--resume`
 checkpoint. It rides the forwarded request document to `remote`/`batch`
 workers, so the worker image must include this implementation.
 
+#### PSP103 device currents inside a subcircuit
+
+ngspice exposes an OSDI device under the `n.` prefix. Include each enclosing
+subcircuit instance and the name of the actual device element inside the PDK
+wrapper. For example, suppose `XDUT` contains `XM1`, which instantiates the
+IHP SG13G2 `sg13_lv_nmos` wrapper. That wrapper declares an element named
+`Nsg13_lv_nmos`. With the PSP103 model loaded, this request fragment measures
+its drain current at the operating point.
+
+```json
+{
+  "analysis": {"kind": "op", "args": ""},
+  "options": {
+    "osdi_preload": ["$PDK_ROOT/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi"],
+    "save_vectors": ["@n.xdut.xm1.nsg13_lv_nmos[ids]"]
+  },
+  "measurements": [
+    {"name": "itail", "unit": "A", "expr": "@n.xdut.xm1.nsg13_lv_nmos[ids]"}
+  ]
+}
+```
+
+To derive the inner name for a different wrapper, open its `.subckt` in the
+PDK model library and find the device line beginning with `N`. In ngspice,
+`show n.xdut.xm1.nsg13_lv_nmos` lists this instance's operating-point
+parameters. PSP103 exposes `ids` and `ide`, and has no `id`. A request that
+names `[id]` anyway errors the corner (exit 4) with the generic
+`measurement '<name>' produced no value: its 'expr' (...) printed no
+'<name> = <value>' line` diagnostic, not a message naming the missing vector —
+so confirm an unfamiliar parameter name with `show` rather than reading that
+diagnostic as a plumbing fault.
+
+With a 1 µm × 0.13 µm NMOS at 27 °C, a 0.7 V gate and a 0.6 V drain,
+ngspice 46 reported 44.56219 µA for both parameters and for the independent
+drain supply measurement `-i(vdrain)`. On a DC sweep of that supply from
+0.2 to 0.8 V in 0.1 V steps, `vecmax(@n.xdut.xm1.nsg13_lv_nmos[ids])`
+reported 48.23553 µA. The SPICE measurement
+`.meas dc itail FIND @n.xdut.xm1.nsg13_lv_nmos[ids] AT=0.6` returned
+44.5622 µA. Include the instance vector in `save_vectors` for these DC
+measurements as well.
+
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
 `options.complex_vectors` is a non-empty array of single-ended `v(node)`
