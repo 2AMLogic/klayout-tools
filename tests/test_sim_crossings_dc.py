@@ -172,6 +172,7 @@ def test_per_corner_reference_varies(tmp_path):
     [
         ({"sample_at": 9.0, "fraction": 0.9}, {}, "outside the dc sweep range"),
         (0.9, {"reduce": ["period"]}, "not supported on a dc sweep"),
+        (0.9, {"value_from": "period.mean"}, "not supported on a dc sweep"),
     ],
 )
 def test_misspecified_dc_requests_are_refused_before_a_run(level, extra, match):

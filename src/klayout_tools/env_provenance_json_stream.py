@@ -15,6 +15,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from klayout_tools import _jsongz
 from klayout_tools.env_provenance import (
     ENVELOPE_LINT_RECOMMENDATION,
     SCHEMA_VERSION,
@@ -36,9 +37,9 @@ def load_json_stream_documents(path: str) -> list[Any]:
     JSON" error as the single-document mode, never a silent "clean" verdict.
     """
     try:
-        with open(path, encoding="utf-8") as handle:
+        with _jsongz.open_text(path) as handle:
             text = handle.read()
-    except OSError as exc:
+    except _jsongz.READ_ERRORS as exc:
         raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
     decoder = json.JSONDecoder()
     documents: list[Any] = []

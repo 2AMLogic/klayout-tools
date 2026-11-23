@@ -10,6 +10,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._jsonnum import is_number
+from .lvs_base import (
+    _MAX_PARAMETER_TOLERANCE,
+    _PARAM_DISPLAY_NAMES,
+    CATEGORY_DEVICE_PARAMETER_TOLERATED,
+    LvsError,
+)
 
 if TYPE_CHECKING:
     from .lvs_mismatch import ExcludedParameters
@@ -34,7 +40,6 @@ def _parse_parameter_tolerance(options: dict[str, Any]) -> float | None:
     believes is in force but is not would be the worst possible failure mode
     for this particular option.
     """
-    from .lvs import _MAX_PARAMETER_TOLERANCE, LvsError
 
     if "parameter_tolerance" not in options:
         return None
@@ -129,7 +134,7 @@ def _tolerated_device_pair(
     on -- and an explicit tolerance should absorb that too, not just the
     differences this module happens to classify.
     """
-    from .lvs import _PARAM_DISPLAY_NAMES, _name_or_none
+    from .lvs import _name_or_none
     from .lvs_mismatch import _param_pair_is_comparable
 
     device_class = a.device_class()
@@ -262,7 +267,6 @@ def _tolerance_disclosure(snap: _ToleratedParam, tolerance: float) -> dict[str, 
     what was actually compared -- the same "disclose, never silently absorb"
     discipline ``device.bulk_reconciled``/``device.body_unverified`` apply.
     """
-    from .lvs import CATEGORY_DEVICE_PARAMETER_TOLERATED
     from .lvs_mismatch import _mismatch
 
     return _mismatch(

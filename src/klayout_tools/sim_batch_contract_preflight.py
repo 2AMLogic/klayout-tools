@@ -30,6 +30,7 @@ from .sim_batch_contract_spec import (
     _request_features,
     _runner_gate_release,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     pass
@@ -86,8 +87,6 @@ def _runner_preflight_script(
     )
     # Only a validated N.N is ever embedded in the shell below.
     if client_release is None or not re.fullmatch(r"\d+\.\d+", client_release):
-        from .sim import SimError
-
         raise SimError(
             f"the submitting client's klt version {client_version!r} cannot be "
             "pinned against the fleet runner (expected only [A-Za-z0-9._+-] "
@@ -213,8 +212,6 @@ def assess_remote_runner_features(
     manifest, a legacy entry without ``klt_version``) proceeds to
     :func:`remote_feature_preflight` on the host. Never relaxed by a warn
     policy: ``remote`` has none, and a silently dropped metric is worse."""
-    from .sim import SimError
-
     features = [
         name
         for name in _request_features(request)
@@ -243,6 +240,35 @@ def assess_remote_runner_features(
     )
 
 
+# Development builds can share a release segment while accepting different request
+# fields. Have the worker's own CLI validate a self-contained deck before launch.
+_CROSSINGS_VALUE_FROM_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/deck.spice" "$probe/probe.json"; rmdir "$probe"' EXIT
+    echo 'V1 out 0 1' > "$probe/deck.spice" || exit 1
+    cat > "$probe/probe.json" <<'KLT_CROSSINGS_PROBE' || exit 1
+{"netlist":"deck.spice","analysis":{"kind":"tran","args":"1n 4n"},
+ "measurements":[{"name":"period","crossings":{"signal":"v(out)","level":0.5,
+ "value_from":"period.mean"}}]}
+KLT_CROSSINGS_PROBE
+    klt sim "$probe/probe.json" --backend local --dry-run --format json
+)"""
+
+# The first supported release segment also identifies development images built
+# before phase selection and stepped eyes. Exercise the installed worker CLI.
+_EYE_STEP_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/eye.sp" "$probe/request.json"; rmdir "$probe"' EXIT
+    echo 'V1 rx 0 1' > "$probe/eye.sp" || exit 1
+    cat > "$probe/request.json" <<'KLT_EYE_PROBE' || exit 1
+{"netlist":"eye.sp","analysis_steps":[{"name":"one","analysis":{"kind":"tran",
+"args":"10p 4n"},"measurements":[{"name":"e","eye":{"signal":"v(rx)","ui":"1n",
+"uis":2,"phase":"500p"}}]}]}
+KLT_EYE_PROBE
+    klt sim "$probe/request.json" --backend local --dry-run --format json
+)"""
+
+
 def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
     """Shell setting ``$mmiss`` to the ``features`` the runner is not known
     to support, from ``$rv`` (the runner's ``klt --version`` string). It
@@ -253,6 +279,19 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
+    if "crossings_value_from" in features:
+        floor = _feature_release_key("crossings_value_from")
+        checks += (
+            f' if [ "$mk" -ge {floor} ] && ! {_CROSSINGS_VALUE_FROM_PROBE} '
+            ">/dev/null 2>&1; then "
+            'mmiss="${mmiss}${mmiss:+, }crossings_value_from"; fi;'
+        )
+    if "eye_step_or_phase" in features:
+        floor = _feature_release_key("eye_step_or_phase")
+        checks += (
+            f' if [ "$mk" -ge {floor} ] && ! {_EYE_STEP_PROBE} >/dev/null 2>&1; then '
+            'mmiss="${mmiss}${mmiss:+, }eye_step_or_phase"; fi;'
+        )
     names = ", ".join(features)
     return (
         "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "

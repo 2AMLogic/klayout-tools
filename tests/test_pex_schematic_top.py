@@ -44,7 +44,9 @@ def _kwargs(tmp_path):
 
 @real_ngspice
 @pytest.mark.parametrize("flatten", [False, True])
-@pytest.mark.parametrize("pin_list", ["RA RB", "(RA RB)", "(RA,RB)"])
+@pytest.mark.parametrize(
+    "pin_list", ["RA RB", "(RA RB)", "(RA,RB)", "RA,RB", "RA , RB"]
+)
 def test_real_resistor_measures_both_sides(tmp_path, design, flatten, pin_list):
     gds, dut, tb, request = design
     tb.write_text(tb.read_text().replace("Xres RA RB rEs", f"Xres {pin_list} rEs"))
@@ -88,6 +90,92 @@ def test_only_instance_target_tokens_change():
         "RB RES m", "RB LAYOUT_RES m"
     )
     assert pex_binding.retarget_calls(body, "RES", "LAYOUT_RES", 2) == expected
+
+
+_PIN_LISTS = ["RA RB", "RA,RB", "RA , RB", "RA ,RB", "RA, RB", "(RA,RB)", "(RA , RB)"]
+
+
+@pytest.mark.parametrize("pins", _PIN_LISTS)
+def test_every_comma_spelling_counts_two_pins(pins):
+    body = f"Xcall {pins} RES\n"
+    assert pex_binding.retarget_calls(body, "RES", "LAYOUT", 2) == body.replace(
+        "RES", "LAYOUT"
+    )
+
+
+@pytest.mark.parametrize("pins", ["RA", "RA,RB,RC", "RA , RB , RC", "(RA,RB,RC)"])
+def test_comma_spellings_still_reject_a_wrong_pin_count(pins):
+    with pytest.raises(ValueError, match="nodes for 2 pins"):
+        pex_binding.retarget_calls(f"Xcall {pins} RES\n", "RES", "LAYOUT", 2)
+
+
+_PRIVATE = ".subckt load p n\n.subckt res a b\nRlocal a b 9000\n.ends res\n"
+
+
+def test_private_subckt_of_the_dut_name_is_not_retargeted():
+    body = (
+        f"{_PRIVATE}Xprivate p n RES\n.ends load\n"
+        ".subckt wrap p n\nXin p n RES\n.ends wrap\n"
+        "Xunit RA RB RES\nXload RB 0 load\n"
+    )
+    expected = body.replace("Xin p n RES", "Xin p n LAYOUT").replace(
+        "Xunit RA RB RES", "Xunit RA RB LAYOUT"
+    )
+    assert pex_binding.retarget_calls(body, "RES", "LAYOUT", 2) == expected
+
+
+def test_a_call_resolving_only_to_a_private_subckt_is_not_a_dut_call(tmp_path):
+    body = f"{_PRIVATE}Xprivate p n RES\n.ends load\nRother RA RB 1\n"
+    assert pex_binding.retarget_calls(body, "RES", "LAYOUT", 2) is None
+    schematic = tmp_path / "dut.spice"
+    schematic.write_text(".subckt RES RA RB\nR1 RA RB 1\n.ends RES\n")
+    testbench = tmp_path / "tb.spice"
+    testbench.write_text(body)
+    with pytest.raises(ValueError, match="no call to 'RES'"):
+        pex_binding.bind("RES", "LAYOUT", str(schematic), [str(testbench)], None)
+
+
+def test_a_private_subckt_named_like_the_extracted_top_is_refused():
+    enclosed = (
+        ".subckt wrap p n\n.subckt layout a b\n.ends layout\nXin p n RES\n.ends wrap\n"
+    )
+    with pytest.raises(ValueError, match="private .subckt 'LAYOUT'"):
+        pex_binding.retarget_calls(enclosed, "RES", "LAYOUT", 2)
+    elsewhere = (
+        ".subckt other a b\n.subckt layout x y\n.ends layout\n.ends other\n"
+        "Xin p n RES\n"
+    )
+    assert pex_binding.retarget_calls(
+        elsewhere, "RES", "LAYOUT", 2
+    ) == elsewhere.replace("n RES", "n LAYOUT")
+
+
+@real_ngspice
+@pytest.mark.parametrize("flatten", [False, True])
+def test_real_private_subckt_of_the_dut_name_keeps_its_own_definition(
+    tmp_path, design, flatten
+):
+    gds, dut, tb, request = design
+    measured = {}
+    for private in ("AUX_R", "rEs"):
+        tb.write_text(
+            f'.include "{dut}"\n.model res_generic_po r\n'
+            ".subckt load p n\n"
+            f".subckt {private} a b\nRlocal a b 9000\n.ends {private}\n"
+            f"Xprivate p n {private}\n.ends load\n"
+            "Vdd RA 0 DC 1.8\nXres RA RB rEs\nXload RB 0 load\n"
+        )
+        report = pex.run_pex(
+            str(gds),
+            [str(request)],
+            "sky130",
+            flatten_schematic=flatten,
+            **_kwargs(tmp_path),
+        )
+        assert report["status"] == "pass"
+        (row,) = report["delta"]
+        measured[private] = (row["schematic_value"], row["extracted_value"])
+    assert measured["rEs"] == pytest.approx(measured["AUX_R"], rel=1e-9)
 
 
 @pytest.mark.parametrize(

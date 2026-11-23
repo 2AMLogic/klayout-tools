@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from ._spice_text import strip_spice_inline_comment
 from ._spice_tokens import split_spice_tokens
@@ -34,20 +35,65 @@ def _masked_body(text: str) -> str:
 
 
 def _node_count(nodes: list[str]) -> int:
-    # The shared lexer keeps a parenthesized pin list together. Its original
-    # token is still needed to find the target's byte offset in the input.
-    if len(nodes) == 1 and nodes[0].startswith("(") and nodes[0].endswith(")"):
-        return len(split_spice_tokens(nodes[0][1:-1].replace(",", " ")))
-    return len(nodes)
+    # Commas separate pins wherever they fall (`a,b`, `a , b`, `(a,b)`), but
+    # the shared lexer keeps those spellings as different tokens. The original
+    # tokens are still needed to find the target's byte offset in the input.
+    count = 0
+    for node in nodes:
+        if node.startswith("(") and node.endswith(")"):
+            node = node[1:-1]
+        count += len(split_spice_tokens(node.replace(",", " ")))
+    return count
+
+
+_SUBCKT_LINES = re.compile(r"^[ \t]*\.(?:subckt|ends)\b[^\n]*", re.I | re.M)
+
+
+@dataclass
+class _Scope:
+    start: int
+    end: int
+    name: str
+    parent: int | None
+
+
+def _scopes(masked: str) -> list[_Scope]:
+    """Every `.subckt` body in the testbench, with its enclosing body."""
+    scopes: list[_Scope] = []
+    open_: list[int] = []
+    for line in _SUBCKT_LINES.finditer(masked):
+        tokens = split_spice_tokens(line[0])
+        if tokens[0].casefold() == ".subckt":
+            name = tokens[1].casefold() if len(tokens) > 1 else ""
+            scopes.append(
+                _Scope(line.end(), len(masked), name, open_[-1] if open_ else None)
+            )
+            open_.append(len(scopes) - 1)
+        elif open_:
+            scopes[open_.pop()].end = line.start()
+    return scopes
+
+
+def _private_names(scopes: list[_Scope], at: int) -> set[str]:
+    """Names of `.subckt`s defined inside a body enclosing offset ``at``."""
+    enclosing = {i for i, scope in enumerate(scopes) if scope.start <= at < scope.end}
+    return {scope.name for scope in scopes if scope.parent in enclosing}
 
 
 def retarget_calls(
     text: str, schematic: str, physical: str, pin_count: int | None
 ) -> str | None:
-    """Replace only the selected X-call target tokens, preserving all other bytes."""
+    """Replace only the selected X-call target tokens, preserving all other bytes.
+
+    A call resolves to the included schematic unless a `.subckt` of the same name
+    is defined inside an enclosing testbench subcircuit; such private calls are
+    left alone, and a private definition of the physical name is refused.
+    """
     chunks: list[str] = []
     end = 0
-    for match in _X_CARDS.finditer(_masked_body(text)):
+    masked = _masked_body(text)
+    scopes = _scopes(masked)
+    for match in _X_CARDS.finditer(masked):
         card = _CONTINUATION.sub(lambda prefix: " " * len(prefix[0]), match[0])
         tokens = split_spice_tokens(card)
         try:
@@ -56,6 +102,14 @@ def retarget_calls(
             continue
         if target.casefold() != schematic.casefold():
             continue
+        private = _private_names(scopes, match.start())
+        if schematic.casefold() in private:
+            continue
+        if physical.casefold() in private:
+            raise ValueError(
+                f"instance '{tokens[0]}' would call a private .subckt "
+                f"'{physical}' instead of the extracted top"
+            )
         actual_pins = _node_count(nodes)
         if pin_count is not None and actual_pins != pin_count:
             raise ValueError(

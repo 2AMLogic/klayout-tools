@@ -44,6 +44,9 @@ from ._provenance import (
     sha256_file_required,
 )
 from .env_provenance import find_repo_root, repo_relative_path
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
 from .functional_verification_from_synthesize import (
     resolve_sources_with_synthesize,
     with_from_synthesize,
@@ -69,8 +72,6 @@ class RunInputs(NamedTuple):
             try:
                 self.provenance["sdf_sha256"] = sha256_file_required(sdf["file"])
             except OSError as exc:
-                from .functional_verification import FunctionalVerificationError
-
                 raise FunctionalVerificationError(
                     f"Cannot hash original SDF {sdf['file']!r}: {exc}"
                 ) from exc
@@ -138,8 +139,6 @@ def resolve_run_inputs(
     #5782) merge over the request's ``pdk`` block here; with no pdk input at
     all the result is byte-identical to before the issue."""
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        from .functional_verification import FunctionalVerificationError
-
         raise FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
