@@ -1,6 +1,6 @@
 # `klt signoff`
 
-Four modes, one verb:
+Six modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
    more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield`/`klt pex`/`klt
@@ -52,6 +52,13 @@ Four modes, one verb:
    **no longer accept native envelopes** (item 2 still does; item 8 still
    accepts a bare generic envelope — `--attest 8` is the tool-produced
    alternative). See "Attesting items 1, 8, 9 and 10" below.
+6. **Compare two saved reports** (`--diff-reports OLD NEW`, issue #6850) —
+   diff the *checklist* surfaces of two previously committed tier reports
+   (the source doc + content hash and each row's `title`/`text`/`notes`),
+   reading nothing but the two files — for the evidence reviewer who has
+   the two snapshots but no longer has the manifest, the evidence, or the
+   grading build. See "Comparing two saved reports: `--diff-reports`"
+   below.
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
@@ -75,6 +82,7 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
 # The --attest 2 (stream) forms first ship in klt 0.9.0 (PyPI); 0.8.0 and earlier refuse --attest 2.
 klt signoff --attest 2 --input <stream> [--inventory <file>] [--generator CMD --regenerated-hash sha256:<hash>] [-o <envelope> [--skip-local-only]] [--format text|json]
 klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format text|json]
+klt signoff --diff-reports <old-report> <new-report> [--format text|json] [--color auto|always|never] [--no-color]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -111,6 +119,17 @@ klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format t
   `doc_drift: true` alongside `status: "match"` rather than failing the gate
   (issue #2526). Use this instead of byte-comparing a committed report
   against a fresh render — see "Verifying a committed report: `--check`"
+  below.
+- `--diff-reports` — two paths to previously committed `--manifest` tier
+  report JSON files (issue #6850): compare the two snapshots' *checklist*
+  surfaces instead of grading anything. Read-only and self-sufficient — it
+  needs neither the manifest nor the evidence nor the grading build, just
+  the two files. Rows are matched by `(tier, id, partition)`, so reordered
+  rows alone — or a verdict-only/build-only change — compare as unchanged.
+  Exits `0` for any completed comparison, movement included; `1` for an
+  unreadable file, a non-tier report, or an ambiguous duplicate row key.
+  Mutually exclusive with `<file>...`/`--manifest`/`--fleet`/`--check` and
+  every grading flag. See "Comparing two saved reports: `--diff-reports`"
   below.
 - `--describe-grader` — print which T1 item ids this build has grading rules
   for, plus its grading-code content hash. Mutually exclusive with
@@ -1292,6 +1311,10 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
 - `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
   what this block's two partitions *denote*. See "The declared partition
   boundary" below.
+- `upstream_source` — optional, any kind (issue #6972): where a block
+  **consumed from another repository at a pinned commit** came from:
+  `{"repository": <locator>, "commit": <full hexadecimal Git commit ID>}`.
+  See "The declared upstream source" below.
 - `require_coverage_disclosure` — optional boolean (default `false`, issue
   #5789): the item-3 ratchet comparing each cited `klt drc` report's
   `coverage` block against the `coverage_disclosed` declaration on its
@@ -1706,6 +1729,90 @@ The fleet roll-up (`--fleet`) does not restate it: a roll-up row is a
 reduction — tier, counts, and what is blocking — and already directs a
 reader to the block's own `--manifest` report, which carries the
 declaration in full.
+
+### The declared upstream source (issue #6972)
+
+A repo can assemble a design from blocks **consumed from other repositories
+at pinned commits**: the consumer commits the block's evidence reports and
+a small pin record (repo URL + commit), but not the block's design
+sources. Before this field, nothing `klt signoff` read recorded that
+binding — the report said `block:`/`kind:` and nothing distinguished
+"every cited artifact was produced in this repo" from "the block's sources
+live in another repository at a commit only a non-graded local file
+records", and a pin bump staled nothing the grader reads.
+
+`upstream_source` is where that declaration lives:
+
+```json
+{
+  "block": "sky130-bandgap",
+  "kind": "analog",
+  "upstream_source": {
+    "repository": "https://github.com/2AMLogic/example-blocks",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "evidence": {"3": "drc.json", "4": "lvs.json"}
+}
+```
+
+It is **reported, never graded** — the same treatment "The declared
+partition boundary" above describes. `klt signoff` never contacts the
+remote, reads no consumer lockfile, and attests nothing about whether the
+cited evidence was *generated* from the declared commit; it records the
+pin so the report of record names the upstream revision its evidence
+belongs to. Declaring one moves no item's `status` and no block's `tier`,
+and a manifest declaring none renders exactly the report it rendered
+before this field existed.
+
+The object describes the design sources for the **whole block**, so it
+applies to every block kind (unlike `partition_boundary`, which is
+`"mixed-signal"`-only) and echoes **once**, at the top level of the
+report — on no `items[]` row. The fleet roll-up row carries the same
+object under its own `upstream_source`, beside the row's `source` — which
+stays what it always was: the local manifest path, or `null` for an
+inline manifest, the locator for the *pin record*, while
+`upstream_source` is the locator for the *design sources the pin names*.
+
+`--format text` prints it once, under the `block:`/`kind:` header (and as
+an `upstream:` line on the roll-up row, in fleet mode):
+
+```
+$ klt signoff --manifest manifest.json --format text
+block: sky130-bandgap  kind: analog
+upstream source: https://github.com/2AMLogic/example-blocks @ 0123456789abcdef0123456789abcdef01234567
+tier: none
+T1: 2/11 items met
+```
+
+**The staleness story.** The declaration is part of the claim a committed
+report records. When the consumer bumps its pin and lands new evidence, it
+updates the manifest's `upstream_source` too, and `--check` re-grading the
+old report against the updated manifest returns `"drifted"` (exit `3`)
+naming `upstream_source.commit` (or `upstream_source.repository`; on a
+fleet roll-up, `blocks[].upstream_source.commit`) even with the evidence
+files held fixed — which is exactly how a report graded against one
+upstream revision is told apart from one graded against another. A
+pre-feature report still matches a manifest that omits the declaration:
+an absent field is compared as absent on both sides.
+
+Out of scope, deliberately: remote Git access, discovery of
+consumer-specific lockfiles, and attestation that evidence was generated
+from the declared commit. A change solely in a separate pin file is
+invisible until the consumer updates its manifest — the consumer updates
+the declaration when it bumps the pin.
+
+Rules, and why each one is a refusal rather than a silent drop:
+
+| Manifest | Result |
+|---|---|
+| Field omitted, or `null` | Nothing declared. No `upstream_source` key anywhere in the report — an undeclared manifest renders exactly the report it rendered before this field existed, so `--check` reports no drift on an upgrade alone. |
+| A well-formed pair | Accepted. `repository` is any non-empty string locator; `commit` is a full hexadecimal Git commit ID — 40 hex digits, or 64 in a SHA-256 repository — matched case-insensitively and reported lowercase, so two manifests naming the same commit in different case render the same report bytes. |
+| A non-object, an incomplete pair, a blank/non-string `repository`, or a branch/tag/shortened SHA in place of a full commit ID | **Error** (exit `1`), naming `upstream_source.<member>`. A branch or tag is a *moving* reference, not a pin — a report recording one would silently re-point itself on every upstream push. |
+| A member other than `"repository"`/`"commit"` | **Error**. A typo'd member name would otherwise vanish from the report with no signal. |
+
+Additive per [`../json-contract.md`](../json-contract.md): the field is
+present only when the manifest declares a pin, so no `schema_version`
+bump.
 
 ### Items 1, 2, 9, and 10: bind them to an audited artifact
 
@@ -3829,11 +3936,11 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   drift" below.
 - **Everything else is compared**: every `items[]` `status`/`reason`/
   `citation` (including each citation's `content_hash`/`input_verified`),
-  every `id`/`tier`/`partition`/`partition_boundary`, `t1_item_count`,
-  `build_t1_item_count`, `t1_met_count`, `graded_by_build`, and
-  `source_doc` (*where* the doc came from — grading against a `--tiers-doc`
-  override instead of the bundled copy is a different grading run, not a
-  reworded one).
+  every `id`/`tier`/`partition`/`partition_boundary`, `upstream_source`,
+  `t1_item_count`, `build_t1_item_count`, `t1_met_count`,
+  `graded_by_build`, and `source_doc` (*where* the doc came from — grading
+  against a `--tiers-doc` override instead of the bundled copy is a
+  different grading run, not a reworded one).
 - **A report predating the `build` block verifies normally.** An excluded
   path is skipped whether or not either side carries it, so a report
   committed before issue #2176 still verifies on its graded content instead
@@ -3925,6 +4032,76 @@ Note that this is a separate question from drift: a version pin alone does
 not pin the grading build (that is what `grading_ruleset_id` is for, below),
 and `--check` excludes the whole `build` block from its verdict precisely
 because two legitimate installs of the same commit disagree about it.
+
+### Comparing two saved reports: `--diff-reports` (issue #6850)
+
+`--check` answers "does this committed report still reproduce" by
+**re-grading its manifest** — so it needs the manifest, the evidence that
+manifest cites, and a working grading build. An evidence reviewer holding
+two *saved* tier reports and none of that (the manifest was never
+committed, the evidence was archived, the build was upgraded) still has one
+question to answer: *what changed in the checklist between these two
+snapshots?* `--diff-reports` answers it from the two files alone:
+
+```bash
+# What moved in the checklist between two committed tier reports.
+# Always exits 0 on a completed comparison -- read the JSON for the movement.
+klt signoff --diff-reports reports/block.signoff.v1.json \
+  reports/block.signoff.v2.json --format json
+```
+
+```json
+{
+  "schema_version": 1,
+  "mode": "diff-reports",
+  "old_report": "reports/block.signoff.v1.json",
+  "new_report": "reports/block.signoff.v2.json",
+  "changed": true,
+  "source": [
+    { "field": "source_doc_content_hash",
+      "old": "sha256:…", "new": "sha256:…" }
+  ],
+  "items": {
+    "changed": [
+      { "tier": "T1", "id": 7, "partition": null, "field": "text",
+        "old": "…", "new": "… (reworded)" }
+    ],
+    "added": [
+      { "tier": "T1", "id": 12, "partition": null,
+        "title": "…", "text": "…", "notes": [] }
+    ],
+    "removed": []
+  }
+}
+```
+
+- **The comparison covers exactly the checklist-describing surfaces**: the
+  top-level `source_doc`/`source_doc_content_hash` (which checklist doc the
+  report quotes, and the hash of what it said) and each matched row's
+  `title`/`text`/`notes` — the same three item fields `--check` excludes
+  from its verdict as `doc_drift` (issue #2526). Everything else — every
+  `status`/`reason`/`citation`, the `t1_*` counts, the `build` block — is
+  grading output or install identity, and a report pair differing *only*
+  there compares as unchanged. The mode is the read-only complement of
+  `--check`: it reports the movement `--check` deliberately ignores,
+  without needing anything the grading touched.
+- **Rows are matched by `(tier, id, partition)`** — the row identity the
+  report itself carries. Reordering `items[]` alone therefore compares as
+  unchanged; the analog and digital rows of a mixed-signal pair that share
+  a numeric id stay distinct; and the T2–T4 ladder rows (`id: null`) are
+  distinguished by their tier. Each row present on only one side is
+  identified **once**, in `added`/`removed`, with its full checklist
+  content (`title`/`text`/`notes`).
+- **`changed` is the boolean summary; the lists are the answer.** `source[]`
+  and `items.changed[]` entries carry both values as `old`/`new`.
+- **Exit `0` for any completed comparison, movement included** — reporting
+  movement is this mode's answer, not a failure. Exit `1` is a failure to
+  run: an unreadable/non-JSON file, a report that is not a tier report (a
+  fleet roll-up, an unrelated JSON object), or a report carrying two rows
+  with the same `(tier, id, partition)` key, which could not be matched
+  unambiguously.
+- Fleet roll-ups and attestation envelopes are out of scope: point the mode
+  at reports `--manifest` produced.
 
 ### Re-pinning a stale hash: `--repin` (issue #5527)
 
@@ -6116,6 +6293,7 @@ interconnect between sub-blocks) — not something `composed_of` decides.
 | `block`         | string \| null       | Echoed from the manifest's `block` field.                                                |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
 | `partition_boundary` | object          | **Present only when a `"mixed-signal"` manifest declared one** (issue #2278): `{"analog": <string>, "digital": <string>}` — what each partition denotes (which nets/pins/cells belong to which side), echoed verbatim from the manifest, with only the partitions it actually declared. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `drc_coverage` and `body_bias`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#2278 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared partition boundary" above. |
+| `upstream_source` | object          | **Present only when the manifest declared one** (issue #6972): `{"repository": <string>, "commit": <string>}` — where a block **consumed from another repository at a pinned commit** came from, echoed from the manifest (the commit lowercased). One object for the whole block, on no `items[]` row. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `partition_boundary`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#6972 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared upstream source" above. |
 | `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"` (or, item 6 only, a guarded `"not_applicable"`); otherwise `null` — no partial credit. |
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
@@ -6458,6 +6636,7 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `block`         | string               | The block's name, from its manifest's `block` field.                                     |
 | `source`        | string \| null       | The fleet manifest entry's file path, or `null` for an inline block manifest.             |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the block's manifest.           |
+| `upstream_source` | object \| null     | **Present only when this block's manifest declared one** (issue #6972): the declared upstream pin `{"repository", "commit"}`, echoed verbatim from the block's tier report — where the block's design sources live, as opposed to `source` above (the local manifest path, the locator for the *pin record*). The text roll-up prints an `upstream: <repository> @ <commit>` line on the row. Never graded. |
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
@@ -6724,6 +6903,14 @@ Fleet roll-up mode (`--fleet`):
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | Always, once argument validation passes — purely informational, cannot fail. |
 | `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`/`--repo-root`. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
+
+`--diff-reports` mode (issue #6850):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | Any completed comparison, movement included — the movement is the answer, not a failure. Gate on `.changed`, not the exit code. |
+| `1`       | `--diff-reports` was combined with another mode's flag (`<file>...`/`--manifest`/`--fleet`/`--check`/`--attest`/`--describe-grader`/`--repin`/a grading flag/`-o`); or either report was missing/unreadable/not valid JSON/not a JSON object, was not a tier report (no `items` array — a fleet roll-up, an attestation envelope, an unrelated file), or carried two rows with the same `(tier, id, partition)` key. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 
 `--attest` mode (issue #2844):

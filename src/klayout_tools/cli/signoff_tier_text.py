@@ -151,6 +151,37 @@ def _print_justified_gaps(item: dict) -> None:
             )
 
 
+def _print_partition_boundary(result: dict) -> None:
+    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
+    #2278) under the `block:`/`kind:` header, or nothing when it declared
+    none.
+
+    Printed **once per declared partition**, not on each of that partition's
+    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
+    beside the citation they qualify), the boundary is one constant statement
+    per partition, and restating it eleven times would bury the checklist it
+    qualifies. The JSON carries it per row as well, where a consumer
+    filtering `.items[]` needs each row to be self-contained.
+
+    Absent entirely when nothing was declared -- "no statement" must not read
+    as "the partitions were defined" -- exactly as an undeclared boundary is
+    absent from the JSON rather than rendered `null`.
+    """
+    boundary = result.get("partition_boundary") or {}
+    if not boundary:
+        return
+    print("partition boundary:")
+    for partition, text in boundary.items():
+        print(f"  {partition}: {text}")
+
+
+def print_upstream_source(result: dict, label: str) -> None:
+    """Print the manifest's upstream repository and commit when declared."""
+    upstream = result.get("upstream_source")
+    if upstream:
+        print(f"{label}: {upstream['repository']} @ {upstream['commit']}")
+
+
 def _print_structural_rows(item: dict) -> None:
     """Each structurally dispositioned row with its evidence (issue #6985):
     the claimed fact and the hash-bound artifact that evidences it. The

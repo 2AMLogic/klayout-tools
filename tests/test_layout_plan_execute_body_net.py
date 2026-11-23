@@ -3,7 +3,7 @@
 A MOS body is not a per-device port -- it is one well/substrate tie shared by
 every device a ``device_groups[]`` entry declares -- so
 ``layout_plan_execute`` binds it group-level, via
-``layout_plan_ports.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
+``layout_plan_body_nets.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
 (#4143), the shared ``WELL_TAP`` port a ring-less pfet array draws on
 sg13cmos5l (#1473, #5948), or, for a group that draws its own guard ring,
 that ring's first ``TAP_<side>`` port.
@@ -21,13 +21,13 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import pdk
+from klayout_tools.layout_plan_body_nets import body_tie_port, group_body_nets
 from klayout_tools.layout_plan_execute import (
     LayoutPlanExecuteError,
     execute_layout_plan_document,
     exit_code_for,
     partial_success,
 )
-from klayout_tools.layout_plan_ports import body_tie_port, group_body_nets
 from test_layout_plan_execute import _make_install, _write
 
 

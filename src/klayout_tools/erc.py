@@ -42,10 +42,9 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
-from . import env_provenance
+from . import _warn, env_provenance
 from . import erc_antenna_gf180mcu as _gf180
 from ._devices import (
     _conductor_role_layers,
@@ -2235,13 +2234,12 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     file still sees it (JSON goes to stdout only -- ``docs/json-contract.md``).
     ``verb`` is the calling command (``"klt erc"``), so the line names the
     tool the caller actually ran."""
-    print(
+    _warn.warn(
         f"{verb}: warning: stackup entry {name!r} declares label_layer "
         f"{label_layer}, but that layer carries no text anywhere in the "
         "analysed top cell -- nets matched through it resolve zero islands "
         "(erc.unconnected_net) and its gates[].net reads null. Check the "
-        "label layer/datatype.",
-        file=sys.stderr,
+        "label layer/datatype."
     )
 
 

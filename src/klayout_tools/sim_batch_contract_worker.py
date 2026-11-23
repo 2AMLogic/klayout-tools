@@ -10,6 +10,7 @@ import shlex
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ._digest import normalize_sha256
 from .remote_launcher import (
     RemoteLaunchError,
     published_runner_identities,
@@ -55,6 +56,29 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
         return None
     cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
     return cleaned[:limit]
+
+
+def _capture_engine_digest(request: dict[str, Any]) -> bool:
+    return "decks" not in request and request.get("engine", "ngspice") == "ngspice"
+
+
+def _bounded_simulator(
+    raw: Any, request: dict[str, Any] | None
+) -> dict[str, str | None]:
+    """Sanitize the simulator capture before incorporating it into a report."""
+    sim = raw if isinstance(raw, dict) else {}
+    result = {
+        "requested_binary": _bounded_str(sim.get("requested_binary")),
+        "binary_source": _bounded_str(sim.get("binary_source"), 40),
+        "selected_path": _bounded_str(sim.get("selected_path")),
+        "version_banner": _bounded_str(
+            sim.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
+        ),
+        "version_probe": _bounded_str(sim.get("version_probe"), 40),
+    }
+    if "binary_sha256" in sim and _capture_engine_digest(request or {}):
+        result["binary_sha256"] = normalize_sha256(sim["binary_sha256"])
+    return result
 
 
 def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
@@ -133,8 +157,10 @@ _WORKER_CAPTURE_PROGRAM = r"""
 import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
-out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-model_names = sys.argv[5:5 + @MODELS@]
+capture_digest = sys.argv[1] != "--omit-binary-digest"
+args = sys.argv[1:] if capture_digest else sys.argv[2:]
+out, req_bin, variant, staged = args[:4]
+model_names = args[4:4 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -150,6 +176,12 @@ def guard(label, fn, default=None):
 def read(path, n):
     with open(path, "rb") as h:
         return h.read(n + 1)[:n].decode("utf-8", "replace")
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 doc = {"schema": 1}
 def sim():
     sel = req_bin or os.environ.get("KLT_NGSPICE_BINARY") or "ngspice"
@@ -159,6 +191,8 @@ def sim():
          "selected_path": clip(path) if path else None, "version_banner": None,
          "version_probe": "unavailable"}
     if path:
+        if capture_digest:
+            s["binary_sha256"] = guard("simulator digest", lambda: file_sha256(path))
         try:
             r = sp.run([path, "--version"], stdin=sp.DEVNULL,
                                stdout=sp.PIPE, stderr=sp.STDOUT,
@@ -236,11 +270,7 @@ def model_inputs():
     base = os.environ.get("EDA_INPUT_DIR") or "."
     found = []
     for name in model_names:
-        h = hashlib.sha256()
-        with open(os.path.join(base, name), "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        found.append({"name": clip(name), "sha256": h.hexdigest()})
+        found.append({"name": clip(name), "sha256": file_sha256(os.path.join(base, name))})
     return found
 doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
@@ -276,11 +306,14 @@ def _worker_capture_command(
         *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
+    digest_flag = (
+        "" if _capture_engine_digest(remote_request) else "--omit-binary-digest "
+    )
     return (
         'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
-        f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+        f"{digest_flag}{target} {' '.join(args)} 2>/dev/null; true; }}"
     )
 
 
