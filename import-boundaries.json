@@ -1055,6 +1055,7 @@
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_mismatch_scale",
         "klayout_tools.sim_measurement_grading",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
