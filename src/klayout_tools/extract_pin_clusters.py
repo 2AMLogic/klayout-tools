@@ -12,10 +12,11 @@ def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
     """Map each promoted pin's underlying net's ``cluster_id`` to its 0-based
     position in ``circuit.each_pin()`` order -- issue #1540.
 
-    KLayout's ``NetlistSpiceWriter`` uses that exact order. A caller can link a
-    written ``.SUBCKT`` port index to a ``nets[]`` row via ``net_id`` without an
-    LVS run, even when separately drawn nets share a name. Manually created
-    nets with cluster ID zero collapse onto one key (the last pin wins).
+    KLayout's ``NetlistSpiceWriter`` emits ports in this order. Even when names
+    collide, a caller can match the original port position to a ``nets[]`` row
+    via ``net_id`` without an LVS run. Explicit ``--pins`` can reorder the final
+    top-level ``.SUBCKT`` header after writing. Manually created nets with
+    cluster ID zero collapse onto one key (the last pin wins).
     """
     result: dict[int, int] = {}
     for index, pin in enumerate(circuit.each_pin()):

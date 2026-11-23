@@ -465,11 +465,11 @@ def _describe_nets(
 
     Flattening repeated cells can give separate nets the same name (#1540).
     ``net_id`` identifies the KLayout cluster within this extraction.
-    ``pin_index`` gives its zero-based SPICE port position, or ``None`` for
-    an internal net. ``label_positions_um`` locates the labels that named it.
-    Both :func:`_net_label_positions` and :func:`_pin_index_by_net_id` use
-    cluster identity. An omitted ``net_label_positions`` defaults to an empty
-    mapping, so a net without supplied label geometry gets an empty list.
+    ``pin_index`` gives its zero-based position in KLayout's original SPICE
+    writer order, or ``None`` for an internal net. Explicit ``--pins`` can reorder
+    the final top-level header. Both :func:`_pin_index_by_net_id` and
+    :func:`_net_label_positions` use cluster identity. ``label_positions_um``
+    lists the drawn label locations, defaulting to an empty list.
     """
     pin_nets = {pin.expanded_name() for pin in _each_pin_net(circuit)}
     pin_index_by_net_id = _pin_index_by_net_id(circuit)

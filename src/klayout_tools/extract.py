@@ -3873,12 +3873,12 @@ def _canonicalize_extract_report_for_rerun_diff(
     ``klt extract --check <report> --rerun`` stops reporting bookkeeping-only
     differences as ``status: "drifted"``:
 
-    - every ``net_id`` (KLayout's per-run cluster counter) is stripped
-      recursively. Same-run consumers use that counter to resolve nets with
-      colliding names (see :func:`~klayout_tools.extract_parasitics._net_identity_name`
-      and :func:`_mom_ground_entry_for_crosscheck`). Only top-level net rows lose
-      ``structural_id``, so
-      pre-field committed reports stay comparable (#5735);
+    - strip every ``net_id`` recursively. Within one run,
+      :func:`_inject_parasitics` indexes nets by cluster ID in ``nets_by_id`` and
+      :func:`_mom_ground_entry_for_crosscheck` matches that ID even when names collide.
+      :func:`~klayout_tools.extract_parasitics._net_identity_name` normalizes the
+      expanded name for use inside the circuit. Drop ``structural_id`` only from
+      top-level net rows to keep pre-field reports comparable (#5735);
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
       (that net's own sorted ``<device>.<terminal>`` attachment list), so
