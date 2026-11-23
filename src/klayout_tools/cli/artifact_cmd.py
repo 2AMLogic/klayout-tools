@@ -20,7 +20,9 @@ Exit codes:
         adds: no entry resolved to a file (``nothing_verified``) and an
         entry name that escapes the verify root (``name_escapes_root``).
     (delete: 0 - dry run reported, or objects deleted / already absent; 1 - a
-        referenced object, a broker refusal or an unreachable broker.)
+        referenced object, a broker refusal or an unreachable broker -- a
+        broker without a delete op (404/405/501) is code
+        ``unsupported_operation``, other refusals ``broker_refused``.)
     3 - verify only: ran, and at least one checked entry is missing or
         mismatched (broker-backed or --local)
 (2 is reserved for argparse usage errors.)
@@ -102,11 +104,14 @@ def _print_put_text(payload: dict[str, Any]) -> None:
 def _target_for_ref(
     ref: str, repo: str | None
 ) -> tuple[store.FetchTarget, dict[str, Any] | None]:
-    """A bare sha256 (with the repo from config), or ``MANIFEST[#SELECTOR]``."""
+    """A bare sha256 (with the repo from config), an ``artifact:<key>`` URI (as
+    a manifest entry's ``uri`` publishes it), or ``MANIFEST[#SELECTOR]``."""
     if len(ref) == 64 and all(c in "0123456789abcdef" for c in ref):
         return store.FetchTarget(
             kind="evidence", repo=store.resolve_repo(repo), sha256=ref
         ), None
+    if ref.startswith(f"{store.URI_SCHEME}:"):
+        return store.target_for_uri(ref, repo), None
     path, _, selector = ref.partition("#")
     entry = store.select_entry(store.load_manifest(path), selector or None, path)
     return store.target_for_entry(entry), entry

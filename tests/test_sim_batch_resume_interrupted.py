@@ -4,8 +4,8 @@ single-job path (issue #5459); split from test_sim_batch.py to keep it small."""
 
 from __future__ import annotations
 
+import hashlib
 import json
-import time
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
@@ -122,10 +122,13 @@ def _one_job_resume_fixture(tmp_path, monkeypatch, **batch):
         },
     }
 
+    netlist = _write_body(tmp_path)
+
     def run(*, resume=False):
         return sb._run_batch(
             corner_points=_corner_points(1),
-            netlist_path=str(_write_body(tmp_path)),
+            netlist_path=str(netlist),
+            netlist_sha256=hashlib.sha256(netlist.read_bytes()).hexdigest(),
             models_lib=None,
             analysis={"kind": "tran", "args": "1n 1u"},
             measurements_spec=_measurements_spec(),
@@ -169,12 +172,24 @@ def test_resume_resubmits_a_single_unit_job_that_stays_interrupted(
     launches_before = len(_launches(runner))
     _stick_job_status(monkeypatch, {stuck: "interrupted"})
 
-    started = time.monotonic()
-    corners, _, environment = run(resume=True)
-    elapsed = time.monotonic() - started
+    # Record the grace each poll loop is given rather than timing the call:
+    # wall clock also counts fixture I/O and a loaded runner (issue #6321).
+    graces: list[tuple[str, float]] = []
+    real_poll = sb._poll_status_interruptibly
 
-    # Reported after ~one poll, not after another full `interrupted_grace_s`.
-    assert elapsed < grace_s / 2
+    def spy(config, job_id, **kwargs):
+        graces.append((job_id, config.interrupted_grace_s))
+        return real_poll(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "_poll_status_interruptibly", spy)
+
+    corners, _, environment = run(resume=True)
+
+    # The re-attach to the stuck job waits the shortened resume grace -- about
+    # one poll -- not another full `interrupted_grace_s`; only the fresh
+    # resubmit gets the request's own grace.
+    assert graces[0] == (stuck, 0.01)
+    assert [g for job, g in graces if job != stuck] == [grace_s]
     assert len(_launches(runner)) == launches_before + 1
     assert not _codes(corners)
     assert environment["job_id"] != stuck
@@ -224,6 +239,26 @@ def test_resume_still_reattaches_a_running_single_unit_job(tmp_path, monkeypatch
     assert len(_launches(runner)) == launches_before
     assert _codes(corners) == {"batch_poll_timeout"}
     assert _receipt_job_id(receipt_path) == attached
+
+
+def test_resume_submits_a_new_single_unit_job_after_the_deck_changes(
+    tmp_path, monkeypatch
+):
+    runner, run, receipt_path = _one_job_resume_fixture(tmp_path, monkeypatch)
+    run()
+    previous = json.loads(receipt_path.read_text())
+    launches_before = len(_launches(runner))
+    netlist = tmp_path / "body.spice"
+    netlist.write_text(netlist.read_text().replace("1k", "2k"))
+    new_digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    assert new_digest != previous["netlist_sha256"]
+
+    corners, _, environment = run(resume=True)
+
+    assert not _codes(corners)
+    assert len(_launches(runner)) == launches_before + 1
+    assert environment["job_id"] != previous["job_id"]
+    assert json.loads(receipt_path.read_text())["netlist_sha256"] == new_digest
 
 
 def test_resume_reattaches_a_done_single_unit_job_without_relaunching(
@@ -285,3 +320,56 @@ def test_resume_resubmits_a_single_unit_job_that_had_failed(tmp_path, monkeypatc
     assert len(_launches(runner)) == launches_before + 1
     assert environment["job_id"] != stuck
     assert not _codes(corners)
+
+
+# --------------------------------------------------------------------------- #
+# `--resume` harvests the retained shard map (issue #5775)
+# --------------------------------------------------------------------------- #
+
+
+def test_shard_map_records_each_shards_unit_ids(tmp_path, monkeypatch):
+    """Issue #5775: each map entry carries its ordered corner ids, so a
+    later harvest (or `--attach`) can recover what a job ran without
+    re-deriving the partition that minted it."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+
+    document = json.loads(manifest_path.read_text())
+    assert [entry["units"] for entry in document["shards"]] == [
+        ["tt/1.800V/0C", "tt/1.800V/1C"],
+        ["tt/1.800V/2C", "tt/1.800V/3C"],
+    ]
+
+
+def test_replanned_partition_does_not_reproduce_old_shards():
+    """The finding-4 measurement (issue #5775): a shrunken dispatch set
+    re-plans to *different* shard groupings -- even a contiguous suffix of
+    outstanding units regroups, because the split boundaries move -- so the
+    manifest's per-index digest gate cannot be what provides reuse. The
+    harvest (collect before planning) is."""
+    full = _corner_points(27)
+    from klayout_tools.sim_remote import _shard_corner_points
+
+    old_shards = [
+        [p.corner_id for p in points]
+        for points in _shard_corner_points(full, 14)
+        if points
+    ]
+    # Six outstanding units (a contiguous suffix, the friendliest case)...
+    outstanding = full[21:]
+    new_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(outstanding, 3)
+        if points
+    ]
+    # ...still regroup: no new shard equals an old one.
+    old_sets = [set(ids) for ids in old_shards]
+    assert not any(new in old_sets for new in new_shards)
+    # And a non-contiguous outstanding set regroups just the same.
+    scattered = [full[0], full[5], full[11]]
+    scattered_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(scattered, 2)
+        if points
+    ]
+    assert not any(new in old_sets for new in scattered_shards)

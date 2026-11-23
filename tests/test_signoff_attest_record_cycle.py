@@ -196,7 +196,14 @@ def test_the_check_mode_of_the_deadlocked_tree_carries_no_hint(converged, capsys
     assert _attest("--check", _ENVELOPE, "--format", "json") == 3
 
     payload = json.loads(capsys.readouterr().out)
-    assert "hint" not in json.dumps(payload)
+    # The guarded thing is the deadlock advice, attached only by mint mode's
+    # attach_live_fields (hints=False here): no check carries the additive
+    # `hint` field, and the advice text itself appears nowhere in the payload.
+    # A stale-pin hint inside a check's output_tail is the inner record
+    # check's own report text, faithfully captured -- not this run's advice.
+    checks = payload["fresh"]["attestation"]["checks"]
+    assert all("hint" not in c for c in checks)
+    assert "this check re-verifies a tier-verdict record" not in json.dumps(payload)
 
 
 def test_the_written_envelope_never_carries_the_hint(converged, capsys):
@@ -209,5 +216,9 @@ def test_the_written_envelope_never_carries_the_hint(converged, capsys):
     assert _mint_envelope() == 0
 
     payload = json.loads((repo / _ENVELOPE).read_text())
-    assert "hint" not in json.dumps(payload)
+    # The envelope is written before attach_live_fields runs, so no additive
+    # field is ever built into it -- and the deadlock advice text appears
+    # nowhere in it either.
+    assert all("hint" not in c for c in payload["attestation"]["checks"])
+    assert "this check re-verifies a tier-verdict record" not in json.dumps(payload)
     capsys.readouterr()

@@ -1,27 +1,16 @@
 """Electrical-check (``report_check_types``) markers and parsers for ``klt sta``.
 
 Split out of :mod:`klayout_tools.post_route_sta` (issues #3005, #5241) to keep
-that module under its file-size ceiling. ``post_route_sta`` re-imports every
-name here, so existing ``post_route_sta._parse_electrical_check`` etc.
-references keep working.
+that module under its file-size ceiling.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when either
-    marker is absent (same contract as ``post_route_sta._extract_block``)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
-
+from ._sta_request_diag import extract_block as _extract_block
 
 #: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
 #: (issue #3005): one ``report_check_types -violators`` region per limit class.
@@ -110,7 +99,7 @@ def _parse_electrical_slack_check(stdout: str, begin: str, end: str) -> dict[str
     for line in block.splitlines():
         if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
             continue
-        if "(VIOLATED)" not in line:
+        if "(VIOLATED)" not in line.upper():
             continue
         violated_lines += 1
         match = _SLACK_ROW_RE.match(line.strip())
@@ -121,6 +110,20 @@ def _parse_electrical_slack_check(stdout: str, begin: str, end: str) -> dict[str
     return _electrical_slack_class("checked", rows)
 
 
+def _electrical_limit_row(line: str) -> tuple[str, float, float] | None:
+    match = _ELECTRICAL_ROW_RE.fullmatch(line)
+    if not match:
+        return None
+    try:
+        limit, value, slack = map(float, match.group("limit", "value", "slack"))
+    except ValueError:
+        return None
+    excess = value - limit
+    if not all(map(math.isfinite, (limit, value, slack, excess))):
+        return None
+    return match.group("pin"), limit, excess
+
+
 def _parse_electrical_check(
     stdout: str, begin: str, end: str, unit: str
 ) -> dict[str, Any]:
@@ -128,8 +131,8 @@ def _parse_electrical_check(
 
     ``coverage`` is ``"not_run"`` when the markers are absent (the session
     never reached the block), ``"unsupported"`` when the Tcl ``catch`` fired,
-    and ``"checked"`` only when the ``KLT_ELECTRICAL_OK`` sentinel closed the
-    block -- so zero violations is only ever reported for a check that ran.
+    or a marked violator is unreadable, and ``"checked"`` for a complete
+    report closed by the ``KLT_ELECTRICAL_OK`` sentinel.
     ``worst_excess`` is ``value - limit`` of the worst violator (positive)."""
     block = _extract_block(stdout, begin, end)
     if block is None:
@@ -144,8 +147,10 @@ def _parse_electrical_check(
             if len(parts) == 3:
                 nets.add(parts[2].strip())
             continue
-        match = _ELECTRICAL_ROW_RE.match(line)
-        if match:
-            excess = float(match.group("value")) - float(match.group("limit"))
-            rows.append((match.group("pin"), float(match.group("limit")), excess))
+        if "(VIOLATED)" not in line.upper():
+            continue
+        row = _electrical_limit_row(line.strip())
+        if row is None:
+            return _electrical_class("unsupported", unit, [], set())
+        rows.append(row)
     return _electrical_class("checked", unit, rows, nets)

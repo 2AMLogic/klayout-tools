@@ -16,32 +16,18 @@ out-of-bounds request before any geometry is built) and the
 ``_<family>_describe()`` functions (which turn a built layout into the
 response envelope's ``device_count``/``ports``/``drc_hints`` fields) -- plus
 the helpers used exclusively by them (``_voltage_flavor_hints``, the
-``_ring_*`` port/note builders, ``_ring_params_validate``, the
-``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``).
+``_ring_*`` note builders, ``_ring_params_validate``, the
+``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``;
+``_ring_ports`` lives next door in :mod:`klayout_tools.gen_ring_ports`,
+which also holds the strap-window spacing lookup it insets by).
 ``_well_island_layer_params`` comes along too: it is the one ``layer_params``
 resolver #1875 had to leave behind, because it calls
 :func:`_well_island_isolation` to reject an unsatisfiable isolation request
 before any geometry exists.
 
-Like :mod:`klayout_tools.gen_pcells`, this is a pure code-motion refactor,
-not a behaviour change: no function body was edited beyond prepending the
-lazy ``from .gen import ...`` line each one needs. The import direction is
-one-way -- ``gen.py`` imports this module at its own module level, and
-nothing here imports ``gen`` at module level. The layout-math helpers these
-functions call (``_mos_array_layout``, ``_res_array_layout``,
-``_cap_array_layout``, ``_ring_layout``, ``_diff_pair_layout``,
-``_bjt_array_layout``, ``_esd_device_layout``, ``_grid_snapped``,
-``_box_separation_um``, ``_parse_well_regions``, ``_well_box_um``,
-``_auto_ring_inner_size_um``) and the geometry constants they read stay in
-``gen.py`` and are imported back **lazily, at call time**, exactly the way
-``gen_pcells/*.py`` and ``gen_layer_params.py`` already do it. By the time
-any function here actually runs, ``gen`` has finished importing this module
-and is fully loaded, so the lazy import never raises.
-
-The PDK layer-parameter names below have no such cycle -- ``gen.py`` itself
-re-exports them from :mod:`klayout_tools.gen_layer_params`, so they are
-imported here directly from their defining module rather than through
-``gen``.
+Shared constants, validation errors, layer parameters and grid helpers come
+from their defining modules. Functions that need the runner's device layout
+calculations import those helpers at call time.
 """
 
 from __future__ import annotations
@@ -49,6 +35,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .gen_base import (
+    CONTACT_SIZE_UM,
+    ENCLOSURE_MARGIN_UM,
+    MIN_SAME_LAYER_SPACING_UM,
+    RING_SIDE_DIRECTIONS,
+    WELL_ENCLOSURE_MARGIN_UM,
+    GenError,
+)
 from .gen_diff_pair_describe import (  # noqa: F401 -- re-exported
     # `_diff_pair_validate`/`_diff_pair_describe` moved to
     # `gen_diff_pair_describe.py` (file-size ratchet); re-exported here so
@@ -73,36 +67,40 @@ from .gen_layer_params import (
     PAD_TOP_METAL_ENCLOSURE_MIN_UM,
     TAP_PAD_REACH_UM,
     UNIT_MIN_W_UM,
+    _bjt_unit_implant_margin_um,
     _cap_family_layers,
     _cap_geometry_min_um,
     _check_cap_stack_supported,
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
     _deck_min_width_um,
+    _device_implant,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
+    _mos_array_well_enclosure_um,
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
-    _res_end_contact_um,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
-    _sd_implant_margin_um,
     _tap_pads_wanted,
-    _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_pitch import _pitch_hints_and_warnings
+from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
+from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
+from .gen_ring_ports import _ring_ports
+from .gen_snap import _GRID_DBU_UM, _grid_snapped, _mfg_grid_neighbours
+from .gen_voltage_flavor import _voltage_flavor_hints
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["num"] < 1:
         raise GenError("generator 'resistor_strip': params.num must be >= 1")
     if params["length_um"] <= 0:
@@ -138,9 +136,9 @@ def _resistor_strip_describe(
     )
 
     # Layer name is not resolved against a PDK layer map at phase 1 -- the
-    # drawing layer is a generator implementation detail (see the module
-    # docstring's `_HIDDEN_PARAMS` note); a real per-PDK layer name lookup is
-    # phase 2 scope, alongside the primitive families that actually need one.
+    # drawing layer is a generator implementation detail (hidden, per the
+    # module docstring); a real per-PDK layer name lookup is phase 2 scope,
+    # alongside the primitive families that actually need one.
     layer = {"layer": 67, "datatype": 20, "name": None}
 
     ports = [
@@ -178,8 +176,6 @@ def _resistor_strip_describe(
 
 
 def _validate_pitch_overrides(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     for pitch_name in ("pitch_x_um", "pitch_y_um"):
         if params[pitch_name] < 0:
             raise GenError(f"generator 'mos_array': params.{pitch_name} must be >= 0")
@@ -189,8 +185,6 @@ def _validate_share_sd(params: dict[str, Any]) -> None:
     """Issue #3551 (Phase 2 of #3299): ``share_sd`` abuts adjacent units into
     a series chain, which only the plain single-finger ``array`` topology
     supports. Everything else is rejected rather than emitted wrong."""
-    from .gen import GenError
-
     if not params["share_sd"]:
         return
     if params["topology"] != "array":
@@ -215,8 +209,6 @@ def _validate_mirror(params: dict[str, Any]) -> None:
     """Issue #3552 (Phase 3 of #3299): ``mirror`` flips odd columns of the
     plain single-finger ``array`` topology. ``common_centroid`` already owns
     the pairing order, so it is rejected rather than given invented semantics."""
-    from .gen import GenError
-
     if not params["mirror"]:
         return
     if params["topology"] != "array":
@@ -316,47 +308,13 @@ def _share_sd_hints(
     return {"share_sd": True, "shared_sd_nodes": shared_nodes}
 
 
-def _pitch_hints_and_warnings(
-    params: dict[str, Any], info: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """Issue #3299 (Phase 1): only when a pitch override was requested, report
-    the effective pitch and whether it was clamped up to the legal minimum
-    (empty otherwise, so default reports are unchanged)."""
-    if params["pitch_x_um"] <= 0 and params["pitch_y_um"] <= 0:
-        return {}, []
-    hints = {
-        "pitch": {
-            "col_pitch_um": info["col_pitch_um"],
-            "row_pitch_um": info["row_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "min_row_pitch_um": info["min_row_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-            "pitch_y_clamped": info["pitch_y_clamped"],
-        }
-    }
-    warnings = [
-        f"params.{name}={params[name]} is below the legal minimum "
-        f"pitch {minimum}um; clamped up to {minimum}um"
-        for axis, name, minimum in (
-            ("x", "pitch_x_um", info["min_col_pitch_um"]),
-            ("y", "pitch_y_um", info["min_row_pitch_um"]),
-        )
-        if info[f"pitch_{axis}_clamped"]
-    ]
-    return hints, warnings
-
-
 from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
     validate_mos_array_width as _validate_mos_array_width,
 )
 
 
 def _mos_array_validate(params: dict[str, Any]) -> None:
-    from .gen import (
-        GenError,
-        _auto_ring_inner_size_um,
-        _mos_array_layout,
-    )
+    from .gen import _auto_ring_inner_size_um, _mos_array_layout
 
     _validate_mos_array_width(params)
     if params["l_um"] <= 0:
@@ -426,61 +384,21 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
     )
 
 
-def _voltage_flavor_hints(
-    family: str, params: dict[str, Any], notes: list[str]
-) -> dict[str, Any]:
-    """``drc_hints`` fields for the optional ``voltage_flavor`` marker (issue
-    #1054), shared by :func:`_mos_array_describe`/:func:`_diff_pair_describe`:
-    echoes the requested flavour (``None`` when omitted) and whether a real
-    marker layer was resolved for it, appending an explanatory entry to
-    ``notes`` (in place) when a non-empty request resolved to no layer --
-    mirrors ``esd_device``'s own ``esd_mark``/``salicide_block`` "notes it,
-    never silently drops it" precedent rather than rejecting the request."""
-    voltage_flavor = params["voltage_flavor"]
-    mark_present = False
-    if voltage_flavor:
-        mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if not mark_present:
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
-                f"resolved for the resolved PDK family ('{family}') -- no marker "
-                "was drawn"
-            )
-    return {
-        "voltage_flavor": voltage_flavor or None,
-        "voltage_flavor_mark_present": mark_present,
-    }
-
-
 def _sd_implant_hints(
-    family: str, params: dict[str, Any], notes: list[str]
+    family: str, params: dict[str, Any], notes: list[str], *, mos_array: bool = False
 ) -> dict[str, Any]:
-    """``drc_hints`` fields for the unit devices' source/drain implant
-    (issue #2580), reporting-only: echoes whether the family's
-    flavor-selected ``"nplus"``/``"pplus"`` role resolved to a real layer
-    (the same selection :func:`_device_layer_params` threads to the PCell),
-    appending an explanatory entry to ``notes`` (in place) when it did not
-    -- gf180mcu (issue #1577) is today the only family that declares the
-    roles, so every other family's S/D diffusion lands un-implanted with no
-    DRC rule in its curated deck to flag it. Mirrors
-    :func:`_voltage_flavor_hints`'s own "notes it, never silently drops it"
-    contract; draws nothing and changes no geometry -- actually drawing a
-    correctly-enclosed implant on the remaining families needs a real PDK
-    enclosure rule this repo's curated decks do not carry."""
+    """Report the same layer and active enclosure used by the drawing PCell."""
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
-    sd_implant = _role_layer_info(family, sd_implant_role)
-    if sd_implant is None or _sd_implant_margin_um(family) <= 0:
+    layer, margin, _ = _device_implant(family, flavor, mos_array=mos_array)
+    present = layer is not None and margin > 0
+    if not present:
         notes.append(
             f"family '{family}' declares no S/D implant role "
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
-    return {
-        "sd_implant_present": (
-            sd_implant is not None and _sd_implant_margin_um(family) > 0
-        ),
-    }
+    return {"sd_implant_present": present}
 
 
 def _fmt_um(value_um: float) -> str:
@@ -512,8 +430,6 @@ def _mfg_grid_warnings(
 
     ``checks`` are the ``(param, role)`` pairs to check (issue #4203:
     ``res_array`` passes ``(("length_um", "poly"),)``)."""
-    from .gen import _mfg_grid_neighbours
-
     roles = _PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
     for param, role in checks:
@@ -648,11 +564,7 @@ def _mos_array_port_cells(info: dict, dummy_ports: bool) -> list[tuple[str, dict
 def _mos_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        _grid_snapped,
-        _mos_array_layout,
-    )
+    from .gen import _mos_array_layout
 
     family = _pdk_family(pdk_info["variant"])
     # Must match the same gate `_MosArrayPCell.produce_impl` uses (issue
@@ -694,6 +606,7 @@ def _mos_array_describe(
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
+        well_enclosure_um=_mos_array_well_enclosure_um(family, params),
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
@@ -800,6 +713,7 @@ def _mos_array_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -848,7 +762,7 @@ def _mos_array_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
-    sd_implant_hints = _sd_implant_hints(family, params, notes)
+    sd_implant_hints = _sd_implant_hints(family, params, notes, mos_array=True)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"
@@ -915,8 +829,6 @@ def _mos_array_describe(
 
 
 def _res_array_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["length_um"] <= 0:
         raise GenError("generator 'res_array': params.length_um must be > 0")
     # This runs before `--pdk`'s family is resolved (`_produce` resolves
@@ -1027,6 +939,8 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
         f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
         "Per-joint overhead (jumper length): "
         + (", ".join(overhead) if overhead else "none (num is 1)")
+        + ". Compare against the schematic's single resistor with `klt lvs` "
+        "options.combine_devices: true (default false: one device per unit)"
     )
 
 
@@ -1079,8 +993,6 @@ def _res_array_snap_length(
     resistor, ``params.snap`` false (today's #4203 warnings stay), or a length
     already on-grid and above the floor. Raises :class:`GenError` for a
     below-floor length under ``short_length='refuse'``."""
-    from .gen import GenError, _mfg_grid_neighbours
-
     if params.get("metal_level", 0) or not params.get("snap", True):
         return None
     family = _pdk_family(pdk_info["variant"])
@@ -1143,11 +1055,7 @@ def _res_array_apply_snap_report(
 def _res_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        _grid_snapped,
-        _res_array_layout,
-    )
+    from .gen import _res_array_layout
 
     family = _pdk_family(pdk_info["variant"])
     metal_level = params.get("metal_level", 0)
@@ -1156,10 +1064,10 @@ def _res_array_describe(
         if metal_level
         else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
     )
-    # Issue #2449: sky130 high/xhigh draw a rectangular precision-poly licon.
-    end_contact = _res_end_contact_um(
-        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-    )
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    # Issues #2449/#5704: sky130 high/xhigh draw a rectangular licon + long head.
+    end_contact = _res_end_contact_um(family, flavor, metal_level)
+    head_len_um = _res_head_len_um(family, flavor, metal_level)
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -1171,9 +1079,8 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
-        _res_sab_geometry_um(
-            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-        )[0],
+        _res_sab_geometry_um(family, flavor, metal_level)[0],
+        head_len_um,
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -1235,6 +1142,7 @@ def _res_array_describe(
             f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
             "contacts (licon.1b/c precision-resistor exception) on "
             f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
+            + _res_head_note(head_len_um)
         )
 
     snapped = _grid_snapped(
@@ -1280,8 +1188,6 @@ def _res_array_describe(
 
 
 def _cap_array_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["plate_w_um"] < UNIT_MIN_W_UM:
         raise GenError(
             f"generator 'cap_array': params.plate_w_um must be >= {UNIT_MIN_W_UM}"
@@ -1294,8 +1200,6 @@ def _cap_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'cap_array': params.spacing_um must be >= 0")
     if params["num"] < 1:
         raise GenError("generator 'cap_array': params.num must be >= 1")
-    from .gen import CONTACT_SIZE_UM
-
     if params["connect"] not in ("independent", "parallel"):
         raise GenError(
             "generator 'cap_array': params.connect must be 'independent' or 'parallel'"
@@ -1320,12 +1224,7 @@ def _cap_array_validate(params: dict[str, Any]) -> None:
 def _cap_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        RING_SIDE_DIRECTIONS,
-        _cap_array_layout,
-        _grid_snapped,
-    )
+    from .gen import _cap_array_layout
 
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
@@ -1609,12 +1508,6 @@ def _validate_ring_gap(
     Only one side can be named, so the ring always stays a single connected
     conductor.
     """
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        RING_SIDE_DIRECTIONS,
-        GenError,
-    )
-
     if side not in ("", *RING_SIDE_DIRECTIONS):
         raise GenError(
             f"generator '{generator}': params.ring_gap_side must be '' (a "
@@ -1693,70 +1586,6 @@ def _tap_pad_ports(
     return ports
 
 
-def _ring_ports(
-    ring: dict[str, Any],
-    offset_um: tuple[float, float],
-    tap_prefix: str,
-    tap_layer: dict[str, Any],
-    tap_width_um: float,
-    gap_layer: dict[str, Any],
-    tap_net: str | None = None,
-) -> list[dict[str, Any]]:
-    """Reported ``ports[]`` entries for a drawn ring.
-
-    One ``<tap_prefix><side>`` tap port at the midpoint of every side that is
-    still covered by ring metal there, plus -- when the ring was cut with
-    ``ring_gap_side`` (#434) -- one ``GAP_<side>`` entry marking the opening
-    itself. A ``GAP_*`` entry is a *marker, not a conductor*: it reports where
-    a route may cross the ring (``x_um``/``y_um`` = the opening's centre on
-    the ring's own centre line, ``width_um`` = the opening's length along that
-    side, ``direction_deg`` = the side's outward normal) on the layer a route
-    would cross it on, and `klt gen-compose` rejects any attempt to wire or
-    label it.
-
-    ``tap_net`` (issue #1421) names the net every tap port carries, reported
-    as each entry's ``net``. ``None`` (the default, and every caller that
-    predates ``well_island``) keeps the historical ``"net": null`` -- a ring
-    whose tie net the generator has no way to know. It is never applied to a
-    ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
-    no net by construction.
-    """
-    from .gen import RING_SIDE_DIRECTIONS
-
-    ox, oy = offset_um
-    ports: list[dict[str, Any]] = []
-    for side, direction in RING_SIDE_DIRECTIONS.items():
-        xy = ring["ports"].get(side)
-        if xy is None:
-            continue  # this side's midpoint sits inside the ring opening
-        ports.append(
-            {
-                "name": f"{tap_prefix}{side}",
-                "net": tap_net,
-                "layer": tap_layer,
-                "x_um": xy[0] + ox,
-                "y_um": xy[1] + oy,
-                "width_um": tap_width_um,
-                "direction_deg": direction,
-            }
-        )
-
-    gap = ring["gap"]
-    if gap is not None:
-        ports.append(
-            {
-                "name": f"GAP_{gap['side']}",
-                "net": None,
-                "layer": gap_layer,
-                "x_um": gap["x_um"] + ox,
-                "y_um": gap["y_um"] + oy,
-                "width_um": gap["opening_um"],
-                "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
-            }
-        )
-    return ports
-
-
 def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str]:
     """``drc_hints.notes`` entries about a requested ring opening (#434)."""
     if not ring_gap_side:
@@ -1792,8 +1621,6 @@ def _ring_contact_gap_notes(
     gap is flagged here instead, per-axis, so a caller targeting gf180mcu
     knows to double-check with ``klt drc``.
     """
-    from .gen import CONTACT_SIZE_UM
-
     notes: list[str] = []
     for label, straight, contacts in (
         ("inner_width_um", inner_w_um, contacts_ns),
@@ -1828,11 +1655,6 @@ def _ring_params_validate(generator: str, params: dict[str, Any]) -> None:
     ``generator`` only names the generator in the raised message, so a
     ``well_island`` request is never rejected in ``guard_ring``'s name.
     """
-    from .gen import (
-        CONTACT_SIZE_UM,
-        GenError,
-    )
-
     if params["inner_width_um"] <= 0:
         raise GenError(f"generator '{generator}': params.inner_width_um must be > 0")
     if params["inner_height_um"] <= 0:
@@ -1897,14 +1719,11 @@ def _guard_ring_validate(params: dict[str, Any]) -> None:
 def _guard_ring_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        _grid_snapped,
-        _ring_layout,
-    )
+    from .gen import _ring_layout
 
     family = _pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    contact_layer = _PDK_ROLE_LAYERS[family]["contact"]
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
@@ -1913,6 +1732,10 @@ def _guard_ring_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        gap_contact_enclosure_um=_guard_ring_gap_contact_enclosure_um(family),
+        dbu=dbu,
+        mfg_grid_um=mfg_grid_um(family, contact_layer),
+        contact_fixed_size_um=_cut_fixed_size_um(family, contact_layer),
     )
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
@@ -1925,6 +1748,7 @@ def _guard_ring_describe(
         metal_layer,
         params["ring_width_um"],
         metal_layer,
+        pdk_variant=pdk_info["variant"],
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
@@ -1942,6 +1766,9 @@ def _guard_ring_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(
+        family, params, notes, params["add_well"] and well_supported
+    )
     snapped = _grid_snapped(
         dbu,
         params["inner_width_um"],
@@ -1950,9 +1777,6 @@ def _guard_ring_describe(
     )
 
     return {
-        # The contacts actually drawn -- `2 * (contacts_ns + contacts_ew)`
-        # unless a ring opening (params.ring_gap_side) clipped one or more
-        # of them away.
         "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {
@@ -1960,6 +1784,7 @@ def _guard_ring_describe(
             "matched_group_id": None,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
@@ -2027,11 +1852,7 @@ def _largest_clearing_margin_um(
     still needs) so it can never trade a well-spacing violation for a
     well-enclosure one.
     """
-    from .gen import (
-        _GRID_DBU_UM,
-        _box_separation_um,
-        _well_box_um,
-    )
+    from .gen import _box_separation_um, _well_box_um
 
     def _clears(margin_um: float) -> bool:
         box = _well_box_um(ring, margin_um)
@@ -2089,8 +1910,6 @@ def _well_island_isolation(params: dict[str, Any], family: str) -> dict[str, Any
     """
     from .gen import (
         _PDK_WELL_ISOLATION_UM,
-        WELL_ENCLOSURE_MARGIN_UM,
-        GenError,
         _box_separation_um,
         _parse_well_regions,
         _well_box_um,
@@ -2266,15 +2085,10 @@ def _well_island_validate(params: dict[str, Any]) -> None:
     same split ``res_array``'s ``flavor`` validation already uses, since
     ``_GeneratorSpec.validate`` is handed no ``pdk_info``).
     """
-    from .gen import (
-        WELL_ENCLOSURE_MARGIN_UM,
-        GenError,
-        _parse_well_regions,
-    )
+    from .gen import _parse_well_regions
 
     # The ring geometry is `guard_ring`'s, so its bounds are too -- reuse the
-    # shared validator rather than restating (and risking drift from) the
-    # same checks.
+    # shared validator rather than restating (and risking drift from) the same checks.
     _ring_params_validate("well_island", params)
 
     net = params["net"]
@@ -2306,11 +2120,6 @@ def _well_island_validate(params: dict[str, Any]) -> None:
 def _well_island_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        _grid_snapped,
-    )
-
     family = _pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
     info = _well_island_ring(params)
@@ -2326,6 +2135,7 @@ def _well_island_describe(
         params["ring_width_um"],
         metal_layer,
         net,
+        pdk_variant=pdk_info["variant"],
     )
 
     isolation = _well_island_isolation(params, family)
@@ -2376,8 +2186,7 @@ def _well_island_describe(
             # Issue #1421's own reporting contract: the caller (or
             # `klt gen-compose`, or their own placer) gets the island's
             # resulting well rectangle and the region no *other* well may
-            # enter, so a composition never has to re-derive either from raw
-            # geometry.
+            # enter, so a composition never has to re-derive either from raw geometry.
             "well_net": net,
             "well_box_um": _box_um_field(isolation["well_box_um"]),
             "well_separation_um": isolation["separation_um"],
@@ -2440,11 +2249,7 @@ def _well_island_layer_params(
 
 
 def _bjt_array_validate(params: dict[str, Any]) -> None:
-    from .gen import (
-        GenError,
-        _auto_ring_inner_size_um,
-        _bjt_array_layout,
-    )
+    from .gen import _auto_ring_inner_size_um, _bjt_array_layout
 
     if params["emitter_um"] < UNIT_MIN_W_UM:
         raise GenError(
@@ -2487,14 +2292,7 @@ def _bjt_array_validate(params: dict[str, Any]) -> None:
 def _bjt_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        CONTACT_SIZE_UM,
-        ENCLOSURE_MARGIN_UM,
-        MIN_SAME_LAYER_SPACING_UM,
-        _bjt_array_layout,
-        _bjt_unit_implant_margin_um,
-        _grid_snapped,
-    )
+    from .gen import _bjt_array_layout
 
     family = _pdk_family(pdk_info["variant"])
     info = _bjt_array_layout(
@@ -2561,6 +2359,7 @@ def _bjt_array_describe(
                 tap_layer,
                 ring_w,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -2613,8 +2412,6 @@ def _bjt_array_describe(
 
 
 def _bond_pad_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if params["opening_um"] <= 0:
         raise GenError("generator 'bond_pad': params.opening_um must be > 0")
     if params["bond_type"] not in PAD_OPENING_GUIDELINE_MIN_UM:
@@ -2646,8 +2443,6 @@ def _bond_pad_validate(params: dict[str, Any]) -> None:
 def _bond_pad_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import _grid_snapped
-
     family = _pdk_family(pdk_info["variant"])
     opening_um = params["opening_um"]
     enclosure_um = params["enclosure_um"]
@@ -2729,8 +2524,6 @@ def _esd_device_resolve_total_width(
     ``ESD_FINGER_WIDTH_MAX_UM`` (21.5 -> 2 x 10.75). ``0.0`` (the default)
     means unset. Combining it with an explicit ``fingers``/``finger_width_um``
     is ambiguous and rejected."""
-    from .gen import GenError
-
     if "total_width_um" not in raw_params:
         return
     total = resolved["total_width_um"]
@@ -2758,11 +2551,7 @@ def _esd_device_resolve_total_width(
 
 
 def _esd_device_validate(params: dict[str, Any]) -> None:
-    from .gen import (
-        GenError,
-        _auto_ring_inner_size_um,
-        _esd_device_layout,
-    )
+    from .gen import _auto_ring_inner_size_um, _esd_device_layout
 
     if params["finger_width_um"] < ESD_FINGER_WIDTH_MIN_UM:
         raise GenError(
@@ -2815,11 +2604,7 @@ def _esd_device_validate(params: dict[str, Any]) -> None:
 def _esd_device_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import (
-        MIN_SAME_LAYER_SPACING_UM,
-        _esd_device_layout,
-        _grid_snapped,
-    )
+    from .gen import _esd_device_layout
 
     family = _pdk_family(pdk_info["variant"])
     info = _esd_device_layout(
@@ -2888,6 +2673,7 @@ def _esd_device_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -2941,7 +2727,6 @@ def _esd_device_describe(
 
 
 def _diode_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
     from .gen_diode import DIODE_KINDS, DIODE_MIN_EDGE_UM, DIODE_VOLTAGE_CLASSES
 
     if params["kind"] not in DIODE_KINDS:
@@ -2964,41 +2749,17 @@ def _diode_validate(params: dict[str, Any]) -> None:
 def _diode_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
-    from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
-    from .gen_diode import _diode_layout
+    from .gen_diode import _diode_layout, diode_notes, diode_ports
 
+    family = _pdk_family(pdk_info["variant"])
     info = _diode_layout(
         params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
     )
-    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     assert metal_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    ports = []
-    for name, box, direction in (
-        ("ANODE", info["anode_li"], 90),
-        ("CATHODE", info["cathode_li"], 90),
-    ):
-        ports.append(
-            {
-                "name": name,
-                "net": None,
-                "layer": metal_layer,
-                "x_um": (box[0] + box[2]) / 2,
-                "y_um": (box[1] + box[3]) / 2,
-                "width_um": box[2] - box[0],
-                "direction_deg": direction,
-            }
-        )
+    ports = diode_ports(info, metal_layer)
     snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
-    notes = [
-        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
-        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
-    ]
-    if params["kind"] == "n_psub":
-        notes.append(
-            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
-            "terminal in the extracted netlist"
-        )
     return {
         "device_count": 1,
         "ports": ports,
@@ -3006,11 +2767,18 @@ def _diode_describe(
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
             "matched_group_id": None,
             "snapped_to_grid": snapped,
-            "notes": notes,
+            "notes": diode_notes(params["kind"], params["voltage_class"]),
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + _mfg_grid_warnings(
+            "diode",
+            family,
+            params,
+            # Both edges are diffusion extents.
+            checks=(("width_um", "active"), ("length_um", "active")),
         ),
     }

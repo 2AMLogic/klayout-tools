@@ -37,6 +37,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    pitch_x_um: float = 0.0,
     top_endcap_um: float = 0.0,
     tap_reach_um: float = 0.0,
     strap_splits: bool = False,
@@ -60,11 +61,14 @@ def _diff_pair_layout(
     ``docs/cli/gen.md`` and surfaced in ``klt gen --list``.
 
     ``ring_padding_um``/``row_spacing_um`` (issue #484) are the ring-to-core
-    padding and the device-row-to-device-row gap, defaulted so omitting them
-    reproduces prior geometry byte-for-byte; ``col_pitch`` stays fixed to
-    ``MIN_SAME_LAYER_SPACING_UM`` (out of scope for #484). Both default to
-    ``None`` rather than binding ``gen``'s constants at module scope -- this
-    module imports ``gen`` lazily, never at import time.
+    padding and the device-row-to-device-row gap, both fixed at their
+    present-day values by default so omitting them reproduces prior geometry
+    byte-for-byte; a caller that needs more room to route both matched
+    devices' gate nets out of the block can grow either and pay the area.
+    ``pitch_x_um`` (issue #5764) overrides the within-row column pitch
+    (the room a ``gen-compose`` route needs between adjacent units); like
+    ``mos_array``'s #3299 knob it is clamped up to the legal minimum and
+    ``0.0`` (default) is a strict no-op, uniform so common-centroid holds.
 
     ``gate_contact`` (issue #492) and ``gate_pad_clearance_um`` (issue
     #1450) are forwarded to :func:`_mos_unit_layout`; both grow each unit's
@@ -97,6 +101,7 @@ def _diff_pair_layout(
         GUARD_RING_DEFAULT_PADDING_UM,
         GUARD_RING_DEFAULT_WIDTH_UM,
         MIN_SAME_LAYER_SPACING_UM,
+        _clamp_pitch_override,
         _mos_unit_layout,
         _optional_tap_pads,
         _ring_layout,
@@ -120,8 +125,9 @@ def _diff_pair_layout(
         top_endcap_um=top_endcap_um,
         gate_pad_growth_um=gate_pad_growth_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -141,7 +147,9 @@ def _diff_pair_layout(
                 }
             )
 
-    core_w = splits * col_pitch - MIN_SAME_LAYER_SPACING_UM
+    # True units' footprint at any pitch (#5764): the old shortcut only
+    # equals this at the default pitch (`col_pitch == min_col_pitch`).
+    core_w = (splits - 1) * col_pitch + unit["total_len_um"]
     core_h = 2 * row_pitch - row_spacing_um
     if strap_splits:
         core_w += _STRAP_MARGIN_LEFT_UM + _STRAP_MARGIN_RIGHT_UM
@@ -183,6 +191,8 @@ def _diff_pair_layout(
         "unit": unit,
         "cells": cells,
         "col_pitch_um": col_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
         "row_pitch_um": row_pitch,
         "core_w_um": core_w,
         "core_h_um": core_h,

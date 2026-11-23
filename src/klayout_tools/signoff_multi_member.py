@@ -16,7 +16,19 @@ from __future__ import annotations
 from typing import Any
 
 #: T1 items whose list form is a per-cell report list: layout, DRC and LVS.
-MEMBER_COUNT_ITEMS: frozenset[int] = frozenset({2, 3, 4})
+#: Issue #5597 adds item 11's grouped form (one compound citation per
+#: independently signed-off stream), which reports the same two fields over
+#: groups.
+MEMBER_COUNT_ITEMS: frozenset[int] = frozenset({2, 3, 4, 11})
+
+
+def graded_input_provenance(citation: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy the hash and tri-state verification of an already resolved member."""
+    source = citation or {}
+    return {
+        "content_hash": source.get("content_hash"),
+        "input_verified": source.get("input_verified"),
+    }
 
 
 def member_coverage(raw_entry: Any, extra: dict[str, Any]) -> dict[str, int]:

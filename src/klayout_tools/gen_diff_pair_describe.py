@@ -23,11 +23,33 @@ from __future__ import annotations
 from typing import Any
 
 
+def _validate_strap_params(params: dict[str, Any]) -> None:
+    from .gen_base import GenError
+    from .gen_diff_pair_strap import STRAP_MIN_W_UM
+
+    if params["strap_splits"]:
+        # Family coverage is rejected in `_diff_pair_layer_params` (it is the
+        # hook that knows the resolved family); these two are family-agnostic.
+        if not params["gate_contact"]:
+            raise GenError(
+                "generator 'diff_pair': params.strap_splits requires "
+                "params.gate_contact -- the gate strap lands on the gate "
+                "pads' local metal, and a bare-poly gate has no metal pad "
+                "to land the strap's mcon on (issue #5557)"
+            )
+        if params["w_um"] < STRAP_MIN_W_UM:
+            raise GenError(
+                f"generator 'diff_pair': params.strap_splits requires "
+                f"params.w_um >= {STRAP_MIN_W_UM} -- the four S/D strap "
+                "tracks must fit centred inside the S/D pads' height, and "
+                f"the pads are only {params['w_um']}um tall (issue #5557)"
+            )
+
+
 def _diff_pair_validate(params: dict[str, Any]) -> None:
     from .gen import GenError, _auto_ring_inner_size_um
     from .gen_describe import UNIT_MIN_W_UM, _validate_ring_gap
     from .gen_diff_pair import _diff_pair_layout
-    from .gen_diff_pair_strap import STRAP_MIN_W_UM
 
     if params["w_um"] < UNIT_MIN_W_UM:
         raise GenError(
@@ -46,23 +68,9 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.ring_padding_um must be >= 0")
     if params["row_spacing_um"] < 0:
         raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
-    if params["strap_splits"]:
-        # Family coverage is rejected in `_diff_pair_layer_params` (it is the
-        # hook that knows the resolved family); these two are family-agnostic.
-        if not params["gate_contact"]:
-            raise GenError(
-                "generator 'diff_pair': params.strap_splits requires "
-                "params.gate_contact -- the gate strap lands on the gate "
-                "pads' local metal, and a bare-poly gate has no metal pad "
-                "to land the strap's mcon on (issue #5557)"
-            )
-        if params["w_um"] < STRAP_MIN_W_UM:
-            raise GenError(
-                f"generator 'diff_pair': params.strap_splits requires "
-                f"params.w_um >= {STRAP_MIN_W_UM} -- the four S/D strap "
-                "tracks must fit centred inside the S/D pads' height, and "
-                f"the pads are only {params['w_um']}um tall (issue #5557)"
-            )
+    _validate_strap_params(params)
+    if params["pitch_x_um"] < 0:
+        raise GenError("generator 'diff_pair': params.pitch_x_um must be >= 0")
 
     # `gate_pad_clearance_um` is deliberately left at its default here: this
     # validator runs before the PDK family is resolved (the same PDK-agnostic
@@ -82,6 +90,7 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
             ring_padding_um=params["ring_padding_um"],
             row_spacing_um=params["row_spacing_um"],
             gate_contact=params["gate_contact"],
+            pitch_x_um=params["pitch_x_um"],
         )
     )
     _validate_ring_gap(
@@ -104,6 +113,7 @@ def _diff_pair_describe(
     )
     from .gen_describe import (
         _mfg_grid_warnings,
+        _pitch_hints_and_warnings,
         _ring_gap_notes,
         _ring_ports,
         _sd_implant_hints,
@@ -145,6 +155,7 @@ def _diff_pair_describe(
         tap_reach_um=_tap_reach_um(family),
         strap_splits=params["strap_splits"],
         strap_grid_um=strap_grid_um,
+        pitch_x_um=params["pitch_x_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -241,6 +252,7 @@ def _diff_pair_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -269,6 +281,7 @@ def _diff_pair_describe(
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     sd_implant_hints = _sd_implant_hints(family, params, notes)
+    pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info, axes=("x",))
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -286,6 +299,7 @@ def _diff_pair_describe(
             "notes": notes,
             **voltage_flavor_hints,
             **sd_implant_hints,
+            **pitch_hints,
         },
         "warnings": (
             (
@@ -293,6 +307,7 @@ def _diff_pair_describe(
                 if snapped
                 else []
             )
+            + pitch_warnings
             + _mfg_grid_warnings(
                 "diff_pair",
                 family,
@@ -325,6 +340,7 @@ def _diff_pair_layer_params(
 
     from .gen import GenError
     from .gen_diff_pair_strap import DIFF_PAIR_STRAP_FAMILIES
+    from .gen_layer_mv_ring import apply_hv_mark_margins
     from .gen_layer_params import (
         _device_layer_params,
         _pdk_family,
@@ -362,4 +378,4 @@ def _diff_pair_layer_params(
     layer_params["strap_via_layer"] = (
         strap_via if strap_via is not None else kdb.LayerInfo(0, 0)
     )
-    return layer_params
+    return apply_hv_mark_margins(layer_params, _pdk_family(pdk_info["variant"]), params)

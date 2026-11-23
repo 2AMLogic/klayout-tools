@@ -12,10 +12,9 @@ Deck data lives in per-PDK sibling modules (``sky130.py``, ``gf180mcu.py``);
 this module only aggregates them into a name -> deck registry.
 
 The domain dataclasses/exceptions themselves live in three sibling modules
-split out of this one (issue #1821), grouped by independent domain -- none
-of the three references either of the others, except that ``extraction.py``
-reuses ``rules.py``'s :class:`RuleProvenance` for its own devices'
-provenance fields:
+split out of this one (issue #1821), grouped by independent domain -- none of
+the three references either of the others, except that ``extraction.py`` reuses
+``rules.py``'s :class:`RuleProvenance` for its own devices' provenance fields:
 
 - :mod:`klayout_tools.decks.rules` -- the DRC rule domain
   (:class:`DerivedLayer`, :class:`RuleProvenance`, :class:`DrcRule`,
@@ -23,10 +22,9 @@ provenance fields:
 - :mod:`klayout_tools.decks.extraction` -- the extraction device domain
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
-  :class:`CapacitorDevice`,
-  :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
-  :class:`InvalidLabelLayerError`).
+  :class:`CapacitorDevice`, :class:`CapacitorFlavour`,
+  :class:`MomCapacitorDevice`, :class:`DiodeDevice`, :class:`InductorDevice`,
+  :class:`LayerExpr`, :class:`SizeFilter`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -40,6 +38,8 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Mapping
+from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from .extraction import (
@@ -61,6 +61,7 @@ from .extraction import (
     UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
+from .extraction_inductor import InductorDevice
 from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .parasitics import (
     HIGH_CORNER,
@@ -100,6 +101,7 @@ __all__ = [
     "FinFETFlavour",
     "FinFETPassiveCapacitor",
     "HIGH_CORNER",
+    "InductorDevice",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",
@@ -123,6 +125,7 @@ __all__ = [
     "UnsupportedDeviceMarker",
     "deck_names",
     "describe_cut_resistance_gaps",
+    "deck_content_hash",
     "deck_source_path",
     "get_deck",
     "get_extraction_deck",
@@ -140,48 +143,34 @@ __all__ = [
 
 
 def deck_source_path(name: str) -> str | None:
-    """Absolute path to the Python module source that defines deck ``name``.
-
-    Our decks are declarative Python tables in per-PDK sibling modules
-    (``sky130.py``, ``gf180mcu.py``) rather than standalone rule-deck files,
-    so the "deck file" whose content hash pins a run's rule set (see
-    :func:`klayout_tools._provenance.build_provenance`) is that module's
-    source. Deck names map 1:1 to those sibling module names (see the
-    registries below). Returns ``None`` when the module can't be located.
-    """
-    from importlib import import_module
-
-    try:
-        module = import_module(f"{__package__}.{name}")
-    except ImportError:
+    """Absolute path to the primary Python source for this deck, if available."""
+    if not isinstance(name, str) or not name.isidentifier():
         return None
-    return getattr(module, "__file__", None)
+    primary = Path(__file__).with_name(f"{name}.py")
+    return str(primary) if primary.is_file() else None
+
+
+def deck_content_hash(name: str) -> str | None:
+    """Identity of the installed primary module and its curated rule sources."""
+    from .._deck_hash import source_file_hash
+
+    return source_file_hash(deck_source_path(name))
+
+
+# Keep name lookup independent of rule execution: a missing hook still has
+# to produce a structured "hash unavailable" from `klt deck hash`.
+_CURATED_DECKS = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l")
+_EXTRACTION_DECKS = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l", "asap7")
 
 
 def deck_names() -> list[str]:
-    """Every built-in deck name *this build* ships, sorted.
-
-    The union of the DRC registry (:func:`get_deck`) and the extraction
-    registry (:func:`get_extraction_deck`) -- deliberately separate rule
-    tables that happen to share PDK-family names, so a name registered in
-    either is a real deck a run can name. Used to validate a deck name before
-    :func:`deck_source_path` imports it (issue #1202): every deck name maps to
-    a sibling module, but not every sibling module is a deck, so an unchecked
-    name would happily hash ``history.py``.
-
-    Note this answers "what does this build ship", which is a different
-    question from :func:`klayout_tools.decks.history.known_deck_names`'s "what
-    have past releases shipped".
-    """
-    return sorted(set(_registry()) | set(_extraction_registry()))
+    """Every registered built-in DRC or extraction deck in this build."""
+    return sorted(set(_CURATED_DECKS) | set(_EXTRACTION_DECKS))
 
 
 def drc_deck_names() -> list[str]:
-    """Every deck name :func:`get_deck` accepts (a curated Python rule table),
-    sorted -- the subset of :func:`deck_names` that ``klt drc --deck`` and
-    ``klt deck rules --deck`` can run (issue #3783). ``asap7`` is absent: its
-    DRC is a KLayout script, not a curated rule table (#2760)."""
-    return sorted(_registry())
+    """Names with curated DRC rules. ASAP7 ships a standalone KLayout script."""
+    return sorted(_CURATED_DECKS)
 
 
 def deck_provides(name: str) -> list[str]:
@@ -203,13 +192,8 @@ def deck_provides(name: str) -> list[str]:
 
 
 def _registry() -> dict[str, list[DrcRule]]:
-    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
-
     return {
-        "sky130": sky130.DECK,
-        "gf180mcu": gf180mcu.DECK,
-        "sg13g2": sg13g2.DECK,
-        "sg13cmos5l": sg13cmos5l.DECK,
+        name: import_module(f"{__package__}.{name}").DECK for name in _CURATED_DECKS
     }
 
 
@@ -413,17 +397,9 @@ def get_nominal_dbu(name: str) -> float:
 
 
 def _extraction_registry() -> dict[str, ExtractionDeck]:
-    from . import asap7, gf180mcu, sg13cmos5l, sg13g2, sky130
-
     return {
-        "sky130": sky130.EXTRACTION_DECK,
-        "gf180mcu": gf180mcu.EXTRACTION_DECK,
-        "sg13g2": sg13g2.EXTRACTION_DECK,
-        "sg13cmos5l": sg13cmos5l.EXTRACTION_DECK,
-        # Issue #2761: extraction-only FinFET deck. ASAP7 is deliberately
-        # absent from the DRC registries above (#2760); its first-order
-        # parasitics table is registered in `_parasitics_registry` (#4558).
-        "asap7": asap7.EXTRACTION_DECK,
+        name: import_module(f"{__package__}.{name}").EXTRACTION_DECK
+        for name in _EXTRACTION_DECKS
     }
 
 
@@ -437,7 +413,7 @@ def known_extraction_deck_names() -> tuple[str, ...]:
     first tagged release). Used as the default deck set for ``klt deck
     info`` (issue #1209) when no ``--deck`` is given.
     """
-    return tuple(sorted(_extraction_registry()))
+    return tuple(sorted(_EXTRACTION_DECKS))
 
 
 def get_extraction_deck(
