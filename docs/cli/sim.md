@@ -1562,6 +1562,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   aggregate envelope (and each request's `dir` in `set-manifest.json`) is
   the authoritative path to a member's `report.json` -- read it from the
   envelope rather than re-deriving the stem.
+  A member refused with `not_launched` after it received a job ID also
+  records `requests[].expected_report`. This path may become readable after
+  a later collection. Before using it, match the file’s remote job ID or
+  fleet job IDs to that member’s `job_ids`. The original refusal keeps
+  `report: null`.
 - **Netlist identity.** For each corner batch job, collection compares the
   runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
   bytes, including rewritten include paths. A mismatch rejects the result
