@@ -130,14 +130,15 @@ def test_missing_checkpoint_is_an_engine_error(tmp_path, monkeypatch, suffix):
 
 
 def test_no_budget_report_golden(tmp_path, monkeypatch, capsys):
-    # Pin host-dependent fields. The digest is from the CLI at aa341302c.
+    # Pin host-dependent fields. The digest is from the CLI at 0f5c76a5a,
+    # which added netlist_sha256_banner_normalised to the payload (#7277).
     path = setup_run(tmp_path, monkeypatch, run_id="golden")
     monkeypatch.setattr(synthesize, "build_provenance", lambda **kw: {})
     monkeypatch.setattr(synthesize, "_read_sta_timing", lambda *args: (None, "fixture"))
     assert main(["synthesize", path, "--format", "json"]) == 0
     assert (
         hashlib.sha256(capsys.readouterr().out.encode()).hexdigest()
-        == "6d60b51434222c1e805191f12d14950e44ad881000f3928e84f7226273dd2329"
+        == "e04454a006ac969f71cd1703d13c5569c62c23da5aad4b85c5ccebc7a468773a"
     )
 
 
