@@ -254,10 +254,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from . import _liberty_warnings, _sta_wire_load, env_provenance
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
 from . import _sta_timing_derate as _derate
-from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
 from ._openroad_engine import (
@@ -918,10 +918,6 @@ class _ReportPaths:
             raise PostRouteStaError(scrubbed) from exc
 
 
-def _identity(text: str) -> str:
-    return text
-
-
 @dataclass(frozen=True)
 class _StaConstraints:
     """Issue #7023: the eleven validated port/path constraint values that
@@ -1050,7 +1046,6 @@ def _dispatch_sta(
         timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
-        scrub=report_paths.scrub,
         sdf_stem=basename if write_sdf else None,
         report_paths=report_paths,
     )
@@ -1140,6 +1135,7 @@ def _dispatch_sta(
         # finite WNS (`timing_status: "constrained"`) only says *some* path
         # was timed; this says whether any endpoint/register was left out.
         "constraint_completeness": corner_fields["constraint_completeness"],
+        "liberty_warnings": corner_fields["liberty_warnings"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
@@ -1206,7 +1202,6 @@ def _run_corner_session(
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
-    scrub: Callable[[str], str] = _identity,
     sdf_stem: str | None = None,
     report_paths: _ReportPaths | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1274,6 +1269,9 @@ def _run_corner_session(
     macro_liberty_paths = macro_blackbox.macro_liberty_paths(
         macros, corner, error_cls=PostRouteStaError
     )
+    decks = (liberty_path, *macro_liberty_paths)
+    # `str` is the no-op scrub for a report_paths-less call.
+    scrub = report_paths.scrub if report_paths is not None else str
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1414,6 +1412,8 @@ def _run_corner_session(
         "constraint_completeness": _parse_constraint_completeness(
             completed.stdout or ""
         ),
+        # Additive field (issue #7411): see `_liberty_warnings`.
+        "liberty_warnings": _liberty_warnings.parse(completed, report_paths, decks),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
@@ -1597,7 +1597,6 @@ def _run_multi_corner(
             timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
-            scrub=report_paths.scrub,
             sdf_stem=basename if write_sdf else None,
             report_paths=report_paths,
         )

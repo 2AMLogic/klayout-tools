@@ -168,6 +168,7 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
     _print_constraint_completeness(fields.get("constraint_completeness"), indent=indent)
+    _print_liberty_warnings(fields.get("liberty_warnings"), indent=indent)
     for key in ("worst_setup_path", "worst_hold_path"):
         _print_path_record(f"{indent}{key}", fields.get(key))
     for port, entry in (fields.get("port_paths") or {}).items():
@@ -235,6 +236,21 @@ def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:
         if check["sample"]:
             more = f" ... ({check['count']} total)" if check["truncated"] else ""
             print(f"{indent}  {key} (sample): {', '.join(check['sample'])}{more}")
+
+
+def _print_liberty_warnings(block: dict | None, *, indent: str) -> None:
+    """Issue #7411: one summary line naming the two Liberty-model codes,
+    plus the capped verbatim sample. Silent on a clean deck -- `count: 0`
+    has nothing to say, and the always-present JSON field is the stable
+    contract, not the text rendering."""
+    if not block or not block.get("count"):
+        return
+    counts = ", ".join(
+        f"{code}={block['by_code'].get(code, 0)}" for code in ("STA-1253", "STA-1311")
+    )
+    print(f"{indent}liberty_warnings: count={block['count']} ({counts})")
+    for line in block.get("sample") or []:
+        print(f"{indent}  {line}")
 
 
 def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:

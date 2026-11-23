@@ -45,6 +45,7 @@ from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
+from . import place_and_route_warnings as _pnr_warnings
 from ._dont_use import cell_exclusion_fields
 from ._openroad_engine import (
     _count_violations,
@@ -132,12 +133,6 @@ from .place_and_route_portable import portable_response
 # orchestration.
 from .place_and_route_power_audit import (
     audit_power_delivery as audit_power_delivery,
-)
-from .place_and_route_power_audit import (
-    power_delivery_warnings as power_delivery_warnings,
-)
-from .place_and_route_power_audit import (
-    row_rail_fallback_warning as row_rail_fallback_warning,
 )
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
@@ -355,6 +350,15 @@ from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
 from .place_and_route_unconstrained import unconstrained_warnings
+from .place_and_route_warnings import (
+    _antenna_repair_warnings as _antenna_repair_warnings,
+)
+from .place_and_route_warnings import (
+    _layer_map_warnings as _layer_map_warnings,
+)
+from .place_and_route_warnings import (
+    _response_warnings as _response_warnings,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1175,70 +1179,6 @@ def _validate_pdn_core_fit(
         raise PlaceAndRouteError(message)
 
 
-def _antenna_repair_warnings(
-    target_stage: str, library: dict[str, Any] | None
-) -> list[str]:
-    """Warn when a ``route`` run skips antenna repair (``antenna_diode: null``)."""
-    if target_stage != "route" or not _antenna_diode_absent(library):
-        return []
-    return [
-        "antenna repair did not run: request.library.antenna_diode is "
-        "null (the library has no antenna diode), so repair_antennas "
-        "was not called; the antenna check still ran"
-    ]
-
-
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
-    ]
-
-
-def _response_warnings(
-    placed: dict[str, Any],
-    *,
-    power_requested: bool,
-    row_rail_emitted: bool,
-    row_rail_layer: str | None,
-) -> list[str]:
-    """Compose the response's top-level ``warnings`` array for one run.
-
-    Two producers, kept in one place so the response assembly stays a
-    single call (and one fewer decision point in the already-baselined
-    :func:`run_place_and_route` -- ``complexity-baseline.json``, the same
-    reason :func:`_validate_pdn_core_fit` is a function of its own):
-
-    - the power-delivery audit's own strings (issue #2086,
-      :func:`power_delivery_warnings`): what the DEF was measured to
-      place, for an omitted ``request.power`` or a supplied one whose
-      grid came back incomplete/unverifiable;
-    - the row-rail fallback caveat (issue #1985,
-      :func:`row_rail_fallback_warning`), appended -- never folded into
-      the audit's strings, so each entry stays true to its own evidence:
-      the audit's prose is measured from the DEF and already refuses to
-      claim "no rails" on the fallback path, while the caveat states the
-      structural fact (horizontal rails only, no vertical straps, no
-      tapcells, no multi-layer PDN vias) that makes the grid incomplete
-      even when every measured count came back nonzero.
-
-    ``row_rail_emitted`` is ``True`` only when the fallback actually ran
-    (``request.power`` omitted, ``"route"`` stage reached, a
-    :data:`_ROW_RAIL_STRAP` library) -- never alongside a real PDN -- so a
-    full-PDN run's ``warnings`` is exactly what the audit alone produces.
-    """
-    warnings = power_delivery_warnings(placed, power_requested=power_requested)
-    if row_rail_emitted:
-        warnings.append(row_rail_fallback_warning(row_rail_layer))
-    return warnings
-
-
 def _own_stage_root(
     ownership: contextlib.ExitStack,
     request_path: str,
@@ -1782,6 +1722,9 @@ def _run_single_corner(
     previous_hash: str | None = None
     resumed_stages: list[str] = []
     can_resume = resume
+    # Issue #7411: the deduplicated STA-1253/STA-1311 lines accumulated
+    # across the stage loop below, for the response's `warnings` entry.
+    liberty_warning_lines: list[str] = []
 
     for stage in stages_to_run:
         script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_{stage}.tcl")
@@ -1850,6 +1793,11 @@ def _run_single_corner(
         if record is not None:
             stages.append(record["stage_entry"])
             engine_logs.extend(record["engine_logs"])
+            # Issue #7411: a resumed stage never runs here, so its own
+            # Liberty read survives only in its retained logs.
+            liberty_warning_lines = _pnr_warnings.liberty_warning_lines_from_resumed(
+                liberty_warning_lines, record["engine_logs"], output_dir
+            )
             placement_routability = record["placement_routability"]
             resumed_stages.append(stage)
             checkpoint_path = next_checkpoint
@@ -1884,6 +1832,11 @@ def _run_single_corner(
                 )
 
             metrics = _read_metrics(metrics_path, stage)
+        # Issue #7411: this stage's own Liberty read (every stage script
+        # runs one) -- deduped against the stages already run.
+        liberty_warning_lines = _pnr_warnings.liberty_warning_lines_after_stage(
+            liberty_warning_lines, completed.stdout or "", completed.stderr or ""
+        )
         setup_count, hold_count = (None, None)
         if stage != "floorplan":
             setup_count = _count_violations(
@@ -2281,6 +2234,12 @@ def _run_single_corner(
     warnings.extend(_antenna_repair_warnings(target_stage, library))
     warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
+    # Additive producer (issue #7411): one entry when any stage's Liberty
+    # read discarded a timing model (STA-1253/STA-1311). A clean deck adds
+    # nothing -- `warnings` stays byte-identical to the pre-#7411 run.
+    warnings.extend(
+        _pnr_warnings.liberty_model_response_warnings(liberty_warning_lines)
+    )
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
