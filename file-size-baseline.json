@@ -577,11 +577,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11158
+      "lines": 11085
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4251
+      "lines": 4250
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
-      "lines": 1145
+      "lines": 1144
     },
     {
       "path": "src/klayout_tools/sim_search.py",
