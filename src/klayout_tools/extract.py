@@ -1872,12 +1872,10 @@ def run_extract(
     ``net_id`` is ``net.cluster_id`` -- unique across every net *object* in
     this circuit, the same convention ``parasitics.nets[].net_id`` already
     uses for the identical "several distinct nets share one label" shape
-    (issue #765/#811). ``pin_index`` is that net's 0-based position in the
-    written ``.SUBCKT``/instance-line port order (``circuit.each_pin()``,
-    the exact sequence ``NetlistSpiceWriter`` iterates) when it is a promoted
-    pin, ``None`` otherwise -- resolving a specific ``.SUBCKT`` port index
-    straight back to a ``nets[]`` entry, positionally, with no separate
-    ``klt lvs`` run against a reference schematic needed.
+    (issue #765/#811). For a promoted pin, ``pin_index`` is its 0-based
+    position in KLayout's ``Circuit.each_pin()`` order used by
+    ``NetlistSpiceWriter``. An explicit ``--pins`` order can reorder the
+    written top-level ``.SUBCKT`` header. Internal nets have ``pin_index=None``.
     ``label_positions_um`` is ``[{"text": str, "x_um": float, "y_um": float},
     ...]`` -- every drawn text-label shape naming this net, in this circuit's
     own local coordinate frame (same convention
