@@ -38,6 +38,13 @@ _CANCELLED_STDOUT = (
 )
 
 
+@pytest.fixture(autouse=True)
+def fleet_job_store(tmp_path):
+    (tmp_path / "batch-fleet.env").write_text(
+        f"BATCH_JOB_BUCKET={FAKE_BUCKET}\nBATCH_JOBS_PREFIX=jobs\n"
+    )
+
+
 def _cancel_env(tmp_path, monkeypatch, runner):
     """Env-resolution for a request-less ``--cancel``, transport faked."""
     _install_fake_batch_transport(monkeypatch, runner=runner)
@@ -88,6 +95,37 @@ def test_cancel_requestless_matches_the_request_form(tmp_path, monkeypatch, caps
 
     assert without_request == with_request
     assert len(runner.argvs_matching("cancel")) == 1
+
+
+@pytest.mark.parametrize(
+    "fleet_config",
+    [
+        "BATCH_JOB_BUCKET=other-store\nBATCH_JOBS_PREFIX=jobs\n",
+        f"BATCH_JOB_BUCKET={FAKE_BUCKET}\nBATCH_JOBS_PREFIX=other-prefix\n",
+        None,
+    ],
+    ids=["different-bucket", "different-prefix", "missing-config"],
+)
+def test_cancel_refuses_unverified_job_store_before_apply(
+    tmp_path, monkeypatch, capsys, fleet_config
+):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    request = json.loads(path.read_text())
+    request["batch"]["jobs_prefix"] = "jobs"
+    path.write_text(json.dumps(request))
+    sidecar = tmp_path / "batch-fleet.env"
+    if fleet_config is None:
+        sidecar.unlink()
+    else:
+        sidecar.write_text(fleet_config)
+
+    assert main(["sim", str(path), "--cancel", JOB, "--format", "json"]) == 1
+    assert (
+        "cannot cancel: the job store must match"
+        in _stderr_json(capsys)["error"]["message"]
+    )
+    assert runner.calls == []
 
 
 def test_cancel_text_format_prints_the_job_line(tmp_path, monkeypatch, capsys):
@@ -184,6 +222,7 @@ def test_cancel_invalid_job_id_refused_before_any_subprocess(
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
+        (["--dry-run"], "--cancel cannot be combined with --dry-run"),
         (["--submit-only"], "--cancel cannot be combined with --submit-only"),
         (
             ["--wait-for-capacity", "30"],

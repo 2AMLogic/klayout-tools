@@ -1347,8 +1347,11 @@ itself. The job's S3 prefix and partial results are left in place. Like
 A job with nothing live to terminate (already finished, already cancelled,
 or unknown to the fleet tag) fails with `error.code:
 "batch_cancel_nothing_to_cancel"`; any other script failure surfaces its
-bucket-redacted stderr. `--cancel` conflicts (exit `2`) with
-`--submit-only`, `--wait-for-capacity`, `--attach`, `--job-status`, a
+bucket-redacted stderr. Before applying a cancellation, klt checks that
+the resolved bucket and jobs prefix match the provisioner's literal
+`BATCH_JOB_BUCKET` and `BATCH_JOBS_PREFIX` in the adjacent `batch-fleet.env`.
+If it cannot confirm the match, it exits before invoking the provisioner.
+`--cancel` conflicts (exit `2`) with `--dry-run`, `--submit-only`, `--wait-for-capacity`, `--attach`, `--job-status`, a
 non-`batch` `--backend`, and `--batch-set`. Cancelling a sharded
 `--submit-only` run takes one `--cancel` per shard job id (a shard-map form
 is future work). A cancelled job read with `--job-status` reports

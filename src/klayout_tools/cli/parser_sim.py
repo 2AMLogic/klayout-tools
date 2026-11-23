@@ -144,7 +144,8 @@ def add_sim_parser(
             "are left in place (issue #4351). The positional request, "
             "when given, supplies the bucket/region/profile; without one "
             "they resolve from the KLT_BATCH_* environment and the fleet "
-            "batch-fleet.env, as --job-status does. A job with nothing "
+            "batch-fleet.env. The bucket and jobs prefix must match that "
+            "file. --dry-run conflicts with --cancel. A job with nothing "
             "live to terminate fails with error.code "
             "batch_cancel_nothing_to_cancel. See docs/cli/sim.md."
         ),

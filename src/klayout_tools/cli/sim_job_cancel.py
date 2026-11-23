@@ -20,6 +20,7 @@ EXIT_PASS = 0
 #: Job-by-id flags ``--cancel`` cannot ride with. ``--batch-set`` is refused
 #: centrally in ``cli/sim_cmd.py``'s ``_run_batch_set`` conflict list.
 _CONFLICTS = (
+    ("dry_run", "--dry-run"),
     ("submit_only", "--submit-only"),
     ("wait_for_capacity", "--wait-for-capacity: it launches nothing"),
     ("attach_job_id", "--attach"),

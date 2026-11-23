@@ -94,6 +94,18 @@ def cancel_job(
     config = sim_batch._resolve_batch_config(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
+    # The provisioner reads the job store from its own fleet config. Its
+    # cancel verb has no bucket or prefix argument.
+    fleet = sim_batch._read_fleet_config(config.provision_script)
+    if (fleet.get("BATCH_JOB_BUCKET"), fleet.get("BATCH_JOBS_PREFIX")) != (
+        config.bucket,
+        config.jobs_prefix,
+    ):
+        raise SimError(
+            "cannot cancel: the job store must match BATCH_JOB_BUCKET and "
+            "BATCH_JOBS_PREFIX in batch-fleet.env beside the provision script; "
+            "check the fleet configuration and any batch bucket or prefix override"
+        )
     argv = [
         config.provision_script,
         "cancel",
