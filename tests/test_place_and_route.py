@@ -82,6 +82,7 @@ from klayout_tools.place_and_route import (
     load_request,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_deck_warnings import tap_distance_warning
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -7892,7 +7893,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
@@ -10627,11 +10628,10 @@ def _run_preset_pdn_integration(
     at all -- only `{"preset": ...}` -- and return the report.
 
     This is the automated form of this issue's "a preset-driven run reaches
-    `power.placed.status == "complete"` and `warnings == []` under
-    #2086/#2122's audit on a real toolchain run (not a stub), for each
-    supported library" acceptance criterion. The two assertions that
-    criterion names are made by each caller below, so a failure names the
-    library it happened on.
+    `power.placed.status == "complete"` with no #2086/#2122 audit warning on
+    a real toolchain run (not a stub), for each supported library"
+    acceptance criterion. Each caller below makes both assertions (a
+    gf180mcu caller expects the #7311 tap-distance entry and nothing else).
     """
     root, variant = variant_gate
     monkeypatch.setenv("PDK_ROOT", root)
@@ -10742,7 +10742,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -10784,7 +10784,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(

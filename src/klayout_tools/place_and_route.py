@@ -78,6 +78,11 @@ from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
 
+# Deck-known configuration warnings (issue #7311) for the two gf180mcu
+# `request.power` shapes the bundled deck is known to reject: pure, static
+# (no DRC run) strings kept out of this file for its size ceiling.
+from .place_and_route_deck_warnings import deck_warnings
+
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
 # the one name that subsystem calls back into this module for -- called once
@@ -98,6 +103,8 @@ from .place_and_route_gds_merge import (
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_hints import grt_hint, null_unconstrained_fmax
+from .place_and_route_layer_map import explain_spef_layer_map
+from .place_and_route_layer_map import layer_map_warnings as _layer_map_warnings
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -139,13 +146,6 @@ from .place_and_route_power_audit import (
 from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
-
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
 from .place_and_route_power_pins import _POWER_PIN_PATTERNS as _POWER_PIN_PATTERNS
 from .place_and_route_power_pins import rail_label_evidence
 from .place_and_route_reports import (
@@ -1178,22 +1178,9 @@ def _antenna_repair_warnings(
     if target_stage != "route" or not _antenna_diode_absent(library):
         return []
     return [
-        "antenna repair did not run: request.library.antenna_diode is "
+        "antenna repair did not run: the effective request.library.antenna_diode is "
         "null (the library has no antenna diode), so repair_antennas "
         "was not called; the antenna check still ran"
-    ]
-
-
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
     ]
 
 
@@ -1604,14 +1591,16 @@ def _run_single_corner(
     ``request`` (issue #3507: the unit :func:`run_place_and_route` runs once,
     or once per ``pdk.rebuild_corners`` entry).
 
-    ``corner_override`` stands in for ``request.pdk.corner`` and
-    ``output_subdir`` names a directory under ``.klt/place-and-route/`` to
-    write into instead of the stage root itself. Both default to ``None``,
-    which is the original single-run behaviour. The caller owns the output
-    directory lock; this function is pure of CLI and transport so a remote
-    dispatcher can call it per corner too.
+    ``corner_override`` stands in for ``request.pdk.corner`` and ``output_subdir``
+    names a directory under ``.klt/place-and-route/`` to write into instead of
+    the stage root itself. Both default to ``None``, which is the original
+    single-run behaviour. The caller owns the output directory lock; this
+    function is pure of CLI and transport so a remote dispatcher can call it
+    per corner too.
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #6764: engine-log envelopes anchor on the request's repo, not the cwd.
+    repo_root = find_repo_root(request_dir)
 
     threads = resolve_threads(request.get("threads", 1))
     engine = request.get("engine", "openroad")
@@ -1669,13 +1658,14 @@ def _run_single_corner(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    library = _validate_library(request.get("library"))
+    library = _validate_library(request.get("library"), cell_library)
     io_spec = _validate_io(request.get("io"), cell_library, library)
     # Issue #3885: a pattern naming no real port is an error, never a silent
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    instance_groups = _validate_instance_groups(request.get("instance_groups"))
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -1691,7 +1681,6 @@ def _run_single_corner(
         request.get("constraints") or {}, PlaceAndRouteError
     )
     seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
@@ -1788,7 +1777,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
-            instance_groups=instance_groups,
+            instance_groups=groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -1863,6 +1852,7 @@ def _run_single_corner(
             error_cls=PlaceAndRouteError,
             threads=threads,
             engine_logs=engine_logs,
+            repo_root=repo_root,
         )
         with completed.diagnostics(PlaceAndRouteError):
             if completed.returncode != 0:
@@ -1925,11 +1915,11 @@ def _run_single_corner(
                 overflow=_route_overflow.grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
-            # Issue #949: sweep every corner `cell_library` ships for
-            # setup/hold slack, as a second OpenROAD invocation over the
-            # checkpoint this stage's own script just wrote -- see
-            # `_run_corner_sweep`/`_corner_sweep_script_lines` for why this
-            # is a separate session rather than more Tcl appended above.
+            # Issue #949: sweep every corner `cell_library` ships for setup/hold
+            # slack, as a second OpenROAD invocation over the checkpoint this
+            # stage's script just wrote -- `_run_corner_sweep`/
+            # `_corner_sweep_script_lines` explain why this is a separate
+            # session rather than more Tcl appended above.
             assert io_spec is not None  # required to reach "route" (validated above)
             corners = list_sweep_corners(
                 cell_library, pdk_info, PlaceAndRouteError, sweep_corners
@@ -1963,6 +1953,7 @@ def _run_single_corner(
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
                 library=library,
+                repo_root=repo_root,
             )
 
         stages.append(
@@ -2044,41 +2035,43 @@ def _run_single_corner(
         via_pad_trim_info = merge_info.get("via_pad_trim")
         pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
-        # routed-geometry parasitics, via `klt extract --parasitics` against
-        # the GDS just merged above, fed back into a fresh OpenSTA session
+        # routed-geometry parasitics via `klt extract --parasitics` against the
+        # GDS just merged above, fed back into a fresh OpenSTA session
         # (`read_spef`) seeded from the `"route"` stage's own checkpoint --
-        # after the DEF->GDS merge, before this function's own final
-        # response is assembled, exactly the "after write_def/the DEF->GDS
-        # merge... before the report calls" ordering the issue's own scope
-        # names (the report calls in question are this helper's own
-        # internal `_metrics_report_lines`/`_violation_count_lines`, run
-        # inside the second `openroad` invocation it launches -- the merge
-        # itself runs in-process Python, so no *Tcl* command can sit
-        # "between" it and `write_def`; the ordering constraint is honored
-        # at the pipeline-step level instead). Off by default -- see
-        # `_validate_post_route_spef`'s own docstring for why.
+        # after the DEF->GDS merge, before this function's own final response
+        # is assembled, exactly the "after write_def/the DEF->GDS merge...
+        # before the report calls" ordering the issue's own scope names (the
+        # report calls in question are this helper's own internal
+        # `_metrics_report_lines`/`_violation_count_lines`, run inside the
+        # second `openroad` invocation it launches -- the merge itself runs
+        # in-process Python, so no *Tcl* command can sit "between" it and
+        # `write_def`; the ordering constraint is honored at the pipeline-step
+        # level instead). Off by default -- see `_validate_post_route_spef`'s
+        # own docstring for why.
         if post_route_spef:
-            spef_sta = _post_route_spef_metrics(
-                threads=threads,
-                engine_logs=engine_logs,
-                output_dir=output_dir,
-                hdl_toplevel=hdl_toplevel,
-                gds_path=gds_path,
-                def_path=def_path,
-                cell_library=cell_library,
-                liberty_path=liberty_path,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
-                max_transition_ns=max_transition_ns,
-                max_capacitance_pf=max_capacitance_pf,
-                max_fanout=max_fanout,
-                input_delay_ns=input_delay_ns,
-                output_delay_ns=output_delay_ns,
-                checkpoint_in=checkpoint_path,
-                # Issue #1002: `write_sdf` inside that same session, right
-                # after its `read_spef` -- see `_validate_post_route_sdf`.
-                write_sdf=post_route_sdf,
-            )
+            with explain_spef_layer_map(layer_map_info):
+                spef_sta = _post_route_spef_metrics(
+                    threads=threads,
+                    engine_logs=engine_logs,
+                    output_dir=output_dir,
+                    hdl_toplevel=hdl_toplevel,
+                    gds_path=gds_path,
+                    def_path=def_path,
+                    cell_library=cell_library,
+                    liberty_path=liberty_path,
+                    clock_port=clock_port,
+                    clock_period_ns=clock_period_ns,
+                    max_transition_ns=max_transition_ns,
+                    max_capacitance_pf=max_capacitance_pf,
+                    max_fanout=max_fanout,
+                    input_delay_ns=input_delay_ns,
+                    output_delay_ns=output_delay_ns,
+                    checkpoint_in=checkpoint_path,
+                    # Issue #1002: `write_sdf` inside that same session, right
+                    # after its `read_spef` -- see `_validate_post_route_sdf`.
+                    write_sdf=post_route_sdf,
+                    repo_root=repo_root,
+                )
     else:
         def_path = None
 
@@ -2104,60 +2097,49 @@ def _run_single_corner(
         else None
     )
 
-    # Additive field (issue #1091): reports what `request.power` actually
-    # drove, so a caller can tell a signal-only "route" result from a
-    # power-complete one without parsing the DEF for a missing
-    # `SPECIALNETS` section. See "Power delivery" in
+    # Additive field (issue #1091): reports what `request.power` actually drove, so a
+    # caller can tell a signal-only "route" result from a power-complete one without
+    # parsing the DEF for a missing `SPECIALNETS` section. See "Power delivery" in
     # docs/cli/place-and-route.md. `pdn`/`global_connect` are `True` once
-    # `request.power` is present (both run unconditionally together, at the
-    # end of the `"floorplan"` stage -- every run reaches at least that
-    # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
-    # per-library masters :func:`_power_delivery_lines`/the `"route"` stage's
-    # own `filler_placement` call actually used -- **not** a live placed-
-    # instance count (OpenROAD reports that only via a
-    # `report_design_area`/`get_cells`-style query this module does not yet
-    # thread through its per-stage `-metrics` mechanism; see the module
-    # docstring's own "Scope deliberately excluded" note). `filler_masters`
-    # is `[]` unless this run actually reached the `"route"` stage (the
-    # `"floorplan"`-stage `tapcell`/PDN Tcl always runs first, but
-    # `filler_placement` is a `"route"`-stage-only call). Both master fields
-    # are `None` on a `_NO_TAPCELL_LIBRARIES` library (issue #2441) even
-    # though `request.power` ran and `pdn`/`global_connect` are `True` --
-    # that library has no tap/endcap masters to name, and naming one would
-    # be the invention this module's table convention exists to avoid.
-    # `straps`/`connects`
-    # (issue #1133) echo exactly what `_power_delivery_lines` actually put on
-    # each `add_pdn_stripe`/`add_pdn_connect` call -- so a caller citing a
-    # real platform PDN config (e.g. gf180's own
-    # `pdn_grid_strategy_9t_6M.cfg`) can tell whether its request reproduced
-    # that config's `-spacing`/`-max_columns`/`-ongrid`/`-split_cuts` or
-    # silently fell back to this module's plain defaults, without re-deriving
-    # it from the request document itself. `connects` always lists one entry
-    # per consecutive strap pair (built via :func:`_pdn_connects_applied`),
-    # whether or not the caller supplied `power.connects[]` tuning for it.
-    #
-    # `preset` (issue #2123) echoes the `request.power.preset` name this
-    # run's `straps`/`connects` were resolved from (`None` for a
-    # hand-supplied block, and for a `request.power`-less run). Because
-    # `straps`/`connects` are echoed identically either way -- a preset
-    # resolves into the *same* validated values an explicit request
-    # produces, before any Tcl is emitted (:func:`_resolve_pdn_preset`) --
-    # this field is what tells a reader *which* of the two a given response
-    # describes, keeping a preset auditable rather than opaque.
-    #
-    # `row_rail` (issue #1442): reports the separate, `request.power`-
-    # independent fallback :func:`_row_rail_lines` may have emitted at the
-    # start of the `"route"` stage -- see that function's own and
-    # :data:`_ROW_RAIL_STRAP`'s own docstrings for why this exists and why
-    # it is never active when `power is not None` (a `request.power`-bearing
-    # run's real PDN already covers this, if its own `straps[]` include the
-    # row-rail layer). `emitted` is `True` only once a run both omitted
-    # `request.power` *and* actually reached the `"route"` stage on a
-    # `cell_library` with a verified :data:`_ROW_RAIL_STRAP` entry.
-    # `filler_masters` mirrors `power.filler_masters`'s own shape: the
-    # row-rail fallback also drives this same `"route"`-stage-only
-    # `filler_placement` call (see `_stage_script_lines`), safe only because
-    # the row-rail obstruction above already precedes `global_route`.
+    # `request.power` is present (both run unconditionally together, at the end of the
+    # `"floorplan"` stage -- every run reaches at least that stage).
+    # `tapcell_master`/`endcap_master`/`filler_masters` name the per-library masters
+    # :func:`_power_delivery_lines`/the `"route"` stage's own `filler_placement` call
+    # actually used -- **not** a live placed-instance count (OpenROAD reports that only
+    # via a `report_design_area`/`get_cells`-style query this module does not yet thread
+    # through its per-stage `-metrics` mechanism; see the module docstring's own "Scope
+    # deliberately excluded" note). `filler_masters` is `[]` unless this run actually
+    # reached the `"route"` stage (the `"floorplan"`-stage `tapcell`/PDN Tcl always runs
+    # first, but `filler_placement` is a `"route"`-stage-only call). Both master fields
+    # are `None` on a `_NO_TAPCELL_LIBRARIES` library (issue #2441) even though
+    # `request.power` ran and `pdn`/`global_connect` are `True` -- that library has no
+    # tap/endcap masters to name, and naming one would be the invention this module's
+    # table convention exists to avoid. `straps`/`connects` (issue #1133) echo exactly
+    # what `_power_delivery_lines` actually put on each `add_pdn_stripe`/
+    # `add_pdn_connect` call -- so a caller citing a real platform PDN config (e.g.
+    # gf180's own `pdn_grid_strategy_9t_6M.cfg`) can tell whether its request reproduced
+    # that config's `-spacing`/`-max_columns`/`-ongrid`/`-split_cuts` or silently fell
+    # back to this module's plain defaults, without re-deriving it from the request
+    # document itself. `connects` always lists one entry per consecutive strap pair
+    # (built via :func:`_pdn_connects_applied`), whether or not the caller supplied
+    # `power.connects[]` tuning for it. `preset` (issue #2123) echoes the
+    # `request.power.preset` name this run's `straps`/`connects` were resolved from
+    # (`None` for a hand-supplied block, and for a `request.power`-less run). Because
+    # `straps`/`connects` are echoed identically either way -- a preset resolves into
+    # the *same* validated values an explicit request produces, before any Tcl is
+    # emitted (:func:`_resolve_pdn_preset`) -- this field is what tells a reader *which*
+    # of the two a given response describes, keeping a preset auditable rather than
+    # opaque. `row_rail` (issue #1442): reports the separate, `request.power`-
+    # independent fallback :func:`_row_rail_lines` may have emitted at the start of the
+    # `"route"` stage -- see that function's own and :data:`_ROW_RAIL_STRAP`'s own
+    # docstrings for why this exists and why it is never active when `power is not None`
+    # (a `request.power`-bearing run's real PDN already covers this, if its own
+    # `straps[]` include the row-rail layer). `emitted` is `True` only once a run both
+    # omitted `request.power` *and* actually reached the `"route"` stage on a
+    # `cell_library` with a verified :data:`_ROW_RAIL_STRAP` entry. `filler_masters`
+    # mirrors `power.filler_masters`'s own shape: the row-rail fallback also drives this
+    # same `"route"`-stage-only `filler_placement` call (see `_stage_script_lines`),
+    # safe only because the row-rail obstruction above already precedes `global_route`.
     row_rail_emitted = (
         power is None and target_stage == "route" and cell_library in _ROW_RAIL_STRAP
     )
@@ -2285,6 +2267,7 @@ def _run_single_corner(
     warnings.extend(_antenna_repair_warnings(target_stage, library))
     warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
+    warnings.extend(deck_warnings(cell_library, power, power_info))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2384,7 +2367,7 @@ def _run_single_corner(
         ),
         # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
-            read_def_instance_groups(audited_def_path, instance_groups)
+            read_def_instance_groups(audited_def_path, groups)
             if audited_def_path
             else None
         ),
@@ -3037,8 +3020,8 @@ def check_place_and_route_report(
 ) -> dict[str, Any]:
     """Compare committed netlist and Liberty digests to the current inputs.
 
-    Each rebuilt corner carries its own pair. This check requires no engine
-    run and the requested thread count does not enter either digest.
+    Each rebuilt corner has its own pair. This engine-free check excludes thread count.
+    See the ``--check`` / ``--rerun`` contract in ``docs/cli/place-and-route.md``.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
     request = load_request(request_path, threads=threads)

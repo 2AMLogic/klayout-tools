@@ -1,0 +1,26 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN divider ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 4 ;
+    - div_ff sky130_fd_sc_hd__dfxtp_1 ;
+    - inv sky130_fd_sc_hd__inv_1 ;
+    - sink_ff sky130_fd_sc_hd__dfxtp_1 ;
+    - source_ff sky130_fd_sc_hd__dfxtp_1 ;
+END COMPONENTS
+PINS 4 ;
+    - base_q + NET base_q + DIRECTION OUTPUT + USE SIGNAL ;
+    - clk + NET clk + DIRECTION INPUT + USE SIGNAL ;
+    - data + NET data + DIRECTION INPUT + USE SIGNAL ;
+    - slow_q + NET slow_q + DIRECTION OUTPUT + USE SIGNAL ;
+END PINS
+NETS 6 ;
+    - base_q ( PIN base_q ) ( source_ff Q ) ( sink_ff D ) + USE SIGNAL ;
+    - clk ( PIN clk ) ( source_ff CLK ) ( div_ff CLK ) + USE SIGNAL ;
+    - data ( PIN data ) ( source_ff D ) + USE SIGNAL ;
+    - div_q ( sink_ff CLK ) ( inv A ) ( div_ff Q ) + USE SIGNAL ;
+    - slow_q ( PIN slow_q ) ( sink_ff Q ) + USE SIGNAL ;
+    - toggle ( inv Y ) ( div_ff D ) + USE SIGNAL ;
+END NETS
+END DESIGN

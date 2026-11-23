@@ -192,9 +192,9 @@ def test_base_dir_anchors_every_relative_path_field(tmp_path):
     sources = fv._resolve_sources(doc["sources"], anchor)
     assert sources == [str((base / "rtl" / "gcd.v").resolve())]
 
-    module, module_dir, _testcase = fv._resolve_testbench(doc["testbench"], anchor)
+    module, module_dirs, _testcase = fv._resolve_testbench(doc["testbench"], anchor)
     assert module == "test_gcd"
-    assert module_dir == str((base / "tb").resolve())
+    assert module_dirs == [str((base / "tb").resolve())]
 
     (
         _coverage,
