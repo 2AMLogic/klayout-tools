@@ -289,8 +289,8 @@ that root without the first-match-wins search, so the PDK ambiguity warning does
 not fire. The pinned root shows in `provenance.pdk`. For a local ngspice
 corner, klt expands `$PDK_ROOT` in the body’s include paths with the selected
 install root and passes the same `PDK_ROOT` to the child process. This also
-applies to a store selected by discovery. Corner requests only:
-`decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
+applies to a store selected by discovery. Corner requests and `--op-lint` accept the pin.
+`decks`/`commands` requests, `--batch-set` and `--job-status`
 refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
 
 **Pinning the PDK revision (`models.pdk_version`, issue #4046).** The
@@ -1043,9 +1043,9 @@ recorded shard's `status.json` is read once, a shard whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
 `resume: reused N checkpointed corner(s)` summary and never re-billed.
-Harvested reuse is reported through `environment.resume.resumed_corners`,
-not as `environment.remote.fleet[]` entries with `resumed: true`; `fleet[]`
-lists only shards dispatched after the harvest. Shards the map records
+The reused unit count appears in `environment.resume.resumed_corners`. The
+invocation's `environment.remote.fleet[]` lists harvested jobs first, followed
+by dispatch observations. A job seen in both appears once. Shards the map records
 `submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
@@ -1704,7 +1704,7 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   the same set with the same `-o`: a sharded request harvests finished jobs
   recorded in its `batch-shards.json`, reports their reused units in
   `environment.resume.resumed_corners`, and dispatches only the outstanding
-  units (`environment.remote.fleet[]` covers that dispatch); a request with no
+  units (`environment.remote.fleet[]` covers both phases). A request with no
   prior directory runs fresh. A non-sharded or deck-list request resumes through its
   own checkpoint (the set always runs on `batch`, which supports `--resume`
   for both). A request whose resume is refused -- a shard map written for a
@@ -2201,11 +2201,44 @@ poll instead of another full window) is submitted again under a new id,
 overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
 the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
 the grace the first run already waited. A `batch_poll_timeout` shard is never
-resubmitted (that job may still be running). The shards dispatched after the
-harvest appear in `environment.remote.fleet[]`, with `resumed: true|false`
-describing dispatch-time re-attachment. Harvested shards are absent from
-`fleet[]`; their reused units count toward `environment.resume.resumed_corners`.
+resubmitted (that job may still be running). The invocation's `environment.remote.fleet[]` includes harvested jobs and
+jobs observed during dispatch. Harvested entries carry `resumed: true`; the
+dispatch entries record whether the client re-attached. Reused units count
+toward `environment.resume.resumed_corners`.
 A map written before these fields existed carries no `state` and is only ever polled.
+
+<a id="whole-run-batch-summary"></a>
+
+**Whole-run batch summary.** A sharded simulation reports
+`environment.remote.run` alongside the invocation's fleet. The original
+requested host count is `declared_hosts`. Each invocation that reaches dispatch
+or finishes by harvesting the full matrix counts as a round. `rounds` gives
+the total when recorded from the start. `observed_rounds` counts the rounds
+tracked in this output directory. `observed_launched_jobs` counts distinct job
+IDs with launch evidence, including failed jobs later replaced. A submission or
+a launch attempt alone contributes no launch. `first_launch` and `last_terminal`
+are the earliest recorded launch and the latest time a job first reached an
+observed terminal state, in UTC. Re-reading the same state leaves the span
+unchanged. Missing timestamps are null.
+
+`completed_units` counts requested units with a result, including electrical
+failures. Units that never ran remain outstanding: lost, interrupted,
+budget-skipped, orphaned, or aborted by the fail-fast probe
+(`timeout_budget_unreachable`).
+`complete` means `completed_units == total_units`. The existing
+`unlaunched_shards` and `resumable` fields describe the current dispatch.
+A sharded `--resume` that dispatches and harvests nothing, because every unit
+came from `checkpoint.json`, still reports the summary: `environment.remote`
+then holds only `run`, and `environment.models_lib_sha256_scope` reads
+`"client"` as on any other batch run, not `"local"`.
+
+The client stores observations in `batch-run-history.json` under the artifact
+directory before replacing the shard map. It binds them to the checkpoint
+fingerprint and request digest. A fresh run starts a new history. On a legacy
+resume, `history_coverage: "partial"` means the original `declared_hosts` and
+`rounds` are null. Job counts and the observed time span cover only available
+evidence; with no known launch, the count is null. `"from_start"` means the
+client tracked rounds from the first invocation.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, netlist) or an unreadable `batch-shards.json` is refused with
@@ -2314,6 +2347,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_overrides` | 0.9.1 |
 | `analysis.op_check` | 0.9.2 |
+| `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 | `lossless supply_v corner_id spelling` | unreleased |
@@ -9404,6 +9438,98 @@ a bad value is refused with an application error before any unit runs.
   forward the request's `options` verbatim, so the runner applies it itself (the
   runner's `klt` must support the option). `engine: "xyce"` refuses it.
 
+## Tightened re-run of check-failing points (`--regrade`, issue #6778)
+
+A sim acceptance check can fail on a point where the simulator returned a
+poor transient solution rather than a property of the circuit (one of 504
+VCO tuning curves dipping ~11% at a single Vctrl point under the batch
+image's ngspice). The remedy is procedural, not statistical: re-run *only*
+the affected units with tightened solver settings, keep both observations,
+and let the tightened one carry the grade. No check definition is ever
+relaxed by this feature.
+
+Two halves, declared before acquisition — never ad hoc:
+
+**The manifest declaration.** The bench declares its tightened transient
+settings on the request itself, so they exist before the first pass ever
+runs (a typo is refused on every run, not discovered after a campaign):
+
+```json
+{
+  "netlist": "vco.spice",
+  "analysis": { "kind": "tran", "args": "1n 20u" },
+  "corners": { "supply_v": { "vdd": [1.8, 1.62] } },
+  "measurements": [
+    { "name": "kvco", "expr": "slope(v(freq))", "unit": "Hz/V",
+      "limits": { "min": "1.2x nominal" } }
+  ],
+  "options": { "tightened_rerun": { "tmax": "25p", "reltol": 1e-4 } }
+}
+```
+
+Keys: `tmax` (the transient's maximum internal timestep — a number of
+seconds or a SPICE time literal; requires a scalar `tran` analysis) plus any
+name from `options.ngspice_options`' allowlist (`reltol`, `abstol`, ...).
+At least one key must be declared; the resolved declaration is echoed as
+`environment.tightened_rerun` in *both* passes' reports. The declaration is
+inert in a normal run: nothing about the first pass changes.
+
+**The second pass.** After the first report, the checker (the chip repo's
+own curve check — it lives outside KLT) supplies the source report, the
+failed check's identifier and the affected corner ids; KLT owns selection,
+dispatch and the comparison record:
+
+```console
+$ klt sim request.json --regrade report.json \
+    --check-id vco_curve_dip --corner default/1.620V/27C
+```
+
+- **Selection.** `--corner` takes a `corners[].corner_id` from the source
+  report (repeatable; each unit is dispatched exactly once; zero `--corner`
+  flags submits zero jobs and records `status: "not_checked"`). Unknown,
+  duplicated or ambiguous ids are refused before anything is dispatched.
+  Seven Vctrl readings that share one transient select the one corner/band
+  curve; a brown-out checker can select individual PVT corners.
+- **What changes.** Only the declared smaller `tmax` and/or tighter solver
+  tolerances. The stimulus, time window, measurements, checker thresholds
+  and resolved inputs are preserved — the re-run rides the request's own
+  expansion unchanged, so corner ids and Monte Carlo seeds are identical by
+  construction. A batch baseline dispatches the subset on batch even when
+  it contains one unit (the fleet simulator is the evidence baseline); the
+  request's own timeout and refusal accounting apply as ever.
+- **The companion record.** Written beside the re-run's artifacts as
+  `regrade/<check-slug>/regrade.json` (both attempts' artifacts survive
+  side by side; the first pass's are never overwritten). Per selected unit:
+  the id, the triggering check, the effective solver settings, **both**
+  attempts' values or waveform references, execution status and batch job
+  provenance when available. The same checker then re-grades the tightened
+  observations — a failure that survives the tightened run stays a failure.
+- **Grades.** A completed tightened run grades `pass`/`fail` from its own
+  limits. A timeout, missing result or unusable solve grades `unresolved`
+  with an explicit reason (and the first observation still in the record) —
+  never a `pass`. Exit codes mirror the sweep's: 0 all passed, 3 a failure
+  survived, 4 unresolved (or nothing was selected), 1 the re-run could not
+  be attempted at all.
+- **Refusals.** A request that declares no `options.tightened_rerun`, a
+  netlist that drifted since the first pass (`expect_netlist_identity` is
+  pinned from the source report), a batch runner too old to apply the
+  selection, or a swept `corners.options` axis that already sets one of the
+  tightened names — each is a named error, never a silent fallback.
+
+Batch and remote jobs carrying a regrade selection require a worker whose
+`klt sim --help` includes `--regrade`. A worker without it refuses the selection
+before running any corners. This also distinguishes development builds that
+share a release number. Declaring `options.tightened_rerun` on an ordinary
+first pass does not require this feature.
+
+`--regrade` composes with `--backend` (an override away from the source
+report's backend adds a `warnings[]` note that the record is not
+evidence-grade parity), `--dry-run` (preview the selection without
+dispatching), and the usual `--timeout-s`/`--budget-s`/`--wait-for-capacity`.
+It cannot combine with `--check`, `--batch-set`, `--submit-only`,
+`--attach`, `--collect-partial`, `--job-status`, `--op-lint`, `--plot` or
+`--resume`.
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical
@@ -9654,7 +9780,10 @@ stay verbatim.
 `models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
 runner; drop it and use `models.pdk`. A path that does not exist here is
 assumed runner-valid and passes. `--pdk-root` is folded into `models.pdk_root`
-as an absolute path, so the flag form is refused the same way.
+as an absolute path, so the flag form is refused the same way. The refusal
+message names the pin that does work on `batch`: set `$PDK_ROOT` to choose which
+install this *client* resolves (the runner reads its own, selected by
+`models.pdk`) ([#5751](https://github.com/2AMLogic/klayout-tools/issues/5751)).
 
 `klt sim --dry-run --backend batch` raises the same error rather than passing
 clean ([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)), with
@@ -10398,6 +10527,17 @@ sweep response.
 klt sim <request.json> --op-lint [--op-lint-corner <corner_id>|all] [--format text|json]
 ```
 
+- `--pdk-root DIR` — pin the PDK install root for the lint, exactly as on the
+  graded path ([#5751](https://github.com/2AMLogic/klayout-tools/issues/5751)):
+  folded into `models.pdk_root`, so it wins over the request's own field and a
+  relative `DIR` resolves against the CWD. Use it on a host with more than one
+  install of the same PDK so the lint reads the install the grid will.
+- **Resolved PDK reporting** — the lint reports which PDK it resolved:
+  `provenance.pdk` in JSON (unchanged), and in `--format text` a
+  `pdk: <name> <version> (via <source>)` line. When more than one
+  install holds the variant and none was pinned, it also prints the same
+  one-line stderr ambiguity warning as the graded path and a `pdk: WARNING`
+  text line.
 - `--op-lint-corner` — which expanded `corner_id` from the request's own
   matrix to bias at. Defaults to the **first** expanded corner. Exactly one
   corner is run either way: this is a diagnostic meant to be cheap enough to

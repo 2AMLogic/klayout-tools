@@ -272,7 +272,12 @@ from .signoff_justified_gap import (
 
 # Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
 # for its size-ratchet ceiling.
-from .signoff_multi_member import _entry_problem, failed_members, with_member_coverage
+from .signoff_multi_member import (
+    _entry_problem,
+    failed_members,
+    graded_input_provenance,
+    with_member_coverage,
+)
 
 # The item-6 `not_applicable` form's pure helpers (statistical scan, markdown
 # spec parser; issue #4793) live in `signoff_na`, keeping this file under its
@@ -6232,11 +6237,9 @@ def _grade_multi_citation(
     is ``invalid_evidence``; so is ``require_coverage_invalid`` (issue #5789,
     via :func:`_checked_multi_members`).
 
-    Issue #6027: a ``check_failed`` ``sim`` member's envelope is captured too,
-    so its tagged, limited, passing rows join ``covered``/``row_sources`` as
-    ``derived`` and leave ``failed_rows``; the citation still grades
-    ``unmet`` with its own reason, and a named row whose tagged measurement
-    fails stays in ``failed_rows``.
+    A ``check_failed`` sim member still credits its passing tagged rows as
+    derived. Its own verdict and failing rows retain their reasons (#6027).
+    Each graded entry copies its own resolved input provenance (#7598).
 
     Issue #6969: a ``joint_grid`` row is covered only when every named
     member graded ``met`` and proved the declared grid plus a condition
@@ -6245,8 +6248,6 @@ def _grade_multi_citation(
     ``detail.joint_rows``, a member no citation names or a Monte Carlo
     member is ``invalid_evidence`` (decided with the other post-member
     outcomes).
-
-    Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
 
     def invalid(
@@ -6283,7 +6284,7 @@ def _grade_multi_citation(
                 **({"rows": rows} if rows else {}),
                 "status": g[0],
                 "reason": g[1],
-                # Issue #5786: carries the member citation's own `yield_campaign`.
+                **graded_input_provenance(g[2] or g[3].get("cited_evidence")),
                 **graded_entry_campaign(g[2]),
             }
             for spec, rows, g in graded

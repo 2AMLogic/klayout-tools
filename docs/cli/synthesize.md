@@ -126,6 +126,18 @@ a separate, second failure mode: a query that exhausts the wasm32 guest's
 [`docs/cli/equiv.md`](equiv.md) ("Which binaries are run") documents it
 (issue #5804).
 
+The WASI builds also lose ABC's redirected stdout entirely (issue #7010):
+the `abc` pass runs ABC in-process and its `stime -p` summary never reaches
+the captured `<top>_abc.log`, which on earlier `klt` versions left `timing`
+unconditionally `null` even though the mapping itself completed. `klt
+synthesize` now stages the engine's own constrained script with the report
+widened to `stime -pd`, so ABC additionally dumps its statistics file into
+the run directory and a single-region design recovers an integer-precision
+`timing` from it (see "`timing`" below for the precision and per-region
+limits). Full precision and per-region attribution still need a native
+`yosys` — the `PATH=/usr/bin:$PATH` advice above is the workaround when
+only the timing figure matters.
+
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
 in process — see "`sta`" below) analyzes that netlist's timing graph. It is
@@ -315,8 +327,10 @@ the directory is cleared — see [`place-and-route.md`](place-and-route.md)'s
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
 library enables ABC constraints. Missing artifacts fail explicitly. A current
-ABC log without a readable `stime` summary produces `timing: null` and a
-`timing_unavailable` warning; any requested clock target remains unverified.
+ABC log without a readable `stime` summary falls back to the run's ABC
+statistics dump (see "`timing`" below); when that cannot attribute a delay
+either, the run produces `timing: null` and a `timing_unavailable` warning,
+and any requested clock target remains unverified.
 Unknown-library capability warnings still describe unavailable ABC constraints.
 
 Provenance hashes are computed before engine execution. Before returning,
@@ -338,13 +352,15 @@ retained directory next to that request.
 | File | Contents |
 | --- | --- |
 | `synth_<top>.ys` | The generated Yosys script (`script_path` in the response) — the **commit-safe** form, with the liberty written as `$PDK_ROOT/…` (issue #1870). |
-| `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root and no token was written. |
+| `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root, no token was written, **and** no statistics-dump capture was staged — with the capture (issue #7010) the sibling exists for its own sake, carrying absolute paths so Yosys can execute from the run directory. |
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
 | `<top>_latch_map.v` | The generated `techmap` rule file for `request.latch_map` (`latch_map.techmap_path`) — present only when the request sets `latch_map`. Commit-safe. |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
+| `abc_stime_capture.script` | The staged ABC script (issue #7010) used instead of the `abc` pass's built-in one on the constrained mapping path: the engine's own documented constrained script — parsed from `help abc`, so the selected mapping commands are preserved, `-D` substitution included — with the `stime` tail widened to also dump statistics. Written only when the engine's help documents the script in the parsed shape. |
+| `stats.txt` | ABC's own `stime -d` statistics dump (issue #7010), written into the run directory because Yosys executes from there. Read only when the captured ABC log carries no readable `stime` summary, and only in its unambiguous single-record form (see "`timing`"). ABC appends to this file — a manual replay of the run script adds records to it. |
 | `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
@@ -362,10 +378,12 @@ Use the optional top-level `synthesis` object to select ABC mapping effort and a
 Fast mapping reduces effort on both passes. On builds without the native
 `-fast` option, klt emits the corresponding Yosys 0.67 commands explicitly.
 With Liberty timing constraints it retains the buffer, sizing and `stime -p`
-steps. A custom script applies only to standard-cell mapping so it can refer
-to the target library. Use `--verify-equivalence` to check the resulting
-gate-level netlist against the source RTL. To populate ABC timing with a
-custom script, include `stime -p` and enable the appropriate ABC constraints.
+steps — and widens the report to `stime -pd` so the run's statistics dump is
+recoverable (issue #7010). A custom script applies only to standard-cell
+mapping so it can refer to the target library. Use `--verify-equivalence` to
+check the resulting gate-level netlist against the source RTL. To populate
+ABC timing with a custom script, include `stime -p` and enable the
+appropriate ABC constraints.
 
 `abc_fast` accepts a boolean. `abc_script` names a file relative to the
 request directory (the working directory for stdin). A leading `+` is a
@@ -807,6 +825,42 @@ in the mapped netlist) and leakage totalled through the existing
 `_LEAKAGE_UNIT_TO_NW["pw"]` entry this library's `"1pW"` liberty unit already
 matched.
 
+## Multicycle timing on the mapped netlist
+
+When `constraints.multicycle_paths` contains entries, synthesis runs standalone
+`klt sta` in Verilog mode on its final mapped netlist, using the same cell library,
+corner and declared hard macros. Selectors name **mapped** instances or pins.
+Check the emitted Verilog for their names after Yosys mapping. Entry syntax and
+selector rules are shared with [standalone STA](sta.md#multicycle-paths-constraintsmulticycle_paths-issue-6921).
+
+```json
+{
+  "constraints": {
+    "clocks": [{"port": "clk", "period_ns": 2.0}],
+    "multicycle_paths": [{"from": "ff_fb", "to": "ff_fb", "setup": 4, "hold": 3}]
+  }
+}
+```
+
+Supply each clock port and period in `constraints.clocks`. The first clock is the
+primary clock and later entries define additional clocks. An explicit scalar
+`constraints.clock_period_ns` still takes precedence for ABC’s global mapping
+target. Constrained STA uses the periods of the named clocks.
+
+The optional `constrained_timing` result contains the standalone analysis basis,
+`geometry_source: "netlist_estimate"`, worst setup and hold slack in nanoseconds,
+timing status, and a `multicycle_paths` record per entry. Each record includes
+the selectors, matched endpoint count, and setup and hold slacks with and without
+that entry. For example, a four-cycle feedback exception can improve setup slack
+on that feedback path while an adjacent register retains its single-cycle check.
+The existing `sta` field measures native, SDC-free delay. The `timing` and
+`clock_targets` fields describe ABC mapping.
+
+An omitted or empty list skips this analysis and leaves `constrained_timing`
+absent. With entries, an unavailable timing engine or a selector that matches
+nothing fails synthesis with exit 1. The run directory retains the mapped netlist
+and `constrained_sta_request.json` for diagnosis.
+
 ## `timing`: ABC's own pre-layout estimate, **not** signoff STA
 
 `timing` carries ABC's `stime -p` critical-path number — the one delay
@@ -861,10 +915,43 @@ runs — it was simply discarded, because `-constr` was never passed
 (`docs/design/synthesize-qor-improvements-survey.md` sections 1.2/1.4).
 Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
 
+**WASI engines and the statistics-file fallback (issue #7010).** The
+YoWASP/WASI Yosys builds lose ABC's redirected stdout, so on those engines
+the captured `<top>_abc.log` never carries the `stime` line at all. When
+that happens, `klt synthesize` reads the run's own `stats.txt` — ABC's
+`stime -d` statistics dump, staged into the run directory as described
+above — and reports:
+
+```json
+"timing": {
+  "source": "abc_stime_stats_file",
+  "wire_load": null,
+  "critical_path_ps": 771,
+  "precision_ps": 1,
+  "delay_target_ps": null,
+  "regions": [{"module": "top", "critical_path_ps": 771}]
+}
+```
+
+The differences from the `abc_stime` shape are the honest labels: ABC
+writes the dump's delay as an **integer** (truncated, not rounded — echoed
+as `precision_ps`), and it carries no wire-load echo at all, so
+`wire_load` is `null` because it is *unknown*, not because it is `"none"`.
+Only the unambiguous case is reported: exactly one measured region. A
+design whose ABC runs once per region leaves percentage records in the
+dump (ratios to the first region, not delays), so multi-region designs on
+a WASI engine stay `timing: null` with the `timing_unavailable` warning —
+run a native `yosys` for those. And because the integer is truncated, a
+`critical_path_ps` *equal to* `delay_target_ps` does not establish that
+the target was met (the true delay may sit anywhere in the truncated
+value's one-picosecond window); only a value strictly below the target
+does.
+
 `timing` is `null` — never a fabricated number — when the resolved
 `cell_library` has no ABC constraint-table entry (so `-constr`, and
-therefore `stime -p`, never ran), or when the resolved ABC printed no
-recognisable summary line.
+therefore `stime`, never ran), when the resolved ABC printed no
+recognisable summary line, or when the statistics dump is missing or
+ambiguous (the multi-region case above).
 
 ## `sta`: the native gate-level critical-path report
 
@@ -1474,6 +1561,7 @@ separately if it turns out to matter for evidence-record committing.
 | `macros` | array\<object\> \| omitted | Hard-macro declarations (issue #2635) — pre-characterized blocks this design instantiates but carries no RTL for. See "Hard macros" below for the shared shape and per-verb behaviour. `[]`/omitted (the default) leaves every pre-#2635 request byte-identical. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
 | `constraints.clocks` | array\<{port, period_ns}\> \| null | Per-clock periods for a multi-clock design (issue #2883). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list, or a malformed entry are errors. `abc -D` takes a single global number, so per-clock periods are **not** individually enforced: when `clock_period_ns` is omitted the **smallest** listed `period_ns` becomes the ABC delay target (and the `--restructure-timing` target); an explicit `clock_period_ns` always takes precedence. The response's `clock_targets` states exactly what was applied. |
+| `constraints.multicycle_paths` | array of objects | Optional mapped-netlist setup/hold exceptions. Requires named clocks. See [Multicycle timing on the mapped netlist](#multicycle-timing-on-the-mapped-netlist). |
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
 | `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
 | `constraints.abc_constr` | object \| omitted | The `abc -constr` inputs `{driving_cell, load_ff}` (issue #4662): `driving_cell` must exist in the resolved liberty and match none of the exclusion patterns selected by `dont_use_mode`. A conflict is an error naming the cell and pattern. `load_ff` is the output load in femtofarads (finite, > 0). Supplies `-constr` — and with it ABC's load-driven sizing/buffering and `stime` timing — for any `pdk.cell_library`, including ones with no built-in entry (e.g. `asap7sc7p5t_rvt`), and **overrides** the built-in entry when there is one. Omitted, behaviour is unchanged. Missing/unknown keys, an unknown `driving_cell`, or a non-positive/non-finite `load_ff` are errors naming the field. |
@@ -1684,6 +1772,7 @@ see [Generic ABC timeout and pre-ABC checkpoint](#generic-abc-timeout-and-pre-ab
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps, regions}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given); `regions` is `[{module, critical_path_ps}]`, one per `stime` report in log order (`module` is `null` when the log names none; the max equals `critical_path_ps`). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). For a multi-module design the analysis runs over a flattened temp copy of the netlist (hops carry flattened instance names). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
 | `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). A multi-module (hierarchical) netlist is flattened into a throwaway copy for the `sta` stage only — the committed `netlist_path` stays hierarchical — and if that flatten fails the reason says the netlist is hierarchical and points to `klt sta` with a `verilog` request. **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
+| `constrained_timing` | object, optional | Standalone Verilog-mode timing on the mapped netlist when multicycle paths are requested. Includes per-entry endpoint counts and setup/hold measurements. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `abc_constr` | object | **Always present** (issue #4662) — where the `abc -constr` inputs came from: `{source, driving_cell, load_ff}`. `source` is `"request"` (`constraints.abc_constr`), `"builtin"` (the per-library table), or `null` (no `-constr` passed; `driving_cell`/`load_ff` are then `null` and the `unsupported_cell_library` warning names the skipped capability). Additive field, no `schema_version` bump. |

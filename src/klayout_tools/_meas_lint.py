@@ -181,7 +181,10 @@ def _callee_start(spice: str, open_at: int) -> int | None:
         return match.start()
     if word not in ("max", "min"):
         return None
-    inner = spice[open_at + 1 : _balanced_close(spice, open_at) or len(spice)]
+    close = _balanced_close(spice, open_at)
+    if close is None:
+        return None
+    inner = spice[open_at + 1 : close]
     while "(" in inner:
         inner = re.sub(r"\([^()]*\)", "", inner)
     return match.start() if "," in inner else None
