@@ -245,6 +245,7 @@ timing, which matters most in a ``request.pdk.corners`` sweep. See
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -577,18 +578,11 @@ _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
 
 
 def load_request(request_path: str) -> dict[str, Any]:
-    """Read and minimally validate a ``klt sta`` request JSON file.
+    """Read the request as written and validate its shape for later hashing.
 
-    Reject unreadable files, malformed JSON, unknown top-level fields, and
-    requests missing ``pdk`` or ``constraints``. The schema field is optional.
-
-    Unlike ``pdk``/``constraints``, neither ``def`` nor ``verilog`` is a
-    required top-level field here -- exactly one of them is required, a
-    relationship :func:`validate_request_shape`'s flat "these keys must all
-    be present" check cannot express. :func:`run_sta` validates that
-    mutual-exclusion/require-one-of relationship itself, right after calling
-    this function (see its own "Request-field resolution" section, issue
-    #1825).
+    The loader requires ``pdk`` and ``constraints``, accepts an optional schema,
+    and rejects unknown fields, unreadable files and malformed JSON. After this
+    check, :func:`run_sta` requires exactly one of ``def`` and ``verilog`` (#1825).
     """
     request = _load_request_json(request_path, PostRouteStaError)
     request = validate_request_shape(
@@ -819,6 +813,11 @@ def run_sta(
         )
         if constraints.boundary and "clock_driving_cell" in constraints.boundary:
             response["clock_driving_cell"] = constraints.boundary["clock_driving_cell"]
+        if multicycle:
+            canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            response["provenance"]["request_sha256"] = hashlib.sha256(
+                canonical.encode()
+            ).hexdigest()
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -830,6 +829,7 @@ def run_sta(
             input_delays=constraints.input_delays,
             output_delays=constraints.output_delays,
             clock_uncertainty=clock_uncertainty,
+            multicycle=multicycle,
         )
         return response
 
