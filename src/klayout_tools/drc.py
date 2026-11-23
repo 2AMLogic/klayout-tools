@@ -2636,6 +2636,7 @@ def rerun_drc_report(
         _recorded_tile,
         _recorded_top,
         _rerun_pdk_selection,
+        recorded_native_deck_vars,
     )
 
     committed = _load_committed_report(report_path, DrcError)
@@ -2685,14 +2686,12 @@ def rerun_drc_report(
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
+            deck_vars=recorded_native_deck_vars(committed),
             top=top,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             pdk_variant=eff_variant,
             pdk_root=eff_root,
-            # Issue #2697: reproduce the original coverage assertion too,
-            # or a committed `clean` would always drift to `coverage_unknown`.
-            # Issue #2806: dispatched on its `kind`; a set assertion replays
-            # its embedded names, never the original manifest file.
+            # Replay the coverage assertion using the names stored in the report.
             **_rerun_assertion_kwargs(committed),
         )
     else:
