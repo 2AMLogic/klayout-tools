@@ -387,10 +387,32 @@ def _landing_pad_side_um_for_pair(
     pad_layer: tuple[int, int],
     via_layer: tuple[int, int],
     via_side: float,
+    override_um: float | None = None,
 ) -> float:
-    """Default drawn side of one landing pad, before via-array growth."""
-    floor, _ = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
-    return max(_VIA_LANDING_SIZE_UM, floor)
+    """Drawn side of one landing pad, before via-array growth."""
+    floor_side, floors = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
+    if override_um is None:
+        return max(_VIA_LANDING_SIZE_UM, floor_side)
+    if override_um < floor_side - 1e-9:
+        rule_id, needed = max(floors, key=lambda f: f[1])
+        source = (
+            "native runset"
+            if rule_id
+            in (
+                _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
+                _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
+            )
+            else "resolved PDK deck"
+        )
+        raise GenComposeError(
+            f"request.routing.landing_pad_size_um ({override_um:.4g}um) "
+            f"is below the {source} floor for layer {pad_layer} over "
+            f"via layer {via_layer}. '{rule_id}' requires "
+            f">= {needed:.4g}um. "
+            f"Please request at least {floor_side:.4g}um or omit "
+            "routing.landing_pad_size_um to keep the default pads"
+        )
+    return override_um
 
 
 def _resolve_landing_pad_sizes(
@@ -431,34 +453,9 @@ def _resolve_landing_pad_sizes(
                 if pair in landing_pad_size_um:
                     continue
                 via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
-                if override_um is None:
-                    landing_pad_size_um[pair] = _landing_pad_side_um_for_pair(
-                        variant, pad_layer, via_layer, via_side
-                    )
-                    continue
-                floor_side, floors = _landing_pad_floor_um(
-                    variant, pad_layer, via_layer, via_side
+                landing_pad_size_um[pair] = _landing_pad_side_um_for_pair(
+                    variant, pad_layer, via_layer, via_side, override_um
                 )
-                if override_um < floor_side - 1e-9:
-                    rule_id, needed = max(floors, key=lambda f: f[1])
-                    source = (
-                        "native runset"
-                        if rule_id
-                        in (
-                            _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
-                            _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
-                        )
-                        else "resolved PDK deck"
-                    )
-                    raise GenComposeError(
-                        f"request.routing.landing_pad_size_um ({override_um:.4g}um) "
-                        f"is below the {source} floor for layer {pad_layer} over "
-                        f"via layer {via_layer}. '{rule_id}' requires "
-                        f">= {needed:.4g}um. "
-                        f"Please request at least {floor_side:.4g}um or omit "
-                        "routing.landing_pad_size_um to keep the default pads"
-                    )
-                landing_pad_size_um[pair] = override_um
     return landing_pad_size_um
 
 

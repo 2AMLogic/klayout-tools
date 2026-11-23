@@ -20,14 +20,8 @@ the report from these functions, and ``_extract_netlist`` calls
 :func:`_pin_index_by_net_id` from the pin-cluster helpers.
 :func:`_describe_layers_in_set` and :func:`_each_pin_net` serve only this module.
 
-:func:`_describe_devices` still needs the
-``_PARAM_PRECISION_UM``/``_PARAM_PRECISION_FARAD``/``_PARAM_PRECISION_OHM``
-rounding tunables, which stay in ``extract.py`` because they have other
-callers there. That import is deferred into the function body -- the same
-convention ``extract_parasitics.py`` already uses for its own
-back-references -- because ``extract.py`` imports *this* module at its top
-level, so a module-level ``from .extract import ...`` here would be a
-circular import evaluated mid-load.
+The extraction report and the parasitic writers share precision and feed
+constants from ``extract_base``.
 """
 
 from __future__ import annotations
@@ -37,6 +31,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, ParasiticsDeck
+from .extract_base import (
+    _PARAM_PRECISION_FARAD,
+    _PARAM_PRECISION_OHM,
+    _PARAM_PRECISION_UM,
+    MOM_FEED_TOKENS,
+)
 from .extract_parasitics import spice_safe_net_name
 from .extract_pin_clusters import _pin_index_by_net_id
 
@@ -84,22 +84,6 @@ def _describe_devices(
     itself is ``None`` (a caller with none to offer, matching
     ``net_label_positions``'s own default-empty convention below).
     """
-    # Deferred (call-time) import, not a module-level one: `extract.py`
-    # imports this module at its own module scope (mirroring the
-    # `extract_spef.py`/`extract_abstract.py`/`extract_parasitics.py`
-    # precedent), so a module-level `from .extract import ...` here would be a
-    # circular import evaluated during that very load. The three
-    # `_PARAM_PRECISION_*` tunables stay in `extract.py` because they have
-    # other callers there -- this defers the back-reference until
-    # `_describe_devices` is actually called, by which point `extract.py` has
-    # finished importing.
-    from .extract import (
-        _PARAM_PRECISION_FARAD,
-        _PARAM_PRECISION_OHM,
-        _PARAM_PRECISION_UM,
-        MOM_FEED_TOKENS,
-    )
-
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
     instance_paths = device_instance_paths or {}
