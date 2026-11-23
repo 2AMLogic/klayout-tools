@@ -225,6 +225,63 @@ def add_pex_extraction_args(
         ),
     )
     pex_parser.add_argument(
+        "--resistance-graph-max-terminals",
+        dest="resistance_graph_max_terminals",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "terminals-per-net cap for --resistance-graph (positive integer, "
+            "default 64), passed through to `klt extract "
+            "--resistance-graph-max-terminals` (issue #6964); a net with more "
+            "terminals is `graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph. The effective caps are echoed under "
+            "`extraction.resistance_graph.caps`."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-cells",
+        dest="resistance_graph_max_cells",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "mesh-cells-per-polygon cap for --resistance-graph (positive "
+            "integer, default 4096), passed through to `klt extract "
+            "--resistance-graph-max-cells` (issue #6964); a polygon needing "
+            "more is `graph_too_large` and its net keeps the legacy R. "
+            "Requires --resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-nodes",
+        dest="resistance_graph_max_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "nodes-per-net cap for --resistance-graph (positive integer, "
+            "default 5000), passed through to `klt extract "
+            "--resistance-graph-max-nodes` (issue #6964); a larger net is "
+            "`graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
+        "--resistance-graph-max-edges",
+        dest="resistance_graph_max_edges",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "edges-per-net cap for --resistance-graph (positive integer, "
+            "default 20000), passed through to `klt extract "
+            "--resistance-graph-max-edges` (issue #6964); a larger net is "
+            "`graph_too_large` and keeps the legacy R. Requires "
+            "--resistance-graph."
+        ),
+    )
+    pex_parser.add_argument(
         "--parasitic-variant",
         dest="parasitic_variants",
         type=_parasitic_variant_arg,

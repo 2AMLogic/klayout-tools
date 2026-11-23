@@ -7,6 +7,7 @@ size ceiling; :func:`pdk.drc_deck_file` keeps the variant-named-deck contract.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from . import pdk
@@ -20,6 +21,21 @@ from . import pdk
 _NATIVE_MAIN_SCRIPTS: dict[str, tuple[str, str]] = {
     "gf180mcu.drc": ("0.30.9", "variant"),
 }
+
+
+def gf180_main_path(deck_file: str) -> str | None:
+    """Resolve a GF180 main runner in an installed PDK or a copied rule framework."""
+    deck = Path(deck_file).resolve()
+    if deck.name == "gf180mcu.drc" and (
+        deck.match("gf180mcu*/libs.tech/klayout/tech/drc/gf180mcu.drc")
+        or deck.match("gf180mcu*/libs.tech/klayout/drc/gf180mcu.drc")
+        or (
+            deck.with_name("rule_framework.rb").is_file()
+            and deck.with_name("options.rb").is_file()
+        )
+    ):
+        return str(deck)
+    return None
 
 
 def native_drc_main_script(

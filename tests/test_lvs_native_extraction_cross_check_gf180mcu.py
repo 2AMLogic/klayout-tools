@@ -745,9 +745,8 @@ def test_ldmos_matches_native_deck(
 # under-covering.
 # --------------------------------------------------------------------------- #
 
-#: Upstream `rule_id`s this module reaches a verdict for, one way or another
-#: -- hand-maintained, same discipline as the sky130 module's own
-#: `_CROSS_CHECK_VERDICT_RULE_IDS`.
+#: Upstream `rule_id`s this module reaches a verdict for, one way or another --
+#: hand-maintained, like the sky130 module's `_CROSS_CHECK_VERDICT_RULE_IDS`.
 _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
     {
         "gf180mcu_fd_pr__nfet_03v3",  # agrees
@@ -758,6 +757,7 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "gf180mcu_fd_pr__rm2",  # agrees
         "gf180mcu_fd_pr__rm3",  # agrees
         "gf180mcu_fd_pr__tm9k",  # agrees (needs extra_rd={"metal_level": "5LM"})
+        "gf180mcu_fd_pr__efuse",  # agrees (terminals; native ignores R)
         "cap_mim_2f0fF",  # documented disagreement (#512)
         "BJT.3",  # deferred (investigated)
         "gf180mcu_fd_pr__diode_nd2ps_06v0",  # deferred (investigated)

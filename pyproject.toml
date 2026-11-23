@@ -292,6 +292,7 @@ path = "hatch_build.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: long-running integration test"]
 
 # Report-only coverage (issue #3223): no `fail_under` on purpose -- measure
 # first, ratchet later. `_vendor/` is third-party code kept byte-exact.

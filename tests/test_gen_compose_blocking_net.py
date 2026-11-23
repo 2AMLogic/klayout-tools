@@ -131,7 +131,8 @@ def test_blocking_net_on_the_both_layers_cross_layer_failure(tmp_path, pdk_root)
     )
 
 
-def test_blocking_net_follows_the_accepted_net_exactly(tmp_path, pdk_root):
+@pytest.mark.parametrize("pin_plane", [False, True])
+def test_blocking_net_follows_the_accepted_net_exactly(tmp_path, pdk_root, pin_plane):
     # #6961: reversing connectivity[] order flips which net "wins" (see
     # test_compose_route_vs_route_collision_is_order_dependent in
     # test_gen_compose.py) -- the rejected leg's blocking_net must follow the
@@ -141,6 +142,8 @@ def test_blocking_net_follows_the_accepted_net_exactly(tmp_path, pdk_root):
     # '[', ']' and '#' would survive it -- together they prove the field is
     # the label itself, never parsed back out of the message).
     request = _crossing_routes_fixture(tmp_path, pdk_root)
+    if pin_plane:
+        request["connectivity"][0]["layer_role"] = "metal"
     request["connectivity"][0]["net"] = "h.rail#2"  # NET_H
     request["connectivity"][1]["net"] = "v/bus[1]'"  # NET_V
     request["connectivity"] = list(reversed(request["connectivity"]))
@@ -152,6 +155,13 @@ def test_blocking_net_follows_the_accepted_net_exactly(tmp_path, pdk_root):
 
     nets_by_name = {net["net"]: net for net in report["nets"]}
     assert nets_by_name["v/bus[1]'"]["routed"] is True
+    if not pin_plane:
+        assert report["unrouted_nets"] == []
+        assert nets_by_name["h.rail#2"]["routed"] is True
+        assert all(
+            "blocking_net" not in leg for leg in nets_by_name["h.rail#2"]["legs"]
+        )
+        return
     assert nets_by_name["h.rail#2"]["routed"] is False
     assert report["unrouted_nets"] == ["h.rail#2"]
     blocker_leg = next(
@@ -205,6 +215,7 @@ def test_blocking_net_per_leg_on_a_partially_routed_net(tmp_path, pdk_root):
                 },
                 {
                     "net": "NET_V",
+                    "layer_role": "metal",  # Keep the tested single-plane rejection.
                     "pins": [
                         {"block": "bn2", "port": "P2"},
                         {"block": "bn", "port": "P2"},
@@ -263,6 +274,7 @@ def test_blocking_net_omitted_on_geometry_only_rejections(tmp_path, pdk_root):
             "connectivity": [
                 {
                     "net": "BUS",
+                    "layer_role": "metal",  # Keep the tested single-plane rejection.
                     "pins": [
                         {"block": "b1", "port": "P1"},
                         {"block": "b1", "port": "P2"},
