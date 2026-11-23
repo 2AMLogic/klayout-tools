@@ -97,6 +97,7 @@ from . import (
     env_provenance,
     output_lock,
     sim_ac_waveform,
+    sim_batch_history,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -3987,6 +3988,18 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
+    shard_fingerprint = (
+        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
+    )
+    history = sim_batch_history.begin(
+        artifacts_dir,
+        shard_fingerprint,
+        request,
+        hosts,
+        bool(resume),
+        bool(pre_completed),
+        attach_job_id,
+    )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
         # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
@@ -4011,7 +4024,7 @@ def _run_sim_corners(
             **local_engine_kwargs,
             **(
                 {
-                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "shard_fingerprint": shard_fingerprint,
                     "netlist_sha256": netlist_digests.sha256,
                     "explicit_points": dispatch_points
                     if len(dispatch_points) < len(corner_points)
@@ -4038,7 +4051,7 @@ def _run_sim_corners(
         # already ran instead of paying for them again.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "shard_fingerprint": shard_fingerprint,
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4113,26 +4126,9 @@ def _run_sim_corners(
         harvested_env, remote_environment
     )
 
-    if resume:
-        # Reassemble the full corner list in the request's own order: a
-        # corner is either freshly run just now (`corners_new`) or reused
-        # verbatim from a matching checkpoint (`pre_completed`) -- every
-        # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Lost batch shards synthesize unrun reports
-        # per point, so every dispatched point still has a report.
-        new_by_id = {corner["corner_id"]: corner for corner in corners_new}
-        corners = [
-            new_by_id[point.corner_id]
-            if point.corner_id in new_by_id
-            else pre_completed[point.corner_id]
-            for point in corner_points
-        ]
-    else:
-        # The exact pre-#473 assignment -- `corners_new` is already the
-        # full, correctly-ordered report for every backend (including
-        # `remote`, whose corners this process never reconciles against a
-        # local `CornerPoint` list).
-        corners = corners_new
+    corners = sim_batch_resume.reassemble_corners(
+        bool(resume), corner_points, corners_new, pre_completed
+    )
     _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
@@ -4179,6 +4175,9 @@ def _run_sim_corners(
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
 
+    remote_environment = sim_batch_history.finish(
+        history, remote_environment, corners, len(corner_points)
+    )
     sharded_attach = attach_job_id is not None and attach_job_id.endswith(".json")
     if (
         backend == "batch"

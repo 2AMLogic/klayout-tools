@@ -767,6 +767,14 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+For sharded batch simulation, `environment.remote.run` records whole-run
+completion, the original host count, observed rounds, distinct jobs with launch
+evidence and the observed launch-to-terminal span. `environment.remote.fleet`
+covers jobs harvested or dispatched during the reporting invocation. The
+`history_coverage` field identifies partial history from older artifacts.
+See the [simulation report contract](cli/sim.md#whole-run-batch-summary) for
+the fields and their null semantics.
+
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional

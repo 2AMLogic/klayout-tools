@@ -467,3 +467,21 @@ def merge_resume_environment(
         if not (isinstance(entry, dict) and entry.get("job_id") in dispatched_jobs)
     ] + dispatched_fleet
     return result
+
+
+def reassemble_corners(
+    resume: bool,
+    points: Sequence[Any],
+    fresh: list[dict[str, Any]],
+    completed: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """On resume, merge fresh and checkpointed reports in request order.
+
+    Lost batch shards supply a synthesized report per point. Every requested
+    point is therefore covered. A fresh run uses the backend's original order,
+    including remote reports that this process does not reconcile locally.
+    """
+    if not resume:
+        return fresh
+    by_id = {**completed, **{corner["corner_id"]: corner for corner in fresh}}
+    return [by_id[point.corner_id] for point in points]
