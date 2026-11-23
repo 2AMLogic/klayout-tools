@@ -150,11 +150,12 @@ primary clock’s ideal slew during analysis.
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. Mutually exclusive with `pdk.corners` below (issue #1871) — a request giving both is a request error. |
 | `pdk.corners` | array of string \| omitted | Additive field (issue #1871). A **list** of corner names to characterize the *same* loaded geometry against, in one request/response round trip, instead of a caller hand-rolling an external loop of N single-corner requests (see "Multi-corner characterization" below). Mutually exclusive with the scalar `pdk.corner` above. Must be a non-empty list of non-empty, mutually-distinct strings — unlike `klt place-and-route`'s `pdk.sweep_corners` (which *narrows* an already-enumerated shipped-corner set, so `[]` meaningfully means "sweep zero of them"), `corners` here *is* the primary corner selection, so an empty list is a request error, not "characterize nothing". |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
-| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay, and per-clock I/O delays, generated clocks and uncertainty are not supported. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay; per-port I/O delays can name any declared clock via the entry's `clock` key (issue #7399, see `constraints.input_delays`), and every other I/O delay uses the primary clock. See [Generated clocks](#generated-clocks) for derived domains and the clock uncertainty section for primary-clock uncertainty. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.generated_clocks` | array of objects | A source clock port, linked target pin and either a divider or three edge indices per derived clock. See [Generated clocks](#generated-clocks). |
 | `constraints.clock_groups` | array\<array\<string\>\> \| omitted | Additive field (issue #4241). Each inner array names declared clock ports that form one group; emits `set_clock_groups -asynchronous -group [get_clocks {a}] -group [get_clocks {b}]`. At least two groups; every port must be a declared clock (an undeclared name is an error). **Without it OpenSTA times cross-domain paths as synchronous** — this command never guesses a relationship. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
-| `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
+| `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. Issue #7399: each entry may also carry `"clock": "<declared clock port>"` — the delay is then emitted `-clock` that clock (e.g. a secondary `constraints.clocks` strobe) instead of the primary; omitted (or naming the primary explicitly) keeps the primary-clock Tcl. `clock` must be a non-empty string naming a clock declared in the same request, and an entry with `clock` but no bound is a request error. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
 | `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a data driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
 | `constraints.clock_driving_cell` | object or omitted | Optional Liberty driver for the primary clock input. Uses the same `cell`, `pin` and optional `input_pin` fields as `driving_cell`. |
@@ -941,8 +942,9 @@ accepted anything:
   even on a perfectly-correlated run.
 - `design_nets_annotated`/`design_nets_total` — design-side **name-match
   count**: how many eligible linked nets are named by the SPEF. A confirmed
-  internal net connected to just one instance output and no port is excluded
+  internal net with no pins or just one instance output, and no port, is excluded
   from both counts and the missing-net sample, even if it appears in the SPEF.
+  A physical terminal count from OpenDB confirms a zero-pin net is empty.
   Nets with a sink or any connected top-level port count. When OpenSTA cannot
   establish connectivity, the verifier keeps the net in the comparison. It is
   not evidence that parasitics were applied to the timing; the
@@ -1079,6 +1081,50 @@ backslash-escaped in the SPEF text itself (SPEF's own IEEE 1481-1999
 identifier grammar) but un-escaped back to their real, design-side spelling
 before this correlation check runs — a caller-supplied SPEF with ordinary
 bus/hierarchy naming is not penalized for it.
+
+## Generated clocks
+
+Use `constraints.generated_clocks` when a cell output clocks other registers.
+For a flip-flop dividing a 10 ns clock by two, declare
+
+```json
+{
+  "clock_port": "clk",
+  "clock_period_ns": 10,
+  "generated_clocks": [
+    {"source": "clk", "pin": "div_ff/Q", "divide_by": 2}
+  ]
+}
+```
+
+`source` names the primary port or a port in `constraints.clocks`. Each
+`pin` names one literal linked pin, including numeric bus indices such as
+`divider[2]/Q`. Whitespace, wildcards, double quotes,
+backslashes, braces, semicolons, dollar signs and leading dashes are rejected. Each pin can appear once. Supply exactly one of
+`divide_by` (an integer of at least two) or `edges` (three strictly
+increasing positive integer edge numbers). For example, `"edges": [1, 3, 5]`
+selects source transitions 1, 3 and 5 for the generated rising, falling and
+next rising edges. A generated clock cannot be the source of another declaration.
+
+After linking and declaring the source clocks, the session resolves every
+source and target. A missing or ambiguous match fails the request with its
+entry index and name. In array order, OpenSTA creates `klt_gen_clk_0`,
+`klt_gen_clk_1`, and so on with `create_generated_clock`. These names must
+be available. DEF-mode `propagated_clock: true` propagates them as well.
+
+The flat response, or each entry of `corners[]`, echoes the definitions in
+`generated_clocks` with their `index`, generated `name`, measured `period_ns`
+and number of `clocked_registers` in that session. An unavailable measurement
+is null with a `reason`. Omitting the array or supplying `[]` emits no generated
+clock commands or response field.
+
+On the Sky130 divider fixture with OpenROAD 26Q3-1510, omitting the declaration
+left `sink_ff/CLK` unclocked and `sink_ff/D` and `slow_q` unconstrained.
+Both divider forms above produced a 20 ns clock with one downstream register
+and cleared those findings. The undivided domain retained its 10 ns clock and
+two registers. The setup path from `source_ff` to `sink_ff` launched at 10 ns
+and captured at 20 ns. An additional register on a separate, undeclared clock
+still appeared in the completeness report.
 
 ## Propagated-clock timing (`constraints.propagated_clock`, issue #2739)
 
@@ -1320,6 +1366,34 @@ reports whichever unrelated check is worst.
   arrival, and its setup-side arrival stays **unconstrained**: there is no
   setup path from that port at all. Neither the other bound nor the scalar
   default is copied into it. To constrain both sides, give both bounds.
+- **Clock reference (issue #7399).** An entry may carry
+  `"clock": "<declared clock port>"` to time that port against a clock
+  other than the primary -- the one constraint a source-synchronous
+  (DDR-style) capture path needs:
+  ```json
+  "constraints": {
+    "clocks": [
+      { "port": "clk", "period_ns": 2.0 },
+      { "port": "dqs", "period_ns": 2.0 }
+    ],
+    "input_delays": {
+      "d[0]": { "clock": "dqs", "min_ns": -0.1, "max_ns": 0.1 }
+    }
+  }
+  ```
+  emits `set_input_delay -min/-max <v> -clock dqs [dict get
+  $klt_ports_by_name d[0]]`, so the capture endpoints of `d[0]` are
+  constrained against the strobe, not the system clock. Omitted, the
+  primary clock is used (a request with no `clock` anywhere generates
+  byte-identical Tcl); naming the primary explicitly is accepted and emits
+  the same Tcl as omitting it. `clock` must be a non-empty string naming a
+  clock declared in the same request (`clock_port`/`clocks[0]` or any
+  `constraints.clocks` entry) -- anything else is a request error naming
+  the field and the declared clocks. An entry with `clock` but no bound is
+  a request error: it constrains nothing. The scalar
+  `input_delay_ns`/`output_delay_ns` defaults keep the primary clock, and a
+  mapped port never receives the scalar anyway (existing precedence), so a
+  strobe-relative port gets no primary-clock default.
 - **Values.** Values must be finite numbers. Booleans, `null`, strings, NaN
   and infinity are rejected. Negative values are allowed, because a boundary
   reference point can sit after the launching edge. When both bounds are
@@ -1770,11 +1844,19 @@ Checked subset: `create_clock` (`-name`, `-period`, `[get_ports X]`),
 `set_clock_uncertainty` (`-setup`/`-hold`, optional `[get_clocks X]`), compared
 with `constraints` clocks/periods, `input_delay_ns`/`output_delay_ns`,
 `input_delays`/`output_delays` and `clock_uncertainty_ns` (tolerance 1e-9 ns).
-A per-corner period map matches when the SDC period equals any corner's value.
+The `-clock` of an I/O-delay command is compared too (issue #7399): it must
+equal the request's reference for that subject -- the entry's `clock` for a
+mapped port, else the primary clock -- so a clock disagreement is a mismatch,
+never a false `match`. A per-corner period map matches when the SDC period
+equals any corner's value.
 Comments, blank lines and `\` continuations are handled; anything else --
 other commands, or a checked command using an option/form the reader does not
 understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
 `unchecked`.
+An unchecked form may supply a requested constraint. For that command,
+`mismatches` lists differences involving parsed SDC values. For other
+commands, a requested constraint missing from the SDC still produces a
+mismatch with `sdc_value: null`.
 
 ```json
 "sdc_drift": {
@@ -1792,11 +1874,13 @@ understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
 ```
 
 `sdc_value`/`request_value` are `null` when one side has no counterpart (a
-request constraint the SDC lacks, or the reverse). `status` is `"match"` or
-`"drift"`. The hash of the file is recorded in `path.content_hash`. Drift is
-data, not a gate: the exit code stays 0. A missing/unreadable file or a
-malformed `sdc_check` is a request error (exit 1). The block is hoisted once
-on both the single- and multi-corner response shapes.
+request constraint the SDC lacks, or the reverse). A clock-only disagreement
+adds `sdc_clock`/`request_clock` keys to the mismatch record (issue #7399).
+`status` is `"match"` or `"drift"`. The hash of the file is recorded in
+`path.content_hash`. Drift is data, not a gate: the exit code stays 0. A
+missing/unreadable file or a malformed `sdc_check` is a request error
+(exit 1). The block is hoisted once on both the single- and multi-corner
+response shapes.
 
 ## Input transitions (issue #3227)
 

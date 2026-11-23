@@ -33,6 +33,27 @@ def expand_pdk_root_literal(entry: str, pdk_root: str | None) -> str:
     return entry
 
 
+def rebase_osdi_preload(request: dict[str, Any], request_dir: str) -> None:
+    """Anchor file inputs in a relocated request copy to their original directory.
+
+    Literal PDK-root paths must reach the host that loads them. Leave malformed
+    entries in place so the normal simulator validation can diagnose them.
+    """
+    options = request.get("options")
+    if not isinstance(options, dict):
+        return
+    entries = options.get("osdi_preload")
+    if not isinstance(entries, list):
+        return
+    for index, entry in enumerate(entries):
+        if (
+            isinstance(entry, str)
+            and entry.strip()
+            and not entry.startswith(_PDK_ROOT_LITERAL_PREFIXES)
+        ):
+            entries[index] = _resolve_relative(entry, request_dir)
+
+
 def resolve_osdi_preload(
     options: dict[str, Any],
     request_dir: str,

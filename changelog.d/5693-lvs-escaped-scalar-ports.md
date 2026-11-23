@@ -1,0 +1,1 @@
+- **LVS accepts escaped scalar ports in gate-level Verilog references** (#5693, 2026-11-23). A port such as `\O[0]` keeps its literal name through reference conversion and comparison.
