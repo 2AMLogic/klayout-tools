@@ -31,6 +31,70 @@ _NC_WRITE_ERROR = "Unexpected text after numeric value"
 _NC_PLACEHOLDER_STEM = "klt_nc"
 
 
+def _substrate_tie_header_line(requested_ohms: float) -> str:
+    """The ``* - substrate tie: ...`` header line (issue #3089).
+
+    Moved verbatim from ``extract.py`` (issue #6899 pays for its emission
+    growth with the move; behavior unchanged); the extract-side tie helpers
+    are imported lazily, the same direction this module's writer already
+    imports everything else from ``extract``.
+    """
+    from .extract import substrate_tie_mode, substrate_tie_written_ohms
+
+    written = substrate_tie_written_ohms(requested_ohms)
+    if substrate_tie_mode(requested_ohms) == "hard":
+        return (
+            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
+            "SPICE has no zero-ohm resistor) -- the substrate node is "
+            "DC-fixed at 0 V in transient analysis"
+        )
+    from .extract import SUBSTRATE_DC_TIE_RESISTANCE_OHM
+
+    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
+        consequence = (
+            "the substrate is capacitively floating in transient analysis "
+            "(DC reference only); see --substrate-tie-ohms"
+        )
+    else:
+        consequence = (
+            "the substrate is held near 0 V in transient analysis through "
+            "this resistance"
+        )
+    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
+
+
+def _parasitic_model_header_comment(substrate_tie_ohms: float | None = None) -> str:
+    """Render ``PARASITIC_MODEL_SCOPE`` as `*`-prefixed SPICE comment
+    lines for the written netlist's header (issue #728).
+
+    ``kdb.Netlist.write``'s ``description`` argument only `*`-comments its
+    *first* line -- every subsequent line is written verbatim, which would
+    otherwise land as unprefixed text a SPICE reader could try to parse as a
+    circuit element. Each line here is pre-prefixed with ``* `` so the whole
+    block stays a comment regardless of how many lines it spans. Called only
+    when ``--parasitics`` was given (``parasitics_report is not None`` in
+    ``run_extract``) -- a netlist with no parasitics has nothing to declare
+    the scope of.
+
+    Moved verbatim from ``extract.py`` (issue #6899); ``substrate_tie_ohms``
+    defaults lazily to ``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` (every current
+    caller passes it explicitly), and the extract-side names import lazily
+    for the same circular-import reason this module's docstring records.
+    """
+    from .extract import (
+        PARASITIC_MODEL_SCOPE,
+        SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+    )
+
+    if substrate_tie_ohms is None:
+        substrate_tie_ohms = SUBSTRATE_DC_TIE_RESISTANCE_OHM
+    lines = ["* parasitic model (--parasitics):"]
+    for key, value in PARASITIC_MODEL_SCOPE.items():
+        lines.append(f"* - {key}: {value}")
+    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
+    return "\n".join(lines)
+
+
 def _nc_prefixed_nets(netlist: Any) -> list[Any]:
     return [
         net
@@ -145,7 +209,6 @@ def write_flat_netlist(
         _apply_pin_ties_if_circuit,
         _finish_netlist_write,
         _model_delegate_factory,
-        _parasitic_model_header_comment,
         _substitution_notes,
     )
 

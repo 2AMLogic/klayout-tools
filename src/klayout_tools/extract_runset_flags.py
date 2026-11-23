@@ -154,6 +154,7 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "resistance_graph": "--resistance-graph",
     "resistance_graph_r_cut_ohm": "--resistance-graph-r-cut",
     "emit_selected_resistance": "--emit-selected-resistance",
+    "emit_resistance_network": "--resistance-network",
     "distributed_rc": "--distributed-rc",
     "resistance_paths": "--resistance-path",
     "resistance_path_max_nodes": "--resistance-path-max-nodes",

@@ -55,6 +55,7 @@ from .pex import (
     _find_dut_include,
     _load_testbench_request,
     _reject_resistance_graph_with_distributed_rc,
+    _reject_resistance_network_without_graph,
     _require_single_dut,
     _resolve_measured_reference,
     _resolve_reference_netlist_path,
@@ -121,6 +122,7 @@ def _extraction_preflight(
     distributed_rc: bool,
     resistance_graph: bool,
     resistance_graph_r_cut_ohm: float | None,
+    resistance_network: bool,
     parasitic_variants: Sequence[str] | None,
     substrate_tie_ohms: float | None,
     mom_rlc_net: str | None,
@@ -164,6 +166,7 @@ def _extraction_preflight(
                 resistance_graph=resistance_graph,
                 resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
                 emit_selected_resistance=resistance_graph,
+                emit_resistance_network=resistance_network,
                 critical_net_patterns=critical_net_patterns,
                 critical_net_all=critical_net_all,
                 critical_net_excludes=critical_net_excludes,
@@ -289,6 +292,7 @@ def run_pex_dry_run(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -346,6 +350,7 @@ def run_pex_dry_run(
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    _reject_resistance_network_without_graph(resistance_network, resistance_graph)
 
     repo_root = env_provenance.find_repo_root(
         os.path.dirname(os.path.abspath(layout_path))
@@ -371,6 +376,7 @@ def run_pex_dry_run(
         distributed_rc=distributed_rc,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_network=resistance_network,
         parasitic_variants=parasitic_variants,
         substrate_tie_ohms=substrate_tie_ohms,
         mom_rlc_net=mom_rlc_net,

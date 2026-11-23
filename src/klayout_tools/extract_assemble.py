@@ -16,6 +16,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance
 from .decks import deck_source_path
+from .extract_resistance_network import RESISTANCE_NETWORK_MODEL_NOTE
 
 
 def assemble_extract_report(
@@ -27,6 +28,7 @@ def assemble_extract_report(
     dead_metal_omitted: Any,
     dead_metal_summary: Any,
     deck: Any,
+    emit_resistance_network: Any = False,
     deck_name: Any,
     deck_options: Any,
     declared_pins: Any,
@@ -274,6 +276,10 @@ def assemble_extract_report(
     # Additive, independently-optional field (issue #216 addendum): `null`
     # unless `--parasitics` was given, a `parasitics` summary block otherwise.
     result["parasitics"] = parasitics_report
+    # Additive disclosure (issue #6899): with the reduced-network emission
+    # on, `parasitics.model` gains a key stating it -- absent otherwise.
+    if parasitics_report is not None and emit_resistance_network:
+        parasitics_report["model"]["resistance_network"] = RESISTANCE_NETWORK_MODEL_NOTE
 
     # Additive field (issue #948): `null` unless `--spef` was given, the
     # resolved SPEF path otherwise -- see `run_extract`'s `spef_output`

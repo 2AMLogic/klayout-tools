@@ -8216,6 +8216,28 @@ of scope here. `klt extract`'s own netlist always stays on the legacy scalar;
 `selected_resistance_ohm`, writing it as the lumped R for `graph`-sourced nets
 (and rejecting the `--distributed-rc` combination).
 
+**Reduced terminal networks (issue #6899, internal).** For nets with three
+or more terminals there is no unique scalar, and `klt pex
+--resistance-network` (which sets `run_extract`'s internal
+`emit_resistance_network` — there is deliberately no public `klt extract`
+flag) writes the terminal-equivalent network instead:
+`extract_resistance_network.reduce_terminal_network` Kron-reduces the solved
+`pair_resistance_ohm` matrix onto the net's device terminals (one resistor
+per surviving terminal pair, at most `T(T-1)/2` = 2016 at the 64-terminal
+cap), reproducing every pair value by construction. The emission matches
+each device terminal (position proxy `Device.trans`, the same coarseness
+the star/ladder split uses) to its nearest geometry-derived graph terminal
+one-to-one; a count mismatch or an assignment outside the terminals' own
+spread reports `terminal_mismatch` and keeps the star, as do an
+`unsupported`/`skipped`/disconnected graph, a `--mom-rlc-resistance-ohm`
+override (`mom_rlc_override`) and a `--parasitic-variant` drop
+(`parasitic_variant`). The net's ground capacitance splits equally across
+its terminal nodes; the additive `resistance_graph.network` block reports
+`written` (`reduced`/`scalar`/`legacy`), `resistor_count` and the
+`fallback_reason`. The mode requires `--resistance-graph`, cannot be
+combined with `--spef` (the SPEF writer models the star/ladder only), and
+is refused under `--engine klayout-runset`.
+
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
 The per-deck `PARASITICS.metals` table (see "The coefficients are curated

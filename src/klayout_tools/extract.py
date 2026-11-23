@@ -264,7 +264,11 @@ from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
-from .extract_netlist_write import write_flat_netlist, write_spice_netlist
+from .extract_netlist_write import (
+    _parasitic_model_header_comment,
+    write_flat_netlist,
+    write_spice_netlist,
+)
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
 
@@ -674,50 +678,6 @@ PARASITIC_MODEL_SCOPE: dict[str, str] = {
         "skin effect, no distributed transmission-line behavior"
     ),
 }
-
-
-def _substrate_tie_header_line(requested_ohms: float) -> str:
-    """The ``* - substrate tie: ...`` header line (issue #3089)."""
-    written = substrate_tie_written_ohms(requested_ohms)
-    if substrate_tie_mode(requested_ohms) == "hard":
-        return (
-            f"* - substrate tie: hard tie to ground ({written:g} ohm; "
-            "SPICE has no zero-ohm resistor) -- the substrate node is "
-            "DC-fixed at 0 V in transient analysis"
-        )
-    if requested_ohms >= SUBSTRATE_DC_TIE_RESISTANCE_OHM:
-        consequence = (
-            "the substrate is capacitively floating in transient analysis "
-            "(DC reference only); see --substrate-tie-ohms"
-        )
-    else:
-        consequence = (
-            "the substrate is held near 0 V in transient analysis through "
-            "this resistance"
-        )
-    return f"* - substrate tie: {written:g} ohm to ground -- {consequence}"
-
-
-def _parasitic_model_header_comment(
-    substrate_tie_ohms: float = SUBSTRATE_DC_TIE_RESISTANCE_OHM,
-) -> str:
-    """Render :data:`PARASITIC_MODEL_SCOPE` as `*`-prefixed SPICE comment
-    lines for the written netlist's header (issue #728).
-
-    ``kdb.Netlist.write``'s ``description`` argument only `*`-comments its
-    *first* line -- every subsequent line is written verbatim, which would
-    otherwise land as unprefixed text a SPICE reader could try to parse as a
-    circuit element. Each line here is pre-prefixed with ``* `` so the whole
-    block stays a comment regardless of how many lines it spans. Called only
-    when ``--parasitics`` was given (``parasitics_report is not None`` in
-    ``run_extract``) -- a netlist with no parasitics has nothing to declare
-    the scope of.
-    """
-    lines = ["* parasitic model (--parasitics):"]
-    for key, value in PARASITIC_MODEL_SCOPE.items():
-        lines.append(f"* - {key}: {value}")
-    lines.append(_substrate_tie_header_line(substrate_tie_ohms))
-    return "\n".join(lines)
 
 
 def _fixed_value_capacitor_classes(
@@ -1593,6 +1553,7 @@ def run_extract(
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
     emit_selected_resistance: bool = False,
+    emit_resistance_network: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -2074,6 +2035,13 @@ def run_extract(
     ``selected_resistance_ohm`` as its lumped R in the emitted netlist where
     ``resistance_source == "graph"``; requires ``resistance_graph=True``.
     ``False`` keeps the legacy-scalar netlist.
+
+    ``emit_resistance_network`` (internal, issue #6899; set only by
+    ``klt pex --resistance-network``) writes the Kron-reduced terminal
+    network in place of the star per solved 3+-terminal net; see
+    :func:`klayout_tools.extract_resistance_network` and
+    :func:`_inject_parasitics`. Requires ``resistance_graph=True``, refuses
+    ``spef_output``; ``False`` is byte-identical to before.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
     overrides every landing's per-cut resistance (``0`` = ideal via).
@@ -2996,6 +2964,7 @@ def run_extract(
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         critical_net_patterns=critical_net_patterns,
         critical_net_all=critical_net_all,
         critical_net_excludes=critical_net_excludes,
@@ -3216,6 +3185,7 @@ def run_extract(
         deck_name=deck_name,
         distributed_rc=distributed_rc,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         mom_crosscheck=mom_crosscheck,
         mom_net=mom_net,
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -3343,6 +3313,7 @@ def run_extract(
         netlist_sha256=netlist_sha256,
         nets=nets,
         parasitics_report=parasitics_report,
+        emit_resistance_network=emit_resistance_network,
         path=path,
         pdk_info=pdk_info,
         report_parasitics_shape=report_parasitics,

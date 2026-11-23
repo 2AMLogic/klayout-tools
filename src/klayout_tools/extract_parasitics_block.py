@@ -51,6 +51,7 @@ def build_parasitics_report(
     deck_name: Any,
     distributed_rc: Any,
     emit_selected_resistance: Any,
+    emit_resistance_network: Any,
     mom_crosscheck: Any,
     mom_net: Any,
     mom_rlc_capacitance_ff: Any,
@@ -224,6 +225,7 @@ def build_parasitics_report(
                 record_slice_topology=subcircuit_cell is not None,
                 variants=variants,
                 emit_selected_resistance=emit_selected_resistance,
+                emit_resistance_network=emit_resistance_network,
             )
         else:
             parasitics_report = {
@@ -470,9 +472,8 @@ def build_parasitics_report(
         # capacitance plus vertical-overlap net-to-net coupling, plus
         # `--critical-net`-scoped lateral coupling; single lumped series
         # resistance per net; quasi-static) -- present on every
-        # `parasitics` block regardless of whether any net actually carried
-        # non-zero parasitics, since the model's scope does not depend on
-        # what was found. See `PARASITIC_MODEL_SCOPE`'s docstring.
+        # `parasitics` block regardless of what was found, since the model's
+        # scope does not depend on it. See `PARASITIC_MODEL_SCOPE`'s docstring.
         parasitics_report["model"] = dict(PARASITIC_MODEL_SCOPE)
         # Additive field (issue #2957): the extraction model's own revision,
         # so a consumer can tell a model change from a mere tool bump.

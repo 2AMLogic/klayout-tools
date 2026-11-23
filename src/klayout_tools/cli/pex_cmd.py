@@ -262,6 +262,7 @@ def run(args: argparse.Namespace) -> int:
                 distributed_rc=args.distributed_rc,
                 resistance_graph=args.resistance_graph,
                 resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+                resistance_network=args.resistance_network,
                 parasitic_variants=args.parasitic_variants,
                 substrate_tie_ohms=args.substrate_tie_ohms,
                 mom_rlc_net=args.mom_rlc_net,
@@ -338,10 +339,13 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
-            # `--resistance-graph[-r-cut]` (issue #4037): `False`/`None` when
-            # never given, unchanged from every call site that predates them.
+            # `--resistance-graph[-r-cut]` (issue #4037) and
+            # `--resistance-network` (issue #6899): `False`/`None` when
+            # never given, unchanged from every call site that predates
+            # them.
             resistance_graph=args.resistance_graph,
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            resistance_network=args.resistance_network,
             # `--substrate-tie-ohms` (issue #3089): `None` when never given.
             substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/

@@ -253,7 +253,11 @@ from .pex_netlist_text import (
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
-from .pex_resistance_graph import _resistance_graph_echo
+from .pex_resistance_graph import (
+    _reject_resistance_graph_with_distributed_rc,
+    _reject_resistance_network_without_graph,
+    _resistance_graph_echo,
+)
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -2367,18 +2371,6 @@ def _device_only_parity(
     }
 
 
-def _reject_resistance_graph_with_distributed_rc(
-    resistance_graph: bool, distributed_rc: bool
-) -> None:
-    """Issue #4037: the ladder keeps the legacy per-level resistance."""
-    if resistance_graph and distributed_rc:
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
-
-
 def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
@@ -2528,6 +2520,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2603,12 +2596,14 @@ def run_pex(
     to ``klt extract``'s terminal-aware resistance graph and make the
     extracted netlist use each ``resistance_source == "graph"`` net's
     ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
-    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
-    ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`` entry,
-    only when the flag was given -- otherwise the report and netlist are
-    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
-    (the ladder stays on the legacy scalar, so a critical net would mix sources).
+    legacy scalar). ``extraction.resistance_graph`` echoes the request and
+    one per-net entry, only when the flag was given -- otherwise the report
+    and netlist are byte-identical. Combining it with ``distributed_rc``
+    raises :class:`PexError` (the ladder keeps the legacy scalar).
+
+    ``resistance_network`` (issue #6899) requires ``resistance_graph`` and
+    writes the Kron-reduced terminal network per solved 3+-terminal net;
+    ``False`` is byte-identical to before.
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
@@ -2843,8 +2838,12 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    _reject_resistance_network_without_graph(resistance_network, resistance_graph)
     pex_runset.refuse_unsupported(
-        runset, device_only_leg=device_only_leg, tie_nets=tie_nets
+        runset,
+        device_only_leg=device_only_leg,
+        tie_nets=tie_nets,
+        resistance_network=resistance_network,
     )
 
     # Issue #1261: every input-path field this run's own JSON response
@@ -2886,6 +2885,7 @@ def run_pex(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_network=resistance_network,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
