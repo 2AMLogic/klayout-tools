@@ -5861,7 +5861,16 @@ known runner/client version mismatch with `batch_runner_version_mismatch`
 under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
 version skew"); passing that check does not establish mechanism support.
 
-## Supply-relative measurement limits
+## Measurement limits
+
+Both bounds include equality by default. Use `"limits": {"max": 0.9,
+"exclusive_max": true}` to require a value below 0.9. Use `exclusive_min`
+to require a value above the lower bound. Each flag takes a boolean and
+applies independently to its numeric or supply-relative bound. Equality at
+a strict bound fails with zero margin. Coverage counts each applied bound
+once. These flags use the same spelling as `klt yield`.
+
+### Supply-relative measurement limits
 
 Either `measurements[].limits.min` or `.max` can be a number or a fraction
 of a named supply. For example, `"limits": {"min": {"frac_of": "vdd",

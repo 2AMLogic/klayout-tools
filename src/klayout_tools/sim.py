@@ -9905,9 +9905,7 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     return values
 
 
-#: The only ``measurements[].limits`` keys :func:`_evaluate_limits` applies.
-#: Anything else in a ``limits`` object is silently inert -- which is exactly
-#: why :func:`_build_coverage` reports it (issue #1996).
+#: The numeric bounds that contribute coverage checks (issue #1996).
 _RECOGNISED_LIMIT_KEYS = ("min", "max")
 
 
@@ -9926,7 +9924,7 @@ def _measurement_coverage(
     """
     name = spec["name"]
     identity = work_id("measurement", corner_index, corner["corner_id"], name)
-    limits = spec.get("limits") or {}
+    limits = sim_supply_relative.coverage_bounds(spec.get("limits"))
     measurement = next(
         (m for m in corner.get("measurements", []) if m["name"] == name), {}
     )
@@ -10053,11 +10051,11 @@ def _summarise_limits(
     limits_declared = 0
     measurements_with_limits = 0
     for spec in measurements_spec:
-        limits = spec.get("limits")
-        if not isinstance(limits, dict) or not limits:
+        limits = sim_supply_relative.coverage_bounds(spec.get("limits"))
+        if not limits:
             continue
         limits_declared += 1
-        unknown = sorted(k for k in limits if k not in _RECOGNISED_LIMIT_KEYS)
+        unknown = sorted(limits.keys() - _RECOGNISED_LIMIT_KEYS)
         if unknown:
             unrecognized.append({"measurement": spec.get("name"), "keys": unknown})
         if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):

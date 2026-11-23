@@ -175,6 +175,7 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
+    "measurements[].limits.exclusive_min / exclusive_max": None,
     # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
     # a supply_v rail value finer than three decimals is spelled at full
     # precision in corner_id instead of .3f, so sub-milli rungs keep distinct

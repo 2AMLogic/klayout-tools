@@ -23,6 +23,7 @@ from . import (
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
+    sim_supply_relative,
     sim_transfer_meas,
     sim_twoport,
 )
@@ -209,9 +210,6 @@ def _runner_gate_release(version: str) -> str | None:
 #: (``measurements[].slope_band``, #5518) missed the ``v0.9.2`` tag (it was not
 #: in that release), so ``0.9.3`` is its first release segment; an older runner
 #: would reject the unknown form or drop the measurement, hence mandatory.
-#: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
-#: likewise first ships in ``0.9.3``; an older runner would reject the unknown
-#: key (at best) or grade the raw crossing count, hence mandatory.
 def _uses_extended_eye(request: dict[str, Any]) -> bool:
     for step in request.get("analysis_steps") or []:
         if isinstance(step, dict) and any(
@@ -257,6 +255,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "eye_step_or_phase": ((0, 9, 3), _uses_extended_eye),
     "osdi_pdk_relative": ((0, 9, 3), _uses_pdk_relative_osdi),
+    "exclusive_bounds": ((0, 9, 3), sim_supply_relative.request_uses_exclusive_bounds),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
@@ -351,6 +350,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "snm",
         "slope_band",
         "crossings_value_from",
+        "exclusive_bounds",
         "osdi_pdk_relative",
         "search",
         "search_param",
