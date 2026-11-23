@@ -161,6 +161,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_check",
         "klayout_tools.cli._drc_list_categories",
         "klayout_tools.cli._drc_native",
         "klayout_tools.cli._drc_parser_args",
@@ -184,6 +185,7 @@
         "klayout_tools.drc_klayout_list",
         "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
+        "klayout_tools.drc_rerun_replay",
         "klayout_tools.drc_text_exempt"
       ]
     },
@@ -286,8 +288,10 @@
         "klayout_tools.cli.parsers.extract_args_part3",
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
+        "klayout_tools.extract_abstract_pin_join",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_validate",
+        "klayout_tools.extract_base",
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
@@ -517,6 +521,7 @@
         "klayout_tools.layout_plan_check",
         "klayout_tools.layout_plan_execute",
         "klayout_tools.layout_plan_fields",
+        "klayout_tools.layout_plan_flavors",
         "klayout_tools.layout_plan_ports",
         "klayout_tools.layout_plan_routing"
       ]
@@ -628,6 +633,7 @@
       "description": "PDK resolution and rule decks -- the documented exception to verb self-containment (docs/ARCHITECTURE.md).",
       "modules": [
         "klayout_tools.cli.pdk_cmd",
+        "klayout_tools.cli.pdk_expect",
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
@@ -899,6 +905,7 @@
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_base",
         "klayout_tools.signoff_characterization",
         "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
@@ -988,6 +995,7 @@
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_case_names",
+        "klayout_tools.sim_checkpoint",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_corner_axes",

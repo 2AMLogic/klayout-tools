@@ -35,22 +35,8 @@ calls :func:`_inject_parasitics`) and ``_extract_netlist`` (which calls
 :func:`_compute_parasitics` and :func:`_detect_dead_metal`), the three call
 sites this subsystem's whole interface narrows down to.
 
-A handful of functions below (:func:`_detect_dead_metal`,
-:func:`_inject_parasitics`, :func:`_tie_substrate_nets_to_ground`) still need
-a few names that remain defined in ``extract.py`` itself
-(:func:`~klayout_tools.extract._bbox_um_rounded`, the
-``_PARAM_PRECISION_UM``/``_MIN_PARASITIC_R_OHM``/``_SPICE_GLOBAL_GROUND_NODE``/
-``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` tunables, and the re-exported
-:func:`~klayout_tools.extract._is_synthesized_substrate_net_name`, defined in
-``extract_detect_substrate_label.py`` since #5736) -- each is reached through
-``extract.py``, not moved along with this subsystem. Those imports are deferred
-(``from .extract import ...`` *inside* the function body, not at this
-module's top level) because ``extract.py`` imports *this* module at its own
-top level (the same "``from .extract_parasitics import ...``" pattern
-``extract_spef.py``/``extract_abstract.py`` already established) -- a
-module-level import back the other way would be a circular import evaluated
-mid-load; deferring it to call time, by which point both modules have
-finished importing, avoids that entirely.
+Shared SPICE naming, substrate-tie constants and geometry formatting live
+in ``extract_base``.
 """
 
 from __future__ import annotations
@@ -61,7 +47,20 @@ from typing import TYPE_CHECKING, Any
 from ._layout import region as _region
 from .decks import ExtractionDeck, ParasiticsDeck
 from .extract_abstract import _sanitize_instance_name
+from .extract_base import (
+    _MIN_PARASITIC_R_OHM,
+    _PARAM_PRECISION_UM,
+    _SPICE_GLOBAL_GROUND_NODE,
+    SUBSTRATE_DC_TIE_RESISTANCE_OHM,
+    _bbox_um_rounded,
+    substrate_tie_mode,
+    substrate_tie_written_ohms,
+)
+from .extract_base import SPICE_HIERARCHY_SEPARATOR as SPICE_HIERARCHY_SEPARATOR
+from .extract_base import SPICE_SAFE_HIERARCHY_JOIN as SPICE_SAFE_HIERARCHY_JOIN
+from .extract_base import spice_safe_net_name as spice_safe_net_name
 from .extract_cut_resistance import CutResistanceResolver, cut_resistance_resolver
+from .extract_detect_substrate_label import _is_synthesized_substrate_net_name
 from .extract_fragment_resistance import _n_squares as _n_squares
 from .extract_fragment_resistance import _region_n_squares
 from .extract_parasitic_body import (
@@ -96,17 +95,6 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 
-#: ngspice's own hierarchy separator (issue #2145). A node token containing
-#: it is parsed as a *path expression* (``XBIAS.vb1`` = instance ``XBIAS``,
-#: node ``vb1``) wherever a node reference is read, so a flat net whose name
-#: carries an instance path -- what ``klt place-and-route``'s DEF net names
-#: and hierarchy-qualified drawn labels both produce -- is unaddressable by
-#: its own written name in ``v()``/``.meas``/``.ic``. Only *net/node* tokens
-#: are rewritten: SPICE dot-commands (``.SUBCKT``/``.ENDS``/``.GLOBAL``) and
-#: numeric literals (``L=0.28U``) are a different lexical class entirely and
-#: are never routed through :func:`spice_safe_net_name`.
-SPICE_HIERARCHY_SEPARATOR = "."
-
 #: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
 #: Emitted as ``parasitics.model_revision``. Bump it whenever a change alters
 #: the R or C values extracted from identical input, so a consumer comparing
@@ -115,16 +103,6 @@ SPICE_HIERARCHY_SEPARATOR = "."
 #: per merged net); ``2`` is 0.7.0's (squares counted per conductor fragment,
 #: #2392).
 PARASITICS_MODEL_REVISION = 2
-
-#: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
-#: ``_`` is an ordinary identifier character in every SPICE dialect and is
-#: the join several other extractors already use; ``/`` was rejected because
-#: ngspice's expression parser reads it as division inside ``v()``/``B``
-#: source expressions. Not injective on its own (``a.b`` and a pre-existing
-#: ``a_b`` both spell ``a_b``) -- no dot-free-preserving rewrite can be --
-#: so collisions are resolved per-netlist, not per-name, by ``extract.py``'s
-#: ``_rewrite_dotted_net_names``.
-SPICE_SAFE_HIERARCHY_JOIN = "_"
 
 
 #: ``kdb.Net`` property key tagging every node :func:`_inject_parasitics`
@@ -1693,16 +1671,6 @@ def _detect_dead_metal(
     """
     import klayout.db as kdb
 
-    # Deferred (call-time) import, not a module-level one: `extract.py`
-    # imports this module at its own module scope (mirroring the
-    # `extract_spef.py`/`extract_abstract.py` precedent), so a module-level
-    # `from .extract import ...` here would be a circular import evaluated
-    # during that very load. `_bbox_um_rounded`/`_PARAM_PRECISION_UM` stay in
-    # `extract.py` (both have other callers there) -- this defers the
-    # back-reference until `_detect_dead_metal` is actually called, by which
-    # point `extract.py` has finished importing.
-    from .extract import _PARAM_PRECISION_UM, _bbox_um_rounded
-
     nets = (
         [net for net in circuit.each_net() if net.cluster_id != 0]
         if circuit is not None
@@ -1959,7 +1927,6 @@ def _record_substrate_ties(
     identities are substrate references, not modeled nets, and nothing in
     the per-net checks should claim them.
     """
-    from .extract import _SPICE_GLOBAL_GROUND_NODE
 
     zero_uid = integ.add_node(_SPICE_GLOBAL_GROUND_NODE, GROUND_OWNER)
     for tied in substrate_dc_tie["nets"]:
@@ -2181,12 +2148,6 @@ def _inject_parasitics(
     syntax and ignores these tags (verified against a live writer run) -- the
     flag exists only so a run that never asks for a slice pays nothing.
     """
-    # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
-    # comment above for why this can't be a module-level import.
-    # `_MIN_PARASITIC_R_OHM` stays in `extract.py` (it is that module's
-    # own tunable constant).
-    from .extract import _MIN_PARASITIC_R_OHM
-
     res_class = kdb.DeviceClassResistor()
     cap_class = kdb.DeviceClassCapacitor()
     ind_class = kdb.DeviceClassInductor()
@@ -2892,19 +2853,6 @@ def _tie_substrate_nets_to_ground(
     detect the node-scoping guarantee programmatically instead of reading
     the generated SPICE for a ``.GLOBAL`` card.
     """
-    # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
-    # comment above for why this can't be a module-level import.
-    # `_SPICE_GLOBAL_GROUND_NODE`/`SUBSTRATE_DC_TIE_RESISTANCE_OHM` stay in
-    # `extract.py`; `_is_synthesized_substrate_net_name` moved to
-    # `extract_detect_substrate_label.py` (#5736) and is re-exported there.
-    from .extract import (
-        _SPICE_GLOBAL_GROUND_NODE,
-        SUBSTRATE_DC_TIE_RESISTANCE_OHM,
-        _is_synthesized_substrate_net_name,
-        substrate_tie_mode,
-        substrate_tie_written_ohms,
-    )
-
     requested_ohms = (
         SUBSTRATE_DC_TIE_RESISTANCE_OHM
         if substrate_tie_ohms is None
@@ -2956,84 +2904,6 @@ def _tie_substrate_nets_to_ground(
         # still accurately described as "global" for this build).
         "node_scope": "global",
     }
-
-
-def spice_safe_net_name(name: str) -> str:
-    """Rewrite a KLayout ``Net.expanded_name()`` string to the exact spelling
-    the written SPICE file uses for that net's *node* references in its
-    ``.SUBCKT``/instance lines (issue #696, issue #1162, issue #2145).
-
-    Three independent rewrites. The first two mirror escaping
-    ``NetlistSpiceWriter`` already applies when it writes a net as a node
-    reference (as opposed to the raw form it keeps in its own leading
-    ``* pin ...``/``* net ...`` comments); the third mirrors a rewrite this
-    repo applies to the *real* ``kdb.Net`` name before handing the netlist
-    to the writer (``extract.py``'s ``_rewrite_dotted_net_names``), because
-    ``NetlistSpiceWriter`` has no escape of its own for that character:
-
-    1. **Merged labels (issue #696).** ``Net.expanded_name()`` joins every
-       distinct text label found on one electrical net with ``,`` (see
-       :func:`_detect_merged_net_labels`'s docstring, issue #470) -- but a
-       SPICE node token cannot contain a comma (a common argument
-       separator), so ``NetlistSpiceWriter`` writes the *same* joined net
-       using ``|`` instead wherever it appears as an actual node reference.
-    2. **Anonymous nets (issue #1162).** A net with no drawn label at all
-       gets KLayout's auto-generated ``$<n>`` placeholder as its
-       ``expanded_name()`` (e.g. ``$2``) -- but ngspice (and the wider
-       SPICE3/HSPICE-descended dialect family) treats a token that *starts*
-       with ``$`` as an inline-comment marker, silently truncating the rest
-       of the card. ``NetlistSpiceWriter`` backslash-escapes a leading ``$``
-       (``\\$2``, confirmed against a live ``NetlistSpiceWriter`` run: a
-       node named ``$weird`` writes as ``\\$weird``, while a *mid-token*
-       ``$`` such as ``mid$dle`` is left alone -- only the leading
-       character triggers the ngspice comment hazard) wherever it appears
-       as a node reference; this function does the same.
-    3. **Hierarchical names (issue #2145).** A net whose name came from a
-       composed/routed cell's own hierarchy -- a ``klt place-and-route``
-       DEF net name replayed by ``--def-net-names``, or a drawn label
-       carrying an instance path -- spells that path with ``.``
-       (``XBIAS.vb1``). ``.`` is ngspice's *own* hierarchy separator, so
-       such a token is read as a path expression (instance ``XBIAS`` ->
-       node ``vb1``) wherever a node reference is parsed: the node is
-       unaddressable by its written name in ``v()``/``.meas``/``.ic``, and
-       the same token means two different things depending on its position
-       on the card. ``NetlistSpiceWriter`` does *not* escape it (confirmed
-       against a live writer run: a net named ``XBIAS.vb1`` writes as
-       ``XBIAS.vb1``), so ``extract.py``'s ``_rewrite_dotted_net_names``
-       renames the real net to ``_`` instead before the netlist is written,
-       and this function applies the same ``.`` -> ``_`` rewrite so a name
-       that reaches a report *without* passing through that pass (a
-       reference netlist's nets in ``klt lvs``, say) is still reported in
-       the one SPICE-addressable spelling.
-
-    Before this function existed (for case 1) and before issue #1162 (for
-    case 2), every net name this module put into the JSON response
-    (``nets[].name``, ``devices[].nets[...]``, ``merged_net_labels[].net``,
-    ``parasitics.nets[].net``, ``parasitics.nets[].terminals[].leg_net``)
-    used the *unescaped* form, while the written netlist used the escaped
-    form -- the same net, spelled two different ways depending which
-    artifact you read it from, with no way for a caller to know the two
-    strings named the same node short of hard-coding the substitutions
-    themselves (and, for the anonymous-net case, a caller that copied the
-    unescaped JSON spelling verbatim into a hand-authored SPICE card would
-    reproduce the very comment-truncation hazard ``NetlistSpiceWriter``
-    itself already avoids). Calling this on every net name before it enters
-    the response makes it byte-identical to the netlist's own spelling
-    everywhere it is reported (also applied by ``klt lvs``'s
-    ``net_correspondence``/``mismatches[].net`` via ``lvs.py``'s
-    ``_name_or_none``, sourced from the same ``Net.expanded_name()``
-    convention).
-
-    A no-op for the overwhelming majority of net names, which contain
-    neither a comma, nor a dot, nor a leading ``$``. Idempotent: its own
-    output contains none of the three, so re-applying it changes nothing.
-    """
-    escaped = name.replace(",", "|").replace(
-        SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN
-    )
-    if escaped.startswith("$"):
-        escaped = "\\" + escaped
-    return escaped
 
 
 def _net_identity_name(net: kdb.Net) -> str:

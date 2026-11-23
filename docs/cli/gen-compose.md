@@ -574,7 +574,17 @@ into the circuit.)
   Case **(2)** now also has two remedies that keep the ring: cut a routing
   opening in it (see "Routing through a ring opening" below), or route on a
   plane the ring has no conductor on (see "Routing *over* a closed ring on a
-  higher plane" below, which needs no floorplan change at all).
+  higher plane" below, which needs no floorplan change at all) — and since
+  #6912 that second remedy is applied *automatically*: the metals-stack
+  plane climb (see "Automatic plane climb (#6920)") now treats the
+  ring-conflict classes (and the self-net pad-crossing classes
+  #433/#453/#1527) as climbable, so an unpinned net whose same-plane leg is
+  refused by the ring check is retried one via above the loop (under the
+  #1960 proof obligations above — every via-drop landing pad still has to
+  clear the ring's trace) instead of coming back in `unrouted_nets[]`. A
+  net that names its own plane (`connectivity[].layer_role`, #1655
+  "explicit wins") never climbs, so the same-plane rejection and its
+  message stay observable exactly as before.
 - **The obstacle-overlap check above is `routing.width_um`-aware, not just a
   zero-width centerline test (#999, fixed).** The bbox/margin heuristic
   described above used to test only the backbone's zero-width *centerline*
