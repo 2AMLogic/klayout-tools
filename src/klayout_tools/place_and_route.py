@@ -65,7 +65,7 @@ from ._paths import _tcl_net_list as _tcl_net_list
 # resolving for callers that reach them by that path (the test suite does).
 # Same intent -- and same redundant `X as X` alias form -- as the
 # `place_and_route_sta` re-export block below.
-from ._power_activity import power_basis_block, validate_power_activity
+from ._power_activity import power_basis_block
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
@@ -121,7 +121,6 @@ from .place_and_route_pin_connectivity import (
     audit_pin_connectivity,
 )
 from .place_and_route_pins import (
-    check_io_pin_constraints,
     netlist_top_ports,
     pin_abutment,
     read_def_instance_groups,
@@ -261,6 +260,9 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
+from .place_and_route_request_checks import (
+    _validate_request_level as _validate_request_level,
+)
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -354,7 +356,7 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
-from .place_and_route_threads import observed_threads, resolve_threads, validate_threads
+from .place_and_route_threads import observed_threads, validate_threads
 from .place_and_route_unconstrained import unconstrained_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -1602,72 +1604,24 @@ def _run_single_corner(
     # Issue #6764: engine-log envelopes anchor on the request's repo, not the cwd.
     repo_root = find_repo_root(request_dir)
 
-    threads = resolve_threads(request.get("threads", 1))
-    engine = request.get("engine", "openroad")
-    if engine not in SUPPORTED_ENGINES:
-        raise PlaceAndRouteError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
-        )
-
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    # Issue #1973: fail here, naming the construct and its line, rather than
-    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
-    # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See "Netlist pre-flight"
-    # in docs/cli/place-and-route.md.
-    _reject_unsupported_netlist_constructs(netlist_path)
-
-    hdl_toplevel = request["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise PlaceAndRouteError("request.hdl_toplevel must be a non-empty string")
-
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PlaceAndRouteError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
-    requested_corner = (
-        corner_override if corner_override is not None else pdk_spec.get("corner")
-    )
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PlaceAndRouteError(
-            "request.pdk.corner must be a non-empty string when given"
-        )
-    # `request.pdk.interconnect_corner` (issue #1100): the tech LEF's own
-    # parasitic-extraction corner -- open_pdks stages exactly three
-    # (`"min"`/`"nom"`/`"max"`, `lef_files`'s own docstring in `pdk.py`), a
-    # fixed convention unlike the dynamic, per-installed-file liberty
-    # corner set `_resolve_liberty` resolves below, so this is a plain
-    # enum-check rather than file-existence-driven resolution. `None`
-    # (the default, field omitted) preserves this module's original
-    # behaviour byte-for-byte: `_resolve_lef` resolves the same `"nom"`
-    # tech LEF it always has.
-    interconnect_corner = pdk_spec.get("interconnect_corner", "nom")
-    if interconnect_corner not in _TECH_LEF_CORNERS:
-        raise PlaceAndRouteError(
-            "request.pdk.interconnect_corner must be one of: "
-            + ", ".join(sorted(_TECH_LEF_CORNERS))
-        )
-    # Issue #1092: scopes the post-route multi-corner sweep to a named
-    # subset of the shipped corners -- shape-validated here, membership-
-    # validated once `cell_library`'s corner set is resolved below (the
-    # "route" stage branch).
-    sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
-
-    floorplan = _validate_floorplan(request["floorplan"])
-    library = _validate_library(request.get("library"), cell_library)
-    io_spec = _validate_io(request.get("io"), cell_library, library)
-    # Issue #3885: a pattern naming no real port is an error, never a silent
-    # no-op.
-    check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
-    macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
-    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
-    power = _validate_power(request.get("power"), cell_library, library)
+    # Issue #7538: every corner-independent validation, extracted verbatim
+    # into `_validate_request_level` so `_run_rebuild_corners` can enforce
+    # the same request-level contract once, before any unit starts.
     (
+        threads,
+        engine,
+        netlist_path,
+        hdl_toplevel,
+        cell_library,
+        requested_corner,
+        interconnect_corner,
+        sweep_corners,
+        floorplan,
+        library,
+        io_spec,
+        macros,
+        groups,
+        power,
         clock_port,
         clock_period_ns,
         max_transition_ns,
@@ -1675,33 +1629,19 @@ def _run_single_corner(
         max_fanout,
         input_delay_ns,
         output_delay_ns,
-    ) = _validate_constraints(request.get("constraints"))
-    # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
-    power_activity = validate_power_activity(
-        request.get("constraints") or {}, PlaceAndRouteError
-    )
-    seed = _validate_seed(request["seed"])
-    route_critical_nets_percentage = _validate_route_critical_nets_percentage(
-        request.get("route_critical_nets_percentage")
-    )
-    placement_density = _validate_placement_density(request.get("placement_density"))
-    route_congestion_iterations = _validate_route_congestion_iterations(
-        request.get("route_congestion_iterations")
-    )
-    route_allow_congestion = _validate_route_allow_congestion(
-        request.get("route_allow_congestion")
-    )
-    max_antenna_repair_iterations = _validate_max_antenna_repair_iterations(
-        request.get("max_antenna_repair_iterations")
-    )
-    post_route_spef = _validate_post_route_spef(request.get("post_route_spef"))
-    portable_paths = _validate_portable_paths(request.get("portable_paths"))
-    output_dbu_um = _validate_output_dbu_um(request.get("output_dbu_um"))
-    post_route_sdf = _validate_post_route_sdf(
-        request.get("post_route_sdf"), post_route_spef=post_route_spef
-    )
-    if post_route_spef:
-        _require_extract_deck_for_cell_library(cell_library)
+        power_activity,
+        seed,
+        target_stage,
+        route_critical_nets_percentage,
+        placement_density,
+        route_congestion_iterations,
+        route_allow_congestion,
+        max_antenna_repair_iterations,
+        post_route_spef,
+        portable_paths,
+        output_dbu_um,
+        post_route_sdf,
+    ) = _validate_request_level(request, request_dir, corner_override=corner_override)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -2520,10 +2460,16 @@ def _run_rebuild_corners(
     """Run :func:`_run_single_corner` serially once per ``corners`` entry and
     aggregate the results into one ``corner_runs`` report (issue #3507).
 
-    Request-level problems (an unreadable netlist, an unknown corner name)
-    raise before any unit starts. A unit that then fails is recorded in its
-    own entry and does not stop the others; the top-level ``status`` is
-    ``"failed"`` if any did.
+    Request-level problems raise before any unit starts (issue #7538):
+    :func:`_validate_request_level` runs once, before the corner loop, over
+    every corner-independent field (netlist readability, ``hdl_toplevel``,
+    the ``pdk`` shape, ``floorplan``/``library``/``io``/``macros``/
+    ``instance_groups``/``power``/``constraints``, ``seed``,
+    ``target_stage``, the routing/placement knobs, ``post_route_spef``/
+    ``post_route_sdf``, ``portable_paths``, ``output_dbu_um``), and each
+    ``corners`` name is resolved against the cell library's shipped corners
+    below. A unit that then fails is recorded in its own entry and does not
+    stop the others; the top-level ``status`` is ``"failed"`` if any did.
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
@@ -2531,6 +2477,12 @@ def _run_rebuild_corners(
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")
+
+    # Issue #7538: one request-level defect, one raised error -- never N
+    # identical `corner_runs[].error` entries. The per-corner calls inside
+    # `_run_single_corner` re-run these cheap validations; the values are
+    # deliberately not threaded through.
+    _validate_request_level(request, request_dir)
 
     deck_hashes: dict[str, str | None] = {}
     for name in corners:

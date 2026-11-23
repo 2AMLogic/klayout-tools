@@ -3729,6 +3729,17 @@ existing request returns changes.
 | `corner_runs[].congestion` | object | A failed local route includes its global-route table, ranked overflow regions, and raw report path under `global_route`. The fields match those on a successful route. `null_reasons` explains missing evidence. |
 | *(other fields)* | | An `ok` unit carries every field of the single-run report (see "Response") flattened into its entry. |
 
+A request-level error fails the whole request before any unit starts (issue
+#7538): the same validation a single run applies — netlist readability,
+`hdl_toplevel`, the `pdk` shape, `floorplan`/`library`/`io`/`macros`/
+`instance_groups`/`power`/`constraints`, `seed`, `target_stage`, the routing
+and placement knobs, `post_route_spef`/`post_route_sdf`, `portable_paths`,
+`output_dbu_um` — runs once up front and raises a single `PlaceAndRouteError`
+with the message the single-corner path gives, with no `corner_runs` and no
+`.klt/place-and-route/<corner>/` directory written. Only a corner-dependent
+failure — a liberty/LEF that cannot be resolved for that corner, or an engine
+failure inside that unit — is recorded in that corner's `corner_runs[].error`.
+
 One failing unit does not stop the others. The command exits `1` when
 `status` is `"failed"` — the aggregated report is still printed on stdout.
 
