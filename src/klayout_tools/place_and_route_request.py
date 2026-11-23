@@ -658,7 +658,7 @@ def _validate_io(
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
@@ -669,7 +669,7 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
         _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
         for index, entry in enumerate(raw)
     ]
-    groups_spec.validate_fixed_members(groups, PlaceAndRouteError)
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
