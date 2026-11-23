@@ -132,10 +132,27 @@ def _print_attribution(attribution: dict | None) -> None:
     )
     attr_rows: list[tuple[str, ...]] = []
     for c in attribution["children"]:
-        attr_rows.append(("child", str(c["name"]), f"{c['bbox_area_um2']:.3f}"))
+        attr_rows.append(("child", str(c["name"]), f"{c['bbox_area_um2']:.3f}", "-"))
     for g in attribution["gap_components"]:
-        attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
-    render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+        attr_rows.append(
+            (
+                "gap",
+                str(g["position"]),
+                f"{g['area_um2']:.3f}",
+                f"{g['drawn_area_um2']:.3f}",
+            )
+        )
+    render_table(
+        ("kind", "name", "area_um2", "drawn_um2"), attr_rows, left_aligned={0, 1}
+    )
+    for g in attribution["gap_components"]:
+        for comp in g["drawn_components"]:
+            print(
+                f"drawn_component: gap={g['position']} "
+                f"bbox={_fmt_bbox(comp['bbox_um'])} "
+                f"drawn={comp['drawn_area_um2']:.3f} um2 "
+                f"pieces={comp['piece_count']}"
+            )
     pnr = attribution.get("pnr_decomposition")
     if pnr is not None:
         ratio = pnr["overrun_ratio"]

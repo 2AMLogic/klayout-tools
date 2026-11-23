@@ -427,6 +427,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `resistance_graph` | bool | `--resistance-graph` (issue #2982) |
 | `resistance_graph_r_cut` | number | `--resistance-graph-r-cut` (issue #2983); finite, `>= 0`, requires `resistance_graph` |
+| `resistance_graph_max_terminals` / `resistance_graph_max_cells` / `resistance_graph_max_nodes` / `resistance_graph_max_edges` | integer | `--resistance-graph-max-terminals` / `--resistance-graph-max-cells` / `--resistance-graph-max-nodes` / `--resistance-graph-max-edges` (issue #6964): positive, requires `resistance_graph`; a non-integer, including `2.5` or `true`, is rejected |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `substrate_tie_ohms` | number | `--substrate-tie-ohms` (issue #3089) |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -2234,6 +2235,54 @@ at `Metal4.pin` (its `Metal5` is on the deck's own forbidden-layer list),
 so a cmos5l instance can only populate `m1p`..`m4p`. For `sg13cmos5l` this
 is the deck's *only* capacitor family — its forbidden-layer rule blocks the
 MiM stack outright, so `ExtractionDeck.capacitors` stays empty there.
+
+### Spiral inductor devices (issue #6726)
+
+IHP's `inductor2` PyCell is plain TopMetal1/TopMetal2 under an `IND` marker, so
+an extractor that ignores it shorts the inductor's two terminals through the
+winding: before this, a layout with one winding and two differently named pin
+labels reported `merged_net_labels` `a|b`, no device, and no warning. The
+`sg13g2` deck now recognises the winding and extracts it as one three-terminal
+`inductor` device (terminals `A`/`B`, equivalent, plus `SUB`):
+
+```json
+{"name": "$1", "class": "inductor",
+ "nets": {"a": "a", "b": "b", "sub": "vsubs"}, "params": {}}
+```
+
+```
+XD_$1 a b vsubs inductor PARAMS:
+```
+
+**Recognition** follows the PDK's own LVS rule (`ind_derivations.lvs`): an `IND`
+polygon (27/0) carrying a `inductor2*` label on TEXT (63/0), whose winding
+metal touches exactly one pin (27/2) labelled `LA` and one labelled `LB` (both
+on 27/25, case-insensitive) at the marker's edge, and no `LC` pin.
+
+**Terminals.** Each pin is conductor in its own right: external routing joins
+it by touching the pin on TopMetal2, and a net label on TopMetal2.text over the
+pin names the terminal's net. The winding itself is *cut out* of TopMetal1 and
+TopMetal2 (the PDK's `topmetal*_con` excludes `IND`), which is what keeps the
+two terminals apart; only recognised windings are cut, so ordinary unmarked
+top-metal routing is untouched. `SUB` is the NWell net when the marker lies
+over an NWell, the isolation island's `vsubs_iso<n>` inside one, and the
+deck's `vsubs` otherwise.
+
+**Not a device, and said so.** A marker that carries an `inductor*` label but
+is not recognised — a centre-tapped `inductor3`, an `LC` pin, a missing or
+duplicated `LA`/`LB` pin — leaves its winding as plain wire (the terminals stay
+merged, as before) and adds a `warnings[]` entry naming why. An `IND` marker
+with no `inductor*` label (27/0 is also an exclusion layer in both MiM
+capacitor flavours, `mimcap_exclude` and `rfmimcap_exc`, so a bare marker is
+not an inductor claim) or no winding metal under it (an isolated label) is
+silent.
+
+**Not modelled.** The device carries connectivity only: no `w`/`s`/`d`/turns
+parameters are measured (so a reference's `w=`/`s=`/`d=`/`nr_r=` are not
+compared), nothing computes inductance, `inductor3` is not recognised, and the
+PDK's own three-node `L` card spelling is not read back (see `klt lvs`'s
+"Custom device classes" section). IHP's `ind_exc` — other device layers
+subtracted from the winding metal before the pin test — is not transcribed.
 
 ### Device-recognition-only layers (issue #619)
 
@@ -8185,7 +8234,8 @@ without the flag — output is byte-identical to a run that never had it):
   strap's contact/via array) attaches by its whole footprint, which becomes
   pieces of its own in the mesh. A net with thousands of such landings may
   exceed the decomposition or node caps and report `graph_too_large`, keeping
-  the legacy scalar.
+  the legacy scalar; the `--resistance-graph-max-*` flags below raise those
+  caps.
 - Each landing's per-cut resistance resolves from the deck (issue #6917):
   `poly`->`metals[0]` from `ParasiticsDeck.poly_contact` (sky130 curates the
   licon at 152 ohm nominal), `metals[i]`->`metals[i+1]` from
@@ -8236,6 +8286,56 @@ of scope here. `klt extract`'s own netlist always stays on the legacy scalar;
 [`klt pex --resistance-graph`](pex.md) (issue #4037) is the consumer of
 `selected_resistance_ohm`, writing it as the lumped R for `graph`-sourced nets
 (and rejecting the `--distributed-rc` combination).
+
+**Raising the build caps (`--resistance-graph-max-*`, issue #6964).** A net
+over any builder cap is `graph_too_large` and keeps the legacy scalar -- which
+is what happens to a power rail with 65 or more terminals (the terminal cap is
+checked before any geometry is examined) or to a poured polygon whose
+Manhattan decomposition needs more than 4096 mesh cells. Four flags raise
+those caps for one run, each changing only its own limit. `klt pex` passes
+them through (see [pex.md](pex.md)).
+
+| Flag | Default | Applies to |
+| --- | ---: | --- |
+| `--resistance-graph-max-terminals N` | 64 | Terminals per net. |
+| `--resistance-graph-max-cells N` | 4096 | Mesh cells per merged conductor polygon: the grid of every vertex x line by every vertex y line, port edges included, so the count grows with the *product* of the two. Each cell becomes a graph node. |
+| `--resistance-graph-max-nodes N` | 5000 | Nodes per net: one per mesh piece plus one per port. |
+| `--resistance-graph-max-edges N` | 20000 | Edges per net: in-plane piece edges plus one per port attachment and per via landing. |
+
+Each takes a positive integer and requires `--resistance-graph`. With no flag
+the builder's own constants apply (`MAX_GRAPH_TERMINALS`,
+`DEFAULT_MAX_DECOMPOSITION_CELLS`, `MAX_GRAPH_NODES`, `MAX_GRAPH_EDGES`) and
+the report is byte-identical to a run made before the flags existed. A
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+that was applied -- `65 terminals exceed the 64 cap`, `... decomposing it
+needs up to 4669 mesh cells, over this build's 4096-mesh-cell cap`, `4 piece
+nodes exceed the 3 cap`, `6 nodes / 5 edges exceed the 5000 / 4 caps` -- so
+the message says which flag to raise. The node cap is then checked a second
+time on the assembled graph (pieces plus ports, together with the edge cap),
+which is why a large polygon usually takes `-max-cells` together with
+`-max-nodes` and `-max-edges`.
+
+**Cost of raising them.** The defaults are resource bounds, not accuracy
+limits: raising them costs time and output size, never a different model.
+
+- *Polygon grid.* A polygon's candidate cell count is
+  `(x lines - 1) * (y lines - 1)`. A strap's cut array adds two lines per
+  row and per column of cuts, so doubling the cuts on each axis quadruples the
+  cells; a polygon over the cap is refused before it is decomposed. Raise
+  `--resistance-graph-max-cells` for it, and `--resistance-graph-max-nodes`
+  with it, since every cell is a node.
+- *Graph size.* A mesh of `n` pieces has about `2 n` in-plane edges (each
+  piece has at most four neighbours and each edge is shared), plus one edge
+  per port attachment and per via landing; `--resistance-graph-max-nodes` and
+  `--resistance-graph-max-edges` bound the assembled graph of one net.
+- *Terminal matrix.* `pair_resistance_ohm` is `T x T`, quadratic in the
+  terminal count, and the solve is `sum(T_c - 1)` injection solves per net
+  over its terminal-bearing components (a 65-terminal connected rail costs 64
+  solves, a two-terminal net one). Three or more terminals never select a
+  scalar (`terminal_count_not_two`); the matrix is the result.
+- `klt extract` adds no field for the caps: the diagnostics above carry the
+  applied values. `klt pex` records all four effective caps under
+  `extraction.resistance_graph.caps` when any cap flag was given.
 
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 

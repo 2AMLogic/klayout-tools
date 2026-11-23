@@ -51,7 +51,7 @@ from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 
 #: Rejection-reason fragments a higher plane can lift. The #1895 far-side
 #: ("from behind") family and the block-interior crossings come from
-#: ``gen_compose_routing._obstacle_rejection_reason``; the two
+#: ``gen_compose_routing._obstacle_rejection_reason``; the three
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
 #: route-vs-route gate ``route_bundle()`` itself runs. Every other class
 #: (a too-narrow channel, a closed guard ring, an unresolvable via drop) is
@@ -64,6 +64,7 @@ _CLIMBABLE_REASON_MARKERS = (
     "crosses already-routed net",
     "overlaps already-routed net",
     "shares a conductive edge with already-routed net",
+    "shares a conductive corner with already-routed net",
 )
 
 
