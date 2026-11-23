@@ -512,7 +512,7 @@ _MIN_PARASITIC_R_OHM = 1e-3
 #: :func:`_tie_substrate_nets_to_ground` write the substrate DC-reference
 #: shunt *inside* the extracted ``.SUBCKT`` (issue #1263) without touching
 #: the subcircuit's declared pin interface.
-_SPICE_GLOBAL_GROUND_NODE = "0"
+SPICE_GLOBAL_GROUND_NODE = _SPICE_GLOBAL_GROUND_NODE = "0"
 
 #: Resistance (ohms) of the DC-reference shunt `--parasitics` writes from
 #: every synthesized substrate net to :data:`_SPICE_GLOBAL_GROUND_NODE`
