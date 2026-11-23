@@ -1,5 +1,6 @@
 """Cause text for ngspice diagnostics: fatal-error cause lines (issues #4623,
-#4924), the netlist title-line cause (issue #5433), the ``measurement``
+#4924), the continuation block under an ``Error on line N`` header (issue
+#7032), the netlist title-line cause (issue #5433), the ``measurement``
 suffix for a ``.meas`` reason (issues #2925, #5415) and the benign
 measure-substitute exemption for a completed run (issue #6401).
 
@@ -26,14 +27,23 @@ _FATAL_CAUSE_MAX_LINES = 2
 _FATAL_CAUSE_MAX_CHARS = 200
 
 
-def _with_fatal_error_cause(message: str, log_text: str) -> str:
+def _with_fatal_error_cause(
+    message: str, log_text: str, adjacent: tuple[str, ...] = ()
+) -> str:
     """Append the first few cause lines to a bare ``fatal error in ngspice``.
 
     That line carries no cause; ngspice prints it on other log lines. The
     result is bounded to ``_FATAL_CAUSE_MAX_LINES`` lines of at most
     ``_FATAL_CAUSE_MAX_CHARS`` chars each. A log with no cause line leaves the
     message unchanged.
+
+    ``adjacent`` (issue #7032) names the continuation lines collected under an
+    ``Error on line N`` header (:func:`_error_on_line_context`): the echoed
+    offending card and the cause printed under it match no cause pattern, so
+    they qualify as cause lines by position. The scan below still walks the
+    whole log in order, keeping today's evidence and ordering intact.
     """
+    adjacent_lines = set(adjacent)
     candidates: list[str] = []
     own_line = message.strip()
     for line in log_text.splitlines():
@@ -44,7 +54,11 @@ def _with_fatal_error_cause(message: str, log_text: str) -> str:
             continue
         if "simulation interrupted" in text.lower():
             continue
-        if _FATAL_CAUSE_LINE_RE.search(text) or _FATAL_CAUSE_SPECIFIC_RE.search(text):
+        if (
+            text in adjacent_lines
+            or _FATAL_CAUSE_LINE_RE.search(text)
+            or _FATAL_CAUSE_SPECIFIC_RE.search(text)
+        ):
             candidates.append(text[:_FATAL_CAUSE_MAX_CHARS])
     # Stable partition: model-binding lines first, then log order.
     causes = (
@@ -167,16 +181,58 @@ def _title_line_message(netlist_path: str, lineno: int, text: str) -> str:
     )
 
 
+def _error_on_line_context(log_text: str, start: int) -> tuple[str, ...]:
+    """The bounded continuation block under an ``Error on line N`` header
+    (issue #7032).
+
+    ngspice aborts mid-deck by printing the location line, then the offending
+    card and the cause under it::
+
+        Error on line 1204 or its substitute:
+          m.x1 d g s b nfet w=1u l=0.15u
+          could not find a valid modelname
+        Simulation interrupted due to error!
+
+    Neither continuation line matches a cause pattern, so this collects them
+    by position: up to :data:`_FATAL_CAUSE_MAX_LINES` stripped non-blank lines
+    after the header line containing offset ``start``, stopping at the abort
+    trailer / fatal line, at a following error block's own header, or at the
+    end of the log. Lines keep their full text here; the per-line
+    :data:`_FATAL_CAUSE_MAX_CHARS` bound is applied where they are rendered
+    (:func:`_with_fatal_error_cause`), so an overlong card cannot consume the
+    cause line's allowance.
+    """
+    context: list[str] = []
+    for line in log_text[start:].splitlines()[1:]:
+        text = line.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if "fatal error in ngspice" in lowered or "simulation interrupted" in lowered:
+            break
+        if _ERROR_ON_LINE_RE.match(line) or _NETLIST_LINE_ERROR_RE.match(line):
+            break
+        context.append(text)
+        if len(context) >= _FATAL_CAUSE_MAX_LINES:
+            break
+    return tuple(context)
+
+
 def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     """Append the next log line to an ``Error in netlist line no. N`` message.
 
     ngspice puts the cause (``Undefined parameter [expr]``) on the line after
-    the location. Any other message is returned unchanged.
+    the location. An ``Error on line N`` message instead gains its bounded
+    continuation block plus any whole-log cause lines
+    (:func:`_error_on_line_context`, :func:`_with_fatal_error_cause`). Any
+    other message is returned unchanged.
     """
     if "fatal error in ngspice" in message.lower():
         return _with_fatal_error_cause(message, log_text)
     if message.lower().startswith("error on line"):
-        return _with_fatal_error_cause(message, log_text)
+        return _with_fatal_error_cause(
+            message, log_text, _error_on_line_context(log_text, start)
+        )
     if not message.lower().startswith("error in netlist line no."):
         return message
     following = log_text[start:].splitlines()[1:2]
