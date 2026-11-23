@@ -27,6 +27,7 @@ import pytest
 from klayout_tools.decks.asap7_rules import DECK_PATH
 from klayout_tools.drc import run_drc_klayout_engine
 from klayout_tools.place_and_route_via_tip import (
+    _MARKERS_PER_RULE,
     _NARROW_MAX_NM,
     _SHORT_MAX_NM,
     _TIP_RULE_LEF_LAYERS,
@@ -58,20 +59,26 @@ def _nm(value: float) -> int:
 class _Builder:
     """A layout with one top cell, where ``wire`` draws plain routed metal and
     ``pad`` draws a ``VIA_*`` cell's landing pad (the router-inserted geometry
-    the flag attributes violations to)."""
+    the flag attributes violations to). ``dbu`` (issue #7405) builds the same
+    geometry at another database unit, for the micron-unit checks."""
 
-    def __init__(self) -> None:
+    def __init__(self, dbu: float = DBU) -> None:
         self.layout = kdb.Layout()
-        self.layout.dbu = DBU
+        self.layout.dbu = dbu
+        self.dbu = dbu
         self.top = self.layout.create_cell("top")
         self._vias = 0
 
     def _index(self, layer: tuple[int, int]) -> int:
         return self.layout.layer(*layer)
 
+    def _u(self, nm: float) -> int:
+        """Nanometres at the DRM's 1x drawing scale -> database units."""
+        return int(round(nm / 1000.0 / self.dbu))
+
     def wire(self, layer, x0, y0, x1, y1) -> None:
         self.top.shapes(self._index(layer)).insert(
-            kdb.Box(_nm(x0), _nm(y0), _nm(x1), _nm(y1))
+            kdb.Box(self._u(x0), self._u(y0), self._u(x1), self._u(y1))
         )
 
     def pad(self, layer, x0, y0, x1, y1, cut: bool = True) -> None:
@@ -79,14 +86,16 @@ class _Builder:
         via = self.layout.create_cell(f"VIA_VIA12_{self._vias}")
         w, h = (x1 - x0) / 2.0, (y1 - y0) / 2.0
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        via.shapes(self._index(layer)).insert(kdb.Box(_nm(-w), _nm(-h), _nm(w), _nm(h)))
+        via.shapes(self._index(layer)).insert(
+            kdb.Box(self._u(-w), self._u(-h), self._u(w), self._u(h))
+        )
         if cut:
             side = min(w, h)
             via.shapes(self._index(V1)).insert(
-                kdb.Box(_nm(-side), _nm(-side), _nm(side), _nm(side))
+                kdb.Box(self._u(-side), self._u(-side), self._u(side), self._u(side))
             )
         self.top.insert(
-            kdb.CellInstArray(via.cell_index(), kdb.Trans(_nm(cx), _nm(cy)))
+            kdb.CellInstArray(via.cell_index(), kdb.Trans(self._u(cx), self._u(cy)))
         )
 
     def run(self, variant: str = "asap7", drcfill_regions=None) -> dict:
@@ -112,11 +121,13 @@ def _attributed(report: dict) -> dict[str, int]:
     return {entry["rule"]: entry["via_pads"] for entry in report["rules"]}
 
 
-def _pad_tip_near_wire_side(layer, gap: float, x: float = 0.0) -> _Builder:
+def _pad_tip_near_wire_side(
+    layer, gap: float, x: float = 0.0, dbu: float = DBU
+) -> _Builder:
     """A landing pad whose 18 nm (narrow) tip edge faces the side of a long
     wire ``gap`` nm away -- the ``S.2`` tip-to-side case issue #4495 reports,
     with the pad fed from below so it is connected metal, not an island."""
-    b = _Builder()
+    b = _Builder(dbu)
     b.pad(layer, x - 9, -20, x + 9, 20)
     b.wire(layer, x - 9, -200, x + 9, -20)
     b.wire(layer, x - 200, 20 + gap, x + 200, 20 + gap + 18)
@@ -225,6 +236,8 @@ def test_pair_touching_pad_and_patch_counts_in_both_subsets():
     assert entry["violations"] == 1
     assert entry["via_pads"] == 1 and entry["router_fill"] == 1
     assert result["via_pad_violations"] == 1 and result["router_fill_violations"] == 1
+    marker = entry["markers"][0]
+    assert marker["via_pad"] is True and marker["router_fill"] is True
 
 
 def test_missing_region_for_a_layer_reports_zero_not_a_guess():
@@ -299,6 +312,78 @@ def test_absent_layer_in_the_layout_is_clean_not_a_skip():
     b.wire(M1, 0, 0, 1000, 18)
     result = b.run()
     assert result["status"] == "clean" and result["reason"] is None
+
+
+# --------------------------------------------------------------------------
+# Per-hit marker boxes (issue #7405)
+# --------------------------------------------------------------------------
+
+
+def test_marker_box_spans_the_pad_tip_to_wire_side_gap():
+    """The manual check of the curation: ``rules[0]["markers"]``'s box sits
+    between the pad tip (``y`` = 20 nm) and the wire side (``y`` = 40 nm),
+    spanning exactly the 20 nm gap, with the pad's attribution flag set."""
+    result = _pad_tip_near_wire_side(M1, 20).run()
+    entry = result["rules"][0]
+    assert entry["markers_truncated"] is False
+    assert len(entry["markers"]) == 1
+    marker = entry["markers"][0]
+    assert marker["box_um"] == [-0.009, 0.02, 0.009, 0.04]
+    assert marker["via_pad"] is True and marker["router_fill"] is False
+
+
+def test_marker_boxes_are_microns_independent_of_the_layout_dbu():
+    """``box_um`` is a micron figure in top-cell coordinates, not a database
+    unit: the same geometry built at the deck's own 0.25 nm dbu and at a
+    1 nm dbu yields the same boxes (and the same flags)."""
+    fine = _pad_tip_near_wire_side(M1, 20, dbu=0.00025).run()
+    coarse = _pad_tip_near_wire_side(M1, 20, dbu=0.001).run()
+    assert coarse["rules"][0]["markers"] == fine["rules"][0]["markers"]
+    box = fine["rules"][0]["markers"][0]["box_um"]
+    assert box[3] - box[1] == 0.02  # the 20 nm gap, in microns
+
+
+def test_marker_flags_and_length_match_the_subset_counts():
+    """Not truncated: one marker per hit, the true ``via_pad`` flags number
+    exactly ``via_pads`` (likewise ``router_fill``), and the markers are
+    sorted by box so the list is deterministic."""
+    result = _all_four_rules().run()
+    for entry in result["rules"]:
+        assert entry["markers_truncated"] is False
+        assert len(entry["markers"]) == entry["violations"]
+        assert sum(m["via_pad"] for m in entry["markers"]) == entry["via_pads"]
+        assert sum(m["router_fill"] for m in entry["markers"]) == entry["router_fill"]
+        boxes = [m["box_um"] for m in entry["markers"]]
+        assert boxes == sorted(boxes)
+
+
+def _many_isolated_tip_hits(count: int) -> _Builder:
+    """``count`` copies of the ``S.2`` pad-tip-vs-wire-side case, 1 um apart
+    so no slot can see another's geometry: one hit per slot, every one of
+    them attributed to a landing pad."""
+    b = _Builder()
+    for i in range(count):
+        x = i * 1000.0
+        b.pad(M1, x - 9, -20, x + 9, 20)
+        b.wire(M1, x - 9, -200, x + 9, -20)
+        b.wire(M1, x - 200, 40, x + 200, 58)
+    return b
+
+
+@pytest.mark.parametrize(
+    "hits", [_MARKERS_PER_RULE, _MARKERS_PER_RULE + 1], ids=["at_cap", "over_cap"]
+)
+def test_markers_are_capped_and_truncation_is_flagged(hits):
+    """At the cap the list is whole and untruncated; one hit over it, the
+    list is cut at the cap, ``markers_truncated`` says so, and the counts
+    stay the full, uncapped figures."""
+    result = _many_isolated_tip_hits(hits).run()
+    entry = next(e for e in result["rules"] if e["rule"] == "M1.S.2")
+    assert entry["violations"] == hits and entry["via_pads"] == hits
+    assert len(entry["markers"]) == _MARKERS_PER_RULE
+    assert entry["markers_truncated"] is (hits > _MARKERS_PER_RULE)
+    boxes = [m["box_um"] for m in entry["markers"]]
+    assert boxes == sorted(boxes)
 
 
 # --------------------------------------------------------------------------
@@ -441,9 +526,40 @@ def test_counts_match_the_real_deck(tmp_path):
     path = tmp_path / "tips.gds"
     b.layout.write(str(path))
 
-    deck = collections.Counter(
-        violation["rule"]
+    deck_violations = [
+        violation
         for violation in run_drc_klayout_engine(str(path), str(DECK_PATH))["violations"]
         if re.fullmatch(r"M[123]\.S\.[2345]", violation["rule"])
-    )
-    assert _by_rule(b.run()) == dict(deck)
+    ]
+    deck = collections.Counter(violation["rule"] for violation in deck_violations)
+    report = b.run()
+    assert _by_rule(report) == dict(deck)
+
+
+@_needs_klayout
+def test_marker_boxes_match_the_real_deck(tmp_path):
+    """The box half of the oracle (issue #7405): the deck's own violation
+    marker boxes -- the integer-dbu ``bbox`` of each ``M[123].S.[2345]``
+    record -- equal, as sets per rule, the ``markers`` boxes converted back
+    to database units. What the reporter measured by rebuilding the checks
+    with ``klayout.db`` is now the pass's own output."""
+    b = _all_four_rules()
+    path = tmp_path / "tips.gds"
+    b.layout.write(str(path))
+
+    deck_boxes: dict[str, set[tuple[int, int, int, int]]] = {}
+    for violation in run_drc_klayout_engine(str(path), str(DECK_PATH))["violations"]:
+        if re.fullmatch(r"M[123]\.S\.[2345]", violation["rule"]):
+            bbox = violation["bbox"]
+            deck_boxes.setdefault(violation["rule"], set()).add(
+                (bbox["left"], bbox["bottom"], bbox["right"], bbox["top"])
+            )
+    dbu = b.layout.dbu
+    marker_boxes = {
+        entry["rule"]: {
+            tuple(int(round(um / dbu)) for um in marker["box_um"])
+            for marker in entry["markers"]
+        }
+        for entry in b.run()["rules"]
+    }
+    assert marker_boxes == deck_boxes
