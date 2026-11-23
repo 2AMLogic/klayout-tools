@@ -347,7 +347,7 @@ def repair_min_area(
 
     ``routing_layers`` restricts the pass to the ``(layer, datatype)`` pairs
     this PDK's own KLayout LEF/DEF layer map names as *routed net* geometry
-    (``place_and_route_gds_merge._lef_net_layer_gds_map``) -- i.e. exactly
+    (``place_and_route_pin_conductor._lef_net_layer_gds_map``) -- i.e. exactly
     the layers the router, the PDN and the tech LEF's via cells draw on.
     Standard-cell internals on non-routing layers are the foundry's
     geometry, already signed off, and are never touched. The scope narrows

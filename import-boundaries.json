@@ -738,6 +738,7 @@
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",
         "klayout_tools.place_and_route_pin_connectivity",
+        "klayout_tools.place_and_route_power_stack",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_rerun",
