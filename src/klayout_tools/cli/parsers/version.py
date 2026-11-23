@@ -38,4 +38,13 @@ def add_version_parser(
         ),
     )
     _add_format_arg(version_parser)
+    version_parser.add_argument(
+        "--require",
+        action="append",
+        metavar="COMMAND",
+        help=(
+            "top-level verb this install must provide; repeat the flag or "
+            "separate names with commas. Exit 3 if any is missing"
+        ),
+    )
     version_parser.set_defaults(func=version_cmd.run)

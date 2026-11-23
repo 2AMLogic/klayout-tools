@@ -270,8 +270,8 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` net but a confirmed driver-only
-      internal one, as standalone ``klt sta`` also skips (#6970/#7267)):
+    - *design-side* (linked nets after excluding confirmed empty or
+      driver-only internal nets, as in standalone ``klt sta``):
       how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
