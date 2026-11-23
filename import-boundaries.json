@@ -967,6 +967,7 @@
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
+        "klayout_tools.cli.sim_regrade_cmd",
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
@@ -1073,6 +1074,8 @@
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
+        "klayout_tools.sim_regrade",
+        "klayout_tools.sim_regrade_run",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_save_diagnostic",
@@ -2711,6 +2714,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
       "reason": "Issue #5616: loads the em request with the same error handling as sim/corner_matrix; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.sim_regrade_run",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_resolve_relative",
+      "reason": "Issue #6778: the derived regrade request rewrites its path-bearing refs absolute against the original request's directory, the same helper sim.py itself imports; promote to a public name with the other _paths importers."
     }
   ],
   "legacy_exceptions": {

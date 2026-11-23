@@ -159,7 +159,7 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -228,7 +228,14 @@ from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports wo
     _load_checkpoint,
     restore_checkpoint,
 )
-from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+from .sim_convergence_retry import (
+    DEFAULT_CONVERGENCE_RETRY as DEFAULT_CONVERGENCE_RETRY,
+)
+from .sim_convergence_retry import (
+    _validate_convergence_retry,
+    is_retryable_convergence_failure,
+    note_not_retried,
+)
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
 #: under its per-file size ratchet; re-exported here -- self-aliased where
@@ -327,6 +334,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
+from . import sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -1905,68 +1913,6 @@ def _portable_substitutions(
     return out
 
 
-#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
-#: retried unit runs with when the object form leaves a key out. ``gear``
-#: integration and a looser ``reltol`` are the standard first remedies for
-#: ngspice's "time step too small".
-DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
-    "max_attempts": 1,
-    "reltol": 0.003,
-    "method": "gear",
-}
-_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
-
-
-def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
-    """Validate and normalise ``options.retry_on_convergence_error`` (issue
-    #2973).
-
-    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
-    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
-    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
-    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
-    unknown key is an application error (``SimError``) rather than a silent
-    no-op, like :func:`_validate_fail_on_diagnostic`.
-    """
-    if value is None or value is False:
-        return None
-    if value is True:
-        return dict(DEFAULT_CONVERGENCE_RETRY)
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.retry_on_convergence_error must be a boolean or an object "
-            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
-        )
-    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
-    if unknown:
-        raise SimError(
-            "options.retry_on_convergence_error has unknown key(s): "
-            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
-        )
-    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
-    attempts = resolved["max_attempts"]
-    if not is_int(attempts) or attempts < 1:
-        raise SimError(
-            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
-        )
-    reltol = resolved["reltol"]
-    if (
-        isinstance(reltol, bool)
-        or not isinstance(reltol, (int, float))
-        or not 0 < reltol < 1
-    ):
-        raise SimError(
-            "options.retry_on_convergence_error.reltol must be a number "
-            "between 0 and 1 (exclusive)"
-        )
-    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
-        raise SimError(
-            "options.retry_on_convergence_error.method must be one of: "
-            + ", ".join(_CONVERGENCE_RETRY_METHODS)
-        )
-    return resolved
-
-
 def _resolve_convergence_retry(
     options: dict[str, Any], engine: str
 ) -> dict[str, Any] | None:
@@ -3357,6 +3303,15 @@ def _prepare_sim_request(
             monte_carlo_info["k_sigma"] = k_sigma
         monte_carlo_info.update(_mc_window_scope_echo(monte_carlo_spec, window_scope))
 
+    # Issue #6778: a `--regrade` second pass rides this same request -- the
+    # internal `_regrade` field selects the re-run units (after this
+    # module's own expansion, so corner identities and Monte Carlo seeds are
+    # preserved), `options.tightened_rerun` is validated on every run, and a
+    # request without either returns the expansion unchanged.
+    corner_points = sim_regrade.prepare_regrade(
+        corner_points, request, analysis, engine
+    )
+
     # Issue #2995: per-instance mismatch gating. Validated before any probe or
     # backend dispatch; the gated netlist copy is what local backends run.
     dispatch_netlist_path, monte_carlo_info = _maybe_gate_instances(
@@ -4117,6 +4072,9 @@ def _run_sim_corners(
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
+    # Issue #6778: a runner that predates `--regrade` ignores the request's
+    # selection field and runs the whole matrix -- refuse that by id.
+    sim_regrade.require_regrade_echo(request, dispatch_points, corners_new, backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
     remote_environment = sim_batch_resume.merge_resume_environment(
         harvested_env, remote_environment
@@ -4377,6 +4335,11 @@ def _run_sim_corners(
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
+    # Issue #6778: the declared tightened-rerun settings (present in both
+    # passes) and, for a regrade run itself, the applied selection.
+    environment.update(
+        sim_regrade.regrade_environment_entries(request, analysis, engine)
+    )
     environment.update(
         sim_env_report.budget_environment(
             budget_s,
@@ -4714,7 +4677,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         " confidence corners decks engine engine_version exclude"
         " expect_netlist_identity measurements models monte_carlo netlist"
         " netlist_overrides netlist_source options remote schema"
-        " schema_version target_ci_halfwidth _explicit_points"
+        " schema_version target_ci_halfwidth _explicit_points _regrade"
     ).split()
     + [sim_staging.STAGED_MODEL_INPUTS_FIELD, sim_stimulus.REQUEST_KEY]
 )
