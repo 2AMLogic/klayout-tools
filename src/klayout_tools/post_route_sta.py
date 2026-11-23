@@ -57,8 +57,8 @@ utility modules, not verb modules, so importing their (underscore-prefixed)
 helpers by name does not violate the convention above. ``_resolve_liberty``
 (this module's own thin wrapper, below) follows the same precedent one level
 further: its body is a one-line call into
-:func:`klayout_tools.pdk.resolve_liberty_for_cell_library`, a *public* name
-in the ``pdk.py`` shared utility module (issue #1652) -- PDK-resolution
+:func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`, a *public* name
+in the ``pdk_cells.py`` shared utility module (issue #1652) -- PDK-resolution
 logic is the one part of the "self-contained" convention that must not
 drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
@@ -2703,7 +2703,7 @@ def _resolve_liberty(
     Raises :class:`PostRouteStaError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``place_and_route.py``'s own ``_resolve_liberty``
