@@ -205,14 +205,17 @@ import subprocess
 import sys
 from typing import Any
 
-from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import ANCHOR_CWD as ANCHOR_CWD
+from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import path_envelope as _path_envelope
 from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from .env_provenance import find_repo_root, repo_relative_path
+from .env_provenance import find_repo_root
+from .env_provenance import repo_relative_path as repo_relative_path
 from .functional_verification_base import (  # noqa: F401 - public re-exports
     DEFAULT_SDF_CORNER,
     DEFAULT_SDF_ENTRIES,
@@ -853,18 +856,6 @@ class _Report(dict):
     ``{path, scope}`` envelope (docs/json-contract.md, #2224)."""
 
     local_paths: dict[str, str | None]
-
-
-def _path_envelope(
-    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
-) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape (never absolute),
-    relative to ``repo_root`` (default: the cwd's repo -- a run passes the
-    request's, so its report does not vary with the invoking directory)."""
-    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
 
 
 def _initial_state_run_specs(
