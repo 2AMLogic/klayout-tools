@@ -1,0 +1,1 @@
+- **Native KLayout DRC findings preserve attached RDB measurements** (#6823, 2026-11-21). Reports include the original value strings in `violations[].values` and detect changes on rerun.

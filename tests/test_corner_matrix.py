@@ -80,6 +80,7 @@ def test_unknown_matrix_key_rejected():
 def test_request_clean(tmp_path, matrix):
     req = _write(tmp_path / "r.json", {"corners": AXES})
     out = check_corner_matrix(matrix, request_path=req)
+    assert "errored" not in out
     assert out["complete"] is True and out["matrix_size"] == 8
     assert out["coverage_complete"] is True
 
@@ -120,6 +121,17 @@ def test_request_duplicate_tuple(tmp_path, matrix):
         check_corner_matrix(matrix, request_path=req)
 
 
+def test_matrix_duplicate_tuple(tmp_path):
+    # The matrix side of issue #5870: expected_tuples() routes through
+    # sim._expand_corners, which refuses duplicate corner_ids, so a
+    # duplicate-resolving matrix is rejected before any diffing happens
+    # (the old "matrix expands to duplicate tuple(s)" branch was unreachable).
+    matrix = _write(tmp_path / "matrix.json", {**AXES, "process": ["tt", "ss", "tt"]})
+    req = _write(tmp_path / "r.json", {"corners": AXES})
+    with pytest.raises(CornerMatrixError, match="matrix is not a valid corner grid"):
+        check_corner_matrix(matrix, request_path=req)
+
+
 def test_request_mode_coverage_complete_equals_complete(tmp_path, matrix):
     req = _write(tmp_path / "r.json", {"corners": AXES})
     out = check_corner_matrix(matrix, request_path=req)
@@ -141,6 +153,7 @@ def test_report_clean(tmp_path, matrix):
     rep = _write(tmp_path / "rep.json", _report(expected_tuples(AXES)))
     out = check_corner_matrix(matrix, report_path=rep)
     assert out["complete"] is True and out["observed_count"] == 8
+    assert out["errored"] == []
     assert out["coverage_complete"] is True
 
 
@@ -354,3 +367,71 @@ def test_report_empty_matrix_failing_default_corner(tmp_path):
     out = check_corner_matrix(matrix, report_path=_write(tmp_path / "r.json", rep))
     assert ids == ["default/novdd/27C"]
     assert out["coverage_complete"] is True and out["complete"] is False
+
+
+def test_report_distinguishes_solver_errors_from_missing_work(tmp_path, capsys):
+    axes = {"temperature_c": [0, 25, 85]}
+    matrix = _write(tmp_path / "matrix.json", axes)
+    ids = expected_tuples(axes)
+    rows = _report(
+        ids,
+        {
+            1: {"status": "error", "diagnostics": [{"code": "nonconvergence"}]},
+            2: {"status": "error", "diagnostics": [{"code": "lost_shard"}]},
+        },
+    )["corners"]
+    report = _write(tmp_path / "report.json", {"corners": list(reversed(rows))})
+    args = ["corner-matrix", "check", matrix, "--report", report]
+    assert main([*args, "--format", "json"]) == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result["errored"] == [ids[1]]
+    assert result["not_simulated"] == ids[1:]
+    assert result["coverage_complete"] and not result["complete"]
+    assert main(args) == 3
+    assert f"errored:\n  {ids[1]}\n" in capsys.readouterr().out
+
+    rows.pop()
+    _write(tmp_path / "report.json", {"corners": rows})
+    result = check_corner_matrix(matrix, report_path=report)
+    assert result["errored"] == [ids[1]] and result["missing"] == [ids[2]]
+    assert not result["coverage_complete"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "attempted"),
+    [
+        ({"engine_exit_code": 0}, True),
+        ({"engine_exit_code": 1}, True),
+        ({"engine_killed_by_signal": "SIGKILL"}, True),
+        ({"diagnostics": [{"code": "timestep_too_small"}]}, True),
+        ({"diagnostics": [{"code": "engine_killed"}]}, True),
+        ({"diagnostics": [{"code": "engine_aborted"}]}, True),
+        ({}, False),
+        ({"artifacts": {"log": "output.log"}}, False),
+        ({"engine_exit_code": False, "engine_killed_by_signal": ""}, False),
+        ({"diagnostics": [{"code": "model_bin_range_preflight"}]}, False),
+        (
+            {"diagnostics": [{"code": "batch_job_failed"}, {"code": "nonconvergence"}]},
+            False,
+        ),
+        ({"diagnostics": [None, {"code": []}]}, False),
+        ({"diagnostics": None}, False),
+    ],
+)
+def test_report_only_counts_evidence_on_error_rows(tmp_path, fields, attempted):
+    axes = {"temperature_c": [0, 25, 85]}
+    matrix = _write(tmp_path / "matrix.json", axes)
+    ids = expected_tuples(axes)
+    rows = _report(
+        ids,
+        {
+            0: {"status": "error", **fields},
+            1: {"status": "fail", "engine_exit_code": 0},
+            2: {"status": "error", "diagnostics": [{"code": "singular_matrix"}]},
+        },
+    )["corners"]
+    report = _write(tmp_path / "report.json", {"corners": list(reversed(rows))})
+    result = check_corner_matrix(matrix, report_path=report)
+    assert result["errored"] == ([ids[0], ids[2]] if attempted else [ids[2]])
+    assert result["out_of_bounds"] == [ids[1]]
+    assert result["not_simulated"] == [ids[0], ids[2]]

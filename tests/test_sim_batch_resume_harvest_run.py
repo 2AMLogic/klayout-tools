@@ -203,3 +203,84 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
     )
     assert not manifest_path.exists()
     assert not (artifacts / "checkpoint.json").exists()
+
+
+@pytest.mark.parametrize("with_params", [True, False], ids=["params", "plain"])
+def test_resume_single_job_keeps_outstanding_draws(tmp_path, monkeypatch, with_params):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    transport = sb._run_subprocess
+    failed_jobs = set()
+    uploads = []
+    resuming = False
+
+    def worker(argv, timeout_s):
+        payload = uploaded_request_of(argv)
+        if payload is not None:
+            document, job = payload
+            wire = document["_explicit_points"]
+            uploads.append(wire)
+            assert not {"corners", "monte_carlo", "exclude"}.intersection(document)
+            points = sim._corner_points_from_wire(wire)
+            if not resuming and any(p.sample_index == 29 for p in points):
+                failed_jobs.add(job)
+            report = json.loads(_sim_report([p.corner_id for p in points]))
+            for corner, point in zip(report["corners"], points, strict=True):
+                corner.update(
+                    params=point.params,
+                    monte_carlo={
+                        "sample_index": point.sample_index,
+                        "seed": point.mc_seed["rndseed"],
+                    },
+                    runtime_s=2.0 if resuming else 1.0,
+                    measurements=[
+                        dict(name="vout", value=1.0, margin=None, status="pass")
+                    ],
+                )
+            runner.outputs_by_job[job] = {"report.json": json.dumps(report)}
+        elif "cp" in argv and any(
+            job + "/outputs" in " ".join(argv) for job in failed_jobs
+        ):
+            return fake_completed(
+                "", returncode=1, stderr="NoSuchKey: lost shard outputs"
+            )
+        return transport(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", worker)
+    deck = _write_body(tmp_path)
+    deck.write_text(".param rval=1000\n" + deck.read_text())
+    request = _batch_request(
+        tmp_path,
+        corners={"params": {"rval": [1000]}} if with_params else {},
+        monte_carlo={"n": 30, "seed": 42, "vary": "process"},
+        measurements=[{"name": "vout", "expr": "v(out)", "reduce": "max"}],
+    )
+    request["batch"].update(max_units_per_job=10, max_concurrent_jobs=1)
+    path = str(_write_request(tmp_path, request))
+    artifacts = str(tmp_path / "artifacts")
+    first = sim.run_sim(path, artifacts_dir=artifacts)
+    completed = {c["corner_id"]: c for c in first["corners"] if c["status"] == "pass"}
+    lost = [c for c in first["corners"] if c["corner_id"] not in completed]
+    assert len(completed) == 20 and len(lost) == 10
+    assert all(any(d["code"] == "lost_shard" for d in c["diagnostics"]) for c in lost)
+    assert len(uploads) == 3
+    original = next(
+        wire for wire in uploads if any(p["sample_index"] == 29 for p in wire)
+    )
+
+    resuming = True
+    uploads.clear()
+    resumed = sim.run_sim(path, artifacts_dir=artifacts, resume=True)
+    assert uploads == [original]
+    assert resumed["status"] == "pass"
+    assert resumed["environment"]["resume"]["resumed_corners"] == 20
+    assert resumed["measurements"][0]["monte_carlo"]["n"] == 30
+    corners = resumed["corners"]
+    assert [c["corner_id"] for c in corners] == [
+        c["corner_id"] for c in first["corners"]
+    ]
+    assert [c["monte_carlo"]["sample_index"] for c in corners] == list(range(30))
+    assert {
+        c["corner_id"]: c for c in corners if c["corner_id"] in completed
+    } == completed

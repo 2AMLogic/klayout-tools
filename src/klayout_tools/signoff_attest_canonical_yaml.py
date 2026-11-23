@@ -214,7 +214,9 @@ def rehash_checks(
             try:
                 with open(candidate, "rb") as handle:
                     data = handle.read()
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: a name no filesystem call can represent (an
+                # embedded NUL byte) cannot be opened either (#7195).
                 continue
             read_any = True
             try:
