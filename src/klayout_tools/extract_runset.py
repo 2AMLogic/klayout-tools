@@ -70,6 +70,7 @@ from . import env_provenance
 from ._provenance import build_provenance, sha256_file
 from .extract_base import SCHEMA_VERSION, _build_metrics
 from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
 
 # Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
@@ -297,7 +298,6 @@ def run_extract_klayout_runset(
     database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
-    from .extract import _normalized_netlist_sha256
     from .extract_progress import stage
     from .extract_report import _describe_devices, _describe_nets
 

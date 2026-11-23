@@ -574,9 +574,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
-        # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
-        # `measurements[].expr` produced no value; the runner may predate it.
+        # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
+        "expr_no_value",
         # Report-level (top-level `diagnostics[]`, issue #5385): process legs
         # with bit-identical results; a warning.
         "process_leg_check",
