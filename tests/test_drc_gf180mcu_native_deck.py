@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import pdk
-from klayout_tools.cli import drc_cmd, main
+from klayout_tools.cli import main
 from klayout_tools.cli._drc_native import resolve_native_deck
 from klayout_tools.drc import DrcError
 from klayout_tools.pdk_native_drc import native_drc_main_script
+from test_drc_klayout_engine import _stub_klayout_drc_subprocess, _write_gds
 
 
 def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
@@ -22,6 +23,14 @@ def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
     for name in drc_files:
         (drc / name).write_text("# stub\n")
     return str(root)
+
+
+def _stub_family_install(tmp_path, monkeypatch, variant="gf180mcuA"):
+    # This fixture writes a placeholder deck without a foundry Ruby registry.
+    from klayout_tools import drc_klayout_selection
+
+    monkeypatch.setattr(drc_klayout_selection, "_registry", lambda *args: None)
+    return _install(tmp_path, variant, ("gf180mcu.drc",))
 
 
 def _installed_gf180_script(tmp_path):
@@ -123,18 +132,12 @@ def test_malformed_deck_var_raises_drc_error(tmp_path, entry):
 
 
 def test_cli_klayout_engine_uses_main_script_and_reports_it(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, real_build_identity_git
 ):
-    root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
-    seen = {}
-
-    def fake_engine(path, deck_file, **kw):
-        seen.update(deck_file=deck_file, **kw)
-        return {"schema_version": 3, "status": "clean"}
-
-    monkeypatch.setattr(drc_cmd, "run_drc_klayout_engine", fake_engine)
-    gds = tmp_path / "a.gds"
-    gds.write_bytes(b"")
+    root = _stub_family_install(tmp_path, monkeypatch, "gf180mcuD")
+    commands = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=commands)
+    gds = _write_gds(tmp_path / "a.gds")
     main(
         [
             "drc",
@@ -150,8 +153,9 @@ def test_cli_klayout_engine_uses_main_script_and_reports_it(
         ]
     )
     out = json.loads(capsys.readouterr().out)
-    assert seen["deck_vars"] == {"variant": "gf180mcuD"}
-    assert seen["min_klayout_version"] == "0.30.9"
+    (command,) = commands
+    assert "variant=gf180mcuD" in command
+    assert out["native_deck"]["min_klayout_version"] == "0.30.9"
     assert out["native_deck"]["kind"] == "pdk_main_script"
     assert out["native_deck"]["min_klayout_version_defaulted"] is True
 
@@ -284,6 +288,10 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path, capsys):
         alias_report = json.loads(capsys.readouterr().out)
         assert alias_report["status"] == "clean_partial"
         assert alias_report["rule_selection"] == wide["rule_selection"]
+        assert (
+            alias_report["provenance"]["deck"]["tree"]["content_hash"]
+            == wide["provenance"]["deck"]["tree"]["content_hash"]
+        )
         alias_reports.append(alias_report)
     from klayout_tools.coverage import build_check_coverage
 
