@@ -357,6 +357,18 @@ byte-identical to before. No existing key changed, so **no
 `schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
 recognition" section.
 
+**A conditional hierarchy census is additive.** In a curated FinFET
+extraction, a selected circuit with subcircuit instances gains three top-level
+fields. `device_count_scope` is `"selected_circuit"`, `instantiated_device_counts`
+counts each device class across the instantiated hierarchy, and
+`instantiated_device_count` gives their sum. For example, a top cell with two
+wrapper instances, each containing two one-NMOS leaves, reports
+`{"nmos_rvt": 4}` and a total of 4. Flat selected circuits omit all three
+fields. The existing `device_count`, `device_counts`, `devices[]` and
+`metrics.extract__device__count` still describe devices directly in the
+selected circuit. The extract report retains `schema_version` 4.
+[Extraction report](cli/extract.md).
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
@@ -585,7 +597,11 @@ and
 engine). `klt extract --engine klayout-runset` reports gain a top-level
 `params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
 `instantiated_device_counts` (`{class: count}` across the instantiated
-hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat).
+`instantiated_device_counts` is always present under `klayout-runset`. On the
+curated engine it appears for a FinFET selected circuit that instantiates at
+least one subcircuit, alongside `device_count_scope` and
+`instantiated_device_count` (issue #7615). Under the runset
 engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
 instantiated hierarchy, which for a flat runset is the selected circuit's own
 count.
