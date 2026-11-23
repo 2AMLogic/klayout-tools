@@ -187,8 +187,8 @@ def _bus_concat_edits(
     ):
         return None
     raw_spans: list[tuple[int, tuple[int, int]]] = []
-    for index in sorted(found):
-        statement = stripped[found[index][1] : found[index][2]]
+    for _, start, end in found.values():
+        statement = stripped[start:end]
         if chunk.count(statement) != 1:
             return None
         stmt_start = chunk.index(statement)
@@ -198,7 +198,8 @@ def _bus_concat_edits(
                 _full_line_span(chunk, stmt_start, stmt_start + len(statement)),
             )
         )
-    first_stmt, (first_start, first_end) = min(raw_spans)
+    raw_spans.sort()
+    first_stmt, (first_start, first_end) = raw_spans[0]
     indent = chunk[first_start:first_stmt]
     concat = "{" + ",".join(found[index][0] for index in range(top, -1, -1)) + "}"
     replacement = indent + f"assign {bus} = {concat};"
@@ -245,7 +246,7 @@ def _rewrite_module_buses(
         return None
     parts: list[str] = []
     cursor = 0
-    for start, end, text in sorted(edits):
+    for start, end, text in sorted(edits, key=lambda edit: edit[0]):
         parts.append(chunk[cursor:start])
         if text is not None:
             parts.append(text)

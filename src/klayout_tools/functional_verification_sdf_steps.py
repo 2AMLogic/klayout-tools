@@ -214,32 +214,13 @@ def _apply_sdf_alias_port_drop(
     hdl_toplevel: str,
     sdf_pre_dropped_counts: dict[str, int],
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    """Issue #2285's zero-delay alias-port ``INTERCONNECT`` drop, one step
-    of :func:`run_functional_verification`'s SDF-normalization pipeline --
-    the code of that function's own inline alias block, moved out to this
-    module unchanged (its two sibling drops already live as helpers there
-    for the same reason: no new branch in the already-baselined function,
-    which the per-file size ratchet also caps at its current line count).
+    """Prepare independently assigned output bits for Icarus annotation.
 
-    An ``INTERCONNECT`` onto a top-level port bit the netlist drives
-    through a Verilog ``assign`` alias cannot be annotated by Icarus at
-    all and cannot be made annotatable by rewriting the endpoint either;
-    when such an entry is zero-delay at every corner, dropping it cannot
-    change simulated timing, so it is removed here and counted under
-    :data:`SDF_ALIAS_PORT_DROPPED_CLASS`. A nonzero delay on a separately
-    assigned bit raises before the simulator build.
-
-    Issue #7534 folded in: this wrapper first rewrites a top module's
-    separately assigned output buses into the equivalent whole-vector
-    concat in build-dir copies of the sources (``_apply_sdf_output_assign_
-    rewrite``), so both the drop and the refusal below see the rewritten
-    spelling -- the one #6937's own verified corrections show annotates --
-    and only shapes that rewrite cannot prove equivalent reach the
-    refusal. Returns ``(path, sources, rewritten)``: the path the next
-    step should read, the sources with any build copies swapped in, and
-    the per-port rewrite records for
-    ``environment.sdf.output_assign_rewritten`` (empty when nothing
-    qualified).
+    Rewrite eligible buses to whole-vector assignments in build copies (#7534).
+    On the remaining alias bits, count and drop arcs with zero delay at every
+    corner (#2285) and refuse nonzero delays before building (#6937).
+    Return the SDF path, build sources, and per-port rewrite records for
+    ``environment.sdf.output_assign_rewritten``.
     """
     sources, rewritten = _apply_sdf_output_assign_rewrite(
         annotate_source_path, sources, hdl_toplevel, output_dir
