@@ -163,7 +163,6 @@ error_msg="gcd(48, 18): got 6, want 999 (deliberate failure)" />
   </testsuite>
 </testsuites>
 """
-
 _GCD_RTL = "module gcd(input wire clk); endmodule\n"
 _TESTBENCH = "# stub testbench module -- never imported by these tests\n"
 

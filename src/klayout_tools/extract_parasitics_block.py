@@ -344,14 +344,15 @@ def build_parasitics_report(
                     for n in parasitics_report.get("nets", [])
                     if n.get("rc_model") == "distributed"
                     and (
-                        variants.drops_r(n["net"]) or variants.drops_c_ground(n["net"])
+                        variants.drops_any_r(n["net"])
+                        or variants.drops_c_ground(n["net"])
                     )
                 }
             )
             if distributed_variant:
                 warnings.append(
-                    "--parasitic-variant drop-r/drop-c-ground does not apply "
-                    "to --distributed-rc net(s) "
+                    "--parasitic-variant drop-r/drop-r-body/drop-c-ground "
+                    "does not apply to --distributed-rc net(s) "
                     f"{', '.join(repr(name) for name in distributed_variant)} "
                     "-- their ladder is left unchanged."
                 )
