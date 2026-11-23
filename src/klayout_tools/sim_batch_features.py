@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from typing import Any
 
+from . import _warn
 from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
 from .sim_batch_corner_libs import (
     _compare_corner_section_libs,
@@ -44,7 +44,7 @@ def warn_unverified_features(
         "launch because the AMI manifest has no candidate images. The worker "
         "will check these mandatory features when it starts."
     )
-    print(f"klt sim: warning: {message}", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {message}")
     return {
         "code": BATCH_RUNNER_FEATURE_UNVERIFIED_CODE,
         "severity": "warning",

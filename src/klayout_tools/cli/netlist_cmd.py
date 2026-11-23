@@ -29,6 +29,7 @@ rather than taking a second path.
 import argparse
 import sys
 
+from .. import _warn as _warn_deferral
 from ..netlist import NetlistError, run_netlist
 from ..netlist_batch import resolve_backend, run_netlist_batch
 from ..netlist_pdk import PDK_VARIANT_UNESTABLISHED_CODE
@@ -39,7 +40,7 @@ EXIT_DRIFTED = 3
 
 
 def _warn(message: str) -> None:
-    print(f"klt netlist: warning: {message}", file=sys.stderr)
+    _warn_deferral.warn(f"klt netlist: warning: {message}")
 
 
 def register(parser: argparse.ArgumentParser) -> None:

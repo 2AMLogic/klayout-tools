@@ -84,7 +84,6 @@ import re
 import signal
 import statistics
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -94,6 +93,7 @@ from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from . import (
+    _warn,
     env_provenance,
     output_lock,
     sim_ac_waveform,
@@ -1777,7 +1777,7 @@ def _attach_meas_lint(
     request alone, so it is identical for local, batch and remote runs."""
     lint = _meas_at_lint(analysis, measurements_spec)
     for diag in lint:
-        print(f"warning: {diag['message']}", file=sys.stderr)
+        _warn.warn(f"warning: {diag['message']}")
     for corner in corners:
         corner["diagnostics"].extend(dict(d) for d in lint)
 
@@ -6610,7 +6610,7 @@ def _worker_cap_notice(message: str) -> None:
         if message in _WORKER_CAP_NOTICES_EMITTED:
             return
         _WORKER_CAP_NOTICES_EMITTED.add(message)
-    print(message, file=sys.stderr)
+    _warn.warn(message)
 
 
 def _reset_worker_cap_notices() -> None:
@@ -7016,7 +7016,7 @@ def _with_unseeded_noise(
     )
     if noise_report is None:
         return monte_carlo_info
-    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
+    _warn.warn(f"warning: {_UNSEEDED_NOISE_NOTE}")
     return {**monte_carlo_info, **noise_report}
 
 
