@@ -105,10 +105,13 @@ def _open_pdks_hash(stamp: str) -> str | None:
 
 
 def _open_pdks_equal(expected: str, installed: str) -> bool:
-    """Same open_pdks commit; a short hash (>= 7 hex) matches by prefix."""
+    """Same open_pdks commit; a short hash (>= 7 hex) matches by prefix.
+    Identical values match at any length (issue #6298)."""
     want, have = _open_pdks_hash(expected), _open_pdks_hash(installed)
     if want is None or have is None:
         return expected == installed
+    if want == have:
+        return True
     short, long_ = sorted((want, have), key=len)
     return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
 
@@ -120,9 +123,12 @@ def _sha_equal(expected: str, installed: str) -> bool:
     """Same commit SHA (both values fully hex, e.g. a store install's
     ``.pdk-store.json`` ``version`` against a bare-hex pin); a short hash
     (>= 7 hex, git's abbreviation floor) matches by prefix. Non-hex values
-    are compared exactly."""
+    are compared exactly, and identical values match at any length
+    (issue #6298)."""
     if not (_BARE_HEX.fullmatch(expected) and _BARE_HEX.fullmatch(installed)):
         return expected == installed
+    if expected.lower() == installed.lower():
+        return True
     return len(expected) >= _MIN_SHORT_HASH and installed.lower().startswith(
         expected.lower()
     )
