@@ -28,6 +28,7 @@ Private to the :mod:`klayout_tools.cli` package -- not part of the public
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from collections.abc import Callable
@@ -475,3 +476,25 @@ def parse_declared_pins(
             f"e.g. {flag} A,B,VDD,VSS"
         )
     return names
+
+
+def parse_resistance_graph_caps(
+    args: argparse.Namespace,
+) -> dict[str, int] | None:
+    """The ``--resistance-graph-max-*`` flags of a parsed ``args`` as the
+    ``{builder keyword: value}`` mapping ``run_extract``'s
+    ``resistance_graph_caps`` parameter takes (issue #6964), or ``None`` when
+    no flag was given -- the exact call every site that predates them makes.
+
+    Shared by ``klt extract`` and ``klt pex``, like :func:`parse_deck_options`
+    above. A flag's ``dest`` is ``resistance_graph_<builder keyword>``, so the
+    mapping needs no second table. The values themselves are validated by
+    ``run_extract`` (``validate_run_extract_args``), where the flag,
+    request-document and library forms meet.
+    """
+    caps = {
+        dest.removeprefix("resistance_graph_"): value
+        for dest, value in vars(args).items()
+        if dest.startswith("resistance_graph_max_") and value is not None
+    }
+    return caps or None

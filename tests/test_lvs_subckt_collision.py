@@ -408,6 +408,32 @@ def test_reference_lib_missing_target_follows_include_error_path(tmp_path):
         _read_reference_netlist(str(path), deck="sg13g2")
 
 
+@pytest.mark.parametrize("side", ["layout", "reference"])
+def test_included_inductor_definition_survives_device_recovery(tmp_path, side):
+    from klayout_tools.lvs import _read_reference_netlist, _resolve_layout
+
+    _write(
+        tmp_path / "coil.cdl",
+        ".subckt inductor A B SUB\nRcoil A B 12\n.ends\n",
+    )
+    path = _write(
+        tmp_path / "top.cdl",
+        ".include coil.cdl\n.subckt TOP P N SUB\nXcoil P N SUB inductor\n.ends\n",
+    )
+    if side == "layout":
+        netlist = _resolve_layout(
+            {"netlist": path, "deck": "sg13g2"}, str(tmp_path), False
+        )[0]
+    else:
+        netlist = _read_reference_netlist(path, deck="sg13g2")
+    (top,) = netlist.top_circuits()
+    (instance,) = top.each_subcircuit()
+    coil = instance.circuit_ref()
+    assert coil.name == "INDUCTOR"
+    (resistor,) = coil.each_device()
+    assert resistor.device_class().name == "RES"
+
+
 def test_recovery_scan_skips_cycles_and_leaves_missing_includes_to_klayout(tmp_path):
     from klayout_tools.lvs import LvsError, _read_reference_netlist
     from klayout_tools.netlist_normalize_scan import recovery_subckt_names
