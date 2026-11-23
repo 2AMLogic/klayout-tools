@@ -1,13 +1,28 @@
 """Label-derived ports and via-stack landing search for ``klt gen-compose``
 ``blocks[].cell`` blocks (issue #2927).
 
-The opt-in ``ports_from_labels`` setting converts a macro's text labels
-to ports on the underlying PDK metal/via connectivity, as in extraction.
-For an access port, the search tests the router's actual via ladder,
-array pitches and drawn pad footprints against other nets, existing vias
-and keep-outs. Candidates belong to the port net and are ordered by
-distance to the label, then by x and y. The composer loads the source cell
-when geometry is needed.
+A hand-drawn macro names its ports only by text labels sitting on the block's
+own routing, usually interior to the cell. :func:`parse_ports_from_labels`
+validates the opt-in ``blocks[].cell.ports_from_labels`` option and
+:func:`derive_label_ports` turns it into ordinary ``ports[]`` entries:
+
+1. every named label is resolved to the net under it (``LayoutToNetlist``
+   connectivity over the resolved PDK deck's ``metals``/``vias`` stack -- the
+   same connectivity model ``klt extract`` and #2210's ``landed_on_block``
+   use), and
+2. when a port carries an ``access`` block, the port net's own shapes are
+   searched for a landing point where the via ladder up to ``access.up_to``
+   (the very ladder :func:`~.gen_compose_routing._resolve_via_drop_layer`
+   makes the router draw at a pin, sized by the same helpers) keeps rule
+   clearance from every other net, via spacing against the macro's existing
+   cuts, and avoids caller-named keep-out layers.
+
+The derived port is reported on the net's own layer, so the router's existing
+via-drop ladder draws the stack at the chosen point; the search only decides
+*where* that is legal. The search is grid-based, bounded and deterministic:
+candidates are ranked by distance to the label (ties by ``x`` then ``y``).
+
+Loading the source cell defers to the composer when layout geometry is needed.
 """
 
 from __future__ import annotations
@@ -19,13 +34,16 @@ from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
 from .gen_compose_base import GenComposeError
-from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
+from .gen_compose_layer_rules import (
+    _landing_pad_side_um_for_pair as _landing_pad_side_um_for_pair,
+)
 from .gen_compose_routing import (
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
 )
-from .gen_compose_via_cuts import landing_pad_half_dbu, via_drop_cut_side_um
+from .gen_compose_via_cuts import _array_extra_um, _stack_sizes, landing_pad_half_dbu
+from .gen_compose_via_cuts import via_drop_cut_side_um as via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 
 #: Default cap on landing candidates evaluated per port (nearest-first).
@@ -338,23 +356,6 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
     return best
 
 
-def _stack_sizes(
-    variant: str,
-    ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...],
-    pad_override_um: float | None = None,
-) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
-    """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
-    as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
-    cuts = {via: via_drop_cut_side_um(variant, via) for via, _, _ in ladder}
-    pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
-    for via, lower, upper in ladder:
-        for metal in (lower, upper):
-            pads[metal, via] = _landing_pad_side_um_for_pair(
-                variant, metal, via, cuts[via], pad_override_um
-            )
-    return pads, cuts
-
-
 def _array_pitches_um(
     variant: str,
     cuts_um: dict[_LayerPair, float],
@@ -373,11 +374,6 @@ def _array_pitches_um(
         raw = side + _min_spacing_um(variant, via)
         pitches[via] = math.ceil(raw / unit - 1e-9) * unit
     return pitches
-
-
-def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
-    """How much wider than one cut the (square-bounded) array footprint is."""
-    return (max(array) - 1) * pitch_um
 
 
 def _box(x: int, y: int, half: int, grow: int = 0) -> Any:
