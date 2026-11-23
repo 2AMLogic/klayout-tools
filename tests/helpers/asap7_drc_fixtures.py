@@ -1781,6 +1781,23 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
         _fail(r + "W.3", [bar(0, 2 * g)]),
         _fail(r + "W.3", [bar(0, 4 * g)]),
         _pass(r + "W.3", [bar(0, 3 * g)]),
+        # A 9 g strap and a separate minimum-width shape whose outer edges
+        # are 14 g apart (9 g + 4 g gap + g): pairing edges across polygons
+        # reports a 14 g "width" that no single polygon has (#7226) -- the
+        # gap is S.1's business. The strap starts on an odd g multiple so
+        # the signal lands on a 2 g track (AUX.2) and every edge stays on
+        # the g grid (AUX.1); neither shape has an even-multiple width.
+        _pass(r + "W.3", [bar(g, 9 * g), bar(14 * g, g)]),
+        # Same shapes with the strap off the grid: the outer distance is
+        # not a multiple of g either, so even the edge-set pairing stays
+        # quiet (the reporter's off-grid-strap route reported zero W.3).
+        _pass(r + "W.3", [bar(D, 9 * g), bar(14 * g, g)], ids("AUX.1")),
+        # A minimum-width bar 14 g along the track: Region#width measures
+        # the along-track extent too, so the angle filter must drop it.
+        _pass(r + "W.3", [bar(0, g, 0, 14 * g)]),
+        # A real 2 g width with a separate minimum-width shape one g beyond
+        # it (the S.1 minimum): a true W.3 and no cross-polygon extra.
+        _fail(r + "W.3", [bar(g, 2 * g), bar(4 * g, g)]),
         _fail(r + "W.5", [bar(0, g, 0, 44 - D)]),
         _pass(r + "W.5", [bar(0, g, 0, 44)]),
         # Across the track: g apart on tracks 0 and 1. A neighbour one dbu
