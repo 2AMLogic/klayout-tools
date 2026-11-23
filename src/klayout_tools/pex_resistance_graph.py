@@ -58,7 +58,8 @@ def _resistance_graph_echo(
 ) -> dict[str, Any]:
     """The ``extraction.resistance_graph`` block (issue #4037): the request
     (``r_cut_ohm``, and ``resistance_network`` for the reduced-network mode
-    of issue #6899, plus the four effective build caps when requested) and, per net with a graph result, which scalar the
+    of issue #6899, plus the four effective build caps when requested)
+    and, per net with a graph result, which scalar the
     extracted netlist's lumped R used (``resistance_source``) next to both
     candidate values and, when it is not the graph value, why
     (``fallback_reason``, issue #5747). Under ``--resistance-network`` each
