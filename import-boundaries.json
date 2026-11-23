@@ -723,6 +723,7 @@
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_power_pins",
         "klayout_tools.place_and_route_reports",
+        "klayout_tools._dont_use",
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
         "klayout_tools.place_and_route_route_overflow",
@@ -3153,12 +3154,6 @@
         "consumer": "klayout_tools.place_and_route_script",
         "exporter": "klayout_tools._openroad_engine",
         "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_script",
-        "exporter": "klayout_tools.synthesize",
-        "symbol": "_ABC_DONT_USE_GLOBS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
