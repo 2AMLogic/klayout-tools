@@ -17,8 +17,7 @@ Bounded on purpose: no vias, no layer changes (``layer_role`` must resolve to
 the port's own drawn layer), at most one jog (an L when both axes are
 requested). This is not a router.
 
-Dependency direction mirrors ``gen_compose_port_access.py``: ``gen_compose.py``
-imports this module, which imports ``gen_compose`` names only inside functions.
+Request validation uses the shared composition error and port geometry rules.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._jsonnum import is_finite_number
+from .gen_compose_base import GenComposeError, _port_has_geometry
 
 #: Error codes (``error.code`` in the JSON envelope), documented in
 #: ``docs/cli/gen-compose.md``.
@@ -43,7 +43,6 @@ _EPS = 1e-9
 
 
 def _error(message: str, code: str, **details: Any) -> Exception:
-    from .gen_compose import GenComposeError
 
     return GenComposeError(message, code=code, details=details or None)
 
@@ -281,7 +280,6 @@ def _check_routes_and_stubs(
 
 
 def _plan_one(ctx: _Ctx, index: int, entry: dict, stub_regions: list) -> dict[str, Any]:
-    from .gen_compose import _port_has_geometry
     from .gen_compose_routing import _drawn_route_region
 
     request = entry["request"]
