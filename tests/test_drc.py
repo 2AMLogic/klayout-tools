@@ -8085,17 +8085,12 @@ def test_sg13g2_extraction_deck_declares_mos_recognition():
     # then the two curated antenna diodes added by issue #1234. The
     # thick-oxide MOS flavour added by #1231 deliberately shares the
     # `nfet`/`pfet` labels (see `MOSFlavour`). The two MoM capacitors added
-    # by issue #1466 trail the two MIM capacitors.
+    # by issue #1466 trail the two MIM capacitors. The spiral inductor
+    # (`"inductor"`, issue #6726) is the last entry, trailing the antenna
+    # diodes.
     assert deck.device_classes == (
-        "nfet",
-        "pfet",
-        "cap_cmim",
-        "rfcmim",
-        "cap_cmomi",
-        "cap_cmomf",
-        "resistor",
-        "dantenna",
-        "dpantenna",
+        *("nfet", "pfet", "cap_cmim", "rfcmim", "cap_cmomi", "cap_cmomf"),
+        *("resistor", "dantenna", "dpantenna", "inductor"),
     )
 
 

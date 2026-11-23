@@ -27,6 +27,8 @@ from __future__ import annotations
 from typing import Any
 
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+from .gen_base import RING_SIDE_DIRECTIONS, GenError
+from .gen_layer_params import _pdk_family
 
 
 def _min_rule_um_for_layer(
@@ -47,8 +49,6 @@ def _min_rule_um_for_layer(
     family/deck cannot be resolved at all -- an unresolvable family degrades
     the lookup to a no-op, exactly like #1386's spacing lookup does.
     """
-    from .gen import GenError, _pdk_family
-
     if layer is None:
         return None
     try:
@@ -176,7 +176,6 @@ def _ring_ports(
     ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
     no net by construction.
     """
-    from .gen import RING_SIDE_DIRECTIONS
     from .gen_describe import _box_um_field
 
     ox, oy = offset_um

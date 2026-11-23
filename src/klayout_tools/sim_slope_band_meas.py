@@ -42,6 +42,7 @@ from typing import Any
 from . import sim_measurement_kind, sim_raw, sim_slope_band
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``slope_band`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -375,8 +376,6 @@ def slope_band_measurement_result(
     failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from :data:`ERROR_CODES`."""
-    from . import sim as _sim
-
-    return _sim._vector_measurement_result(
+    return _vector_measurement_result(
         spec, outcome, save_mode=save_mode, key="slope_band", report_with_spec=True
     )
