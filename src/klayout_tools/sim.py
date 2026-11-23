@@ -509,7 +509,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
-        # Report-level batch runner version and request-feature checks.
+        # Report-level batch runner version and request-feature checks (issue #2901).
         "batch_runner_request_feature_predated",
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
