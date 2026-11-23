@@ -1,4 +1,4 @@
-"""``device_parameter_coverage`` device-kind classification for ``klt lvs``
+"""Device dimension diagnostics and coverage classification for ``klt lvs``
 (issues #2461/#5653).
 
 Which device-class families participate in the ``device_parameter_coverage``
@@ -10,7 +10,15 @@ decomposition as ``lvs_combine.py``); the names are re-imported there, so
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from .lvs_base import CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS
+from .lvs_mismatch import _mismatch
+
+if TYPE_CHECKING:
+    import klayout.db as kdb
+
+_IMPLAUSIBLE_DIMENSION_UM = 1_000_000
 
 #: Issue #2461: the device-class families whose *geometry* sits entirely
 #: outside a default compare, keyed by the `klayout.db` class name (resolved
@@ -67,3 +75,49 @@ def _coverage_kind(device_class: Any, kdb_module: Any) -> str | None:
         if klayout_class is not None and isinstance(device_class, klayout_class):
             return kind
     return None
+
+
+def _implausible_dimensions(netlist: kdb.Netlist, side: str) -> list[dict[str, Any]]:
+    """Flag metre-scale W/L on individual devices in the pruned hierarchy."""
+    # KLayout and the custom MoM reader both expose W/L in micrometres.
+    # Cache parameter IDs once per class for large transistor netlists.
+    parameters = {
+        dc.id(): [
+            (p.name, p.id()) for p in dc.parameter_definitions() if p.name in ("W", "L")
+        ]
+        for dc in netlist.each_device_class()
+    }
+    if not any(parameters.values()):
+        return []
+    findings = []
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            dc = device.device_class()
+            dimensions = {
+                name: value
+                for name, index in parameters[dc.id()]
+                if (value := device.parameter(index)) >= _IMPLAUSIBLE_DIMENSION_UM
+            }
+            if dimensions:
+                device_name = device.expanded_name()
+                measured = ", ".join(
+                    f"{name}={value:g} µm" for name, value in dimensions.items()
+                )
+                findings.append(
+                    _mismatch(
+                        CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS,
+                        "warning",
+                        f"{side} device {circuit.name}/{device_name} ({dc.name}) "
+                        f"has {measured}. "
+                        "Check SPICE length suffixes (for example, 40U for 40 µm).",
+                        side,
+                        device={
+                            "layout": None,
+                            "reference": None,
+                            side: device_name,
+                            "class": dc.name,
+                        },
+                        details={"circuit": circuit.name, "dimensions_um": dimensions},
+                    )
+                )
+    return findings

@@ -181,6 +181,7 @@ from .lvs_base import (  # noqa: F401 -- shared vocabulary re-exported by lvs
     CATEGORY_DEVICE_FINFET_BULK_TIED,
     CATEGORY_DEVICE_FLAVOUR_MISMATCH,
     CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED,
+    CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS,
     CATEGORY_DEVICE_PARAMETER_EXCLUDED,
     CATEGORY_DEVICE_PARAMETER_TOLERATED,
     CATEGORY_DEVICE_PLACEHOLDER_VALUE,
@@ -236,6 +237,7 @@ from .lvs_combine import (
 from .lvs_coverage import (
     _coverage_kind,
     _geometry_disclosure_kind,
+    _implausible_dimensions,
 )
 from .lvs_deck_defaults import apply_deck_ignored_parameters
 from .lvs_finfet import (
@@ -644,7 +646,7 @@ def _aggregate_lvs_findings(
     geometry_warnings: Any,
     flatten_warnings: Any,
     power_only_pruning_warnings: Any,
-    family_findings: Any,
+    precompare_findings: Any,
     gate_level_port_alias_warnings: Any,
     reference_gate_level_case_folds: Any,
     layout_pin_renames: Any,
@@ -812,7 +814,7 @@ def _aggregate_lvs_findings(
     # `severity: "warning"`: it never changes `status`, it only keeps a match
     # reached without comparing a resistor/capacitor's geometry at all from
     # being indistinguishable from one where the two sides' geometry actually
-    # agreed. Extended unconditionally (like `family_findings` below, unlike
+    # agreed. Extended unconditionally (like `precompare_findings` below, unlike
     # the `if`-guarded warnings above): the list is empty on every run with no
     # resistor/capacitor class to report.
     mismatches.extend(geometry_warnings)
@@ -837,16 +839,9 @@ def _aggregate_lvs_findings(
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
-    # Issue #2421: same append-here rationale as the disclosures above --
-    # this is a pre-flight determination about the reference netlist and the
-    # deck, made before the compare ran, not a `NetlistComparer` event.
-    # Unlike them it is `severity: "error"` (the reference really cannot
-    # match), but like `device.class_arity` it is diagnostic only: it never
-    # moves `status` on its own -- the compare that already ran reported the
-    # mismatch this entry explains. Extended unconditionally (like
-    # `supply_findings` below, unlike the `if`-guarded warnings above): the
-    # list is empty on every run that has no such family to report.
-    mismatches.extend(family_findings)
+    # Deck-family diagnostics and metre-scale device dimensions are collected
+    # before comparison. The comparer remains responsible for the verdict.
+    mismatches.extend(precompare_findings)
 
     if gate_level_port_alias_warnings:
         # Issue #2021: same rationale as the disclosures above -- joining an
@@ -862,7 +857,7 @@ def _aggregate_lvs_findings(
         _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
     )
 
-    # Issue #2854: same append-here rationale as `family_findings` above --
+    # Issue #2854: same append-here rationale as `precompare_findings` above --
     # a promoted pin net carrying 2+ declared pin names is a pre-compare
     # determination the inline extraction's rename pass made about the
     # layout's declared interface, not a `NetlistComparer` event. Like
@@ -1284,7 +1279,7 @@ def run_lvs(
         power_connectivity,
         layout_deck_name,
         layout_deck,
-        family_findings,
+        precompare_findings,
         combine_warnings,
         combine_incomplete,
     ) = _select_resolve_and_combine(
@@ -1691,7 +1686,7 @@ def run_lvs(
         geometry_warnings=geometry_warnings,
         flatten_warnings=flatten_warnings,
         power_only_pruning_warnings=power_only_pruning_warnings,
-        family_findings=family_findings,
+        precompare_findings=precompare_findings,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
         reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
@@ -3798,7 +3793,7 @@ def _select_resolve_and_combine(
     of #5144). Mutates both netlists and extends ``flatten_warnings`` in
     place, exactly as the inline code did; returns ``(layout_circuit,
     reference_circuit, power_connectivity, layout_deck_name, layout_deck,
-    family_findings, combine_warnings, combine_incomplete)``.
+    precompare_findings, combine_warnings, combine_incomplete)``.
     """
     layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
     reference_circuit = _select_circuit(
@@ -3866,8 +3861,12 @@ def _select_resolve_and_combine(
     # collect-early/append-late shape `flatten_warnings` above uses). Runs for
     # both engines and both layout shapes: all it needs is a resolved
     # `layout.deck` and the reference netlist.
-    family_findings = _device_class_family_findings(reference_netlist, layout_deck)
-    family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
+    precompare_findings = _device_class_family_findings(reference_netlist, layout_deck)
+    precompare_findings.extend(
+        _flavour_selection_warnings(reference_netlist, layout_deck)
+    )
+    precompare_findings.extend(_implausible_dimensions(layout_netlist, "layout"))
+    precompare_findings.extend(_implausible_dimensions(reference_netlist, "reference"))
 
     if opts.combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
@@ -4038,7 +4037,7 @@ def _select_resolve_and_combine(
         power_connectivity,
         layout_deck_name,
         layout_deck,
-        family_findings,
+        precompare_findings,
         combine_warnings,
         combine_incomplete,
     )
