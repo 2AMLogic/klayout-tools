@@ -137,6 +137,7 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
+from .sim_echo_checks import check_ngspice_options_echo
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
@@ -3305,8 +3306,6 @@ def _poll_and_collect(
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
-        from .sim import check_ngspice_options_echo
-
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
