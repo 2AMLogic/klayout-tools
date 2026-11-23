@@ -10,6 +10,7 @@ Subcommands::
 
     release_prep.py next                      # print the next minor version
     release_prep.py prepare [--version X.Y.Z] [--date YYYY-MM-DD]
+    release_prep.py refresh --version X.Y.Z [--check]
     release_prep.py detect --subject "<commit subject>"
 
 ``prepare`` edits, in place and idempotently (re-running it for the same
@@ -112,22 +113,15 @@ def _has_release_heading(text: str, version: str) -> bool:
     return re.search(rf"^## {re.escape(version)} \(", text, re.MULTILINE) is not None
 
 
-def _read_changelog_fragments(
-    directory: Path, previous: str, new: str
-) -> dict[Path, str]:
+def _read_changelog_fragments(directory: Path) -> dict[Path, str]:
     """Read pending entries in filename order, keyed by the files to remove."""
     fragments: dict[Path, str] = {}
     for path in sorted(directory.glob("*.md")):
         if path.name == "README.md" or not path.is_file():
             continue
         entry = path.read_text(encoding="utf-8")
-        if previous != new:
-            entry = update_signoff_notes(entry, previous, new)
-            check_signoff_note_anchors(
-                entry, previous, source=f"{directory.name}/{path.name}"
-            )
         if entry.strip():
-            fragments[path] = entry.strip("\n")
+            fragments[path] = entry
     return fragments
 
 
@@ -156,7 +150,7 @@ def add_changelog_heading(
             entries,
             previous,
             source="CHANGELOG.md",
-            first_line=text.count("\n", 0, heading_end) + 1,
+            start_line=text.count("\n", 0, heading_end) + 1,
         )
     if fragments:
         legacy = entries.strip("\n")
@@ -174,12 +168,20 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
     return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
 
 
+def _resolve_notes(
+    text: str, previous: str, new: str, source: str, start_line: int = 1
+) -> str:
+    """Check anchors at their original lines before resolving this release."""
+    check_signoff_note_anchors(text, previous, source=source, start_line=start_line)
+    return update_signoff_notes(text, previous, new)
+
+
 def check_signoff_note_anchors(
     text: str,
     previous: str,
     *,
     source: str = "docs/cli/signoff.md",
-    first_line: int = 1,
+    start_line: int = 1,
 ) -> None:
     """Refuse availability-note placeholders the resolver can never match again.
 
@@ -188,7 +190,7 @@ def check_signoff_note_anchors(
     for good. Raise instead of letting it ship silently stale (issue #5582).
     """
 
-    for lineno, line in enumerate(text.splitlines(), start=first_line):
+    for lineno, line in enumerate(text.splitlines(), start=start_line):
         for match in _NOTE_PLACEHOLDER_RE.finditer(line):
             if parse_version(match.group(1)) < parse_version(previous):
                 raise PrepError(
@@ -227,14 +229,17 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     fragments = (
         {}
         if _has_release_heading(changelog_text, new)
-        else _read_changelog_fragments(repo / "changelog.d", current, new)
+        else _read_changelog_fragments(repo / "changelog.d")
     )
     new_log_text = add_changelog_heading(
         changelog_text,
         new,
         date,
         previous=current,
-        fragments="\n\n".join(fragments.values()),
+        fragments="\n\n".join(
+            _resolve_notes(entry, current, new, f"changelog.d/{path.name}").strip("\n")
+            for path, entry in fragments.items()
+        ),
     )
     # On an idempotent re-run `current == new`; the notes were already resolved.
     new_signoff_text = None
@@ -253,6 +258,82 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     return {"previous": current, "version": new, "date": date}
 
 
+_DATED_RELEASE = re.compile(rf"^## ({_VERSION}) \([^()\n]+\)[ \t]*$", re.MULTILINE)
+
+
+def _refresh_changelog(
+    text: str, version: str, fragments: dict[Path, str]
+) -> tuple[str, str]:
+    """Collect late release inputs between Unreleased and the previous release."""
+    heading_end, section_end = _unreleased_span(text)
+    entries = text[heading_end:section_end]
+    current = _DATED_RELEASE.match(text, section_end)
+    if current is None or current[1] != version:
+        raise PrepError(
+            f"expected the prepared ## {version} heading immediately after Unreleased"
+        )
+    older = _DATED_RELEASE.search(text, current.end())
+    if older is None or parse_version(older[1]) >= parse_version(version):
+        raise PrepError(f"cannot determine the previous release below ## {version}")
+    previous = older[1]
+
+    body = _resolve_notes(
+        text[current.end() : older.start()],
+        previous,
+        version,
+        "CHANGELOG.md",
+        text.count("\n", 0, current.end()) + 1,
+    )
+    additions = [
+        _resolve_notes(
+            entries,
+            previous,
+            version,
+            "CHANGELOG.md",
+            text.count("\n", 0, heading_end) + 1,
+        )
+    ]
+    additions.extend(
+        _resolve_notes(entry, previous, version, f"changelog.d/{path.name}")
+        for path, entry in fragments.items()
+    )
+    for entry in additions:
+        entry = entry.strip("\n")
+        # A rerun after the changelog write may still see a consumed fragment.
+        existing = body.strip("\n")
+        if entry.strip() and f"\n\n{entry}\n\n" not in f"\n\n{existing}\n\n":
+            body = body.rstrip("\n") + "\n\n" + entry + "\n\n"
+    before = text[:heading_end] + ("\n\n" if entries.strip() else entries)
+    return before + current[0] + body + text[older.start() :], previous
+
+
+def refresh(repo: Path, version: str, *, check: bool = False) -> bool:
+    """Refresh an already prepared release. Return whether any input was pending."""
+    current = read_base_version((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    if version != current:
+        raise PrepError(
+            f"release branch version {version} disagrees with base-version {current}"
+        )
+    changelog = repo / "CHANGELOG.md"
+    original = changelog.read_text(encoding="utf-8")
+    fragments = _read_changelog_fragments(repo / "changelog.d")
+    refreshed, previous = _refresh_changelog(original, version, fragments)
+    edits = {changelog: refreshed} if refreshed != original else {}
+    signoff = repo / "docs/cli/signoff.md"
+    if signoff.is_file():
+        text = signoff.read_text(encoding="utf-8")
+        check_signoff_note_anchors(text, previous)
+        updated = update_signoff_notes(text, previous, version)
+        if updated != text:
+            edits[signoff] = updated
+    if not check:
+        for path, content in edits.items():
+            path.write_text(content, encoding="utf-8")
+        for path in fragments:
+            path.unlink()
+    return bool(edits or fragments)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
@@ -262,6 +343,13 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("--version", help="override (default: next minor)")
     prep.add_argument(
         "--date", default=_dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    )
+    ref = sub.add_parser("refresh", help="collect late notes into a prepared release")
+    ref.add_argument("--version", required=True, help="version of the release branch")
+    ref.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 for pending updates without writing",
     )
     det = sub.add_parser(
         "detect", help="print the version if --subject is a release bump"
@@ -277,6 +365,15 @@ def main(argv: list[str] | None = None) -> int:
             print(next_minor(current))
         elif args.cmd == "prepare":
             print(json.dumps(prepare(args.repo, args.version, args.date)))
+        elif args.cmd == "refresh":
+            changed = refresh(args.repo, args.version, check=args.check)
+            if args.check and changed:
+                print(
+                    "Pending release notes. Run python3 scripts/release_prep.py "
+                    f"refresh --version {args.version} and commit the result.",
+                    file=sys.stderr,
+                )
+                return 1
         else:
             version = release_version_from_subject(args.subject)
             if version:

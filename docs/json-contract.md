@@ -106,6 +106,12 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+When a `klt sim` measurement declares a supply-relative `limits.min` or
+`limits.max`, its per-corner result gains `limits_resolved` containing
+the numeric bounds for that corner. The aggregate measurement retains the
+declared `limits`, including its `{"frac_of": "<rail>", "fraction": k}`
+object. A measurement with only literal bounds keeps its existing shape.
+
 `measurements[].optional` (issue #2925) is an opt-in boolean (default
 `false`) that extends the per-measurement `status` vocabulary with an
 additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
@@ -220,7 +226,7 @@ multiplier warnings".
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
 and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
-"Asynchronous submit and status".
+"Asynchronous submit, status and cancel".
 
 `klt sim` on a **sharded** `batch` run (issue #5522) adds two top-level
 roll-ups to `environment.remote` beside the existing `fleet[]` array:
@@ -388,6 +394,31 @@ omitted), and absent otherwise -- so an existing graph-enabled envelope is
 unchanged. `klt extract` adds no field for the caps: its per-net
 `graph_too_large` diagnostic names the cap that was exceeded and the value
 applied. No `schema_version` bump.
+
+**A *derived* per-entry identity field, present on every entry and
+`null` when not derivable, is additive the same way — flag-gated or not.**
+`klt extract` now annotates every `nets[]` entry with `structural_id`
+(issue #5735): the net's numbering-independent `$anon<...>` structural
+handle, the same identity `netlist_normalized_sha256` (issue #3407) and
+`--check --rerun` already derive to canonicalize anonymous `\$N` spellings,
+now emitted per net so a testbench probing an unlabeled internal node can
+address it across re-extractions. It is `null` exactly when no identity is
+derivable — a named net (its `name` is the label a consumer already joins
+on; where names collide across internally-repeated sub-cells no unique
+per-net identity would be sound, so none is minted) or an anonymous net
+with zero device terminals — so no consumer ever sees the member appear or
+disappear; its stability bound is exactly #3407's (equal across builds that
+only renumber anonymous nets, not a promise that device instance names are
+stable). Two constraints made this land without invalidating any committed
+evidence: `--check --rerun`'s canonicalization strips the field alongside
+`net_id` — not because it is unstable (it is *content* class, a
+deterministic function of the same numbering-normalized connectivity) but
+because a report committed before the field existed lacks the key and must
+not diff against a fresh one on it — which also keeps
+`netlist_normalized_sha256` byte-identical across the field's introduction.
+No `schema_version` bump; recorded in `CHANGELOG.md` and documented in
+`docs/cli/extract.md`'s `nets[]` schema table and "Anonymous net numbering"
+section.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -561,6 +592,26 @@ count.
 Consumers that switch on `body_bias.status` already must tolerate an unknown
 value per the rule above. No `schema_version` bump on either verb. See
 [`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
+
+## Same-name response field on two verbs: `cell_exclusions`
+
+`klt synthesize` and `klt place-and-route` both report a `cell_exclusions`
+block for cell exclusions, and deliberately differ in **presence** (issue
+#7388): synthesize's is always present (issue #2382), while place-and-route's
+appears only when the request supplied `library.dont_use` — the safer
+additive choice for a verb whose whole block describes a request-supplied
+list. Within the block, the shared keys mean the same thing on both verbs,
+including `validated`: `true` when each requested pattern was matched
+against the resolved Liberty's cell names, `null` when that cell list could
+not be established and the zero-match check was skipped — the check-performed
+disclosure of the "Requested-but-unperformed analysis" rule below, so a
+caller mirroring one `dont_use` list between the two verbs gets the same
+signal from each. (`validated` cannot take the third value it can on
+synthesize, "nothing to check": place-and-route validates the request list
+non-empty before emitting the block.) Synthesize additionally reports `mode`
+and `engine_supports_dont_use`, which have no place-and-route analogue.
+Per-verb details: [`docs/cli/synthesize.md`](cli/synthesize.md) and
+[`docs/cli/place-and-route.md`](cli/place-and-route.md).
 
 ## Requested-but-unperformed analysis
 
@@ -742,6 +793,14 @@ observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
 
+For sharded batch simulation, `environment.remote.run` records whole-run
+completion, the original host count, observed rounds, distinct jobs with launch
+evidence and the observed launch-to-terminal span. `environment.remote.fleet`
+covers jobs harvested or dispatched during the reporting invocation. The
+`history_coverage` field identifies partial history from older artifacts.
+See the [simulation report contract](cli/sim.md#whole-run-batch-summary) for
+the fields and their null semantics.
+
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
@@ -775,6 +834,19 @@ Xyce or malformed worker observations are `null`; no client value is used
 as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
+
+When a collected corner-mode ngspice batch request declares
+`options.ngspice_init`, top-level `diagnostics[]` includes a warning with
+`code: "batch_ngspice_init_unverified"`, `feature: "options.ngspice_init"`
+and `simulator_application: "unverified"`. Its `jobs[]` contains one record
+per job, in fleet order. Each record has `job_id` (string or null),
+`fleet_index` (zero-based integer for a fleet, null for a single job) and
+`request_identity`. The two identity values are `"digest_reported"` when
+the worker reports the requested lines and their matching digest, including
+any worker thread pin, and `"unverified"` otherwise. The digest identifies
+the reported contents. Application by ngspice remains unverified for every
+job. This warning preserves the simulation grade and is absent when the
+request omits the init lines.
 
 The same worker block carries `threads_per_worker`, the positive integer pin
 from the worker report's `environment.threads_per_worker`. Each shard,
@@ -1867,7 +1939,9 @@ and the two coexist deliberately rather than by oversight:
   is committable evidence; a machine-specific absolute path is not).
   `scope` is not decoration: the resolution rule differs per value — a
   `"repo"` path must be joined to *the invoking repo's* root (the cwd `klt`
-  was run from), `"external"`/`"absent"` carry no usable path at all.
+  was run from), except for the request-anchored fields whose table rows
+  below name their own resolution root (#6762, #6764) — those join to that
+  root instead; `"external"`/`"absent"` carry no usable path at all.
 - **Plain string** — a bare absolute filesystem path (or `null` before the
   artifact exists), with no `scope` alongside it. The historical shape every
   path field used before the envelope existed.
@@ -1912,7 +1986,8 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
-| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
+| `em` | `artifacts.{mesh,spec,report,log}` (retained layout runs also `layout`, `mesh_report`, `mesh_log`), each with additive `sha256` — the hashed envelope #4931 defines. All of them use the repo containing the request file (#6764): same request, same report from any invoking directory; present paths outside that repo (or no repo at all) have scope `external` | 1 | #5616 |
+| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path`. Since #6764 every field resolves against the repo containing the request file (never the invoking cwd); an `outputs.dir` outside that repo makes the P&R fields `external` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
@@ -1929,7 +2004,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
-| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `library_limit_report_path` (also in the route stage and per-corner entries, null when no report is available, additive in #7588) (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
@@ -2665,6 +2740,8 @@ the warnings print as they happen, ahead of the plain-text error line.
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_cancel_nothing_to_cancel` | `klt sim --cancel JOB_ID`: the fleet's cancel verb found no pending or running instance for that job (already finished or cancelled, or unknown to the fleet tag) and wrote nothing (issue #4351). Not an infrastructure failure. See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
+  | `sim` | `batch_job_cancelled` | `--backend batch`: polling (a blocking run or `--attach`) observed `status.json` state `cancelled` — the job was cancelled through the fleet; nothing is re-launched and no results are coming (issue #4351). See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner (refused with exit `87`) keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code` and, additively, one top-level `diagnostics[]` entry with this code (severity `error`, `accepted_client_release`, remedy in `message`; issue #5061). See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity or shared vCPU/Spot-quota budget. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. Those diagnostics also carry additive `missing_features[]` (the request-feature keys the runner predates; issue #4863). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |

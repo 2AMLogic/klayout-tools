@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -34,6 +35,17 @@ UNRUN_BATCH_CODES = frozenset(
         "batch_poll_timeout",
         "batch_job_interrupted",
     }
+)
+
+
+#: Every code that marks a unit that never started: the synthesized batch ones
+#: above plus the budget, orphan and fail-fast-probe ones, i.e. the "Units that
+#: never ran" block of ``sim.DIAGNOSTIC_CODES``. Deliberately not folded into
+#: ``UNRUN_BATCH_CODES``, which also decides what a checkpoint records and what
+#: counts as an attempted corner. ``timeout_budget_unreachable`` can arrive in a
+#: worker report adopted verbatim (``_BATCH_SIM_SUCCESS_EXIT_CODES`` holds 4).
+NEVER_RAN_CODES = UNRUN_BATCH_CODES | frozenset(
+    {"budget_exceeded", "orphaned", "timeout_budget_unreachable"}
 )
 
 
@@ -129,13 +141,36 @@ def _load_resume_shard_map(
     return document, entries, hosts
 
 
+# A harvest's status probe re-reads an unreadable status this many times,
+# pausing between attempts (zero in tests; #7115).
+_STATUS_READ_ATTEMPTS = 3
+_STATUS_READ_BACKOFF_S = 2.0
+
+
 def _shard_status(config: sim_batch.BatchConfig, job_id: str) -> dict[str, Any] | None:
-    """One read of a shard job's remote ``status.json`` -- ``None`` when it
-    cannot be read (an unreadable status is "unknown", never an error)."""
-    try:
-        return sim_batch._read_status(config, job_id, sim_batch._run_subprocess)
-    except Exception:
-        return None
+    """A shard job's remote ``status.json``, re-read a small fixed number of
+    times when a read fails (issue #7115) -- ``None`` only when every
+    attempt fails (an unreadable status is "unknown", never an error)."""
+    for attempt in range(_STATUS_READ_ATTEMPTS):
+        if attempt:
+            time.sleep(_STATUS_READ_BACKOFF_S)
+        try:
+            status = sim_batch._read_status(config, job_id, sim_batch._run_subprocess)
+        except Exception:
+            status = None
+        if status is not None:
+            return status
+    return None
+
+
+def _skip_notice(entry: dict[str, Any], reason: str) -> None:
+    """One stderr line for a shard the harvest leaves for the dispatch
+    (issue #7115): a silent skip is indistinguishable from no probe."""
+    print(
+        f"klt sim: notice: --resume did not harvest shard "
+        f"{_entry_index(entry)} (job {entry.get('job_id')}): {reason}",
+        file=sys.stderr,
+    )
 
 
 def _collect_resume_entry(
@@ -154,25 +189,31 @@ def _collect_resume_entry(
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None, int] | None:
-    """One entry's disposition and collection (issue #5775). ``None`` unless
-    the entry is a terminal job whose units are genuinely outstanding: an
-    unrecoverable grouping, units the checkpoint already holds, a
-    never-launched (``submitted``) shard and a non-terminal status all stay
-    untouched for the dispatch. A terminal entry is collected through the
-    plain attach machinery -- read its status once, never wait, never launch
-    -- and its map index returned alongside the attached corners."""
-    unit_ids = _entry_unit_ids(entry, by_id, partition)
-    if unit_ids is None or all(unit in known for unit in unit_ids):
-        return None
+    """One entry's disposition and collection (issues #5775, #7115). ``None``
+    unless the entry is a terminal job whose units are genuinely
+    outstanding: an unrecoverable grouping, units the checkpoint already
+    holds, a never-launched (``submitted``) shard and a non-terminal status
+    all stay untouched for the dispatch, each skip but the deliberate
+    submitted/known ones announced on stderr. A terminal entry is collected
+    through the attach machinery: probe, never wait, never launch."""
     if entry.get("state") == "submitted":
         # Never launched: no results exist to harvest, and launching is the
         # dispatch's decision (`launch_if_unlaunched`), never a harvest's (a
         # shard the map says was submitted is launched, not re-minted, when
         # the partition is unchanged).
         return None
+    unit_ids = _entry_unit_ids(entry, by_id, partition)
+    if unit_ids is None:
+        _skip_notice(entry, "shard grouping not recoverable")
+        return None
+    if all(unit in known for unit in unit_ids):
+        return None
     job_id = str(entry["job_id"])
-    status = _shard_status(config, job_id) or {}
-    if str(status.get("state") or "unknown") not in sim_batch.BATCH_TERMINAL_STATES:
+    status = _shard_status(config, job_id)
+    state = str((status or {}).get("state") or "unknown")
+    if state not in sim_batch.BATCH_TERMINAL_STATES:
+        reason = "status unreadable" if status is None else f"remote state {state}"
+        _skip_notice(entry, reason)
         return None
     points = [by_id[unit] for unit in unit_ids]
     try:
@@ -260,10 +301,11 @@ def harvest_resume_shards(
     the corners of every shard whose remote job is already terminal, so the
     ordinary resume flow re-dispatches only what is genuinely outstanding.
 
-    One entry at a time -- read its remote ``status.json`` once, never wait,
-    never launch (a shard the map records ``submitted`` stays for the
-    dispatch, which launches it under the recorded id when the partition is
-    unchanged). A terminal entry is collected through the plain attach
+    One entry at a time -- probe its remote ``status.json`` (an unreadable
+    read is retried, #7115), never wait, never launch (a shard the map
+    records ``submitted`` stays for the dispatch, which launches it under
+    the recorded id when the partition is unchanged). A terminal entry is
+    collected through the plain attach
     machinery (:func:`sim_batch._run_batch_job` with ``attach=True``) and
     marked ``collected`` in the map; anything else is left alone. Returns
     ``(corners, engine_version, remote_environment)`` -- the corners
@@ -467,3 +509,21 @@ def merge_resume_environment(
         if not (isinstance(entry, dict) and entry.get("job_id") in dispatched_jobs)
     ] + dispatched_fleet
     return result
+
+
+def reassemble_corners(
+    resume: bool,
+    points: Sequence[Any],
+    fresh: list[dict[str, Any]],
+    completed: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """On resume, merge fresh and checkpointed reports in request order.
+
+    Lost batch shards supply a synthesized report per point. Every requested
+    point is therefore covered. A fresh run uses the backend's original order,
+    including remote reports that this process does not reconcile locally.
+    """
+    if not resume:
+        return fresh
+    by_id = {**completed, **{corner["corner_id"]: corner for corner in fresh}}
+    return [by_id[point.corner_id] for point in points]

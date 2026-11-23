@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,23 @@ def test_every_kind_resolves_to_live_objects(kind: str) -> None:
     assert spec.exclude, "every kind excludes at least the volatile provenance"
     assert all(isinstance(path, tuple) for path in spec.exclude)
     assert spec.canonicalize is None or callable(spec.canonicalize)
+
+
+def test_extract_canonicalization_leaves_layout_engine_unloaded() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            "from klayout_tools.evidence_canonicalize import canonicalize\n"
+            "report = {'devices': [], 'nets': []}\n"
+            "assert canonicalize(report, 'extract') == report\n"
+            "assert 'klayout_tools.extract' not in sys.modules\n"
+            "assert 'klayout.db' not in sys.modules",
+        ],
+        check=True,
+    )
 
 
 def test_unknown_kind_is_a_named_error() -> None:

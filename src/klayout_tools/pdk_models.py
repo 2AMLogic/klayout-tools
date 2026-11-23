@@ -59,6 +59,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from .extract_base import MOM_FEED_TOKENS
 from .pdk_diode_models import (
     DIODE_MODEL_TABLE,
     diode_lookup_bindings,
@@ -1920,7 +1921,6 @@ def create_model_binding_delegate(
             # code (1..3) is mapped back to the `.subckt`'s string token, and
             # `0`/absent (`cap_cmomf`, an unmeasured or pre-#2445 device)
             # writes nothing.
-            from .extract import MOM_FEED_TOKENS
 
             feed_code = self._device_param(device, "FEED")
             feed_token = (

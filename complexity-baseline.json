@@ -159,8 +159,8 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/equiv_sequential.py",
-      "function": "_confirm_sequential_counterexample",
+      "file": "src/klayout_tools/equiv_replay.py",
+      "function": "run_counterexample_confirmation",
       "complexity": 11
     },
     {
@@ -785,7 +785,7 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "_run_local_parallel",
+      "function": "_run_local_corners_pooled",
       "complexity": 14
     },
     {

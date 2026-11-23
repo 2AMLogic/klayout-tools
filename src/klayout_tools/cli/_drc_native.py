@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 
 from .. import pdk
+from .._drc_gf180_3lm import configure_prelude
 from ..drc import DrcError
 from ..pdk_native_drc import native_drc_main_script
 from ._parsing import parse_deck_options
@@ -98,6 +99,7 @@ def resolve_native_deck(
         "min_klayout_version": min_version,
         "min_klayout_version_defaulted": floor_defaulted,
     }
+    configure_prelude(native, deck_vars)
     return found["deck_file"], deck_vars, min_version, native
 
 

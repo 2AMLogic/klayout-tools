@@ -42,10 +42,9 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
-from . import env_provenance
+from . import _warn, env_provenance
 from . import erc_antenna_gf180mcu as _gf180
 from ._devices import (
     _conductor_role_layers,
@@ -109,7 +108,9 @@ from .erc_substrate import (
 )
 from .erc_ties import (
     _degenerate_tie_reasons,
+    _register_tie_join,
     _tie_findings,
+    _tie_skip_record,
 )
 from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported for tests
     _boxes_region,
@@ -611,8 +612,9 @@ def _connectivity_coverage(
       performed, so it is recorded as **skipped** (the reason
       ``degenerate_ties`` carries for it:
       :data:`REASON_DEGENERATE_TAP_DECLARATION`, issue #2255's
-      :data:`REASON_DEGENERATE_WELL_ASSERTION`, or issue #2339's
-      :data:`REASON_DEGENERATE_WELL_SELECTION`) and the whole
+      :data:`REASON_DEGENERATE_WELL_ASSERTION`, issue #2339's
+      :data:`REASON_DEGENERATE_WELL_SELECTION`, or issue #7419's
+      :data:`REASON_DEGENERATE_CONNECT_TARGET`) and the whole
       connectivity scope reads ``clean_partial`` rather than ``clean``.
       Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
       requires to be zero can be satisfied by a declaration that never
@@ -716,7 +718,7 @@ def _connectivity_coverage(
     checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
     if keepouts is not None:
         checked.extend(keepouts.checked)
-    skipped: list[dict[str, str]] = list(keepouts.skipped) if keepouts else []
+    skipped: list[dict[str, Any]] = list(keepouts.skipped) if keepouts else []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
@@ -737,7 +739,7 @@ def _connectivity_coverage(
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
         if tie["name"] in degenerate:
-            skipped.append({"id": identity, "reason": degenerate[tie["name"]]})
+            skipped.append(_tie_skip_record(identity, degenerate[tie["name"]], tie))
         else:
             checked.append(identity)
             if tie["name"] in asserted:
@@ -2232,13 +2234,12 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     file still sees it (JSON goes to stdout only -- ``docs/json-contract.md``).
     ``verb`` is the calling command (``"klt erc"``), so the line names the
     tool the caller actually ran."""
-    print(
+    _warn.warn(
         f"{verb}: warning: stackup entry {name!r} declares label_layer "
         f"{label_layer}, but that layer carries no text anywhere in the "
         "analysed top cell -- nets matched through it resolve zero islands "
         "(erc.unconnected_net) and its gates[].net reads null. Check the "
-        "label layer/datatype.",
-        file=sys.stderr,
+        "label layer/datatype."
     )
 
 
@@ -2436,20 +2437,10 @@ def _extract_connectivity(
         if tie["tap_boxes"]:
             tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
-        tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
-        l2n.connect(tap_sites)
-        target = regions[tie["connect_to"]]
-        if tie["through"] is None:
-            l2n.connect(tap_sites, target)
-        else:
-            # Keep each whole cut that lands on both sides. A cut landing only
-            # on the other endpoint of the declared via cannot tie this role.
-            contacts = (
-                regions[tie["through"]].overlapping(target).overlapping(tap_sites)
-            )
-            l2n.register(contacts)
-            l2n.connect(tap_sites, contacts)
-            l2n.connect(contacts, target)
+        # Measure disjointness on the same regions used for connectivity.
+        tap_index, connect_target_disjoint = _register_tie_join(
+            l2n, regions, tie, tap_sites
+        )
         tie_layers.append(
             {
                 **tie,
@@ -2465,6 +2456,12 @@ def _extract_connectivity(
                 "tap_narrowed": not (
                     (drawn_tap & well_region).merged() - tap_sites
                 ).is_empty(),
+                # Issue #7419: whether the `connect_to` role's conductor
+                # region interacts with any tap site of this tie -- measured
+                # above, where both regions exist; always `False` for a
+                # `through` tie, whose join is contact-qualified and out of
+                # scope. Read by `_degenerate_tie_reasons`.
+                "connect_target_disjoint": connect_target_disjoint,
                 # Whether this tie's tap region was derived (at least in
                 # part) from a caller assertion rather than pure PDK-marker
                 # narrowing -- read by `_connectivity_coverage` to grade a
@@ -3030,6 +3027,7 @@ def run_erc(
 
     # Extract the tap conductors in a separate graph (#2169) so ties cannot
     # affect gates, antenna ratios or the net findings already computed.
+    tie_layers: list[dict[str, Any]] = []
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3169,7 +3167,7 @@ def run_erc(
     erc_coverage = _connectivity_coverage(
         gates,
         nets_decl,
-        ties,
+        tie_layers,
         degenerate_ties,
         asserted_ties,
         ties_disclosure,
