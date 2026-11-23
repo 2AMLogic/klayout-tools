@@ -2236,6 +2236,54 @@ so a cmos5l instance can only populate `m1p`..`m4p`. For `sg13cmos5l` this
 is the deck's *only* capacitor family — its forbidden-layer rule blocks the
 MiM stack outright, so `ExtractionDeck.capacitors` stays empty there.
 
+### Spiral inductor devices (issue #6726)
+
+IHP's `inductor2` PyCell is plain TopMetal1/TopMetal2 under an `IND` marker, so
+an extractor that ignores it shorts the inductor's two terminals through the
+winding: before this, a layout with one winding and two differently named pin
+labels reported `merged_net_labels` `a|b`, no device, and no warning. The
+`sg13g2` deck now recognises the winding and extracts it as one three-terminal
+`inductor` device (terminals `A`/`B`, equivalent, plus `SUB`):
+
+```json
+{"name": "$1", "class": "inductor",
+ "nets": {"a": "a", "b": "b", "sub": "vsubs"}, "params": {}}
+```
+
+```
+XD_$1 a b vsubs inductor PARAMS:
+```
+
+**Recognition** follows the PDK's own LVS rule (`ind_derivations.lvs`): an `IND`
+polygon (27/0) carrying a `inductor2*` label on TEXT (63/0), whose winding
+metal touches exactly one pin (27/2) labelled `LA` and one labelled `LB` (both
+on 27/25, case-insensitive) at the marker's edge, and no `LC` pin.
+
+**Terminals.** Each pin is conductor in its own right: external routing joins
+it by touching the pin on TopMetal2, and a net label on TopMetal2.text over the
+pin names the terminal's net. The winding itself is *cut out* of TopMetal1 and
+TopMetal2 (the PDK's `topmetal*_con` excludes `IND`), which is what keeps the
+two terminals apart; only recognised windings are cut, so ordinary unmarked
+top-metal routing is untouched. `SUB` is the NWell net when the marker lies
+over an NWell, the isolation island's `vsubs_iso<n>` inside one, and the
+deck's `vsubs` otherwise.
+
+**Not a device, and said so.** A marker that carries an `inductor*` label but
+is not recognised — a centre-tapped `inductor3`, an `LC` pin, a missing or
+duplicated `LA`/`LB` pin — leaves its winding as plain wire (the terminals stay
+merged, as before) and adds a `warnings[]` entry naming why. An `IND` marker
+with no `inductor*` label (27/0 is also an exclusion layer in both MiM
+capacitor flavours, `mimcap_exclude` and `rfmimcap_exc`, so a bare marker is
+not an inductor claim) or no winding metal under it (an isolated label) is
+silent.
+
+**Not modelled.** The device carries connectivity only: no `w`/`s`/`d`/turns
+parameters are measured (so a reference's `w=`/`s=`/`d=`/`nr_r=` are not
+compared), nothing computes inductance, `inductor3` is not recognised, and the
+PDK's own three-node `L` card spelling is not read back (see `klt lvs`'s
+"Custom device classes" section). IHP's `ind_exc` — other device layers
+subtracted from the winding metal before the pin test — is not transcribed.
+
 ### Device-recognition-only layers (issue #619)
 
 `ignored_layers` (see "JSON schema" below) only distinguishes "shape-bearing
