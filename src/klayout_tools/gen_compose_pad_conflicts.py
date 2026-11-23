@@ -38,6 +38,7 @@ dependency back on them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 
@@ -349,7 +350,8 @@ def _pad_other_block_contact_reason(
     pad_boxes: list[Any],
     net_label: str,
     other_block_ids: list[str],
-    geometry_for: Any,
+    geometry_for: Callable[[str, tuple[int, int], float | None], dict[str, Any] | None],
+    drawing_dbu: float,
 ) -> str | None:
     """The pad-vs-other-block electrical-contact rejection (issue #7325).
 
@@ -380,11 +382,9 @@ def _pad_other_block_contact_reason(
     from ``other_block_ids`` -- a pad merging with the wire at its own
     declared port is the intended landing (#1520), never a violation.
 
-    ``geometry_for(block_id, pad_layer, drop)`` mirrors the #1520 loop's
-    ``_own_block_layer_geometry`` call (the writer's grid for a via-drop
-    landing, the source layout's own dbu for a stub-widen box) and is
-    expected to cache per ``(block, layer, scale)`` -- the caller reads
-    each combination at most once per request.
+    The request's geometry reader caches each block, layer and grid. Match
+    the own-block notch check's grid for each box: the writer's grid for
+    via landings and the source layout's grid for stub-widen boxes.
 
     Returns the rejection wording naming the pad, the block and the net --
     carrying a ``_CLIMBABLE_REASON_MARKERS`` fragment so the #6920 plane
@@ -394,8 +394,9 @@ def _pad_other_block_contact_reason(
     import klayout.db as kdb
 
     for pad_layer, _own_block_id, box, drop in pad_boxes:
+        scale = drawing_dbu if drop is not None else None
         for other_block in other_block_ids:
-            geometry = geometry_for(other_block, pad_layer, drop)
+            geometry = geometry_for(other_block, pad_layer, scale)
             if geometry is None:
                 continue
             dbu = geometry["dbu"]
