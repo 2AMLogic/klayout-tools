@@ -5987,21 +5987,14 @@ def test_cli_missing_deck_flag_is_a_clean_error(tmp_path, capsys):
         # `mos_flavours`, which deliberately shares the `nfet`/`pfet` class
         # labels) plus its drawn poly/metal resistors (issues #1231/#1235),
         # its two curated antenna diodes (issue #1234), its two MIM
-        # capacitors (issue #1454) and its two MoM capacitors (issue #1466,
-        # which trail the MIM capacitors ahead of the `"resistor"` role) --
-        # no curated bipolar entries yet.
+        # capacitors (issue #1454), its two MoM capacitors (issue #1466, which
+        # trail the MIM capacitors ahead of the `"resistor"` role) and its
+        # spiral inductor (issue #6726, last) -- no curated bipolar entries yet.
         (
             "sg13g2",
             (
-                "nfet",
-                "pfet",
-                "cap_cmim",
-                "rfcmim",
-                "cap_cmomi",
-                "cap_cmomf",
-                "resistor",
-                "dantenna",
-                "dpantenna",
+                *("nfet", "pfet", "cap_cmim", "rfcmim", "cap_cmomi", "cap_cmomf"),
+                *("resistor", "dantenna", "dpantenna", "inductor"),
             ),
         ),
     ],
