@@ -59,6 +59,14 @@ from ._jsonnum import is_int, is_number
 from ._layout import new_canonical_layout, write_layout
 from ._provenance import build_provenance
 from .gen_asap7_tap import ASAP7_SPECS
+from .gen_base import (
+    CONTACT_SIZE_UM,
+    ENCLOSURE_MARGIN_UM,
+    MIN_SAME_LAYER_SPACING_UM,
+    RING_SIDE_DIRECTIONS,  # noqa: F401 -- re-exported
+    WELL_ENCLOSURE_MARGIN_UM,
+    GenError,
+)
 from .gen_cap_vpp import (
     _cap_vpp_array_describe,
     _cap_vpp_array_layer_params,
@@ -361,25 +369,6 @@ SCHEMA_VERSION = 1
 #: Reference PCell library name; registered lazily once (:func:`_pcell_library`).
 _PCELL_LIBRARY_NAME = "klt_gen_reference"
 
-#: PDK-generic contact/via cut **budget** (um) used by every phase-2
-#: generator: the side every contact region, landing pad, ring band and port
-#: width is laid out around (``CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM``),
-#: and the drawn cut size on any layer whose cut rule is only a *minimum* --
-#: it meets or exceeds sky130's ``licon1`` (no curated size rule) and
-#: gf180mcu's ``contact.width.1`` (0.22um), and is widened per family where a
-#: coarser minimum binds (``via_min_w_um``/``cap_top_via_min_w_um``).
-#:
-#: It is **not** the drawn size on a *fixed*-size cut layer (issue #2585),
-#: where the foundry rule is a minimum and a maximum: sky130's ``via``
-#: (0.15um) and sg13g2's ``Cont`` (0.16um)/``Via1``-``Via4`` (0.19um) would
-#: all be over their maximum at 0.22um. There the drawn cut is clamped down
-#: to the layer's fixed size (:func:`_cut_fixed_size_um`,
-#: :func:`_clamp_cut_boxes`, :func:`_fixed_cut_side_um`) *inside* the
-#: unchanged 0.22um-derived contact region -- so every pad, ring, port and
-#: ``klt gen describe`` coordinate stays exactly where it was and each cut's
-#: enclosure only grows.
-CONTACT_SIZE_UM = 0.22
-
 #: The coarsest grid (um) any generator's geometry is placed on -- the
 #: ``dbu=0.001`` fallback every ``_GENERATOR_SPECS`` entry below declares.
 #: Used by :func:`_snap_square_box_um` to pre-round a contact's centre to
@@ -400,34 +389,17 @@ CONTACT_SIZE_UM = 0.22
 #: very PDKs this constant was validated against.
 from .gen_snap import (  # noqa: E402 -- re-exported
     _GRID_DBU_UM,
+    _grid_snapped,  # noqa: F401 -- re-exported
+    _mfg_grid_neighbours,  # noqa: F401 -- re-exported
     _snap_cut_box_dbu,
     _snap_offset_um,
     _snap_rect_box_um,
     _snap_square_box_um,
 )
 
-#: Margin (um) an active/poly/tap region must keep around a contact it
-#: encloses -- exceeds both curated decks' enclosure rules (sky130
-#: ``diff.enclosing.licon.1``/``poly.enclosing.licon.1``: 0.04um/0.05um;
-#: gf180mcu ``comp.enclosing.contact.1``/``poly2.enclosing.contact.1``:
-#: 0.07um each).
-ENCLOSURE_MARGIN_UM = 0.1
 #: Gap (um) between a ``dogbone_terminals`` S/D head and the neighbouring gate
 #: stripe (issue #4851); clears sg13g2's 0.07um GatPoly-to-Activ spacing.
 DOGBONE_GATE_GAP_UM = 0.1
-
-#: Generic minimum spacing (um) between same-layer shapes of different unit
-#: instances (array cells, ring segments). Clears the rules on the body layers
-#: (poly/diffusion/contact/li1/lower metals), but NOT every curated rule, e.g.
-#: nwell 0.6-1.27; sky130 met5 1.6, capm 0.84; sg13g2 TopMetal1/2 1.64/2.0,
-#: TopVia1/2 0.42/1.06 (sg13cmos5l: level 1 only). Use the deck rule instead.
-MIN_SAME_LAYER_SPACING_UM = 0.4
-
-#: Margin (um) a well ring/tie keeps around the tap/comp region it encloses
-#: -- exceeds gf180mcu's ``nwell.enclosing.comp.1`` (0.12um). sky130's
-#: curated deck has no well-layer rule, so this only ever matters on
-#: gf180mcu (see :data:`_PDK_ROLE_LAYERS`'s ``"well"`` entries).
-WELL_ENCLOSURE_MARGIN_UM = 0.15
 
 #: Margin (um) the well keeps around a ``mos_array`` well-tie tap pad
 #: (:func:`_mos_array_well_tap_layout`) -- exceeds sg13cmos5l's
@@ -480,44 +452,6 @@ _PDK_WELL_ISOLATION_UM: dict[str, float] = {
 # these instead of independently re-deriving the same layout math, so the
 # drawn GDS and the reported `ports[]` never drift apart.
 # --------------------------------------------------------------------------- #
-
-
-def _grid_snapped(dbu: float, *values_um: float) -> bool:
-    """Whether any of ``values_um`` is not an exact multiple of ``dbu``."""
-
-    def _snapped(value_um: float) -> bool:
-        count = value_um / dbu
-        return abs(count - round(count)) > 1e-9
-
-    return any(_snapped(v) for v in values_um)
-
-
-def _mfg_grid_neighbours(
-    grid_um: float, value_um: float, multiple: int = 1
-) -> tuple[float, float] | None:
-    """The nearest values below and above ``value_um`` that are exact
-    multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
-    ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
-    family's curated deck declares no ``"ongrid"`` rule, see
-    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
-    nothing to check against.
-
-    ``multiple`` is for a quantity built from ``multiple`` equal on-grid
-    parts (e.g. a ``diff_pair`` device's total width, ``splits`` unit
-    widths): the representable set is then the multiples of
-    ``multiple * grid_um``, not of ``grid_um``. Unlike :func:`_grid_snapped`
-    this checks against the PDK *manufacturing* grid, never the dbu."""
-    if grid_um <= 0 or multiple < 1:
-        return None
-    step = grid_um * multiple
-    count = value_um / step
-    nearest = round(count)
-    if abs(count - nearest) <= 1e-6:
-        return None
-    below = math.floor(count)
-    # Round away float noise so the reported values read as the grid
-    # multiples they are (e.g. 4.635, not 4.635000000000001).
-    return (round(below * step, 9), round((below + 1) * step, 9))
 
 
 def _sd_pad_gate_offset_um(l_um: float, extra_offset_um: float = 0.0) -> float:
@@ -2255,11 +2189,6 @@ def _cap_parallel_layout(
     }
 
 
-#: The four sides a ring gap (``ring_gap_side``) can be cut on, and the
-#: outward normal (``direction_deg``) each one's reported port faces.
-RING_SIDE_DIRECTIONS: dict[str, int] = {"N": 90, "S": 270, "E": 0, "W": 180}
-
-
 def _auto_ring_inner_size_um(info: dict[str, Any]) -> tuple[float, float]:
     """Inner (protected-area) size of the automatically-sized ring in a
     ``diff_pair``/``bjt_array`` layout dict -- the straight run available on
@@ -3347,16 +3276,6 @@ def _insert_implant_ring(
         implant_gap_um,
         mfg_grid_um,
     )
-
-
-class GenError(Exception):
-    """Raised when a generation request cannot be fulfilled.
-
-    Covers an unknown generator name, an unresolvable PDK, and invalid/
-    out-of-range ``params`` -- the CLI turns this into a clean stderr
-    message + exit code 1, never a traceback (see docs/cli/gen.md's exit
-    code table).
-    """
 
 
 def list_generators() -> dict[str, Any]:
