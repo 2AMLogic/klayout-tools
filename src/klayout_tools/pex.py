@@ -2857,6 +2857,10 @@ def run_pex(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
+    # Validate side selectors on every testbench before running extraction.
+    requests = [_load_testbench_request(path) for path in testbench_paths]
+    probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
+
     try:
         # Issue #6559/#6606: the engine dispatch (curated / runset / the
         # `--deck`-under-runset merged route) and the option mapping live in
@@ -2959,7 +2963,6 @@ def run_pex(
     # inputs, taken at the resolution points below -- before either side
     # simulates -- so the digests describe the files this run used.
     input_identity: list[dict[str, Any]] = []
-    probe_names: list[tuple[str, ...]] = []
 
     # Command and extraction-only modes can supply a schematic DUT directly.
     measured_reference_netlist = (
@@ -2968,20 +2971,13 @@ def run_pex(
         else None
     )
 
-    # First pass: resolve every testbench's `.include`d DUT reference and
-    # validate them *before* running any simulation at all (extraction has
-    # already run above, but every `klt sim` call is comparatively
-    # expensive) -- a testbench with no `.include` directive, or a set of
-    # testbenches that disagree on which schematic DUT they reference, is
-    # reported as a fast, cheap error rather than only surfacing after every
-    # testbench has already been simulated on both sides.
+    # Check every DUT include before simulation. A missing include or testbenches
+    # pointing at different DUTs must fail before launching any measurement leg.
     for index, testbench_path in enumerate(testbench_paths):
         label = f"{index:02d}-{os.path.splitext(os.path.basename(testbench_path))[0]}"
         labels.append(label)
 
-        request = _load_testbench_request(testbench_path)
-        probe_names.append(pex_sim_evidence.schematic_probes(request))
-
+        request = requests[index]
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):

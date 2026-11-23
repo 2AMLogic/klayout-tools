@@ -115,7 +115,8 @@ byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
 failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
 (issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
-on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+on both sides, `"pass"`. For a schematic-only observation, `delta[].status`
+is `"skipped"` unless the schematic measurement errored. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
@@ -1812,7 +1813,12 @@ GF180 main script carries the same selection as its target.
 
 When the parallel runner names failed workers, `error.abort.decks` lists their
 distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
-A single identified failure also supplies `abort.deck`. The parallel runner
+A single identified failure also supplies `abort.deck`. For the recognized GF180
+3LM abort (`deck: "mslot1"`, `symbol: "metal4_drawn"`), the optional
+`error.abort.hint` points to the [deck selectors and their coverage](cli/drc.md#gf180-3lm-deck-selection).
+A tolerated report carries that hint at `engine_deck_errors.abort.hint`.
+
+The parallel runner
 can start several decks before reporting a failure.
 
 | Field | Meaning |
@@ -1889,7 +1895,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
-| `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
+| `synthesize` | `partial.netlist_path`, `partial.stats_path`, `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
@@ -2776,6 +2782,10 @@ tool failure, documented in its own `docs/cli/<verb>.md` — e.g. `klt drc`
 exits `3` when the deck ran successfully but found violations (a successful
 run, so the documented success payload is still on stdout). Extensions never
 redefine `0`/`1`/`2`.
+
+`klt synthesize` exits `4` with `status: "inconclusive"` and
+`reason: "abc_timeout"` when its optional generic ABC budget expires.
+The `partial` block identifies the retained generic netlist and statistics.
 
 **The exit-code contract is additive, and a consumer must treat it that way.**
 A command may ship a new code above `2` in a later release for an outcome

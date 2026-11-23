@@ -1431,10 +1431,10 @@ manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
 regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
-statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way — the one
-bound verb that is not reachable from a published release (see "Item 6's
-evidence needs a from-source toolchain" below). **Phase 2b
+statistical-evidence item, by binding a [`klt yield` campaign report](yield.md)
+(epic #710). For installation instructions, see
+[Item 6's evidence needs the `[yield]` extra (issue #2466)](#item-6s-evidence-needs-the-yield-extra-issue-2466).
+**Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
