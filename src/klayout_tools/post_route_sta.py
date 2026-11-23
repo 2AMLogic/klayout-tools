@@ -80,13 +80,17 @@ the script marks exactly that clock propagated
 (``set_propagated_clock [get_clocks <clock_port>]`` -- the clock object
 ``_clock_lines`` itself created) and then, after any SPEF annotation and
 before any timing/power metric is collected, dumps
-``report_clock_latency`` so the response carries machine-readable evidence
-of what propagation actually reached: the clock pins the clock network
-reaches (``clock_propagation.clock_sinks``) and the worst network latency
-among them. On a pinned-build session a routed tree moves a boundary hold
-check from met to violated exactly as the issue describes -- which is the
-point: ideal timing can call an input hold check MET that the propagated
-analysis calls VIOLATED.
+``report_clock_latency`` plus a dedicated sink-count query
+(:func:`_clock_sink_count_lines`, issue #7417) so the response carries
+machine-readable evidence of what propagation actually reached: the number
+of clock sink pins the clock network reaches
+(``clock_propagation.clock_sinks``, from OpenSTA's own
+``all_registers -clock_pins`` enumeration -- live-verified on the pinned
+build to follow the clock through the CTS buffers), and the worst network
+latency among the pins the latency report names. On a pinned-build session
+a routed tree moves a boundary hold check from met to violated exactly as
+the issue describes -- which is the point: ideal timing can call an input
+hold check MET that the propagated analysis calls VIOLATED.
 
 The option is **opt-in, and ``"ideal"`` remains the default and the
 backward-compatible behavior byte-for-byte**, because a bare DEF carries no
@@ -494,13 +498,17 @@ _PORT_CHECK_EXIT_CODE = 3
 
 #: Issue #2739: brackets the ``report_clock_latency -digits 6`` dump a
 #: ``propagated_clock`` request emits after ``set_propagated_clock`` (and,
-#: when present, after ``read_spef``) -- the machine-readable evidence of
-#: what propagation actually reached. Per clock: a ``Clock <name>`` header
-#: line, then one (min-column) and one continuation (max-column)
-#: ``network latency <pin>`` row per clock sink per transition pair. A clock
-#: whose network reaches no clock pin prints the header and nothing else --
-#: the explicit "propagation could not be established" signal
-#: :func:`_parse_clock_latency` turns into ``clock_sinks: 0``.
+#: when present, after ``read_spef``) -- evidence of what propagation
+#: actually reached. Per clock: a ``Clock <name>`` header line, then one
+#: (min-column) and one continuation (max-column) ``network latency <pin>``
+#: row for the **min- and max-latency sink of each transition pair** -- the
+#: extremes the report names, not one row per sink (issue #7417: on a
+#: many-flop tree only those two pins per table ever print, so the rows can
+#: never yield the sink count; that comes from
+#: :func:`_clock_sink_count_lines`). A clock whose network reaches no clock
+#: pin prints the header and nothing else -- the explicit "propagation
+#: could not be established" signal :func:`_parse_clock_latency` turns into
+#: ``clock_sinks: 0``.
 _CLOCK_LATENCY_BEGIN = "===KLT_STA_CLOCK_LATENCY_BEGIN==="
 _CLOCK_LATENCY_END = "===KLT_STA_CLOCK_LATENCY_END==="
 #: ``report_clock_latency``'s per-clock section header (``Clock clk``).
@@ -510,9 +518,21 @@ _CLOCK_SECTION_RE = re.compile(r"^Clock (\S+)$")
 #: line it indents under the same pin -- one regex captures both.
 _NETWORK_LATENCY_RE = re.compile(r"^\s*([-+0-9.eE]+)\s+network latency (.+?)\s*$")
 #: Upper bound on how many clock-sink pin names the parsed evidence echoes
-#: into ``clock_propagation.clock_sinks_sample`` -- a diagnostic sample, not
-#: an exhaustive list (a real CTS tree reaches thousands of clock pins).
+#: into ``clock_propagation.clock_sinks_sample`` -- a diagnostic sample of
+#: the pins the latency report names, not an exhaustive list (a real CTS
+#: tree reaches thousands of clock pins; the exhaustive number is the
+#: engine-queried ``clock_sinks``, issue #7417).
 _CLOCK_SINK_SAMPLE_LIMIT = 20
+#: Issue #7417: brackets :func:`_clock_sink_count_lines` -- the engine
+#: query that counts the request clock's sink pins, so
+#: ``clock_propagation.clock_sinks`` is the true sink count rather than the
+#: number of pins the latency report happens to name.
+_CLOCK_SINK_COUNT_BEGIN = "===KLT_STA_CLOCK_SINK_COUNT_BEGIN==="
+_CLOCK_SINK_COUNT_END = "===KLT_STA_CLOCK_SINK_COUNT_END==="
+#: The one parseable row inside the sink-count block: the count itself. An
+#: ``KLT_STA_CLOCK_SINK_COUNT_ERROR <msg>`` row (the ``catch`` arm) matches
+#: nothing and parses as unknown.
+_CLOCK_SINK_COUNT_RE = re.compile(r"^KLT_STA_CLOCK_SINK_COUNT (\d+)$")
 
 #: Issue #2780: brackets the per-session constraint-completeness query
 #: (:func:`_constraint_completeness_lines`). One ``CHECK\t<check>\t<total>``
@@ -2879,19 +2899,61 @@ def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
 
 def _clock_latency_lines() -> list[str]:
     """Marker-delimited ``report_clock_latency -digits 6`` (issue #2739) --
-    the machine-readable evidence of what propagation actually reached: one
-    ``Clock <name>`` section per clock, ``network latency <pin>`` rows per
-    clock sink. Emitted after any ``read_spef`` and before the timing
-    metrics, so the latencies it reports reflect the same parasitics the
-    timing numbers do. A clock whose network reaches no clock pin prints
-    the header and nothing else (:func:`_parse_clock_latency` -> ``sinks:
-    0``). Wrapped in ``catch`` so an OpenSTA build without the command
-    degrades the evidence to ``unknown`` rather than aborting the run (the
-    same degradation :func:`_parasitic_annotation_lines` established)."""
+    evidence of what propagation actually reached: one ``Clock <name>``
+    section per clock, ``network latency <pin>`` rows for the min- and
+    max-latency sink of each transition pair (the extremes, not every
+    sink -- issue #7417; the sink *count* comes from
+    :func:`_clock_sink_count_lines`, which runs right after this block).
+    Emitted after any ``read_spef`` and before the timing metrics, so the
+    latencies it reports reflect the same parasitics the timing numbers
+    do. A clock whose network reaches no clock pin prints the header and
+    nothing else (:func:`_parse_clock_latency` -> ``clock_sinks: 0``).
+    Wrapped in ``catch`` so an OpenSTA build without the command degrades
+    the evidence to ``unknown`` rather than aborting the run (the same
+    degradation :func:`_parasitic_annotation_lines` established)."""
     return [
         f'puts "{_CLOCK_LATENCY_BEGIN}"',
         "catch {report_clock_latency -digits 6} klt_clock_latency_msg",
         f'puts "{_CLOCK_LATENCY_END}"',
+    ]
+
+
+def _clock_sink_count_lines(clock_port: str) -> list[str]:
+    """Marker-delimited count of *clock_port*'s sink pins (issue #7417) --
+    OpenSTA's own ``all_registers -clock [get_clocks <clock_port>]
+    -clock_pins`` enumeration, so ``clock_propagation.clock_sinks`` is the
+    true number of register clock pins the clock network drives (through
+    the CTS buffers), never the count of pins ``report_clock_latency``
+    happens to name (its per-transition tables print only the min- and
+    max-latency sink, so that count under-reports every real tree --
+    live-verified on the pinned build: 4 flops behind buffers -> count 4
+    while the latency report named no pin at all; a clock reaching no flop
+    -> count 0).
+
+    The ``get_clocks`` result is checked to be exactly one clock first: a
+    miss warns (STA-0351) and returns an *empty* collection, and
+    ``all_registers -clock {}`` silently drops the filter and would count
+    every register in the design -- so the guard turns that into the
+    ``catch`` arm's ``KLT_STA_CLOCK_SINK_COUNT_ERROR`` row
+    (:func:`_parse_clock_sink_count` -> unknown) instead of a wrong
+    number. Error text is flattened to one line (the
+    :func:`_constraint_completeness_lines` convention) so a newline in an
+    engine message can never inject a parseable count row."""
+    return [
+        f'puts "{_CLOCK_SINK_COUNT_BEGIN}"',
+        "if {[catch {",
+        f"        set klt_sink_clks [get_clocks {_tcl_literal(clock_port)}]",
+        "        if {[llength $klt_sink_clks] != 1} {",
+        '            error "get_clocks did not name exactly one clock"',
+        "        }",
+        "        llength [all_registers -clock $klt_sink_clks -clock_pins]",
+        "    } klt_sink_msg]} {",
+        '        puts "KLT_STA_CLOCK_SINK_COUNT_ERROR '
+        '[string map [list \\n { } \\t { }] $klt_sink_msg]"',
+        "    } else {",
+        '        puts "KLT_STA_CLOCK_SINK_COUNT $klt_sink_msg"',
+        "    }",
+        f'puts "{_CLOCK_SINK_COUNT_END}"',
     ]
 
 
@@ -3642,7 +3704,9 @@ def _sta_script_lines(
     fingerprints and the timing metrics) is the propagated analysis. The
     evidence dump (:func:`_clock_latency_lines`) runs *after* ``read_spef``
     so its network latencies reflect the same parasitics the timing
-    numbers do.
+    numbers do, and is followed by the sink-count query
+    (:func:`_clock_sink_count_lines`, issue #7417) that
+    ``clock_propagation.clock_sinks`` is parsed from.
 
     ``sdf_path`` (issue #2886; requires ``spef_path``) appends the shared
     ``write_sdf`` command (:func:`~klayout_tools._openroad_engine.write_sdf_line`)
@@ -3698,6 +3762,7 @@ def _sta_script_lines(
         lines += _parasitic_annotation_lines()
     if propagated_clock:
         lines += _clock_latency_lines()
+        lines += _clock_sink_count_lines(clock_port)
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
@@ -4069,21 +4134,31 @@ def _normalize_delay_block(block: str) -> list[str]:
 def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
     """The ``clock_propagation`` evidence block (issue #2739), parsed from
     one session's :data:`_CLOCK_LATENCY_BEGIN`/:data:`_CLOCK_LATENCY_END`
-    ``report_clock_latency`` dump for the request's clock:
+    ``report_clock_latency`` dump and
+    :data:`_CLOCK_SINK_COUNT_BEGIN`/:data:`_CLOCK_SINK_COUNT_END`
+    sink-count query for the request's clock:
 
-    - ``clock_sinks`` -- distinct clock pins the clock network reaches
-      (deduplicated across the per-transition rise/fall tables OpenSTA
-      prints). ``0`` is the explicit "propagation could not be established"
-      signal: the section header printed but no ``network latency`` row
-      under it. ``None`` means unknown -- the clock's section never appeared
-      (an OpenSTA build whose ``catch``-wrapped ``report_clock_latency``
-      produced nothing, or a marker-less stdout from an older stub/capture).
+    - ``clock_sinks`` -- the number of clock sink pins the engine's own
+      ``all_registers -clock ... -clock_pins`` enumeration returned (issue
+      #7417: the latency report names only the min-/max-latency pin per
+      transition table, so its distinct-pin count under-reports every
+      real tree and is never used for this field). ``0`` is the explicit
+      "propagation could not be established" signal -- the count query
+      returned zero (a clock reaching no clock pin), or, on a
+      count-marker-less stdout (an older capture), the section header
+      printed with no ``network latency`` row under it. ``None`` means
+      unknown -- the count query was absent or errored (an OpenSTA build
+      without ``all_registers``, a ``catch``-swallowed failure) **and**
+      the latency section did not carry the tree-less shape; a fabricated
+      number is never substituted.
     - ``max_network_latency_ns`` -- the worst ``network latency`` value the
       section reports (the max-column continuation values included);
       ``None`` when there are no sinks (or the section is absent).
-    - ``clock_sinks_sample`` -- the sink names in report order, capped at
+    - ``clock_sinks_sample`` -- the pin names the latency report names
+      (the per-transition min/max extremes), capped at
       :data:`_CLOCK_SINK_SAMPLE_LIMIT` (a diagnostic sample, mirroring the
-      SPEF missing-nets sample, not an exhaustive list).
+      SPEF missing-nets sample, not an exhaustive list and not every
+      sink).
 
     A request clock whose section is absent is ``unknown``, never ``0``:
     ``create_clock`` already failed the session for a missing clock port,
@@ -4102,13 +4177,37 @@ def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
             if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
                 sample.append(pin)
     max_latency = _max_network_latency(rows)
+    sink_count = _parse_clock_sink_count(stdout)
+    if sink_count is not None:
+        clock_sinks: int | None = sink_count
+    elif section_seen and not rows:
+        clock_sinks = 0
+    else:
+        clock_sinks = None
     return {
-        "clock_sinks": len(seen) if section_seen else None,
+        "clock_sinks": clock_sinks,
         "max_network_latency_ns": (
             round(max_latency, 6) if max_latency is not None else None
         ),
         "clock_sinks_sample": sample,
     }
+
+
+def _parse_clock_sink_count(stdout: str) -> int | None:
+    """The request clock's sink count from
+    :func:`_clock_sink_count_lines`' marker block: the integer on the
+    ``KLT_STA_CLOCK_SINK_COUNT <n>`` row, or ``None`` when the block is
+    absent (a marker-less stdout from an older stub/capture), carries only
+    the ``catch`` arm's ``KLT_STA_CLOCK_SINK_COUNT_ERROR`` row, or holds no
+    parseable count -- unknown, never a guess."""
+    block = _extract_block(stdout, _CLOCK_SINK_COUNT_BEGIN, _CLOCK_SINK_COUNT_END)
+    if block is None:
+        return None
+    for line in block.splitlines():
+        count = _CLOCK_SINK_COUNT_RE.match(line.rstrip())
+        if count is not None:
+            return int(count.group(1))
+    return None
 
 
 def _clock_latency_rows(

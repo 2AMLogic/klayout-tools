@@ -4322,7 +4322,12 @@ def _stub_openroad_clock_capture(
     monkeypatch, scenario_by_corner: dict[str | None, str]
 ) -> list[str]:
     """Replay a captured #2739 scenario per corner (`None` key for every
-    run in the request); returns the generated scripts."""
+    run in the request); returns the generated scripts.
+
+    The captured stdout predates the #7417 sink-count query, so a scenario
+    listed in the fixture's `clock_sink_counts` gets the synthesized count
+    block spliced in after the latency markers -- the counts themselves
+    were verified live on the same pinned build."""
     scripts: list[str] = []
 
     def fake_run(cmd, **kwargs):
@@ -4336,10 +4341,25 @@ def _stub_openroad_clock_capture(
             (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
             None,
         )
-        captured = _clock_capture_scenario(scenario_by_corner[corner])
+        tag = scenario_by_corner[corner]
+        captured = _clock_capture_scenario(tag)
+        stdout = captured["stdout"]
+        count = _CLOCK_CAPTURES.get("clock_sink_counts", {}).get(tag)
+        if count is not None:
+            block = (
+                f"{post_route_sta._CLOCK_SINK_COUNT_BEGIN}\n"
+                f"KLT_STA_CLOCK_SINK_COUNT {count}\n"
+                f"{post_route_sta._CLOCK_SINK_COUNT_END}\n"
+            )
+            latency_end = f"{post_route_sta._CLOCK_LATENCY_END}\n"
+            stdout = (
+                stdout.replace(latency_end, latency_end + block, 1)
+                if latency_end in stdout
+                else block + stdout
+            )
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(captured["metrics"], handle)
-        return fake_completed(returncode=0, stdout=captured["stdout"])
+        return fake_completed(returncode=0, stdout=stdout)
 
     monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
     return scripts
@@ -4367,6 +4387,11 @@ def test_clock_capture_fixture_matches_module_tcl():
         _CLOCK_CAPTURES["tcl_fragments"]["clock_latency_lines"]
         == post_route_sta._clock_latency_lines()
     )
+    # Authored (not captured) on the same pinned build the captures came
+    # from: the capture sessions predate the #7417 sink-count query.
+    assert _CLOCK_CAPTURES["tcl_fragments"][
+        "clock_sink_count_lines"
+    ] == post_route_sta._clock_sink_count_lines("clk")
     placeholders = {
         "<TLEF>": "/t/tech.lef",
         "<CLEF>": "/t/cells.lef",
@@ -4399,6 +4424,12 @@ def test_clock_capture_fixture_matches_module_tcl():
     pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
     assert pinned[pin_idx + 1].startswith("create_clock")
     current = pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    # ...and the #7417 sink-count query, spliced in right after the
+    # latency block the captured sessions end their evidence with.
+    sink_block = post_route_sta._clock_sink_count_lines("clk")
+    sink_at = current.index(sink_block[0])
+    assert current[sink_at : sink_at + len(sink_block)] == sink_block
+    current = current[:sink_at] + current[sink_at + len(sink_block) :]
     # The historical capture includes every linked net. Its buffered design
     # has no driver-only nets, so the #6970 predicate leaves its counts intact.
     at = stored.index("    incr klt_design_total")
@@ -4515,6 +4546,12 @@ def test_sta_script_lines_propagated_marks_clock_right_after_create_clock():
     assert any(ln.startswith("catch {report_clock_latency -digits 6}") for ln in lines)
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
     assert prop_idx < latency_begin < latency_end < first_report_idx
+    # The #7417 sink-count query follows the latency dump, still before the
+    # metrics: `clock_sinks` is this enumeration, never the report's pins.
+    sink_begin = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
+    assert latency_end < sink_begin < sink_end < first_report_idx
+    assert any(ln.strip().startswith("llength [all_registers -clock") for ln in lines)
 
 
 def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
@@ -4538,9 +4575,15 @@ def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
     parasitic_end = lines.index(f'puts "{post_route_sta._PARASITIC_ANNOTATION_END}"')
     latency_begin = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
     first_report_idx = lines.index("report_worst_slack_metric -setup")
     assert (
-        read_spef_idx < parasitic_end < latency_begin < latency_end < first_report_idx
+        read_spef_idx
+        < parasitic_end
+        < latency_begin
+        < latency_end
+        < sink_end
+        < first_report_idx
     )
 
 
@@ -4559,7 +4602,9 @@ def test_sta_script_lines_ideal_has_no_propagation_tcl():
     script = "\n".join(lines)
     assert "set_propagated_clock" not in script
     assert "report_clock_latency" not in script
+    assert "all_registers" not in script
     assert post_route_sta._CLOCK_LATENCY_BEGIN not in script
+    assert post_route_sta._CLOCK_SINK_COUNT_BEGIN not in script
 
 
 def test_sta_netlist_script_lines_never_propagates():
@@ -4605,6 +4650,9 @@ def test_parse_clock_latency_sinks_max_and_sample():
             "        0.000000 skew",
             "",
             f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+            "KLT_STA_CLOCK_SINK_COUNT 1",
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
         ]
     )
 
@@ -4617,6 +4665,99 @@ def test_parse_clock_latency_sinks_max_and_sample():
     }
 
 
+def test_parse_clock_latency_count_exceeds_latency_report_pins():
+    """Issue #7417's reported harm, fixed: the latency report names only
+    the min-/max-latency pin per transition table, so on a real tree its
+    distinct-pin count (2 here) under-reports the sink count. With the
+    engine-queried count marker present, `clock_sinks` is that count --
+    while `clock_sinks_sample` still echoes just the report-named pins."""
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock clk",
+            "rise -> rise",
+            "    min     max",
+            "0.206505         network latency ff2/CLK",
+            "        0.312403 network latency ff1/CLK",
+            "---------------",
+            "0.206505 0.312403 latency",
+            "        0.105898 skew",
+            "",
+            "fall -> fall",
+            "    min     max",
+            "0.223682         network latency ff2/CLK",
+            "        0.342710 network latency ff1/CLK",
+            "---------------",
+            "0.223682 0.342710 latency",
+            "        0.119028 skew",
+            "",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+            "KLT_STA_CLOCK_SINK_COUNT 517",
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
+
+    assert evidence["clock_sinks"] == 517
+    assert evidence["clock_sinks_sample"] == ["ff2/CLK", "ff1/CLK"]
+    assert evidence["max_network_latency_ns"] == 0.34271
+
+
+def test_parse_clock_latency_rows_without_count_marker_is_unknown():
+    """The #7417 bug's exact shape: a latency dump with rows but no
+    sink-count block (an older capture/stub) must not fall back to the
+    distinct-pin count -- that number under-reports every real tree."""
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock clk",
+            "0.206505         network latency ff2/CLK",
+            "        0.312403 network latency ff1/CLK",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
+
+    assert evidence["clock_sinks"] is None
+    assert evidence["max_network_latency_ns"] == 0.312403
+    assert evidence["clock_sinks_sample"] == ["ff2/CLK", "ff1/CLK"]
+
+
+@pytest.mark.parametrize(
+    "count_row",
+    [
+        "KLT_STA_CLOCK_SINK_COUNT_ERROR get_clocks did not name exactly one clock",
+        "KLT_STA_CLOCK_SINK_COUNT not-a-number",
+        "engine banner noise the markers can bracket",
+    ],
+)
+def test_parse_clock_latency_count_query_failed_is_unknown(count_row):
+    """A `catch`-swallowed failure (no `all_registers` on the build, the
+    exactly-one-clock guard firing) or a malformed count row leaves no
+    parseable count -- unknown, never a fabricated number and never the
+    latency report's distinct-pin count (rows are present here)."""
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock clk",
+            "0.206505         network latency ff2/CLK",
+            "        0.312403 network latency ff1/CLK",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+            count_row,
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
+
+    assert evidence["clock_sinks"] is None
+    assert evidence["clock_sinks_sample"] == ["ff2/CLK", "ff1/CLK"]
+
+
 def test_parse_clock_latency_dedupes_sinks_and_caps_sample():
     lines = [f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"', "Clock clk"]
     for i in range(post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5):
@@ -4624,11 +4765,16 @@ def test_parse_clock_latency_dedupes_sinks_and_caps_sample():
     lines += [
         "        0.990000 network latency ff1/CLK",  # max col of an early sink
         f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+        f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+        "KLT_STA_CLOCK_SINK_COUNT 1000",
+        f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
     ]
 
     evidence = post_route_sta._parse_clock_latency("\n".join(lines), "clk")
 
-    assert evidence["clock_sinks"] == post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5
+    # The count is the engine-queried number, not the report's distinct
+    # pins (which is 26 here) nor the capped sample length.
+    assert evidence["clock_sinks"] == 1000
     assert len(evidence["clock_sinks_sample"]) == (
         post_route_sta._CLOCK_SINK_SAMPLE_LIMIT
     )
@@ -4645,6 +4791,9 @@ def test_parse_clock_latency_ignores_other_clock_sections():
             "Clock clk",
             "0.200000         network latency ff/CLK",
             f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+            "KLT_STA_CLOCK_SINK_COUNT 1",
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
         ]
     )
 
@@ -4661,10 +4810,34 @@ def test_parse_clock_latency_empty_section_is_zero_sinks():
     """The tree-less contract: the clock's section printed with no rows --
     the explicit machine-readable "propagation could not be established"
     signal. This is the real captured output of the fixture's `notree`
-    scenario."""
+    scenario, which predates the #7417 count marker -- so it also pins
+    the marker-less fallback: an empty section stays `0`, not unknown."""
     evidence = post_route_sta._parse_clock_latency(
         _clock_capture_scenario("propagated_notree")["stdout"], "clk"
     )
+
+    assert evidence == {
+        "clock_sinks": 0,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+def test_parse_clock_latency_count_zero_with_empty_section_is_zero():
+    """The tree-less contract through the count query itself (a clock the
+    engine says reaches zero register clock pins), live-verified shape."""
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock clk",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"',
+            "KLT_STA_CLOCK_SINK_COUNT 0",
+            f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
 
     assert evidence == {
         "clock_sinks": 0,
@@ -4834,6 +5007,8 @@ def test_run_sta_propagated_script_emits_set_propagated_clock_per_corner(
     latency_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     metrics_idx = scripts[0].index("report_worst_slack_metric -setup")
     assert create_idx < prop_idx < latency_idx < metrics_idx
+    sink_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    assert latency_idx < sink_idx < metrics_idx
 
 
 def test_run_sta_verilog_mode_response_is_always_ideal(tmp_path, monkeypatch):
