@@ -64,10 +64,10 @@ drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
 bug, not just duplicated code.
 
-Scope deliberately excluded from the first version and landed since: a
-``propagated_clock`` request option (issue #2739, below). Still excluded
-(not required for this issue): a bisected (rather than
-``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+Propagated-clock timing is available through ``propagated_clock`` (issue #2739).
+``fmax_mhz`` comes from OpenROAD's ``report_fmax_metric``. Its clock estimate
+uses same-clock, same-edge, single-cycle paths and can overstate achievable
+frequency when an opposite-edge path limits the period.
 
 **Propagated-clock timing (issue #2739).** By default every analyzed corner
 is timed with an **ideal** clock: ``create_clock`` alone, no
@@ -1146,7 +1146,7 @@ def _dispatch_sta(
         "worst_hold_path": corner_fields["worst_hold_path"],
         # Additive field (issue #5424): the unreduced per-path-group rows
         # behind the two records above -- how a caller reads a data-setup
-        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        # WNS when an async recovery check determines `worst_slack_ns`.
         "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],

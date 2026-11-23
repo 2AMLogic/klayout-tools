@@ -106,12 +106,11 @@ A request naming both, or neither, is a request error.
   real (or caller-supplied real-parasitics) delays. The two are unrelated —
   `klayout_tools/post_route_sta.py` is this command's own backing module,
   named to avoid clobbering the pre-existing `klayout_tools/sta.py`.
-- **Not corner-searched `fmax_mhz`.** This version reports
-  `report_fmax_metric`'s own `1/(T-WNS)` extrapolated `fmax_mhz` (not a
-  bisected one) — tracked as follow-up work, not required for this
-  command's initial scope. Propagated-clock timing (the other early
-  "not yet" item) landed as `constraints.propagated_clock` (issue #2739) —
-  see "Propagated-clock timing" below.
+- **Frequency estimate.** The clock-based `fmax_mhz` estimate excludes
+  rise-to-fall and fall-to-rise paths, so it can overstate achievable frequency.
+  In a 50%-duty-cycle ASAP7 example, the eligible paths implied an 84.4 ps
+  period (11.85 GHz). A longer rise-to-fall path needed 343.25 ps for half
+  a cycle, limiting that clock to about 1.46 GHz.
 
 ## Request
 
@@ -305,7 +304,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
 | `constraint_completeness` | object | Additive field (issue #2780), present on every response and every `corners[]` entry. Whether every timing endpoint is constrained and every register is clocked in this session — **separate from `timing_status`**, which only says whether the slack numbers are measurements: a design can report a finite WNS (`timing_status: "constrained"`) and still have unconstrained endpoints or unclocked registers. `{status, unconstrained_endpoints, unclocked_registers, sample_limit}`; `status` is `"complete"` \| `"incomplete"` \| `"unknown"`. Each check is `{status: "ok" \| "unavailable", count, sample, truncated, reason}` — a check that could not run reports `count: null`, never `0`. See "Constraint completeness" below. |
-| `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
+| `fmax_mhz` | number \| null | OpenROAD's `timing__fmax` in Hz, converted to MHz and rounded to four decimals. For each clock, OpenSTA takes the largest `period − path slack` among eligible same-clock, same-edge, single-cycle setup-side paths, including port paths. OpenROAD reports the highest reciprocal across clocks with a usable period. If none qualify, it tries an unconstrained combinational delay estimate. An absent metric yields null. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
 | `worst_*_path.stages` | object \| omitted | Additive field (issue #5783), present inside each `worst_setup_path` / `worst_hold_path` record only when `constraints.report_path_stages` is `true` — on the single-corner response and on every `corners[]` entry. `{status, reason, stages}`: that record's own path resolved to a per-stage `{pin, cell, incr_ns, path_ns}` list, or `stages: null` with a stated `reason` when the breakdown is not available. Never fabricated. See "Per-stage delay breakdown" below. |
@@ -1496,9 +1495,10 @@ only the head row can bind the session aggregate.
 (data setup, asynchronous recovery, clock-gating setup — see "Violation
 counts: check families" above), and `worst_slack_ns` is the aggregate over
 all three. When the worst recovery check is worse than every data path, that
-aggregate describes the **reset network**, and `fmax_mhz` — `1/(T-WNS)` over
-the same aggregate — is a reset-network number, not a datapath frequency.
-Filter this field by `check_type` to get the family you actually gate on:
+aggregate describes the **reset network**. The worst path can fall outside
+the paths eligible for the clock-frequency estimate, so `worst_slack_ns`
+alone cannot reconstruct `fmax_mhz`. Filter the setup rows by `check_type`
+to read the data-path slack.
 
 ```python
 setup_rows = response["worst_paths_by_group"]["setup"]
@@ -1507,12 +1507,8 @@ data_setup_wns = next(
 )  # None => no data setup path in this session, not "0 slack"
 ```
 
-`worst_slack_ns`, `total_negative_slack_ns`, `fmax_mhz`, both violation
-counts and `worst_*_path` are **unchanged** by this field: `fmax_mhz` remains
-the all-family setup aggregate, so a data-only `fmax` has to be derived from
-the filtered slack above and `clock_targets.clock_period_ns` — this command
-does not report one. The field adds no engine query; it is the rows the
-session already parsed.
+Use the data setup row to identify the path. Its launch and capture edges in
+the timing report determine the time available for data to propagate.
 
 ### Boundary example
 
