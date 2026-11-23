@@ -24,11 +24,12 @@ the window. Every (linearly interpolated) crossing of the level is folded to
 its phase within a unit interval. The **width** is the widest circular gap
 between folded crossing phases -- the unit interval minus the crossing spread,
 i.e. the horizontal opening at the level -- and the **best phase** is the
-middle of that gap. The **height** is read at the best phase: the minimum of
+middle of that gap. The **height** at the requested phase (best by default) is
+the minimum of
 the samples above the level minus the maximum of those at or below it, one
 sample per unit interval. The data pattern is not known, so decisions are
 threshold decisions at the sampling phase; a signal that never crosses the
-level, or sits on one side of it at the best phase, is an error rather than a
+level, or sits on one side of it at the sampling phase, is an error rather than a
 zero.
 
 Response shape (additive, no ``schema_version`` bump)
@@ -51,6 +52,7 @@ from typing import Any
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_raw import parse_ascii_rawfile
 
 #: Reason tokens a failed ``eye`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -64,7 +66,7 @@ METRICS = ("height", "width", "best_phase")
 
 MAX_UIS = 1_000_000
 
-_ALLOWED_KEYS = frozenset({"signal", "ui", "uis", "from", "level", "metric"})
+_ALLOWED_KEYS = frozenset({"signal", "ui", "uis", "from", "level", "metric", "phase"})
 
 _VECTOR_PREFIX = "__klt_eye_"
 
@@ -121,6 +123,11 @@ def validate_eye_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': eye.ui is required and must be a positive "
             "unit interval in seconds -- a number or a SPICE time literal "
             f'such as "100p" (got {body.get("ui")!r})'
+        )
+    phase = _seconds(name, body, "phase")
+    if phase is not None and not 0 <= phase < ui:
+        raise SimError(
+            f"measurement '{name}': eye.phase must satisfy 0 <= phase < eye.ui"
         )
     uis = body.get("uis")
     if not isinstance(uis, int) or isinstance(uis, bool) or not 2 <= uis <= MAX_UIS:
@@ -200,12 +207,27 @@ def control_lines(
 ) -> list[str]:
     """One ``let`` plus one ``write`` per eye entry, run after the analysis.
     Empty without an eye entry (deck byte-identical to before)."""
-    lines: list[str] = []
-    for index, spec in enumerate(eye_measurements(measurements_spec)):
-        vector = f"{_VECTOR_PREFIX}{index}"
-        lines.append(f"let {vector} = {spec['eye']['signal']}")
-        lines.append(f"write {rawfile_path(corner_dir, index)} {vector}")
-    return lines
+    return [
+        line
+        for index, spec in enumerate(eye_measurements(measurements_spec))
+        for line in _capture_lines(spec, corner_dir, index)
+    ]
+
+
+def _capture_lines(spec: dict[str, Any], corner_dir: str, index: int) -> list[str]:
+    vector = f"{_VECTOR_PREFIX}{index}"
+    return [
+        f"let {vector} = {spec['eye']['signal']}",
+        f"write {rawfile_path(corner_dir, index)} {vector}",
+    ]
+
+
+def step_captures(specs: list[dict[str, Any]], corner_dir: str) -> dict[str, list[str]]:
+    captures: dict[str, list[str]] = {}
+    for index, spec in enumerate(eye_measurements(specs)):
+        lines = captures.setdefault(spec["step"], ["set filetype=ascii"])
+        lines.extend(_capture_lines(spec, corner_dir, index))
+    return captures
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +248,7 @@ class EyeOutcome:
     metric: str = "height"
     error: str | None = None
     code: str | None = None
+    sampling_phase: float | None = None
 
     @property
     def value(self) -> float | None:
@@ -239,6 +262,11 @@ class EyeOutcome:
             "height": self.height,
             "width": self.width,
             "best_phase": self.best_phase,
+            **(
+                {"sampling_phase": self.sampling_phase}
+                if self.sampling_phase is not None
+                else {}
+            ),
             "level": self.level,
             "ui": self.ui,
             "uis": self.uis,
@@ -254,10 +282,11 @@ def compute_eye(
     start: float = 0.0,
     level: float | None = None,
     metric: str = "height",
+    phase: float | None = None,
 ) -> EyeOutcome:
     """The eye opening of ``values`` over ``scale``, or an outcome carrying
     ``code``/``error``. ``scale`` must be ascending."""
-    base = EyeOutcome(ui=ui, uis=uis, metric=metric)
+    base = EyeOutcome(ui=ui, uis=uis, metric=metric, sampling_phase=phase)
     end = start + uis * ui
     if (
         not scale
@@ -300,8 +329,9 @@ def compute_eye(
     gaps.append(folded[0] + 1.0 - folded[-1])
     widest = max(range(len(gaps)), key=gaps.__getitem__)
     best_phase = (folded[widest] + gaps[widest] / 2) % 1.0
+    sampling_phase = best_phase if phase is None else phase / ui
     samples = [
-        sim_window.value_at(scale, values, start + (k + best_phase) * ui)
+        sim_window.value_at(scale, values, start + (k + sampling_phase) * ui)
         for k in range(uis)
     ]
     high = [v for v in samples if v > threshold]
@@ -309,7 +339,7 @@ def compute_eye(
     if not high or not low:
         base.code = "eye_no_levels"
         base.error = (
-            f"at the best sampling phase every unit interval is on one side "
+            f"at the sampling phase every unit interval is on one side "
             f"of the decision level {threshold!r} -- no high/low pair of rails"
         )
         return base
@@ -341,8 +371,6 @@ def extract_corner_eyes(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EyeOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["eye"]
     name = spec["name"]
     if not os.path.isfile(raw_path):
@@ -375,6 +403,7 @@ def _extract_one(spec: dict[str, Any], raw_path: str) -> EyeOutcome:
         start=_seconds(name, body, "from") or 0.0,
         level=body.get("level"),
         metric=body.get("metric", "height"),
+        phase=_seconds(name, body, "phase"),
     )
     if outcome.error is not None:
         outcome.error = f"measurement '{name}': {outcome.error}"

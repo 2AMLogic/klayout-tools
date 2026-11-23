@@ -43,15 +43,66 @@ preserve the SHAPE annotation, which is why
 - `routed.def` sha256:
   `3ef59e3af9cf0cbdc381d55b62fbb4f1625e84a16a4e90e19b6c1b55716ffc6b`
 
-## What the tip check makes of it
+## Packaged spacing and cut enclosure
 
-`via_pad_trim.tip_check` on the merged layout of this DEF counts 8 tip
-violations (7 x `M1.S.4` on `VIA_*` landing pads, 1 x `M3.S.2`), none of
-which touch the DRCFILL patches -- `router_fill_violations` is 0 here. The
-fixture's role is the real-payload anchor for the DEF scan (see
-`tests/test_place_and_route_def_drcfill.py`, which also cross-checks the
-reconstructed patch rectangles against the geometry KLayout itself draws,
-by reading this DEF with and without the DRCFILL items); the non-zero
-`router_fill` attribution cases are covered by constructed geometry in
-`tests/test_place_and_route_via_tip.py`, where the patch-to-wire distance
-is controlled exactly.
+At 0.00025 µm output DBU, each of the seven original `M1.S.4` markers lies
+between two placed `VIA_VIA12` pads. Each facing edge coincides with the
+complete 22 nm side of its 18 nm wide M1 rectangle and with the x coordinate
+of the V1 cut boundary. The opposing sides have an 18 nm gap. Shrinking the
+facing side would uncover the cut. The safe edit extends both sides along
+their length until they meet the deck's long-edge threshold. The merge uses
+its 1 nm working grid, yielding 37 nm edges at the edited landings.
+
+| Left facing x | Right facing x | Shared y interval (0.25 nm DBU) |
+| ---: | ---: | ---: |
+| 7524 | 7596 | 7732–7820 |
+| 10116 | 10188 | 8884–8972 |
+| 11412 | 11484 | 8884–8972 |
+| 11844 | 11916 | 4564–4652 |
+| 14868 | 14940 | 7732–7820 |
+| 18324 | 18396 | 7732–7820 |
+| 20484 | 20556 | 9892–9980 |
+
+| Packaged ASAP7 DRC | Before | After |
+| --- | ---: | ---: |
+| M1.S.2 | 0 | 0 |
+| M1.S.3 | 0 | 0 |
+| M1.S.4 | 7 | 0 |
+| M1.S.5 | 0 | 0 |
+| All findings | 37 | 30 |
+
+The 30 residuals retain the same rule and location in both streams:
+`M3.S.2` (1), `M5.AUX.1` (8), `V4.M4.EN.1` (17), and
+`V4.M5.EN.2` (4). The post-merge tip checker counts the one M3 finding,
+with zero attributed to router fill. Issue #6992 tracks the separate
+population of pad-free wire tips.
+
+The packaged deck leaves the per-side `V1.M1.EN.1` rule unimplemented. A
+direct polygon comparison found all 2,336 V1 cuts identical and fully
+covered by M1 in both streams. M1 only gained area, 1,890 nm², and every
+other polygon layer had an empty XOR. At all 14 affected cuts, vertical M1
+enclosure on both ends increased from 2 nm to at least 5 nm. Horizontal
+enclosure retained the original flush facing side and at least 5 nm on
+the opposite side.
+
+## Routed connectivity
+
+With this fixture's as-built Verilog from the route, run:
+
+```sh
+python tests/fixtures/place_and_route_drcfill/check_routed_connectivity.py top.gds top.v
+```
+
+The grader merges the physical M1–M6 polygons and joins them across V1–V5
+cuts having positive-area overlap on both layers. It checks all four labeled
+pins of each placed inverter and the five top-level pins against their
+expected nets. Both streams passed for 97 instances, 101 nets, 393 pins and
+2,543 cuts, with zero opens, shorts and unlanded cuts. Removing the input
+via at (3420 nm, 1152 nm) from a copy failed with open net `a` and exit 3.
+This measures routed connectivity down to standard-cell pins.
+
+The DEF scan regression in `tests/test_place_and_route_def_drcfill.py`
+checks the reconstructed DRCFILL rectangles against KLayout imports of
+the DEF with and without its DRCFILL items. Constructed patch-to-wire
+cases in `tests/test_place_and_route_via_tip.py` cover positive router-fill
+attribution.
