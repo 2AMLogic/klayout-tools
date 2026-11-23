@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.ihp_pdk import find_ihp_sg13g2
+from helpers.ihp_sg13g2_root import find_ihp_sg13g2
 from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import characterize, liberty_compare
 from klayout_tools.cli import main
@@ -398,12 +398,8 @@ def test_default_tolerances_cover_every_compared_field():
 
 
 IHP_SG13G2 = find_ihp_sg13g2()
-#: The shared resolver gates on the ngspice assets every live tier needs;
-#: this tier additionally reads the vendor's own stdcell Liberty tree.
 _SKIP_NO_VENDOR = pytest.mark.skipif(
-    IHP_SG13G2 is None
-    or not (IHP_SG13G2 / "libs.ref" / "sg13g2_stdcell" / "lib").is_dir()
-    or not HAVE_NGSPICE,
+    IHP_SG13G2 is None or not HAVE_NGSPICE,
     reason=(
         "needs ngspice plus a fetched IHP-Open-PDK with compiled OSDI models "
         "(scripts/fetch-ihp-sg13g2.sh + scripts/fetch-sg13g2-sim-toolchain.sh, "

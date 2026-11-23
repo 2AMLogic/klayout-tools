@@ -337,11 +337,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2686
+      "lines": 2672
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2488
+      "lines": 2473
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26043
+      "lines": 26034
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from helpers.ihp_pdk import CORNER_MOS_LIB, PSP103_OSDI, find_ihp_sg13g2
+from helpers.ihp_sg13g2_root import CORNER_MOS_LIB, OSDI_MODEL, find_ihp_sg13g2
 from klayout_tools.cli import main
 
 _SKIP_NO_PDK = (
@@ -24,7 +24,7 @@ def _device(instance: str) -> str:
 def psp103_request(tmp_path):
     if shutil.which("ngspice") is None:
         pytest.skip("requires ngspice")
-    root = find_ihp_sg13g2()
+    root = find_ihp_sg13g2(require_stdcell=False)
     if root is None:
         pytest.skip(_SKIP_NO_PDK)
 
@@ -39,7 +39,7 @@ def psp103_request(tmp_path):
         "netlist": "body.spice",
         "models": {"lib": str(root / CORNER_MOS_LIB)},
         "corners": {"process": ["mos_tt"], "temperature_c": [27]},
-        "options": {"osdi_preload": [str(root / PSP103_OSDI)]},
+        "options": {"osdi_preload": [str(root / OSDI_MODEL)]},
     }
 
 

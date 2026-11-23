@@ -380,6 +380,14 @@ Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
 scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
 `resistance_source_reason`). Output without the flag is unchanged; no
 `schema_version` bump.
+Issue #6964 likewise adds `caps` (`{max_terminals, max_cells, max_nodes,
+max_edges}`, integers) to `extraction.resistance_graph` of `klt pex
+--resistance-graph`: present only when a `--resistance-graph-max-*` flag was
+given, holding all four effective caps (the builder's default for any flag
+omitted), and absent otherwise -- so an existing graph-enabled envelope is
+unchanged. `klt extract` adds no field for the caps: its per-net
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+applied. No `schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -863,8 +871,13 @@ file per instantiated hard macro — so `provenance.pdk` alone cannot answer
 "where did this cell's pin order come from". Like `klt erc`'s `spec`, it is a
 verb-local field rather than a `build_provenance()` parameter, and it is
 omitted entirely (never an empty list) for every reference form that reads no
-pin-order source. See [`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level
-LVS".
+pin-order source. A file under the resolved PDK root is recorded as the
+string `"$PDK_ROOT/<relative>"` (issue #5812) rather than an absolute host
+path, so a committed report does not leak where the PDK is installed (the PDK
+identity is in `provenance.pdk`); a `reference.pin_order_files` entry outside
+the PDK root stays absolute unless the request sets `portable_paths: true`.
+Same field and type, no `schema_version` bump. See
+[`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level LVS".
 
 `klt signoff` emits **no** `provenance` block of its own — it resolves no
 PDK, applies no deck, and reads no single input stream; the evidence it
