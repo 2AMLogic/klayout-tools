@@ -81,3 +81,24 @@ def test_public_imports_share_implementation_objects():
         "SUBSTRATE_DC_TIE_RESISTANCE_OHM",
     ):
         assert getattr(extract, name) is getattr(extract_base, name)
+
+
+def test_malformed_ladder_raises_the_public_extract_error():
+    from klayout_tools import extract, extract_validate
+    from klayout_tools.resistance_path import ResistanceGraphError
+
+    net = {
+        "net_id": 7,
+        "net": "OUT",
+        "rc_model": "distributed",
+        "terminals": [{"leg_net": "a"}, {"leg_net": "b"}],
+        "segments": [{"net_a": "a", "net_b": "b", "resistance_ohm": -1.0}],
+    }
+    report = {"nets": [net]}
+    with pytest.raises(
+        extract.ExtractError, match=r"net_id 7's emitted ladder is malformed"
+    ) as exc:
+        extract_validate._attach_resistance_paths(report, [(7, "a", "b")], None, None)
+
+    assert isinstance(exc.value.__cause__, ResistanceGraphError)
+    assert "resistance_paths" not in report
