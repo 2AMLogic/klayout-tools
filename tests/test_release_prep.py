@@ -69,6 +69,17 @@ def test_missing_unreleased_heading_is_an_error() -> None:
 EMPTY_CHANGELOG = "# Changelog\n\n## Unreleased\n\n## 0.8.0 (2026-10-24)\n\n- old\n"
 
 
+def test_changelog_fragments_start_with_a_bullet() -> None:
+    offenders = []
+    for path in sorted((REPO_ROOT / "changelog.d").glob("*.md")):
+        if path.name == "README.md" or not path.is_file():
+            continue
+        entry = path.read_text(encoding="utf-8")
+        if entry.strip() and not entry.startswith("- "):
+            offenders.append(path.name)
+    assert not offenders, "Expected a leading '- ' in " + ", ".join(offenders)
+
+
 def test_prepare_releases_fragments_in_filename_order(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     fragments = repo / "changelog.d"

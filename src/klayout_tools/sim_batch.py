@@ -242,6 +242,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_STR_MAX,
     _assess_deck_support,
     _bounded_model_inputs,
+    _bounded_simulator,
     _bounded_str,
     _deck_preflight_lines,
     _runner_supports_decks,
@@ -1591,18 +1592,16 @@ def poll_status(
 
     ``unstarted_grace_s`` (issue #4291; ``--attach`` sets it) prints one
     stderr diagnostic once that many seconds pass with no ``status.json``
-    ever observed: the job has a ``job.json`` but looks never to have been
-    launched. It only reports -- polling continues, since a slow boot is
-    indistinguishable from a refused launch from here.
+    ever observed (a ``job.json`` but no launch): it only reports -- polling
+    continues, a slow boot being indistinguishable from a refused launch.
 
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
-    (the caller reports unrun corners rather than a failed sweep) -- or
-    once :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever
-    observed, so a job that never launched does not wait out the (possibly
-    hours-long) serial budget. ``last_state`` is ``None`` in that case.
-    Raises
-    :class:`BatchError` on a state outside the documented set -- a contract
-    violation, surfaced loudly rather than waited on forever.
+    (the caller reports unrun corners rather than a failed sweep), or once
+    :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever seen
+    (``last_state`` ``None``): a never-launched job must not wait out the
+    possibly hours-long serial budget. Raises :class:`BatchError` on any
+    state outside the documented set (a contract violation, surfaced loudly)
+    and ``batch_job_cancelled`` on a fleet-cancelled job (issue #4351).
 
     With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, with
     ``progress=False`` so the two stderr streams do not duplicate each other;
@@ -1639,7 +1638,9 @@ def poll_status(
                 on_state(new_state)
             last_state = new_state
             if last_state in BATCH_TERMINAL_STATES:
-                return status
+                from .sim_batch_cancel import terminal_or_cancelled  # deferred
+
+                return terminal_or_cancelled(job_id, status)
             if last_state not in BATCH_WAITING_STATES:
                 raise BatchError(
                     f"job {job_id}: status.json reported unknown state "
@@ -2025,17 +2026,7 @@ def _read_worker_environment(
         doc = json.loads(raw.decode("utf-8"))
         if not isinstance(doc, dict):
             raise ValueError("not an object")
-        sim_in = doc.get("simulator")
-        sim_in = sim_in if isinstance(sim_in, dict) else {}
-        simulator = {
-            "requested_binary": _bounded_str(sim_in.get("requested_binary")),
-            "binary_source": _bounded_str(sim_in.get("binary_source"), 40),
-            "selected_path": _bounded_str(sim_in.get("selected_path")),
-            "version_banner": _bounded_str(
-                sim_in.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
-            ),
-            "version_probe": _bounded_str(sim_in.get("version_probe"), 40),
-        }
+        simulator = _bounded_simulator(doc.get("simulator"), request)
         pdk_in = doc.get("pdk")
         pdk_in = pdk_in if isinstance(pdk_in, dict) else {}
         pdk = {
@@ -3283,7 +3274,7 @@ def _run_batch(
     request_dir: str | None = None,
     attach_job_id: str | None = None,
     collect_partial: bool = False,
-    shard_fingerprint: str | None = None,
+    shard_fingerprint: str | Callable[[], str] | None = None,
     netlist_sha256: str | None = None,
     explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
@@ -3330,6 +3321,8 @@ def _run_batch(
     launch. The request supplies the corner list and measurement grading, so
     it must be the request the job was submitted from.
     """
+    from . import sim_batch_shards as shards
+
     del analysis, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, probe_abort  # not honored
 
@@ -3337,9 +3330,7 @@ def _run_batch(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     if attach_job_id is not None and attach_job_id.endswith(".json"):
-        from . import sim_batch_shards
-
-        return sim_batch_shards.attach_batch_shards(
+        return shards.attach_batch_shards(
             manifest_path=attach_job_id,
             config=config,
             corner_points=corner_points,
@@ -3395,7 +3386,7 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
-                shard_fingerprint=shard_fingerprint
+                shard_fingerprint=shards.resolve_fingerprint(shard_fingerprint)
                 or (None if checkpoint is None else checkpoint.fingerprint),
                 resume=checkpoint is not None,
             )

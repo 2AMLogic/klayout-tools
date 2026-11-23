@@ -9,10 +9,10 @@ non-empty ``missing`` list.
 from __future__ import annotations
 
 import os
-import re
 import sys
 from typing import Any
 
+from ._digest import normalize_sha256
 from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
 from .sim_batch_corner_libs import (
     _compare_corner_section_libs,
@@ -166,22 +166,13 @@ def annotate_unrecovered_failure(corners: list[dict[str, Any]], exit_code: int) 
 # hence the second, list-shaped pair below (issue #5457).
 
 
-def _sha256_or_none(value: Any) -> str | None:
-    """``value`` lower-cased when it is a 64-hex digest, else ``None`` -- one
-    rule for every digest lifted out of a runner's report, so a malformed
-    value can never reach a report as if it were a hash."""
-    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        return value.lower()
-    return None
-
-
 def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
     """The model-library hash the runner's own ``klt sim`` reported (issue
     #5321): ``environment.models_lib_sha256`` of the collected inner report,
     i.e. the card the worker actually resolved. ``None`` when absent or not a
     64-hex string (older runner, error envelope, malformed report)."""
     env = report.get("environment") if isinstance(report, dict) else None
-    return _sha256_or_none(
+    return normalize_sha256(
         env.get("models_lib_sha256") if isinstance(env, dict) else None
     )
 
@@ -193,7 +184,7 @@ def _lifted_osdi_entry(entry: Any) -> dict[str, Any]:
     sha256 = entry.get("sha256") if isinstance(entry, dict) else None
     return {
         "name": name if isinstance(name, str) and name else None,
-        "sha256": _sha256_or_none(sha256),
+        "sha256": normalize_sha256(sha256),
     }
 
 
@@ -386,7 +377,7 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
     if isinstance(name, str) and isinstance(declared, str):
         if os.path.basename(os.path.normpath(declared)) != name:
             return None
-    return _sha256_or_none(reported.get("sha256"))
+    return normalize_sha256(reported.get("sha256"))
 
 
 def attach_runner_osdi_digests(environment: dict[str, Any], backend: str) -> None:
