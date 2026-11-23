@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .liberty_writer import Table2D
 
+#: Recognised ``timing_sense`` values -- the three
+#: ``native/statime/src/liberty.rs``'s ``parse_timing_sense`` distinguishes.
+TIMING_SENSES = ("positive_unate", "negative_unate", "non_unate")
+
 
 def _error() -> type[Exception]:
     from .liberty_writer import LibertyWriteError  # local: circular import
@@ -115,6 +119,55 @@ def render_constraint(
         raise _error()(
             f"cell '{cell.name}' pin '{pin.name}' {arc.timing_type} from "
             f"'{arc.related_pin}': a constraint arc needs at least one table"
+        )
+    lines.append("      }")
+    return lines
+
+
+def render_arc(
+    arc: Any,
+    cell: Any,
+    pin: Any,
+    template_name: str,
+    number: Callable[[float], str],
+    render_table: Callable[..., list[str]],
+) -> list[str]:
+    """One output-pin ``timing()`` group.
+
+    A forced (async ``preset``/``clear``) arc carries only the direction it
+    drives the output in, so a ``None`` table is skipped rather than
+    fabricated -- but an arc with no table at all is an error, not an empty
+    group (issue #5520).
+    """
+    if arc.timing_sense not in TIMING_SENSES:
+        raise _error()(
+            f"cell '{cell.name}' pin '{pin.name}' arc from "
+            f"'{arc.related_pin}': unknown timing_sense {arc.timing_sense!r} "
+            f"(expected one of {', '.join(TIMING_SENSES)})"
+        )
+    lines = ["      timing () {"]
+    lines.append(f'        related_pin : "{arc.related_pin}";')
+    lines.append(f"        timing_sense : {arc.timing_sense};")
+    lines.append(f"        timing_type : {arc.timing_type};")
+    emitted = 0
+    for group, table in (
+        ("cell_rise", arc.cell_rise),
+        ("rise_transition", arc.rise_transition),
+        ("cell_fall", arc.cell_fall),
+        ("fall_transition", arc.fall_transition),
+    ):
+        if table is None:
+            continue
+        where = (
+            f"cell '{cell.name}' pin '{pin.name}' arc from '{arc.related_pin}' {group}"
+        )
+        table.validate(where)
+        lines.extend(render_table(group, table, template_name, number))
+        emitted += 1
+    if not emitted:
+        raise _error()(
+            f"cell '{cell.name}' pin '{pin.name}' {arc.timing_type} arc from "
+            f"'{arc.related_pin}': a timing arc needs at least one table"
         )
     lines.append("      }")
     return lines

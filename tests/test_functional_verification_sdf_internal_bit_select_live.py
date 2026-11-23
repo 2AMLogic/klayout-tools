@@ -18,12 +18,12 @@ the classification tests can never drift onto different nets.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools.functional_verification import run_functional_verification
 from klayout_tools.functional_verification_sdf_internal_bus import (
@@ -35,20 +35,6 @@ from test_functional_verification_sdf_internal_bit_select import (
     _write,
     _write_request,
 )
-
-HAVE_ICARUS = shutil.which("iverilog") is not None
-
-
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
-
 
 # --------------------------------------------------------------------------- #
 # Measured verdicts against the real simulator (spike §3.7's dated
@@ -98,7 +84,7 @@ def _compile_and_run(workdir: Path) -> str:
     return proc.stdout + proc.stderr
 
 
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_ICARUS
 def test_real_icarus_internal_bit_select_net_applies_zero_of_n(tmp_path):
     """The measured verdict the issue's field report carries, pinned here:
     ALL FOUR zero-delay entries on the bit-selected internal net fail --
@@ -114,7 +100,7 @@ def test_real_icarus_internal_bit_select_net_applies_zero_of_n(tmp_path):
     assert "DONE" in transcript
 
 
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_ICARUS
 def test_real_icarus_scalar_internal_net_control_annotates_cleanly(tmp_path):
     """The control that isolates the mechanism: the byte-identical entries
     on a scalar internal net annotate cleanly -- same SDF text, same
@@ -175,8 +161,8 @@ def _run_pipeline(tmp_path: Path) -> dict:
     )
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_real_icarus_internal_bus_net_zero_delay_is_dropped(tmp_path):
     """The 0-of-4 fixture completes once the class drops the entries; the
     response reports the new class, and the normalized copy carries no
@@ -200,8 +186,8 @@ def test_integration_real_icarus_internal_bus_net_zero_delay_is_dropped(tmp_path
     assert normalized_text.count("(INTERCONNECT") == 4
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_real_icarus_internal_bus_net_mixed_keeps_failing(tmp_path):
     """The #5769 boundary, pinned live: the non-zero entry on the same net
     survives the drop pass and still fails the run loudly."""

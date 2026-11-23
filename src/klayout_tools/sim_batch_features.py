@@ -369,12 +369,14 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
         return None
     name = reported.get("name")
     declared = entry.get("entry")
-    if (
-        isinstance(name, str)
-        and isinstance(declared, str)
-        and os.path.basename(declared) != name
-    ):
-        return None
+    if isinstance(declared, dict):
+        declared = declared.get("pdk_relative")
+        if not isinstance(declared, str) or not isinstance(name, str):
+            return None
+    # Normalize as the resolver does: ``device.osdi/.`` names ``device.osdi``.
+    if isinstance(name, str) and isinstance(declared, str):
+        if os.path.basename(os.path.normpath(declared)) != name:
+            return None
     return normalize_sha256(reported.get("sha256"))
 
 

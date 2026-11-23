@@ -1755,8 +1755,7 @@ _SADP = {
 
 
 def _sadp_metal_cases(layer: str) -> list[Case]:
-    """Drawn for a horizontally routed layer (bars along x, on track 0 at
-    y = 0) and transposed for M5 / M7."""
+    """Draw horizontal bars on track 0, then transpose them for M5 and M7."""
     direction, g, wmax = _SADP[layer]
 
     def bar(y0: float, h: float, x0: float = 0, x1: float = 200) -> Box:
@@ -1767,25 +1766,27 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
 
     r = f"{layer}."
     c: list[Case] = [
-        # With both horizontal edges on the g grid (AUX.1) every width is a
-        # multiple of g: a width one dbu off any multiple is inseparable
-        # from an off-grid edge.
+        # A width off the g grid necessarily puts an edge off-grid (AUX.1).
         _fail(r + "W.1", [bar(0, g - D)], ids("AUX.1")),
         _pass(r + "W.1", [bar(0, g)]),
         _fail(r + "W.2", [bar(0, wmax + D)], ids("AUX.1")),
         _fail(r + "W.2", [bar(0, wmax + g)]),
-        # The W.2 maximum itself is an even multiple of g (20 g), which
-        # W.3 forbids: the boundary passes W.2 but trips W.3.
+        # At the W.2 maximum, the even 20 g width also trips W.3.
         _pass(r + "W.2", [bar(0, wmax)], ids("W.3")),
         _pass(r + "W.2", [bar(0, wmax - g)]),
         _fail(r + "W.3", [bar(0, 2 * g)]),
         _fail(r + "W.3", [bar(0, 4 * g)]),
         _pass(r + "W.3", [bar(0, 3 * g)]),
+        # A legal 9 g strap and g-wide signal span 14 g across the gap (#7226).
+        _pass(r + "W.3", [bar(g, 9 * g), bar(14 * g, g)]),
+        # Moving the strap off-grid adds only AUX.1.
+        _pass(r + "W.3", [bar(D, 9 * g), bar(14 * g, g)], ids("AUX.1")),
+        # A 14 g length along the track is legal.
+        _pass(r + "W.3", [bar(0, g, 0, 14 * g)]),
+        _fail(r + "W.3", [bar(g, 2 * g), bar(4 * g, g)]),
         _fail(r + "W.5", [bar(0, g, 0, 44 - D)]),
         _pass(r + "W.5", [bar(0, g, 0, 44)]),
-        # Across the track: g apart on tracks 0 and 1. A neighbour one dbu
-        # closer has an off-grid edge (see W.1); it is drawn 3 g wide so it
-        # is not also an off-track minimum-width bar (AUX.2).
+        # The 3 g neighbour isolates spacing from the minimum-width track rule.
         _fail(r + "S.1", [bar(0, g), bar(2 * g - D, 3 * g)], ids("AUX.1")),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, 3 * g)]),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, g)]),
@@ -1794,8 +1795,7 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
         _pass(r + "S.2", [bar(0, g, 0, 100), bar(0, g, 140, 240)]),
         _fail(r + "AUX.1", [bar(g / 2, 3 * g)]),
         _pass(r + "AUX.1", [bar(g, 3 * g)]),
-        # A minimum-width bar between tracks 0 and 1 (on the g grid, off the
-        # 2 g track pitch).
+        # On the g grid but between the 2 g tracks.
         _fail(r + "AUX.2", [bar(g, g)]),
         _pass(r + "AUX.2", [bar(2 * g, g)]),
         _fail(
