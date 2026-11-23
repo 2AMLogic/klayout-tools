@@ -25,7 +25,7 @@ from helpers.sim_regrade_bench import (
     _stub_engine,
 )
 from helpers.subprocess_fakes import fake_completed, uploaded_request_of
-from klayout_tools import sim, sim_regrade_run
+from klayout_tools import cli, sim, sim_regrade_run
 from klayout_tools import sim_batch as sb
 from klayout_tools.sim_errors import SimError
 
@@ -427,3 +427,42 @@ def test_cli_passes_corners_and_reports_the_record(tmp_path, monkeypatch, capsys
     assert envelope["units"][0]["grade"] == "pass"
     record_path = tmp_path / ".klt" / "sim" / "regrade" / "check" / "regrade.json"
     assert record_path.is_file()
+
+
+@pytest.mark.parametrize(
+    ("engine_result", "expected_status", "exit_code", "detail"),
+    [
+        ({"tightened_value": 0.9}, "fail", 3, "vout: 0.9 -> 0.9 (fail)"),
+        ({"tightened_error": "timeout"}, "unresolved", 4, "timeout"),
+    ],
+)
+def test_cli_text_reports_the_tightened_outcome(
+    tmp_path, monkeypatch, capsys, engine_result, expected_status, exit_code, detail
+):
+    _stub_engine(monkeypatch, **engine_result)
+    request = _request(tmp_path)
+    report = _first_pass(tmp_path, request)
+    corner_id = _failing_id(report)
+
+    code = cli.main(
+        [
+            "sim",
+            str(request),
+            "--regrade",
+            str(report),
+            "--check-id",
+            "dip",
+            "--corner",
+            corner_id,
+            "--format",
+            "text",
+        ]
+    )
+
+    assert code == exit_code
+    text = capsys.readouterr().out
+    assert f"klt sim --regrade: {expected_status} " in text
+    assert f"{corner_id}: {expected_status}" in text
+    assert "check: dip" in text
+    assert "tmax=25p" in text and "reltol=" in text
+    assert detail in text
