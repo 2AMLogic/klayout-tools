@@ -1677,7 +1677,8 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    instance_groups = _validate_instance_groups(request.get("instance_groups"))
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -1693,7 +1694,6 @@ def _run_single_corner(
         request.get("constraints") or {}, PlaceAndRouteError
     )
     seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
@@ -1790,7 +1790,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
-            instance_groups=instance_groups,
+            instance_groups=groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -2379,7 +2379,7 @@ def _run_single_corner(
         ),
         # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
-            read_def_instance_groups(audited_def_path, instance_groups)
+            read_def_instance_groups(audited_def_path, groups)
             if audited_def_path
             else None
         ),

@@ -4089,7 +4089,9 @@ Add `order.fixed_origin_um` to place the first listed standard cell at a
 specified DEF coordinate in micrometres. Each subsequent member advances by
 `pitch_um` in positive x for a row or positive y for a column. Use literal
 linked instance names, including any bus brackets. A member may belong to one
-fixed group and any number of measurement groups.
+fixed group and any number of measurement groups. Placement begins at the
+`place` stage. A fixed origin requires `target_stage` to be `place`, `cts`,
+or `route` (the default).
 
 ```json
 {
