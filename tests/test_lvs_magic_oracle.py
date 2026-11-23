@@ -231,21 +231,20 @@ def _errors(report: dict) -> list[dict]:
 
 
 def _implicated_device_classes(report: dict) -> set[str]:
+    """Device classes responsible for a mismatch; advisories can also name devices."""
     return {
         entry["device"]["class"].lower()
-        for entry in report["mismatches"]
+        for entry in _errors(report)
         if entry.get("device") and entry["device"].get("class")
     }
 
 
 def _reference_device_ids(report: dict) -> set[str]:
-    """Reference-side device identifiers the report names. The reference
-    netlist is byte-identical across both pipelines, so these are directly
-    comparable (layout-side identifiers are each extractor's own instance
-    names and are not)."""
+    """Reference devices named by mismatch errors. Both pipelines read the same
+    reference netlist, while each extractor assigns its own layout-side names."""
     return {
         entry["device"]["reference"]
-        for entry in report["mismatches"]
+        for entry in _errors(report)
         if entry.get("device") and entry["device"].get("reference")
     }
 
