@@ -37,6 +37,31 @@ from __future__ import annotations
 from typing import Any
 
 from .gen_compose_base import _VIA_LANDING_SIZE_UM, _drop_array_extra_um
+from .gen_compose_plane_change import RouteConflict
+
+
+def leg_pad_notch_conflict(
+    region: Any,
+    layer: tuple[int, int] | None,
+    spacing: tuple[float, str] | None,
+    dbu: float,
+) -> RouteConflict | None:
+    """Check the primary layer's drawn pad and backbone on the output grid."""
+    if spacing is None:
+        return None
+    required_um, rule = spacing
+    spacing_dbu = round(required_um / dbu)
+    if spacing_dbu <= 0:
+        return None
+    gaps = region.merged().notch_check(spacing_dbu)
+    if gaps.is_empty():
+        return None
+    closest_um = min(pair.distance() for pair in gaps) * dbu
+    return RouteConflict(
+        f"this leg's landing pad and backbone form a {closest_um:.4g}um notch "
+        f"on layer {layer}. '{rule}' requires at least {required_um:.4g}um "
+        "of spacing. Move the turn farther from the landing pad."
+    )
 
 
 def _pad_is_intermediate(
