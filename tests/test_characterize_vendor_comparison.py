@@ -26,11 +26,11 @@ Two tiers:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
+from helpers.ihp_pdk import find_ihp_sg13g2
 from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import characterize, liberty_compare
 from klayout_tools.cli import main
@@ -397,31 +397,13 @@ def test_default_tolerances_cover_every_compared_field():
 # --------------------------------------------------------------------------- #
 
 
-def _find_ihp_sg13g2() -> Path | None:
-    """The fetched IHP-Open-PDK `ihp-sg13g2` variant: `$KLT_IHP_SG13G2_ROOT`
-    (the variant directory itself), else `pdks/ihp-open-pdk/ihp-sg13g2` in
-    this checkout, else in the checkout this worktree hangs off (a Loom
-    worktree under `.loom/worktrees/` shares the main checkout's gitignored
-    `pdks/`)."""
-    candidates = []
-    override = os.environ.get("KLT_IHP_SG13G2_ROOT")
-    if override:
-        candidates.append(Path(override))
-    repo = Path(__file__).resolve().parents[1]
-    candidates.append(repo / "pdks" / "ihp-open-pdk" / "ihp-sg13g2")
-    if repo.parent.name == "worktrees" and repo.parent.parent.name == ".loom":
-        candidates.append(repo.parents[2] / "pdks" / "ihp-open-pdk" / "ihp-sg13g2")
-    for root in candidates:
-        if (root / "libs.tech" / "ngspice" / "osdi" / "psp103.osdi").is_file() and (
-            root / "libs.ref" / "sg13g2_stdcell" / "lib"
-        ).is_dir():
-            return root
-    return None
-
-
-IHP_SG13G2 = _find_ihp_sg13g2()
+IHP_SG13G2 = find_ihp_sg13g2()
+#: The shared resolver gates on the ngspice assets every live tier needs;
+#: this tier additionally reads the vendor's own stdcell Liberty tree.
 _SKIP_NO_VENDOR = pytest.mark.skipif(
-    IHP_SG13G2 is None or not HAVE_NGSPICE,
+    IHP_SG13G2 is None
+    or not (IHP_SG13G2 / "libs.ref" / "sg13g2_stdcell" / "lib").is_dir()
+    or not HAVE_NGSPICE,
     reason=(
         "needs ngspice plus a fetched IHP-Open-PDK with compiled OSDI models "
         "(scripts/fetch-ihp-sg13g2.sh + scripts/fetch-sg13g2-sim-toolchain.sh, "
