@@ -439,10 +439,8 @@ def multi_row_info(
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
 
-    Issue #6969: ``joint_covered`` is the ``joint_grid`` rows every named
-    member proved (:func:`~.signoff_joint_rows.evaluate_joint_rows`); they
-    join ``covered`` as ``derived`` -- never ``asserted`` -- and the
-    per-member ``joint_rows`` shortfalls are reported, omitted when empty.
+    Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
+    ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
     """
     if spec_rows is None:
         return {}
@@ -461,7 +459,6 @@ def multi_row_info(
             # A row covered by any derived citation is machine-checked.
             if derived or r not in row_sources:
                 row_sources[r] = "derived" if derived else "asserted"
-    # Issue #6969: a joint row's coverage is the set's, always derived.
     covered.update(joint_covered)
     row_sources.update(dict.fromkeys(joint_covered, "derived"))
     failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)

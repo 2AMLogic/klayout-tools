@@ -227,6 +227,7 @@ from .signoff_generator_batch import (
 # The joint-grid spec-row form (issue #6969), hooked into
 # `_grade_multi_citation` below; moved names are for this file's ceiling.
 from .signoff_joint_rows import (
+    JointOutcome,
     _citation_label,
     _members_rows_declared,
     _multi_citation_rows,
@@ -6756,14 +6757,14 @@ def _post_member_outcome(
     met_envelopes: dict[int, dict[str, Any]] | None,
     row_info: dict[str, Any],
     extra: dict[str, Any],
-    joint: Any = None,
+    joint: JointOutcome | None = None,
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
     before partial coverage: the joint-grid declaration check (issue #6969
     -- a member no citation names, or a Monte Carlo one) first, then the
     justified-gap declaration check (issue #5599), then the timing-margin
     rule (issue #4314). ``None`` when none applies."""
-    problem = getattr(joint, "problem", None)
+    problem = joint.problem if joint is not None else None
     if problem is not None:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
     rationale_unmet = _justified_gap_rationale_outcome(spec_rows, row_info, extra)

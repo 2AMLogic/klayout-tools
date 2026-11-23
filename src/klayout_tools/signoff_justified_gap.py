@@ -258,7 +258,6 @@ def _justified_gap_rationale_outcome(
         return None
     reason, detail = failure
     return "unmet", reason, None, {**row_info, **detail}, extra
-    return None
 
 
 def justified_gap_report_fields(
