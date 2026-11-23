@@ -83,44 +83,6 @@ def resolve_report_deck(
     return None, deck_not_found_entry(deck, name)
 
 
-def recorded_top(committed: dict[str, Any], error_cls: type[Exception]) -> str | None:
-    """The ``--top`` cell a committed report's top-level ``top`` field
-    records (issue #7000), or ``None`` for a report that carries none
-    (every report predating the field, and every unscoped run since).
-
-    A present but malformed value raises ``error_cls`` rather than
-    silently replaying an unscoped run, which would turn a recorded cell
-    scope into a whole-stream claim. ``error_cls`` is injected (the same
-    pattern :func:`klayout_tools._layout.select_top_cells` uses) because
-    this module sits below ``drc``'s own exception class in the import
-    graph. Split out of ``drc.py`` with :func:`recorded_tile`` to keep that
-    module under its per-file size ceiling.
-    """
-    if "top" not in committed:
-        return None
-    top = committed["top"]
-    if not isinstance(top, str) or not top.strip():
-        raise error_cls(
-            "committed report's 'top' must be a non-empty cell name string "
-            "to replay the recorded scope"
-        )
-    return top
-
-
-def recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
-    """The ``(columns, rows)`` a committed report's ``tile`` echo records
-    (issue #4226), or ``None`` for a report that carries none. Moved from
-    ``drc.py`` (unchanged) beside :func:`recorded_top`` -- the other
-    committed-report argument reader ``rerun_drc_report`` replays."""
-    recorded = committed.get("tile")
-    if not isinstance(recorded, dict):
-        return None
-    cols, rows = recorded.get("columns"), recorded.get("rows")
-    if isinstance(cols, int) and isinstance(rows, int):
-        return cols, rows
-    return None
-
-
 def _report_hash_checks(
     committed: dict[str, Any],
     *,

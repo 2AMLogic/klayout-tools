@@ -61,16 +61,19 @@ def _stub_klayout(monkeypatch) -> None:
     monkeypatch.setattr(engine_module.subprocess, "run", fake_run)
 
 
-def _committed_report(tmp_path, monkeypatch, capsys) -> tuple[Path, dict]:
+def _committed_report(
+    tmp_path, monkeypatch, capsys, extra_argv=(), *, cells=("TOP",)
+) -> tuple[Path, dict]:
     """Run ``klt drc --engine klayout`` once and return the report written to
     disk (a repo-scoped input, so ``--check``/``--rerun`` can locate it)."""
     _stub_klayout(monkeypatch)
-    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git").mkdir(exist_ok=True)
     layout = kdb.Layout()
     layout.dbu = 0.001
-    layout.create_cell("TOP").shapes(layout.layer(1, 0)).insert(
-        kdb.Box(0, 0, 100, 1000)
-    )
+    for cell in cells:
+        layout.create_cell(cell).shapes(layout.layer(1, 0)).insert(
+            kdb.Box(0, 0, 100, 1000)
+        )
     gds = str(tmp_path / "test.gds")
     layout.write(gds)
     deck = tmp_path / "deck.lydrc"
@@ -79,6 +82,7 @@ def _committed_report(tmp_path, monkeypatch, capsys) -> tuple[Path, dict]:
     argv = [
         *("drc", gds, "--engine", "klayout", "--deck-file", str(deck)),
         *("--expect-rule-categories", "2"),
+        *extra_argv,
     ]
     assert main([*argv, "--format", "json"]) == 0
     text = capsys.readouterr().out
@@ -347,77 +351,136 @@ def test_environment_block_is_dropped_only_when_the_exclusions_empty_it():
     assert result["fresh"] == fresh  # the embedded fresh report is verbatim
 
 
-# --------------------------------------------------------------------------- #
-# --top replay (issue #7000): a scoped native report on a multi-top stream.
-# --------------------------------------------------------------------------- #
+# Issue #6986: the native-engine half of the rerun PDK fix. A report produced
+# with `--pdk`/`--pdk-root` must re-verify in full mode; before the fix the
+# rerun passed no PDK selection into `run_drc_klayout_engine`, so
+# `provenance.pdk` always came back `fresh: null` and drifted.
 
 
-def _scoped_multi_top_report(tmp_path, monkeypatch, capsys) -> tuple[Path, dict]:
-    """Run ``klt drc --engine klayout --top LV`` on a two-top stream and
-    return the report written to disk (repo-scoped input, so ``--rerun``
-    can locate it)."""
-    _stub_klayout(monkeypatch)
-    (tmp_path / ".git").mkdir()
-    layout = kdb.Layout()
-    layout.dbu = 0.001
-    for name in ("LV", "MV"):
-        layout.create_cell(name).shapes(layout.layer(1, 0)).insert(
-            kdb.Box(0, 0, 100, 1000)
-        )
-    gds = str(tmp_path / "multi.gds")
-    layout.write(gds)
-    deck = tmp_path / "deck.lydrc"
-    deck.write_text("# stub deck\n", encoding="utf-8")
-
-    argv = [
-        *("drc", gds, "--engine", "klayout", "--deck-file", str(deck)),
-        *("--top", "LV", "--expect-rule-categories", "2"),
-    ]
-    assert main([*argv, "--format", "json"]) == 0
-    text = capsys.readouterr().out
-    report_path = tmp_path / "scoped.json"
-    report_path.write_text(text, encoding="utf-8")
-    return report_path, json.loads(text)
+def _make_pdk_install(tmp_path, *variants: str) -> str:
+    """Minimal on-disk PDK install `find_pdk` can resolve -- the same shape
+    `tests/test_drc.py`'s helper of that name builds, for several variants."""
+    root = tmp_path / "pdk_install"
+    for variant in variants:
+        (root / variant / "libs.tech").mkdir(parents=True, exist_ok=True)
+    return str(root)
 
 
-def test_scoped_native_report_records_the_requested_top(tmp_path, monkeypatch, capsys):
-    _, report = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
+def test_rerun_resolves_pdk_from_explicit_flags(tmp_path, monkeypatch, capsys):
+    """A `--engine klayout` report produced with `--pdk`/`--pdk-root`
+    re-verifies with the same explicit flags (issue #6986)."""
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report_path, _ = _committed_report(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        extra_argv=["--pdk", "sky130A", "--pdk-root", root],
+    )
 
-    assert report["top"] == "LV"
+    code = main(
+        [
+            "drc",
+            "--check",
+            str(report_path),
+            "--rerun",
+            "--pdk",
+            "sky130A",
+            "--pdk-root",
+            root,
+            "--format",
+            "json",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert result["status"] == "match"
+    assert result["fresh"]["provenance"]["pdk"]["name"] == "sky130A"
 
 
-def test_unscoped_native_report_omits_the_top_field(tmp_path, monkeypatch, capsys):
-    _, report = _committed_report(tmp_path, monkeypatch, capsys)
-
-    assert "top" not in report
-
-
-def test_rerun_of_a_scoped_native_report_matches_on_a_multi_top_stream(
+def test_rerun_resolves_pdk_from_the_environment_via_the_recorded_name(
     tmp_path, monkeypatch, capsys
 ):
-    """The issue #7000 native case: before the recorded cell, the replay
-    passed ``top=None`` and the engine refused the two-top stream outright
-    (exit 1, ``multiple_top_cells``); replaying the recorded scope matches."""
-    report_path, _ = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
+    """No explicit flags on the rerun: `$PDK_ROOT` plus the variant name the
+    committed report records re-resolve the install (issue #6986). The
+    producing run also resolves through `$PDK_ROOT` (variant flag, no root
+    flag), so both sides name the same discovery source."""
+    monkeypatch.delenv("PDK", raising=False)
+    root = _make_pdk_install(tmp_path, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", root)
+    report_path, _ = _committed_report(
+        tmp_path, monkeypatch, capsys, extra_argv=["--pdk", "sky130A"]
+    )
 
     code, result = _rerun(report_path, capsys)
 
-    assert result["status"] == "match"
-    assert result["drift"] == []
     assert code == 0
-    assert result["fresh"]["top"] == "LV"
+    assert result["status"] == "match"
+    assert result["fresh"]["provenance"]["pdk"]["name"] == "sky130A"
 
 
-def test_rerun_of_a_topless_native_report_keeps_the_engine_default(
+def test_rerun_pdk_explicit_other_variant_drifts_on_the_pdk_name(
     tmp_path, monkeypatch, capsys
 ):
-    """A native report predating the field has no scope to replay, so the
-    rerun keeps the engine's default: a two-top stream is refused with the
-    standard error envelope, exactly as a fresh unscoped run is."""
-    report_path, _ = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
-    _rewrite(report_path, lambda r: r.pop("top"))
+    """Explicitly selecting the other installed variant drifts and names the
+    changed PDK (issue #6986), the native-engine counterpart of the curated
+    test."""
+    root = _make_pdk_install(tmp_path, "sky130A", "sky130B")
+    report_path, _ = _committed_report(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        extra_argv=["--pdk", "sky130A", "--pdk-root", root],
+    )
 
-    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+    code = main(
+        [
+            "drc",
+            "--check",
+            str(report_path),
+            "--rerun",
+            "--pdk",
+            "sky130B",
+            "--pdk-root",
+            root,
+            "--format",
+            "json",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert result["status"] == "drifted"
+    assert {entry["field"] for entry in result["drift"]} == {"provenance.pdk.name"}
+
+
+def test_rerun_unresolvable_explicit_pdk_exits_one(tmp_path, monkeypatch, capsys):
+    """An explicit `--pdk` that resolves to nothing is the normal exit-1
+    error on the rerun (issue #6986), never a silent `fresh: null`."""
+    monkeypatch.delenv("PDK", raising=False)
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report_path, _ = _committed_report(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        extra_argv=["--pdk", "sky130A", "--pdk-root", root],
+    )
+
+    code = main(
+        [
+            "drc",
+            "--check",
+            str(report_path),
+            "--rerun",
+            "--pdk",
+            "no-such-variant",
+            "--pdk-root",
+            root,
+            "--format",
+            "json",
+        ]
+    )
+    err = capsys.readouterr().err
 
     assert code == 1
-    assert "2 top cells" in capsys.readouterr().err
+    assert "PDK" in json.loads(err)["error"]["message"]

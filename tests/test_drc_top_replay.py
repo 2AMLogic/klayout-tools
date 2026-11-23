@@ -30,6 +30,9 @@ from test_drc import (
     _selection_layout,
     _write_report,
 )
+from test_drc_rerun_klayout_provenance import _committed_report, _rerun, _rewrite
+
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
 @pytest.fixture
@@ -232,3 +235,53 @@ def test_drc_response_schema_validates_scoped_report(tmp_path):
     unscoped = run_drc(str(path), "sky130")
     assert "top" not in unscoped
     validator.validate(unscoped)
+
+
+@pytest.fixture
+def scoped_native_report(tmp_path, monkeypatch, capsys):
+    return _committed_report(
+        tmp_path, monkeypatch, capsys, extra_argv=("--top", "LV"), cells=("LV", "MV")
+    )
+
+
+def test_scoped_native_report_records_the_requested_top(scoped_native_report):
+    _, report = scoped_native_report
+
+    assert report["top"] == "LV"
+
+
+def test_unscoped_native_report_omits_the_top_field(tmp_path, monkeypatch, capsys):
+    _, report = _committed_report(tmp_path, monkeypatch, capsys)
+
+    assert "top" not in report
+
+
+def test_rerun_of_a_scoped_native_report_matches_on_a_multi_top_stream(
+    scoped_native_report, capsys
+):
+    """The issue #7000 native case: before the recorded cell, the replay
+    passed ``top=None`` and the engine refused the two-top stream outright
+    (exit 1, ``multiple_top_cells``); replaying the recorded scope matches."""
+    report_path, _ = scoped_native_report
+
+    code, result = _rerun(report_path, capsys)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert code == 0
+    assert result["fresh"]["top"] == "LV"
+
+
+def test_rerun_of_a_topless_native_report_keeps_the_engine_default(
+    scoped_native_report, capsys
+):
+    """A native report predating the field has no scope to replay, so the
+    rerun keeps the engine's default: a two-top stream is refused with the
+    standard error envelope, exactly as a fresh unscoped run is."""
+    report_path, _ = scoped_native_report
+    _rewrite(report_path, lambda r: r.pop("top"))
+
+    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    assert code == 1
+    assert "2 top cells" in capsys.readouterr().err

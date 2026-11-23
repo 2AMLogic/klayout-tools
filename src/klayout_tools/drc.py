@@ -43,7 +43,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import drc_report_check, env_provenance
+from . import env_provenance
 from ._drc_edge_pair_hull import _edge_pair_hull_points
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
@@ -1234,7 +1234,6 @@ class _DrcSetup:
     # for a default run.
     tile: tuple[int, int] | None = None
     tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
-    # Issue #7000 (`--top`): the requested cell, recorded verbatim for replay.
     top: str | None = None
 
 
@@ -2147,7 +2146,6 @@ def _assemble_report(
             if setup.tile is None
             else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
         ),
-        # Issue #7000: `--top` runs only -- the cell `--check --rerun` replays.
         **({} if setup.top is None else {"top": setup.top}),
     }
     report["provenance"] = build_provenance(
@@ -2587,51 +2585,23 @@ def check_drc_report(
     return build_check_result(report_path=report_path, checks=checks)
 
 
-def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
-    """The ``--rules`` selectors a committed curated report was run with
-    (issue #2768), or ``None`` for a full-deck report (no ``rule_selection``
-    key -- including every report predating the flag).
-
-    Raises :class:`DrcError` for a present but malformed block rather than
-    silently replaying it as a full run, which would turn a recorded subset
-    into a full-deck claim.
-    """
-    selection = committed.get("rule_selection")
-    if selection is None:
-        return None
-    selectors = selection.get("selectors") if isinstance(selection, dict) else None
-    if (
-        not isinstance(selectors, list)
-        or not selectors
-        or not all(isinstance(token, str) and token.strip() for token in selectors)
-    ):
-        raise DrcError(
-            "committed report's 'rule_selection.selectors' must be a non-empty "
-            "list of rule selector strings to replay the selection"
-        )
-    return parse_rule_selectors(selectors)
-
-
 def rerun_drc_report(
-    report_path: str, *, input_path: str | None = None, deck_path: str | None = None
+    report_path: str,
+    *,
+    input_path: str | None = None,
+    deck_path: str | None = None,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
     ``report_path`` by actually re-running the DRC deck it names and
     diffing the fresh report against the committed one.
 
-    Re-runs against exactly the ``file``/``deck``/``engine`` the committed
-    report itself names -- :func:`run_drc_klayout_engine` when
-    ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
-    engine) otherwise -- replaying a curated ``--rules`` subset's recorded
-    ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`),
-    the recorded ``tile`` echo (issue #4226) and the recorded ``top`` cell
-    (issue #7000, :func:`klayout_tools.drc_report_check.recorded_top`) for
-    either engine. **Legacy limitation**: a report that records no ``top``
-    -- every report predating #7000, every unscoped run since -- keeps the
-    engine's default (all tops curated; single-top required for
-    ``klayout``), so a legacy scoped report on a multi-top stream
-    legitimately drifts; regenerating it acquires the name.
+    Replays the recorded file and deck using the original engine. Both engines
+    replay the recorded ``top`` cell. Reports without it use each engine's
+    default (all tops for curated, a single top required for KLayout).
+    Curated reruns also replay the recorded rule selectors and tile dimensions.
 
     Diffs the fresh report against the committed one via
     :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
@@ -2648,7 +2618,29 @@ def rerun_drc_report(
     Raises :class:`DrcError` for a missing/unparseable committed report, a
     report missing ``file``/``deck`` to rerun, or any error the rerun itself
     raises (bad file, unknown deck, engine error) -- never a traceback.
+
+    ``pdk_variant``/``pdk_root`` (the rerun invocation's own
+    ``--pdk``/``--pdk-root`` flags, issue #6986) select the PDK the fresh
+    run resolves into ``provenance.pdk``, so a report produced with a
+    resolved PDK can re-verify in full mode instead of always drifting
+    ``provenance.pdk`` with ``fresh: null``. Priority: the explicit flags,
+    then the variant name the committed report itself recorded, never
+    ``$PDK`` (:func:`klayout_tools.drc_rerun_replay._rerun_pdk_selection`);
+    the root keeps the existing ``--pdk-root``/``$PDK_ROOT``/search-order
+    machinery a fresh run uses. A report that records no PDK re-runs with
+    none -- ``fresh`` ``provenance.pdk`` stays ``null`` even on a host with
+    ``$PDK`` set -- and an unresolvable selection raises the fresh run's
+    own :class:`DrcError`.
     """
+    # Replay helpers live in `.drc_rerun_replay` (this module's size
+    # ceiling), function-level like the `drc_klayout_engine` import below.
+    from .drc_rerun_replay import (
+        _recorded_rule_selectors,
+        _recorded_tile,
+        _recorded_top,
+        _rerun_pdk_selection,
+    )
+
     committed = _load_committed_report(report_path, DrcError)
     if committed.get("mode") == "crosscheck":
         raise DrcError(
@@ -2669,8 +2661,12 @@ def rerun_drc_report(
         raise DrcError(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
-    # Issue #7000: the recorded `--top` cell, replayed for either engine.
-    top = drc_report_check.recorded_top(committed, DrcError)
+    top = _recorded_top(committed)
+    # Issue #6986: the fresh run resolves `provenance.pdk` too -- explicit
+    # flags first, then the variant the committed report itself recorded
+    # (never `$PDK`) -- so a PDK-resolved report re-verifies instead of
+    # always drifting `fresh: null`; a null-PDK report re-runs with none.
+    eff_variant, eff_root = _rerun_pdk_selection(committed, pdk_variant, pdk_root)
     if committed.get("engine") == "klayout":
         # Issue #5709: same resolver as --check (override, recorded, packaged).
         deck, missing = resolve_report_deck(committed, deck_path)
@@ -2694,6 +2690,8 @@ def rerun_drc_report(
             deck,
             top=top,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
+            pdk_variant=eff_variant,
+            pdk_root=eff_root,
             # Issue #2697: reproduce the original coverage assertion too,
             # or a committed `clean` would always drift to `coverage_unknown`.
             # Issue #2806: dispatched on its `kind`; a set assertion replays
@@ -2709,11 +2707,13 @@ def rerun_drc_report(
             file_path,
             deck,
             top=top,
+            pdk_variant=eff_variant,
+            pdk_root=eff_root,
             rules=_recorded_rule_selectors(committed),
             # Issue #3483: replay the waivers the committed report applied.
             waivers_file=get_path(committed, ("provenance", "waivers", "file")),
             # Issue #4226: replay the abutment context the report was run in.
-            tile=drc_report_check.recorded_tile(committed),
+            tile=_recorded_tile(committed),
         )
 
     return drc_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
