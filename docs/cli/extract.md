@@ -8239,7 +8239,7 @@ the builder's own constants apply (`MAX_GRAPH_TERMINALS`,
 the report is byte-identical to a run made before the flags existed. A
 `graph_too_large` diagnostic names the cap that was exceeded and the value
 that was applied -- `65 terminals exceed the 64 cap`, `... decomposing it
-needs up to 4623 mesh cells, over this build's 4096-mesh-cell cap`, `4 piece
+needs up to 4669 mesh cells, over this build's 4096-mesh-cell cap`, `4 piece
 nodes exceed the 3 cap`, `6 nodes / 5 edges exceed the 5000 / 4 caps` -- so
 the message says which flag to raise. The node cap is then checked a second
 time on the assembled graph (pieces plus ports, together with the edge cap),

@@ -83,7 +83,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
 
-# Re-export flags used by the extraction and CLI entry points.
+# Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
     DEFAULT_ENGINE as DEFAULT_ENGINE,
 )
