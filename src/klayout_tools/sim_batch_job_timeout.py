@@ -29,6 +29,7 @@ from ._jsonnum import is_finite_number
 from .sim_batch_contract import (
     _BATCH_PROVISION_SLACK_S,
     BATCH_MAX_UNITS_CODE,
+    DEFAULT_POLL_INTERVAL_S,
     JOB_CEILING_BASIS_CALLER,
     JOB_CEILING_CHECK_MODES,
 )
@@ -36,6 +37,13 @@ from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim_batch import BatchConfig
+
+#: Machine-readable ``error.code`` of an invalid ``request.batch.poll_interval_s``
+#: or ``poll_timeout_s`` (issue #7543). Defined here, beside the resolvers that
+#: raise it, so ``sim_batch_contract`` (at its 500-line limit) does not grow.
+#: ``sim_batch.dry_run_runner_check`` re-raises it even on a host with no
+#: configured batch runner.
+BATCH_POLL_KNOB_CODE = "batch_poll_knob_invalid"
 
 
 def resolve_job_timeout_s(batch_spec: dict[str, Any]) -> float | None:
@@ -52,6 +60,48 @@ def resolve_job_timeout_s(batch_spec: dict[str, Any]) -> float | None:
         raise SimError(
             "request.batch.job_timeout_s must be a positive number of "
             f"seconds (got {value!r})"
+        )
+    return float(value)
+
+
+def resolve_poll_interval_s(batch_spec: dict[str, Any]) -> float:
+    """``request.batch.poll_interval_s`` (issue #7543): how often the client
+    re-reads ``status.json`` while polling a batch job -- a finite,
+    non-negative number of seconds (default
+    :data:`~klayout_tools.sim_batch_contract.DEFAULT_POLL_INTERVAL_S`),
+    else :class:`~klayout_tools.sim.SimError` raised from
+    :func:`~klayout_tools.sim_batch._resolve_batch_config`, i.e. before any
+    S3 write, the same early-refusal discipline as the other ``batch.*``
+    resolvers. A ``bool`` is refused even though it is an ``int`` subclass,
+    and ``0`` is accepted (a poll-every-loop request). Replaces the bare
+    ``float(batch_spec.get(...))`` that let a malformed value escape as an
+    uncaught ``ValueError``/``TypeError`` traceback and silently accepted
+    ``true``/non-finite/negative values."""
+    value = batch_spec.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S)
+    if not is_finite_number(value) or value < 0:
+        raise SimError(
+            "request.batch.poll_interval_s must be a non-negative number of "
+            f"seconds (got {value!r})",
+            code=BATCH_POLL_KNOB_CODE,
+        )
+    return float(value)
+
+
+def resolve_poll_timeout_s(batch_spec: dict[str, Any], default: float) -> float:
+    """Validate the explicit polling timeout or the caller's derived budget.
+
+    Both must be finite, non-negative seconds. Zero stops at the first poll.
+    """
+    value = batch_spec.get("poll_timeout_s", default)
+    if not is_finite_number(value) or value < 0:
+        source = (
+            "request.batch.poll_timeout_s"
+            if "poll_timeout_s" in batch_spec
+            else "derived batch poll timeout"
+        )
+        raise SimError(
+            f"{source} must be a non-negative number of seconds (got {value!r})",
+            code=BATCH_POLL_KNOB_CODE,
         )
     return float(value)
 

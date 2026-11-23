@@ -46,6 +46,7 @@ from .gen_compose_pad_conflicts import (  # noqa: F401 -- re-export (see above)
     _leg_conflict_message,
     _pad_conflict_escape_note,
     _pad_is_intermediate,
+    _pad_other_block_contact_reason,
     _terminal_pitch_um,
 )
 

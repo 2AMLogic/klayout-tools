@@ -337,3 +337,19 @@ def test_side_pair_on_a_pad_also_in_an_s4_pair_repairs_once():
     assert report["tip_check"]["violations"] == 0
     pad2 = _region(layout, top, 19).interacting(kdb.Region(kdb.Box(27, -11, 45, 11)))
     assert pad2.bbox().height() == 37
+
+
+def test_successive_local_merges_preserve_whole_conductors():
+    from klayout_tools.place_and_route_via_tip_repair import _merge_repair
+
+    # Edits at opposite ends of a long wire must see each other's full conductor.
+    metal = kdb.Region(kdb.Box(0, 0, 500, 10)) + kdb.Region(kdb.Box(0, 20, 10, 30))
+    indexed = kdb.Shapes()
+    indexed.insert(metal)
+    for edit in (kdb.Box(0, 10, 10, 20), kdb.Box(490, 10, 500, 20)):
+        extra = kdb.Region(edit)
+        _merge_repair(kdb, indexed, extra)
+        metal = (metal + extra).merged()
+        actual = kdb.Region(indexed)
+        assert actual.count() == metal.count()
+        assert (actual ^ metal).is_empty()

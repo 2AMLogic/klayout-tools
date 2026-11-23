@@ -2309,15 +2309,9 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
-    subcommands.
+    """Register PDK discovery, model verification and inspection commands."""
+    from . import pdk_osdi_cmd
 
-    The other verbs are flat; ``pdk`` groups discovery operations under one
-    verb (kicad-tools convention for multi-operation capabilities), so it uses
-    argparse sub-subparsers. Each ``--format`` stays a per-subcommand option,
-    matching the flat verbs.
-    """
     pdk_parser = subparsers.add_parser(
         "pdk",
         help="discover and resolve an installed PDK",
@@ -2411,6 +2405,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     add_expect_bundle_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
+    pdk_osdi_cmd.add_parser(pdk_sub, _add_pdk_args, _add_format_arg)
 
     cells_parser = pdk_sub.add_parser(
         "cells",
@@ -4110,13 +4105,11 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     erc_input_group.add_argument(
         "file",
         nargs="?",
-        default=None,
         help=("path to the routed GDSII or OASIS layout for an ERC run"),
     )
     erc_parser.add_argument(
         "spec",
         nargs="?",
-        default=None,
         help=(
             "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
             "mapping GDS layer/datatype pairs to fabrication-order "
@@ -4127,7 +4120,6 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     erc_parser.add_argument(
         "--top",
-        default=None,
         help=(
             "top cell to analyse when the stream has more than one "
             "(required in that case -- klt erc operates on exactly one "
@@ -4136,7 +4128,6 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     erc_parser.add_argument(
         "--pdk",
-        default=None,
         help=(
             "PDK antenna-ratio limit table to check each level's "
             "antenna_ratio against (currently: sky130, ihp-sg13g2, gf180mcu). "
@@ -4149,7 +4140,6 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     erc_parser.add_argument(
         "--deck",
-        default=None,
         help=(
             "curated extraction deck (currently: "
             f"{_deck_names_str()}) whose own device-body marker "
@@ -4218,9 +4208,14 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "output is byte-identical."
         ),
     )
+    erc_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        help="also write the full ERC report as JSON (gzip for .gz) on a layout run",
+    )
     erc_input_group.add_argument(
         "--check",
-        default=None,
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt erc --format json' report "
@@ -4242,7 +4237,6 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     erc_input_group.add_argument(
         "--validate-spec",
-        default=None,
         metavar="SPEC",
         help=(
             "validate the JSON spec file SPEC (schema, unknown keys, and "

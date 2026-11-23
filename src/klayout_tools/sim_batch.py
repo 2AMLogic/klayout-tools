@@ -194,7 +194,6 @@ from .sim_batch_contract import (  # noqa: F401
     DEFAULT_BATCH_MAX_JOB_SECONDS,
     DEFAULT_BATCH_PROFILE,
     DEFAULT_INTERRUPTED_GRACE_S,
-    DEFAULT_POLL_INTERVAL_S,
     FLEET_CONFIG_FILENAME,
     FLEET_MAX_JOB_SECONDS_KEY,
     JOB_CEILING_BASIS,
@@ -242,6 +241,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_STR_MAX,
     _assess_deck_support,
     _bounded_model_inputs,
+    _bounded_simulator,
     _bounded_str,
     _deck_preflight_lines,
     _runner_supports_decks,
@@ -253,10 +253,13 @@ from .sim_batch_contract_worker import (  # noqa: F401
     runner_threads_per_worker,
 )
 from .sim_batch_job_timeout import (
+    BATCH_POLL_KNOB_CODE,
     _resolve_job_ceiling_check,
     _resolve_max_units_per_job,
     assess_caller_job_timeout,
     resolve_job_timeout_s,
+    resolve_poll_interval_s,
+    resolve_poll_timeout_s,
 )
 from .sim_batch_knobs import (
     _resolve_interrupted_grace_s,
@@ -584,9 +587,9 @@ def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
     raise SimError(
         f"backend 'batch': models.pdk_root {root!r} is a directory on the "
         "submitting host, but it is forwarded to the runner verbatim, where "
-        "that path does not exist. Drop models.pdk_root and name the variant "
-        "with models.pdk (the runner uses its own PDK install); nothing was "
-        "submitted",
+        "that path does not exist. Drop models.pdk_root, name the variant with "
+        "models.pdk (the runner uses its own install) and pin this client's "
+        "install with $PDK_ROOT if needed; nothing was submitted",
         code=BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE,
     )
 
@@ -666,6 +669,9 @@ def _resolve_batch_config(
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
     job_timeout_s = resolve_job_timeout_s(batch_spec)
+    default_poll_timeout_s = _default_batch_poll_timeout_s(
+        corner_count, timeout_s, job_timeout_s=job_timeout_s
+    )
     config = BatchConfig(
         provision_script=provision_script,
         image_pointer_key=f"{fleet.get('BATCH_IMAGES_PREFIX', 'images').strip('/')}/"
@@ -688,17 +694,8 @@ def _resolve_batch_config(
             or fleet.get("BATCH_REGION")
             or None
         ),
-        poll_interval_s=float(
-            batch_spec.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S)
-        ),
-        poll_timeout_s=float(
-            batch_spec.get(
-                "poll_timeout_s",
-                _default_batch_poll_timeout_s(
-                    corner_count, timeout_s, job_timeout_s=job_timeout_s
-                ),
-            )
-        ),
+        poll_interval_s=resolve_poll_interval_s(batch_spec),
+        poll_timeout_s=resolve_poll_timeout_s(batch_spec, default_poll_timeout_s),
         capacity_wait_s=capacity_wait_s,
         capacity_retries=resolve_capacity_retries(batch_spec),
         runner_version_check=runner_version_check,
@@ -759,6 +756,9 @@ def dry_run_runner_check(
             BATCH_RUNNER_MISMATCH_CODE,
             BATCH_MAX_UNITS_CODE,
             ENGINE_VERSION_UNMET_CODE,
+            # Issue #7543: a malformed poll knob is the request author's,
+            # never the host's, so the dry run refuses it like the submit.
+            BATCH_POLL_KNOB_CODE,
         ):
             raise
         return None
@@ -1579,18 +1579,16 @@ def poll_status(
 
     ``unstarted_grace_s`` (issue #4291; ``--attach`` sets it) prints one
     stderr diagnostic once that many seconds pass with no ``status.json``
-    ever observed: the job has a ``job.json`` but looks never to have been
-    launched. It only reports -- polling continues, since a slow boot is
-    indistinguishable from a refused launch from here.
+    ever observed (a ``job.json`` but no launch): it only reports -- polling
+    continues, a slow boot being indistinguishable from a refused launch.
 
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
-    (the caller reports unrun corners rather than a failed sweep) -- or
-    once :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever
-    observed, so a job that never launched does not wait out the (possibly
-    hours-long) serial budget. ``last_state`` is ``None`` in that case.
-    Raises
-    :class:`BatchError` on a state outside the documented set -- a contract
-    violation, surfaced loudly rather than waited on forever.
+    (the caller reports unrun corners rather than a failed sweep), or once
+    :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever seen
+    (``last_state`` ``None``): a never-launched job must not wait out the
+    possibly hours-long serial budget. Raises :class:`BatchError` on any
+    state outside the documented set (a contract violation, surfaced loudly)
+    and ``batch_job_cancelled`` on a fleet-cancelled job (issue #4351).
 
     With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, with
     ``progress=False`` so the two stderr streams do not duplicate each other;
@@ -1627,7 +1625,9 @@ def poll_status(
                 on_state(new_state)
             last_state = new_state
             if last_state in BATCH_TERMINAL_STATES:
-                return status
+                from .sim_batch_cancel import terminal_or_cancelled  # deferred
+
+                return terminal_or_cancelled(job_id, status)
             if last_state not in BATCH_WAITING_STATES:
                 raise BatchError(
                     f"job {job_id}: status.json reported unknown state "
@@ -2013,17 +2013,7 @@ def _read_worker_environment(
         doc = json.loads(raw.decode("utf-8"))
         if not isinstance(doc, dict):
             raise ValueError("not an object")
-        sim_in = doc.get("simulator")
-        sim_in = sim_in if isinstance(sim_in, dict) else {}
-        simulator = {
-            "requested_binary": _bounded_str(sim_in.get("requested_binary")),
-            "binary_source": _bounded_str(sim_in.get("binary_source"), 40),
-            "selected_path": _bounded_str(sim_in.get("selected_path")),
-            "version_banner": _bounded_str(
-                sim_in.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
-            ),
-            "version_probe": _bounded_str(sim_in.get("version_probe"), 40),
-        }
+        simulator = _bounded_simulator(doc.get("simulator"), request)
         pdk_in = doc.get("pdk")
         pdk_in = pdk_in if isinstance(pdk_in, dict) else {}
         pdk = {
@@ -3271,7 +3261,7 @@ def _run_batch(
     request_dir: str | None = None,
     attach_job_id: str | None = None,
     collect_partial: bool = False,
-    shard_fingerprint: str | None = None,
+    shard_fingerprint: str | Callable[[], str] | None = None,
     netlist_sha256: str | None = None,
     explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
@@ -3318,6 +3308,8 @@ def _run_batch(
     launch. The request supplies the corner list and measurement grading, so
     it must be the request the job was submitted from.
     """
+    from . import sim_batch_shards as shards
+
     del analysis, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, probe_abort  # not honored
 
@@ -3325,9 +3317,7 @@ def _run_batch(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     if attach_job_id is not None and attach_job_id.endswith(".json"):
-        from . import sim_batch_shards
-
-        return sim_batch_shards.attach_batch_shards(
+        return shards.attach_batch_shards(
             manifest_path=attach_job_id,
             config=config,
             corner_points=corner_points,
@@ -3383,7 +3373,7 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
-                shard_fingerprint=shard_fingerprint
+                shard_fingerprint=shards.resolve_fingerprint(shard_fingerprint)
                 or (None if checkpoint is None else checkpoint.fingerprint),
                 resume=checkpoint is not None,
             )
