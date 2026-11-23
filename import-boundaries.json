@@ -182,6 +182,7 @@
         "klayout_tools.drc_klayout_launch",
         "klayout_tools.drc_klayout_selection",
         "klayout_tools.drc_klayout_list",
+        "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
