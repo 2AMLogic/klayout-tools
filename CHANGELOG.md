@@ -14,6 +14,9 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- The `klt lvs` report category `device.implausible_dimensions` has severity
+  `warning` and can appear on either side of a matching comparison (#7494).
+
 - **`klt version --format json` lists the install's commands** (#7324): the
   payload gains an additive `commands` field — one `{"name", "summary"}`
   object per top-level verb, sorted by `name`, derived from the live parser
