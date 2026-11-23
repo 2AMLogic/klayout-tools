@@ -357,6 +357,11 @@ from .post_route_sta_stages import (
     _worst_path_lines,
     _worst_path_stage_lines,
 )
+from .post_route_sta_violating_endpoints import (
+    _validate_max_violating_endpoints,
+    _violating_endpoint_lines,
+    _violating_endpoints_corner_field,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -677,6 +682,9 @@ def run_sta(
         ),
         report_ports=_validate_report_ports(request["constraints"], clock_port),
         report_path_stages=_validate_report_path_stages(request["constraints"]),
+        max_violating_endpoints=_validate_max_violating_endpoints(
+            request["constraints"]
+        ),
         false_path_from=_validate_false_path_from(request["constraints"], clock_port),
         report_instances=_validate_report_instances(request["constraints"]),
     )
@@ -924,11 +932,12 @@ def _identity(text: str) -> str:
 
 @dataclass(frozen=True)
 class _StaConstraints:
-    """Issue #7023: the eleven validated port/path constraint values that
+    """Issue #7023: the twelve validated port/path constraint values that
     travel together unchanged from :func:`run_sta` into every corner
     session -- the scalar and per-port input/output delays, the scalar and
     per-port input transitions, the boundary settings, the report ports,
-    the path-stage flag, the false-path sources, and the report instances.
+    the path-stage flag, the violating-endpoint cap, the false-path
+    sources, and the report instances.
 
     Built once after request validation and passed as this one value
     through :func:`_dispatch_sta`, :func:`_run_multi_corner`, and
@@ -947,6 +956,7 @@ class _StaConstraints:
     boundary: dict[str, Any] | None
     report_ports: list[str] | None
     report_path_stages: bool
+    max_violating_endpoints: int | None
     false_path_from: list[str] | None
     report_instances: list[str] | None
 
@@ -1162,6 +1172,9 @@ def _dispatch_sta(
     # `constraints.report_instances`.
     if "instance_paths" in corner_fields:
         response["instance_paths"] = corner_fields["instance_paths"]
+    # Additive field (issue #7418): only when the knob was requested.
+    if "violating_endpoints" in corner_fields:
+        response["violating_endpoints"] = corner_fields["violating_endpoints"]
     # Additive field (issue #2968): the applied exclusion list, present only
     # when the request named `constraints.false_path_from`.
     if constraints.false_path_from:
@@ -1312,6 +1325,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             propagated_clock=propagated_clock,
@@ -1346,6 +1360,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             power_activity=power_activity,
@@ -1447,6 +1462,15 @@ def _run_corner_session(
     corner_fields.update(
         _instance_paths_corner_field(
             completed.stdout or "", constraints.report_instances
+        )
+    )
+    # Additive field (issue #7418): only when the knob was requested.
+    corner_fields.update(
+        _violating_endpoints_corner_field(
+            completed.stdout or "",
+            constraints.max_violating_endpoints,
+            setup_violation_count,
+            hold_violation_count,
         )
     )
     if spef_path is not None:
@@ -3597,6 +3621,7 @@ def _sta_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     propagated_clock: bool = False,
@@ -3713,6 +3738,7 @@ def _sta_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     # Before the completeness query, which must stay the script's last
@@ -3744,6 +3770,7 @@ def _sta_netlist_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
@@ -3830,6 +3857,7 @@ def _sta_netlist_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     lines += _constraint_completeness_lines()
