@@ -8232,11 +8232,15 @@ flag) writes the terminal-equivalent network instead:
 `extract_resistance_network.reduce_terminal_network` Kron-reduces the solved
 `pair_resistance_ohm` matrix onto the net's device terminals (one resistor
 per surviving terminal pair, at most `T(T-1)/2` = 2016 at the 64-terminal
-cap), reproducing every pair value by construction. The emission matches
+cap), reproducing every pair value by construction (a numerically-zero
+drop that would disconnect the terminals reports `pair_resistance_unavailable`
+and keeps the star instead). The emission matches
 each device terminal (position proxy `Device.trans`, the same coarseness
 the star/ladder split uses) to its nearest geometry-derived graph terminal
-one-to-one; a count mismatch or an assignment outside the terminals' own
-spread reports `terminal_mismatch` and keeps the star, as do an
+one-to-one; a count mismatch, an assignment outside the terminals' own
+spread, or one position cannot decide (two terminals of one device share its
+single position, e.g. a diode-connected MOS) reports `terminal_mismatch` and
+keeps the star, as do an
 `unsupported`/`skipped`/disconnected graph, a `--mom-rlc-resistance-ohm`
 override (`mom_rlc_override`) and a `--parasitic-variant` drop
 (`parasitic_variant`). The net's ground capacitance splits equally across
@@ -8348,7 +8352,7 @@ Per net, `nets[].integrity`:
 
 | Field | Type | Description |
 |---|---|---|
-| `open` | object | Terminal-connectivity status. `status` is `"pass"` (every required terminal in one DC component), `"open"` (some are not — `disconnected_count`/`disconnected_terminals[]` name them, first required terminal's component is the reference), or `"not_applicable"` (`reason` says why: a **lumped** net's star hangs every terminal leg off the hub by construction, so the model carries no measurable terminal-connectivity evidence — reported as `not_applicable`, never a pass; a net with no required terminals cannot support the check; a single required terminal is vacuously connected). Only a **distributed** net gets the real union-find over its emitted segment resistors. Zero/one-terminal behavior: zero terminals → `not_applicable`; one terminal → `pass`. |
+| `open` | object | Terminal-connectivity status. `status` is `"pass"` (every required terminal in one DC component), `"open"` (some are not — `disconnected_count`/`disconnected_terminals[]` name them, first required terminal's component is the reference), or `"not_applicable"` (`reason` says why: a **lumped** net's star hangs every terminal leg off the hub by construction, so the model carries no measurable terminal-connectivity evidence — reported as `not_applicable`, never a pass; a net with no required terminals cannot support the check; a single required terminal is vacuously connected). Only a **distributed** net (over its emitted segment resistors) or a **reduced** net (issue #6899, over its emitted pair resistors) gets the real union-find. Zero/one-terminal behavior: zero terminals → `not_applicable`; one terminal → `pass`. |
 | `islands` | object | Connected components of the net's DC graph containing none of its required terminals: `count` (always complete), `details[]` (capped at `max_detail_items`, each `{"nodes": [...]}` with sorted members, islands ordered by first member), `details_truncated`, `reason` (`null`; a no-required-terminals net reports `count: 0` with the reason instead — with no main body, every component would be an island and the count would carry no finding value). |
 | `orphan_nodes` | object | Nodes of the net's universe with no element attached at all — same `{count, details[], details_truncated, reason}` shape, each detail `{"node": ...}`. A node attached even only by a capacitor is a legitimate capacitor endpoint, **not** an orphan. A fully detached node is both an orphan and (degenerately) an island. |
 | `suspicious_resistors` | object | Malformed resistors this net emitted, diagnosed before any graph arithmetic so a malformed value can neither crash the checker nor leak into the JSON: `negative`, `zero`, `non_finite` (NaN/±Inf — the value serializes as `null`), `self_loop` (a resistor with both endpoints on one node). Each detail: `{"device", "node_a", "node_b", "resistance_ohm", "issues"}` with `issues` sorted, details sorted by device name. Intentional substrate DC ties are excluded. |

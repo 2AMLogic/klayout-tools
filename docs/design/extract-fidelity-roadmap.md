@@ -1017,7 +1017,10 @@ terminals (`extract_resistance_network.reduce_terminal_network`: with `R`
 the pair matrix and `J = I - 11^T/T`, the reduced Laplacian is
 `pinv(-0.5 J R J)`, one resistor per surviving terminal pair — dense, at
 most `T(T-1)/2` = 2016 at the 64-terminal cap, only numerically-zero
-conductances dropped so every pair value is reproduced by construction).
+conductances dropped and a drop that would disconnect the terminals refused
+as `pair_resistance_unavailable`, so every written network reproduces every
+pair value; terminals of one device share its position and fall back as
+`terminal_mismatch`).
 This is deliberately *not* a graph-aware ladder: it replaces the star, not
 the `--distributed-rc` chain (the `--resistance-graph` +
 `--distributed-rc` refusal still stands; per-segment ladders taken from

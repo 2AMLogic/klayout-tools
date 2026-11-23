@@ -356,8 +356,11 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   `pair_resistance_ohm` matrix the graph echo reports — in place of the
   star, so a tree-routed net's dead stub arms (MOS gate straps, unused
   taps) stop adding series resistance to the current path. The reduced
-  network reproduces every `pair_resistance_ohm` entry by construction; it
-  is dense (at most `T(T-1)/2` resistors per net, 2016 at the graph's
+  network reproduces every `pair_resistance_ohm` entry by construction (a
+  net whose numerically-zero-conductance drop would disconnect its
+  terminals keeps the star as `pair_resistance_unavailable`, and a net with
+  two terminals of one device, which position cannot tell apart, as
+  `terminal_mismatch`); it is dense (at most `T(T-1)/2` resistors per net, 2016 at the graph's
   64-terminal cap) and the net's ground capacitance splits equally across
   its terminal nodes (the first-increment rule; per-node capacitance from
   the graph is the roadmap's open question). Two-terminal graph nets keep

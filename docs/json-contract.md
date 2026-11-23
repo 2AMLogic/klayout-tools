@@ -2982,7 +2982,8 @@ Kron-reduced terminal network of the solved graph in place of the star for
 every net whose graph solved `ok` with three or more terminals and whose
 device terminals map one-to-one onto its graph terminals, so a tree-routed
 net's stub arms stop adding series resistance to the current path. The
-additive fields, all absent without the flag (byte-identical output):
+additive fields, absent without the flag (byte-identical output) except the
+request echo, which is present as `false` under plain `--resistance-graph`:
 
 - `parasitics.nets[].resistance_graph.network` (from `klt extract`, echoed
   verbatim into `extraction.resistance_graph.nets[].network`):
@@ -2993,10 +2994,14 @@ additive fields, all absent without the flag (byte-identical output):
   `legacy`. `fallback_reason` reuses issue #5747's vocabulary
   (`resistance_source_reason`, first `unsupported` diagnostic `code`) and
   adds only `terminal_mismatch` (the one-to-one device-terminal mapping
-  failed), `mom_rlc_override` (a `--mom-rlc-resistance-ohm` substitution
-  won) and `parasitic_variant` (a `--parasitic-variant` drop kept the
-  star), which it cannot express. The reduced network reproduces every
-  `pair_resistance_ohm` entry by construction; the net's ground
+  failed, or position cannot decide it: two terminals of one device on the
+  net share that device's single position), `mom_rlc_override` (a
+  `--mom-rlc-resistance-ohm` substitution won) and `parasitic_variant` (a
+  `--parasitic-variant` drop kept the star), which it cannot express. A
+  written reduced network reproduces every `pair_resistance_ohm` entry by
+  construction; a reduction whose numerically-zero-conductance drop would
+  disconnect the terminals is refused (`pair_resistance_unavailable`, the
+  net keeps its legacy network). The net's ground
   capacitance splits equally across its terminal nodes (the documented
   first-increment rule; per-node capacitance from the graph itself is the
   roadmap's open question).
@@ -3007,7 +3012,8 @@ additive fields, all absent without the flag (byte-identical output):
   `klt signoff --manifest` item-7 citation can tell a graph-derived
   network extraction from a series-sum one.
 - `parasitics.nets[].rc_model` gains a third value, `"reduced"`, beside
-  `"lumped"` and `"distributed"` — only for nets that took the network.
+  `"lumped"` and `"distributed"` — only for nets that took the network;
+  their `integrity.open` runs the real terminal-connectivity check.
 
 No existing field changes name, type or meaning, so **no
 `schema_version` bump**. See [`cli/pex.md`](cli/pex.md)'s

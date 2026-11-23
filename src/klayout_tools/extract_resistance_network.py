@@ -18,7 +18,10 @@ Schur complement of a Laplacian it is itself a Laplacian, so every
 it. A full reduction is dense -- ``T`` terminals give at most
 ``T (T-1) / 2`` resistors (2016 at the graph build's ``MAX_GRAPH_TERMINALS``
 = 64 cap) -- and only numerically-zero conductances (``g < 1e-9 * max g``)
-are dropped, preserving the "every pair reproduces the matrix" guarantee.
+are dropped. A drop that would leave the terminals disconnected (a net
+whose conductances span more than nine decades) is refused as
+``pair_resistance_unavailable`` rather than emitted, so the "every pair
+reproduces the matrix" guarantee holds for every network that is emitted.
 
 :func:`map_device_terminals` grounds the emission on real nets: a graph
 terminal is a geometry-derived ``"<kind>@<x_um>,<y_um>"`` name (a cut box
@@ -26,9 +29,11 @@ center), while the netlist side holds device-terminal refs whose only
 position proxy is the owning device's placement (``Device.trans.disp``,
 micrometres -- the same coarseness the star/ladder resistance split already
 relies on). Each device terminal is matched to its nearest graph terminal,
-one-to-one; a count mismatch, or an assignment farther than the graph
+one-to-one; a count mismatch, an assignment farther than the graph
 terminals' own pairwise spread (a device nowhere near this net's geometry),
-reports ``terminal_mismatch`` and the net keeps its legacy network.
+or one geometry cannot decide (terminals of one device share its single
+position, so their assignment would rest on iteration order alone) reports
+``terminal_mismatch`` and the net keeps its legacy network.
 
 :func:`network_written_report` classifies, per net, which network the
 emitted netlist actually carried (``reduced`` / ``scalar`` / ``legacy``) and
@@ -57,6 +62,11 @@ _ZERO_CONDUCTANCE_REL = 1e-9
 #: (not conditionally negative semidefinite); the reduction reports
 #: ``singular_system`` instead of emitting a negative resistor.
 _NEGATIVE_CONDUCTANCE_REL = 1e-6
+
+#: Two device-to-graph-terminal distances closer than this (micrometres) are
+#: a tie. Graph terminal names round positions to 1e-4 um
+#: (``extract_parasitics``), so no finer difference is observable.
+_POSITION_TIE_TOL_UM = 1e-4
 
 
 #: The additive ``parasitics.model.resistance_network`` disclosure text
@@ -121,6 +131,27 @@ def _graph_span(positions: Sequence[tuple[float, float]]) -> float:
     )
 
 
+def _has_tied_competitor(
+    candidates: Sequence[tuple[float, int, int]],
+    start: int,
+    graph_of: Mapping[int, int],
+    taken: set[int],
+) -> bool:
+    """Whether the candidate at ``start`` is accepted only because of an
+    index tie-break: a later candidate within :data:`_POSITION_TIE_TOL_UM`
+    of the same distance that shares its device (with a still-free graph
+    terminal) or its graph terminal (with a still-unassigned device)."""
+    distance, device_index, graph_index = candidates[start]
+    for other_distance, other_device, other_graph in candidates[start + 1 :]:
+        if other_distance - distance > _POSITION_TIE_TOL_UM:
+            return False
+        if other_device == device_index and other_graph not in taken:
+            return True
+        if other_graph == graph_index and other_device not in graph_of:
+            return True
+    return False
+
+
 def map_device_terminals(
     graph_terminals: Sequence[str],
     device_positions: Sequence[tuple[float, float]],
@@ -129,11 +160,17 @@ def map_device_terminals(
 
     Returns ``(mapping, None)`` on success or ``(None, "terminal_mismatch")``
     when the two sides disagree in count, a terminal name carries no
-    position, or the greedy nearest assignment puts some device farther from
+    position, the greedy nearest assignment puts some device farther from
     its terminal than the graph terminals' own pairwise spread (a device
-    whose placement is nowhere near this net). The assignment is the
-    globally greedy one over distances sorted with index tie-breaks, so it
-    is deterministic.
+    whose placement is nowhere near this net), or the assignment is not
+    uniquely determined by geometry. The last is the co-located case: the
+    device side holds one position per *device*, so two terminals of one
+    device (a diode-connected MOS with gate and drain on the net) are
+    indistinguishable and the match between them would be decided by
+    iteration order alone, silently putting one terminal's arm resistance
+    in the other's current path -- see :func:`_has_tied_competitor`. The
+    assignment is the globally greedy one over distances sorted with index
+    tie-breaks, so it is deterministic whenever it is reported at all.
     """
     if not graph_terminals or len(graph_terminals) != len(device_positions):
         return None, "terminal_mismatch"
@@ -153,10 +190,12 @@ def map_device_terminals(
     )
     graph_of: dict[int, int] = {}
     taken: set[int] = set()
-    for distance, device_index, graph_index in candidates:
+    for position, (distance, device_index, graph_index) in enumerate(candidates):
         if device_index in graph_of or graph_index in taken:
             continue
-        if distance > span:
+        if distance > span or _has_tied_competitor(
+            candidates, position, graph_of, taken
+        ):
             return None, "terminal_mismatch"
         graph_of[device_index] = graph_index
         taken.add(graph_index)
@@ -278,15 +317,40 @@ def reduce_terminal_network(
     largest = max(g for _i, _j, g in conductances)
     if largest <= 0.0:
         return None, "singular_system"
-    return _resistors_from_conductances(conductances, largest)
+    return _resistors_from_conductances(conductances, largest, n)
+
+
+def _terminals_connected(terminal_count: int, resistors: list[NetworkResistor]) -> bool:
+    """Whether ``resistors`` join all ``terminal_count`` terminals into one
+    DC component (union-find over the terminal indices)."""
+    parent = list(range(terminal_count))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for resistor in resistors:
+        parent[root(resistor.terminal_a)] = root(resistor.terminal_b)
+    return len({root(index) for index in range(terminal_count)}) == 1
 
 
 def _resistors_from_conductances(
-    conductances: list[tuple[int, int, float]], largest: float
+    conductances: list[tuple[int, int, float]], largest: float, terminal_count: int
 ) -> tuple[ReducedNetwork | None, str | None]:
     """The emit decision for one conductance list: one ``1 / g`` resistor
     per conductance above the numerical-zero threshold, ``singular_system``
-    for a conductance negative enough to demand a negative resistor."""
+    for a conductance negative enough to demand a negative resistor.
+
+    The ``1e-9`` relative threshold is not "numerically zero" once a net's
+    conductances span more than nine decades: dropping can leave a terminal
+    (or a group of them) with no resistor path to the rest, a DC-floating
+    node in the written netlist and pairs the network cannot reproduce. The
+    surviving resistors must therefore still connect every terminal;
+    otherwise the terminals are effectively in more than one component and
+    the net reports ``pair_resistance_unavailable`` and keeps its legacy
+    network."""
     resistors: list[NetworkResistor] = []
     dropped = 0
     for i, j, g in conductances:
@@ -298,6 +362,8 @@ def _resistors_from_conductances(
         resistors.append(NetworkResistor(i, j, 1.0 / g))
     if not resistors:
         return None, "singular_system"
+    if not _terminals_connected(terminal_count, resistors):
+        return None, "pair_resistance_unavailable"
     return ReducedNetwork(tuple(resistors), dropped), None
 
 
