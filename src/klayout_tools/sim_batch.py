@@ -178,7 +178,6 @@ from .sim_batch_contract import (  # noqa: F401
     BATCH_MAX_UNITS_CODE,
     BATCH_NETLIST_FILENAME,
     BATCH_NO_CAPACITY_CODE,
-    BATCH_POLL_KNOB_CODE,
     BATCH_RECEIPT_FILENAME,
     BATCH_REPORT_FILENAME,
     BATCH_REQUEST_FILENAME,
@@ -254,6 +253,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     runner_threads_per_worker,
 )
 from .sim_batch_job_timeout import (
+    BATCH_POLL_KNOB_CODE,
     _resolve_job_ceiling_check,
     _resolve_max_units_per_job,
     assess_caller_job_timeout,

@@ -24,10 +24,8 @@ import pytest
 from klayout_tools import sim
 from klayout_tools import sim_batch_job_timeout as sbjt
 from klayout_tools.cli import main
-from klayout_tools.sim_batch_contract import (
-    BATCH_POLL_KNOB_CODE,
-    DEFAULT_POLL_INTERVAL_S,
-)
+from klayout_tools.sim_batch_contract import DEFAULT_POLL_INTERVAL_S
+from klayout_tools.sim_batch_job_timeout import BATCH_POLL_KNOB_CODE
 
 FAKE_BUCKET = "fake-batch-jobs-000000000000"
 

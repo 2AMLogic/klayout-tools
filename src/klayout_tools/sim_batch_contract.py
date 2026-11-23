@@ -293,10 +293,6 @@ BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
 #: ``request.batch.max_concurrent_jobs`` (issue #3914).
 BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 
-#: Invalid polling interval or timeout (#7543). Dry-run preflight propagates
-#: this error even on hosts without a configured batch runner.
-BATCH_POLL_KNOB_CODE = "batch_poll_knob_invalid"
-
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"

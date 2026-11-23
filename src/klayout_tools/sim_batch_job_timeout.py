@@ -29,7 +29,6 @@ from ._jsonnum import is_finite_number
 from .sim_batch_contract import (
     _BATCH_PROVISION_SLACK_S,
     BATCH_MAX_UNITS_CODE,
-    BATCH_POLL_KNOB_CODE,
     DEFAULT_POLL_INTERVAL_S,
     JOB_CEILING_BASIS_CALLER,
     JOB_CEILING_CHECK_MODES,
@@ -38,6 +37,13 @@ from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim_batch import BatchConfig
+
+#: Machine-readable ``error.code`` of an invalid ``request.batch.poll_interval_s``
+#: or ``poll_timeout_s`` (issue #7543). Defined here, beside the resolvers that
+#: raise it, so ``sim_batch_contract`` (at its 500-line limit) does not grow.
+#: ``sim_batch.dry_run_runner_check`` re-raises it even on a host with no
+#: configured batch runner.
+BATCH_POLL_KNOB_CODE = "batch_poll_knob_invalid"
 
 
 def resolve_job_timeout_s(batch_spec: dict[str, Any]) -> float | None:
