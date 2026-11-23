@@ -161,6 +161,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_check",
         "klayout_tools.cli._drc_list_categories",
         "klayout_tools.cli._drc_native",
         "klayout_tools.cli._drc_parser_args",
@@ -184,6 +185,7 @@
         "klayout_tools.drc_klayout_list",
         "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
+        "klayout_tools.drc_rerun_replay",
         "klayout_tools.drc_text_exempt"
       ]
     },
