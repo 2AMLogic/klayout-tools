@@ -64,6 +64,7 @@ RERUN_PATH_FIELD_KEYS: frozenset[str] = frozenset(
         "lib",
         "spef_path",
         "sdf_path",
+        "library_limit_report_path",
     }
 )
 
@@ -135,6 +136,22 @@ def canonicalize_place_and_route_report_for_rerun_diff(
     and every :data:`RERUN_PATH_FIELD_KEYS` value reduced to its file name
     (issue #5863) -- the comparison view ``rerun_place_and_route_report``
     diffs, never what it embeds as ``fresh``."""
-    return normalize_path_fields(
+    comparison = normalize_path_fields(
         strip_keys(report, RERUN_BOOKKEEPING_KEYS), RERUN_PATH_FIELD_KEYS
     )
+    corners = comparison.get("corner_runs")
+    units = [comparison]
+    if isinstance(corners, list):
+        units.extend(corner for corner in corners if isinstance(corner, dict))
+    for unit in units:
+        environment = unit.get("environment")
+        if isinstance(environment, dict):
+            environment.pop("threads", None)
+            if not environment:
+                unit.pop("environment")
+        stages = unit.get("stages")
+        if isinstance(stages, list):
+            for stage in stages:
+                if isinstance(stage, dict):
+                    stage.pop("threads", None)
+    return comparison

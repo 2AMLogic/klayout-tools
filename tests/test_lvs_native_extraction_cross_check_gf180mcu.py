@@ -16,15 +16,15 @@ Tiny Tapeout corpus is still unbuilt -- see that module's own "The #520
 corpus" section), same reporting discipline (agree / documented
 disagreement / investigated-and-deferred, never silently skipped).
 
-**Unlike gf180mcu's own DRC-side native cross-check** (deferred in
-``tests/test_golden_deck.py``/``docs/cli/drc.md`` because gf180mcu's native
-*DRC* deck ships only as unassembled fragments with no single runnable
-file), gf180mcu's native **LVS** deck *is* single-file and directly
-runnable: a real, ``volare``-fetched ``gf180mcuD`` install ships
-``libs.tech/klayout/lvs/gf180mcu.lvs`` (verified for this issue; resolved
-via :func:`klayout_tools.pdk.lvs_deck_file`, whose own docstring already
-flagged this exact possibility as of issue #869: "a future caller is free
-to attempt it"). This module is that attempt.
+For LVS, this module cross-checks against a single, directly runnable deck.
+:func:`klayout_tools.pdk.lvs_deck_file` resolved
+``libs.tech/klayout/lvs/gf180mcu.lvs`` in a volare-fetched ``gf180mcuD`` install (#904).
+
+The gf180mcu DRC cross-check is deferred because the golden-pair manifest tests
+do not yet run their fixtures through the native engine. Since #4002,
+``klt drc --engine klayout|both --pdk <variant>`` resolves ``tech/drc/gf180mcu.drc``
+as ``native_deck.kind: pdk_main_script``. Both engines completed a live
+``--engine both`` run on ``gf180mcuA`` (premise corrected 2026-11-18, issue #5720).
 
 ## Results (verified against a real, volare-fetched gf180mcuD install and a
 real KLayout binary)
@@ -745,9 +745,8 @@ def test_ldmos_matches_native_deck(
 # under-covering.
 # --------------------------------------------------------------------------- #
 
-#: Upstream `rule_id`s this module reaches a verdict for, one way or another
-#: -- hand-maintained, same discipline as the sky130 module's own
-#: `_CROSS_CHECK_VERDICT_RULE_IDS`.
+#: Upstream `rule_id`s this module reaches a verdict for, one way or another --
+#: hand-maintained, like the sky130 module's `_CROSS_CHECK_VERDICT_RULE_IDS`.
 _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
     {
         "gf180mcu_fd_pr__nfet_03v3",  # agrees
@@ -758,6 +757,7 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "gf180mcu_fd_pr__rm2",  # agrees
         "gf180mcu_fd_pr__rm3",  # agrees
         "gf180mcu_fd_pr__tm9k",  # agrees (needs extra_rd={"metal_level": "5LM"})
+        "gf180mcu_fd_pr__efuse",  # agrees (terminals; native ignores R)
         "cap_mim_2f0fF",  # documented disagreement (#512)
         "BJT.3",  # deferred (investigated)
         "gf180mcu_fd_pr__diode_nd2ps_06v0",  # deferred (investigated)

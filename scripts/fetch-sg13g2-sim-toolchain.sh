@@ -12,9 +12,7 @@
 #      the Verilog-A-to-OSDI compiler the PDK's own
 #      `libs.tech/verilog-a/openvaf-compile-va.sh` prefers (it looks for
 #      `openvaf-r` on PATH before falling back to plain `openvaf`).
-#   2. Defensively works around a Linux libLLVM dynamic-link problem some
-#      openvaf-r Linux releases ship (see "Why the libLLVM workaround is
-#      defensive, not asserted" below) before ever invoking the compiler.
+#   2. Checks that the pinned compiler starts on this host before compiling.
 #   3. Compiles the PDK's own Verilog-A sources into
 #      `libs.tech/ngspice/osdi/*.osdi` by invoking the PDK's own
 #      `openvaf-compile-va.sh` (not a re-implementation of its four
@@ -69,28 +67,9 @@
 # unrelated per-consumer sim-harness requirements, not this OSDI ABI
 # concern; don't conflate the two numbers.)
 #
-# ---------------------------------------------------------------------
-# Why the libLLVM workaround is defensive, not asserted
-# ---------------------------------------------------------------------
-#
-# The issue this script closes (#1628) describes a Linux openvaf-r release
-# whose bundled `lib/libLLVM.so.21.1` is a dangling symlink into
-# `/usr/lib/x86_64-linux-gnu`, assuming a system LLVM 21 that no current
-# Ubuntu LTS ships. Verified directly while developing this script against
-# the actual pinned asset below (downloaded live, `ldd`'d, and `tar -tzf`'d):
-# it ships as a single, fully self-contained, statically-linked `openvaf-r`
-# ELF binary with NO `lib/` directory and no `libLLVM` runtime dependency
-# at all -- this specific pin does not reproduce the dangling-symlink
-# failure mode. `apply_libllvm_workaround` below is kept anyway, as a
-# defensive fallback rather than a no-op: if a future re-pin (or a
-# differently-built openvaf-r asset) DOES ship a dynamically-linked
-# libLLVM dependency, this detects the unresolved `ldd` entry, looks for
-# an already-installed compatible `libLLVM` on the host via `ldconfig`,
-# and -- if found -- transparently points openvaf-r at it via a local
-# `LD_LIBRARY_PATH` override instead of mutating anything system-wide.
-# If no compatible library is found, it fails closed with the exact
-# missing library named and a pointer to apt.llvm.org, rather than
-# leaving the caller to decode a bare "cannot open shared object file".
+# The pinned x86-64 ELF executable uses system runtime libraries and has
+# no direct libLLVM dependency. Probe the exact binary so a host loader
+# failure identifies the missing library or symbol version.
 
 set -euo pipefail
 
@@ -193,60 +172,6 @@ EOF
     return 0
 }
 
-# apply_libllvm_workaround <extracted-binary> <workdir>: defensive fixup
-# for the Linux libLLVM dynamic-link problem described in this script's
-# header comment. A no-op (prints a note, returns 0) when the binary
-# already runs standalone, which is the case for this script's current
-# pin -- see the header comment for why this is still kept as a fallback.
-apply_libllvm_workaround() {
-    local bin="$1" workdir="$2"
-    local missing
-    missing="$(ldd "$bin" 2>/dev/null | awk '/=> not found/ {print $1}')"
-
-    if [[ -z "$missing" ]]; then
-        echo "openvaf-r runs standalone (ldd reports no unresolved shared libraries) -- no libLLVM workaround needed."
-        return 0
-    fi
-
-    echo "openvaf-r has unresolved shared library dependencies:" >&2
-    echo "$missing" | awk '{print "  " $0}' >&2
-
-    local llvm_missing
-    llvm_missing="$(echo "$missing" | grep -i libllvm || true)"
-    if [[ -z "$llvm_missing" ]]; then
-        echo "error: none of the above are libLLVM -- this script does not know how to work around them." >&2
-        return 1
-    fi
-
-    # Look for any libLLVM shared object already installed on this host
-    # (Ubuntu 24.04 ships llvm-18 by default; apt.llvm.org's llvm-N
-    # packages install their own libLLVM-N.so.1 / libLLVM.so.N.M) and, if
-    # one exists, point openvaf-r at it via a local LD_LIBRARY_PATH
-    # override -- never touching anything system-wide.
-    local found
-    found="$(ldconfig -p 2>/dev/null | awk '/libLLVM[.-]/ {print $NF; exit}')"
-    if [[ -z "$found" || ! -e "$found" ]]; then
-        cat >&2 <<EOF
-error: openvaf-r needs a shared libLLVM this host does not have installed
-  (missing: $llvm_missing)
-
-  openvaf-r's Linux release can assume a system LLVM is already installed
-  and merely symlink to it, rather than bundling a real shared object --
-  install a matching LLVM runtime, e.g.:
-    wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 21
-  then re-run this script. (Or set LD_LIBRARY_PATH yourself to a directory
-  containing a compatible $llvm_missing before re-running.)
-EOF
-        return 1
-    fi
-
-    mkdir -p "$workdir/lib"
-    ln -sf "$found" "$workdir/lib/$(basename "$llvm_missing")"
-    export LD_LIBRARY_PATH="$workdir/lib:${LD_LIBRARY_PATH:-}"
-    echo "Applied libLLVM workaround: $workdir/lib/$(basename "$llvm_missing") -> $found"
-    return 0
-}
-
 fetch_compiler() {
     if [[ $FORCE -eq 0 && -f "$COMPILER_MARKER" && -x "$COMPILER_BIN" && "$(cat "$COMPILER_MARKER")" == "$OPENVAF_R_TAG" ]]; then
         echo "openvaf-r $OPENVAF_R_TAG already cached at $COMPILER_BIN (use --force to refetch)"
@@ -342,7 +267,10 @@ fi
 
 if [[ $NEED_COMPILE -eq 1 ]]; then
     fetch_compiler
-    apply_libllvm_workaround "$COMPILER_BIN" "$COMPILER_PREFIX" || exit 1
+    if ! "$COMPILER_BIN" --version; then
+        echo "error: cannot start pinned compiler $COMPILER_BIN" >&2
+        exit 1
+    fi
     compile_models
 fi
 

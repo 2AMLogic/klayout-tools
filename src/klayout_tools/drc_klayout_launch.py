@@ -14,6 +14,7 @@ from __future__ import annotations
 import subprocess
 
 from .drc import CODE_KLAYOUT_UNAVAILABLE, DrcError
+from .pdk_native_drc import gf180_main_path
 
 
 def launch_klayout_deck(
@@ -24,9 +25,10 @@ def launch_klayout_deck(
     report_path: str,
     deck_vars: dict[str, str] | None = None,
     timeout_s: float,
+    prelude_files: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run ``klayout -b -r <deck_file> -rd input=... -rd report=...`` and
-    return the finished process.
+    return the finished process. Each prelude loads via ``-rm`` before ``-r``.
 
     ``deck_vars`` (issue #1302, CLI ``--deck-var name=value``) appends extra
     ``-rd`` script globals *after* the ``input``/``report`` pair, in
@@ -39,16 +41,20 @@ def launch_klayout_deck(
     :func:`~klayout_tools.drc_klayout_engine._check_klayout_run`): this
     helper never inspects the exit status or the report file.
     """
-    cmd = [
-        klayout_exe,
-        "-b",
-        "-r",
-        deck_file,
-        "-rd",
-        f"input={input_path}",
-        "-rd",
-        f"report={report_path}",
-    ]
+    cmd = [klayout_exe, "-b"]
+    for prelude in prelude_files:
+        cmd.extend(["-rm", prelude])
+    cmd.extend(
+        [
+            "-r",
+            # GF180 loads sibling Ruby files relative to this exact script path.
+            gf180_main_path(deck_file) or deck_file,
+            "-rd",
+            f"input={input_path}",
+            "-rd",
+            f"report={report_path}",
+        ]
+    )
     for name, value in (deck_vars or {}).items():
         cmd.extend(["-rd", f"{name}={value}"])
     try:

@@ -832,8 +832,8 @@ def test_status_clean_partial_when_met3_5_ungraded_but_all_graded_levels_pass(
         for gate in report["gates"]
         for level in gate["levels"]
     )
-    skipped_ids = {entry["id"] for entry in report["coverage"]["skipped"]}
-    assert len(skipped_ids) == 3  # met3, met4, met5
+    skipped = report["coverage"]["skipped"]
+    assert [entry["count"] for entry in skipped] == [3]  # met3, met4, met5
     assert all(
         entry["reason"] == "missing_antenna_limit"
         for entry in report["coverage"]["skipped"]
@@ -5776,15 +5776,15 @@ def test_cli_json_contract(tmp_path, capsys):
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
-
     assert main(["erc", str(gds), str(spec), "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert set(data.keys()) == {
+    assert set(data) == {
         "coverage",
         "erc_coverage",
         "schema_version",
         "file",
+        "top",
         "spec",
         "pdk",
         "findings_only",

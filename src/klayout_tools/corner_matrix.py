@@ -16,12 +16,13 @@ so the matrix and a request can never disagree about what a tuple is called.
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from typing import Any
 
 from . import sim
+from ._jsonnum import is_finite_number
 from ._paths import _load_request_json
+from .sim_batch_resume import UNRUN_BATCH_CODES
 
 #: The only top-level keys a matrix file may carry. Anything else is refused
 #: rather than silently narrowing (or failing to narrow) the expected grid.
@@ -31,6 +32,21 @@ _MATRIX_KEYS = frozenset({*_AXIS_KEYS, "exclude", "schema", "description"})
 #: Corner statuses that mean the unit produced numbers worth grading.
 #: ``fail`` is a simulated corner whose measurement left its limits.
 _SIMULATED_STATUSES = frozenset({"pass", "fail"})
+
+
+# These diagnostics are produced by the engine log classifiers or the local
+# engine invocation itself. A preflight or missing measurement alone is
+# insufficient to establish that a worker attempted this corner.
+_ENGINE_ATTEMPT_CODES = {
+    "analysis_aborted",
+    "engine_aborted",
+    "engine_killed",
+    "ngspice_fatal",
+    "nonconvergence",
+    "singular_matrix",
+    "timestep_too_small",
+    "timeout",
+}
 
 
 class CornerMatrixError(Exception):
@@ -95,7 +111,7 @@ def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
         value = measurement.get("value")
         if isinstance(value, bool):
             continue
-        if isinstance(value, (int, float)) and not math.isfinite(value):
+        if isinstance(value, (int, float)) and not is_finite_number(value):
             return True
         if value is None and measurement.get("status") != "error":
             # An absent value on a corner reported as simulated is not a
@@ -103,6 +119,29 @@ def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
             # the corner's own status.
             return True
     return False
+
+
+def _attempted_error(corner: dict[str, Any]) -> bool:
+    if corner.get("status") != "error":
+        return False
+    diagnostics = corner.get("diagnostics")
+    codes = (
+        {
+            item["code"]
+            for item in diagnostics
+            if isinstance(item, dict) and isinstance(item.get("code"), str)
+        }
+        if isinstance(diagnostics, list)
+        else set()
+    )
+    if codes & UNRUN_BATCH_CODES:
+        return False
+    signal = corner.get("engine_killed_by_signal")
+    return (
+        type(corner.get("engine_exit_code")) is int
+        or (isinstance(signal, str) and signal.startswith("SIG") and bool(signal[3:]))
+        or bool(codes & _ENGINE_ATTEMPT_CODES)
+    )
 
 
 def check_corner_matrix(
@@ -113,11 +152,6 @@ def check_corner_matrix(
     if (request_path is None) == (report_path is None):
         raise CornerMatrixError("give exactly one of --request or --report")
     expected = expected_tuples(_load_object(matrix_path, "matrix"))
-    expected_dupes = _duplicates(expected)
-    if expected_dupes:
-        raise CornerMatrixError(
-            f"matrix expands to duplicate tuple(s): {expected_dupes}"
-        )
     expected_set = set(expected)
 
     result: dict[str, Any] = {"matrix": matrix_path}
@@ -144,6 +178,7 @@ def check_corner_matrix(
                 for cid in in_matrix
                 if by_id[cid].get("status") not in _SIMULATED_STATUSES
             ],
+            "errored": [cid for cid in in_matrix if _attempted_error(by_id[cid])],
             "non_finite": [
                 cid
                 for cid in in_matrix

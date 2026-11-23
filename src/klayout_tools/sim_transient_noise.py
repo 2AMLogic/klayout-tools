@@ -86,15 +86,6 @@ def seed_lines(seed: int | None) -> list[str]:
     return [] if seed is None else [f"setseed {seed}"]
 
 
-def key_in_fingerprint(payload: dict[str, Any], seed: int | None) -> None:
-    """Issue #5772: the seed changes every corner deck's bytes (the
-    ``setseed`` card), so a checkpoint written under another seed -- or none
-    -- never applies. Keyed in off ``None`` only, so an existing checkpoint
-    stays valid for a request that omits the field."""
-    if seed is not None:
-        payload["transient_noise_seed"] = seed
-
-
 def check_transient_noise_seed_echo(
     request: dict[str, Any], report: dict[str, Any]
 ) -> None:
@@ -132,7 +123,7 @@ def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
     source declaring a ``trnoise``/``trrandom`` waveform (issue #2963),
     including inside ``.subckt`` bodies. Lexical, via
     ``sim._logical_netlist_lines``."""
-    from .sim import _logical_netlist_lines
+    from ._spice_text import logical_lines as _logical_netlist_lines
 
     found: list[tuple[str, str]] = []
     for line in _logical_netlist_lines(netlist_text):

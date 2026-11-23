@@ -1,0 +1,1 @@
+- **`klt em` extracts capacitance from labelled GDS regions using the PDK stackup and Geode/Gmsh** (#5617, 2026-11-18).

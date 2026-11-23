@@ -24,9 +24,9 @@ hazard half (which roots were read and skipped) and
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
+from . import _warn
 from .pdk import ambiguity_warning as pdk_ambiguity_warning
 
 #: Replaces :data:`klayout_tools.pdk.AMBIGUITY_REMEDY` in the stderr warning
@@ -90,4 +90,4 @@ def warn_pdk_ambiguity(
         return
     warning = pdk_ambiguity_warning(resolution, remedy=remedy_for(backend))
     if warning is not None:
-        print(warning, file=sys.stderr)
+        _warn.warn(warning)

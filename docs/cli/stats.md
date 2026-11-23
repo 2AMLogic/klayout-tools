@@ -261,7 +261,10 @@ upgrade — see
 The digest covers the **whole stream** and is never scoped by `--top`, unlike
 the area/density/count figures. Two runs over the same file with different
 `--top` values report the same `geometry_digest`. It is `null` unless
-`--geometry-digest` is given (or the digest cannot be computed).
+`--geometry-digest` is given (or the digest cannot be computed). This is also
+the value [`klt gen-compose`](gen-compose.md) records per composed block as
+`blocks[].source_digest` for the same stream — run this command on a composed
+input to recompute and re-verify it (a raw-byte `sha256sum` never matches).
 
 ### Producing a signoff regeneration hash (issue #5551)
 
