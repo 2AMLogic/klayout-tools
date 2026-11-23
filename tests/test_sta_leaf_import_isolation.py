@@ -26,6 +26,7 @@ CASES = {
     "_sta_period_maps": ("validate_period", [0, "clock"]),
     "_sta_request_diag": None,
     "_sta_sdc_check": ("resolve_sdc_check", [False, "."]),
+    "_sta_spef_inputs": ("resolve_spef", [False, "."]),
     "_sta_timing_derate": ("validate_timing_derate", [{"timing_derate": False}]),
     "_sta_wire_load": None,
     "post_route_sta_electrical": None,
