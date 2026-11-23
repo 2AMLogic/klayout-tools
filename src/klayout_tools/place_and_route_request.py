@@ -2,12 +2,9 @@
 resolvers that take a request dict (or one of its sections) and return
 validated values or raise :class:`PlaceAndRouteError`.
 
-Split out of ``place_and_route.py`` (issue #3699), following the sibling-module
-precedent of ``place_and_route_sta.py`` (issue #1808). Nothing here invokes
-OpenROAD or emits a stage script -- that stays in ``place_and_route.py``. Every
-public-by-convention name here is re-exported from
-:mod:`klayout_tools.place_and_route`, so ``place_and_route.<name>`` (the CLI,
-:mod:`klayout_tools.eval`, the batch backend, tests) keeps resolving unchanged.
+The main :mod:`klayout_tools.place_and_route` module re-exports these validators
+for its CLI, batch backend, eval and test callers. Stage rendering lives in
+:mod:`klayout_tools.place_and_route_script`.
 
 :class:`PlaceAndRouteError` and the validation-only tables
 (``_MACRO_ORIENTATIONS``, ``_FLOORPLAN_METHOD_FIELDS``,
@@ -23,9 +20,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from . import macros as macro_spec
+from . import place_and_route_groups as groups_spec
+from ._dont_use import validate_patterns
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
@@ -39,7 +39,6 @@ from .netlist_construct_scan import (
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_clock import validate_clock_constraints
-from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
@@ -665,19 +664,19 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
         return []
     if not isinstance(raw, list):
         raise PlaceAndRouteError("request.instance_groups must be an array")
-    groups: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        groups.append(
-            _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
-        )
+    groups = [
+        _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
+        for index, entry in enumerate(raw)
+    ]
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError)
     return groups
 
 
 def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise PlaceAndRouteError(f"{where} must be a JSON object")
-    reject_unknown_group_keys(entry, where, PlaceAndRouteError)
+    groups_spec.reject_unknown_group_keys(entry, where, PlaceAndRouteError)
     name = entry.get("name")
     if not (isinstance(name, str) and name.strip()):
         raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
@@ -698,7 +697,9 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
     if bound is not None:
         _check_max_extent_um(bound, where)
         item["max_extent_um"] = bound
-    item.update(validate_group_geometry(entry, instances, where, PlaceAndRouteError))
+    item.update(
+        groups_spec.validate_group_geometry(entry, instances, where, PlaceAndRouteError)
+    )
     return item
 
 
@@ -1645,17 +1646,6 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
-_LIBRARY_KEYS = (
-    "cts_buffer",
-    "power_pins",
-    "wire_rc",
-    "route_layers",
-    "antenna_diode",
-    "tapcell",
-    "filler",
-)
-
-
 def _positive_number(value: Any, where: str) -> float:
     if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
@@ -1798,6 +1788,7 @@ def _validate_library_cts_buffer(buf: Any) -> str:
 
 _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
     "cts_buffer": _validate_library_cts_buffer,
+    "dont_use": partial(validate_patterns, error_cls=PlaceAndRouteError),
     "power_pins": _validate_library_power_pins,
     "wire_rc": _validate_library_wire_rc,
     "route_layers": _validate_library_route_layers,
@@ -1818,13 +1809,13 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
     the library has no antenna diode, so no antenna repair; issue #4274),
     ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
+    has no tap cells), ``filler`` (tuple of masters), and ``dont_use`` (tuple of globs).
     """
     if library is None:
         return None
     if not isinstance(library, dict):
         raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
+    unknown = sorted(set(library) - _LIBRARY_VALIDATORS.keys())
     if unknown:
         raise PlaceAndRouteError(
             f"request.library has unknown key(s): {', '.join(unknown)}"

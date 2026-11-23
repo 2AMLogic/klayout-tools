@@ -19,13 +19,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
-def _pex_error(message: str) -> Exception:
-    """A ``PexError`` built lazily, so importing this module never imports
-    ``pex`` (which imports this module's caller's pieces at load time)."""
-    from .pex import PexError
-
-    return PexError(message)
+from .pex_errors import PexError
 
 
 def _is_anonymous(name: str) -> bool:
@@ -305,7 +299,7 @@ def build_probes(
     lvs.read(lvsdb_path)
     circuit = lvs.netlist().circuit_by_name(top)
     if circuit is None:
-        raise _pex_error(
+        raise PexError(
             "net correspondence: the runset database carries no circuit named "
             f"'{top}', so its nets cannot be joined with the curated deck's"
         )

@@ -1493,8 +1493,14 @@ Right after `launch` succeeds — before the first poll — the client writes
 `batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
 default `<request dir>/.klt/sim`; a sharded run writes
 `batch-receipt-<job-id>.json` per shard). It holds `job_id`,
-`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
-`state`. `state` is `null` until the job reaches a terminal state, so a receipt
+`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256`,
+`netlist_sha256` (present only when a netlist digest is recorded),
+`unit_count`, `units_sha256` and `state`. `unit_count` is the number of
+dispatched units ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+`units_sha256` is the ordered digest over the dispatched units' corner ids,
+present only when every dispatched point carries one
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208)). `state` is
+`null` until the job reaches a terminal state, so a receipt
 that still has `state: null` means the client died (or timed out polling) while
 the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
@@ -1505,7 +1511,16 @@ an unsharded request, `--resume` re-attaches to the `job_id` the receipt
 records when its `request_sha256`, `unit_count`, and (when recorded)
 `netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
-any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+any mismatch, or no receipt, submits afresh. When the run resumes a **partial
+slice** of the expanded grid -- a subset of the points dispatched as explicit
+points through the single-job path -- a fourth criterion applies: the
+receipt's `units_sha256` must equal that slice's ordered-unit digest, because
+the unit count alone cannot distinguish two same-sized slices
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208), merged as PR
+#7228). A receipt written before that field carries no `units_sha256`: a
+whole-grid `--resume` of it still re-attaches, but a partial one is not
+re-attached -- the run submits afresh, a billable new job rather than a
+re-attach. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
 after Spot reclaimed it -- is **submitted again under a new job id**, and the
 fresh launch rewrites `batch-receipt.json` with it
@@ -1789,6 +1804,17 @@ margin worst, ties to the first corner in merged order) and `coverage`
 whose ids carry corner indices local to each report and are re-based to the
 merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
+
+Sibling requests may use different model libraries for the same netlist.
+Each shard must declare the same measurement names, units, limits and
+provenance, including `spec_row` and `case` whenever present. A disagreement
+returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
+those row and case labels and grades limits over every declared corner.
+
+You can cite the merged report for item 5 of a `klt signoff` manifest.
+List the intended rows on the citation. Passing tagged measurements with
+limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
+digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -9755,7 +9781,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
-| `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
+| `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`, `threads_per_worker`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |

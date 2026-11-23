@@ -1,0 +1,1 @@
+- `klt place-and-route` accepts `instance_groups[].order.fixed_origin_um` with a positive pitch to fix an ordered row or column of standard cells before global placement (#7035).
