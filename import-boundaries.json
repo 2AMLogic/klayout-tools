@@ -286,6 +286,7 @@
         "klayout_tools.cli.parsers.extract_args_part3",
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
+        "klayout_tools.extract_abstract_pin_join",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_validate",
         "klayout_tools.extract_batch",
