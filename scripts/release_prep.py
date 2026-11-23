@@ -112,15 +112,22 @@ def _has_release_heading(text: str, version: str) -> bool:
     return re.search(rf"^## {re.escape(version)} \(", text, re.MULTILINE) is not None
 
 
-def _read_changelog_fragments(directory: Path) -> dict[Path, str]:
+def _read_changelog_fragments(
+    directory: Path, previous: str, new: str
+) -> dict[Path, str]:
     """Read pending entries in filename order, keyed by the files to remove."""
     fragments: dict[Path, str] = {}
     for path in sorted(directory.glob("*.md")):
         if path.name == "README.md" or not path.is_file():
             continue
-        entry = path.read_text(encoding="utf-8").strip("\n")
+        entry = path.read_text(encoding="utf-8")
+        if previous != new:
+            entry = update_signoff_notes(entry, previous, new)
+            check_signoff_note_anchors(
+                entry, previous, source=f"{directory.name}/{path.name}"
+            )
         if entry.strip():
-            fragments[path] = entry
+            fragments[path] = entry.strip("\n")
     return fragments
 
 
@@ -162,7 +169,9 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
     return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
 
 
-def check_signoff_note_anchors(text: str, previous: str) -> None:
+def check_signoff_note_anchors(
+    text: str, previous: str, *, source: str = "docs/cli/signoff.md"
+) -> None:
     """Refuse availability-note placeholders the resolver can never match again.
 
     A placeholder is only resolvable for the release being bumped *from*
@@ -174,7 +183,7 @@ def check_signoff_note_anchors(text: str, previous: str) -> None:
         for match in _NOTE_PLACEHOLDER_RE.finditer(line):
             if parse_version(match.group(1)) < parse_version(previous):
                 raise PrepError(
-                    f"docs/cli/signoff.md:{lineno}: availability note anchored"
+                    f"{source}:{lineno}: availability note anchored"
                     f" on v{match.group(1)}, older than the previous release"
                     f" {previous} -- the note resolver can never match it again;"
                     " resolve it by hand (e.g. '`klt X.Y.Z`')"
@@ -209,7 +218,7 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     fragments = (
         {}
         if _has_release_heading(changelog_text, new)
-        else _read_changelog_fragments(repo / "changelog.d")
+        else _read_changelog_fragments(repo / "changelog.d", current, new)
     )
     new_log_text = add_changelog_heading(
         changelog_text, new, date, fragments="\n\n".join(fragments.values())

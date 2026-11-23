@@ -1,0 +1,1 @@
+- Release preparation resolves availability notes in pending changelog fragments and identifies stale notes by filename and line before writing release files.
