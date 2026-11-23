@@ -429,6 +429,7 @@
       "modules": [
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_base",
         "klayout_tools.gen_compose_boundary",
         "klayout_tools.gen_compose_dbu",
         "klayout_tools.gen_compose_derived_frame",
@@ -2579,36 +2580,6 @@
     },
     {
       "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_VIA_DROP_SIZE_UM",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_draw_routed_entry",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_fixed_cut_side_um",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_orient_port",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_via_fixed_size_um",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
       "exporter": "klayout_tools.gen_compose_routing",
       "symbol": "_min_width_um_for_layer",
       "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
@@ -2857,13 +2828,13 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose",
+        "consumer": "klayout_tools.gen_compose_via_cuts",
         "exporter": "klayout_tools.gen",
         "symbol": "_cut_fixed_size_um",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose",
+        "consumer": "klayout_tools.gen_compose_via_cuts",
         "exporter": "klayout_tools.gen",
         "symbol": "_fixed_cut_side_um",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -2902,12 +2873,6 @@
         "consumer": "klayout_tools.layout_plan",
         "exporter": "klayout_tools.gen",
         "symbol": "_GENERATOR_SPECS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.layout_plan",
-        "exporter": "klayout_tools.gen_compose",
-        "symbol": "_ORIENTATIONS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
