@@ -184,3 +184,48 @@ def test_unrepairable_pad_wire_keeps_geometry(obstruction):
     assert report["tip_check"]["violations"] > 0
     assert report["m1_landing_pad_wire_pairs_extended"] == 0
     assert (before ^ _region(layout, top, 19)).is_empty()
+
+
+@pytest.mark.parametrize("gap", [22, 27])
+@pytest.mark.parametrize("placement", ["nested", "v0", "multi_cut"])
+def test_facing_via_pad_is_never_repaired_as_a_wire(gap, placement):
+    layout, top, via, _ = _mixed_pair(gap, 18)
+    m1 = layout.layer(19, 0)
+    top.shapes(m1).clear()
+    offset = kdb.Trans(72 + 4 * gap, 0)
+    if placement == "nested":
+        other = layout.create_cell("BLOCK")
+        other.insert(kdb.CellInstArray(via.cell_index(), kdb.Trans()))
+    else:
+        other = layout.create_cell("VIA_OTHER")
+        other.shapes(m1).insert(kdb.Box(-36, -44, 36, 44))
+        if placement == "v0":
+            other.shapes(layout.layer(18, 0)).insert(kdb.Box(-36, -36, 36, 36))
+        else:
+            cuts = other.shapes(layout.layer(21, 0))
+            cuts.insert(kdb.Box(-28, -36, -4, 36))
+            cuts.insert(kdb.Box(4, -36, 28, 36))
+    top.insert(kdb.CellInstArray(other.cell_index(), offset))
+    before = _region(layout, top, 19)
+    report = _repair(layout, top)
+    assert report["m1_landing_pad_wire_pairs_extended"] == 0
+    assert report["m1_landing_pairs_extended"] == 0
+    assert (_region(layout, top, 19) ^ before).is_empty()
+    assert report["tip_check"]["violations"] > 0
+
+
+def test_pad_and_wire_can_extend_in_opposite_directions():
+    layout, top, _, wire = _mixed_pair(22, 18)
+    v0 = layout.layer(18, 0)
+    for box in (kdb.Box(-36, 40, 36, 112), kdb.Box(124, -104, 196, -32)):
+        top.shapes(v0).insert(box)
+    before = _region(layout, top, 19)
+    cuts = _region(layout, top, 18) + _region(layout, top, 21)
+    report = _repair(layout, top)
+    after = _region(layout, top, 19)
+    assert report["m1_landing_pad_wire_pairs_extended"] == 1
+    assert report["tip_check"]["violations"] == 0
+    assert after.count() == before.count() == 2
+    assert (after - before).interacting(cuts).is_empty()
+    assert after.interacting(kdb.Region(wire)).bbox().top > wire.top
+    assert (after - after.interacting(kdb.Region(wire))).bbox().bottom < -44

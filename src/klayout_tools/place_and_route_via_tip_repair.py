@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from itertools import permutations
+
 from .place_and_route_via_tip import (
     _SHORT_MAX_NM,
     _TIP_RULES,
     _edge_classes,
     _nm_to_dbu_ceil,
+    _placed_pads,
 )
 
 
 def _landing_edges(kdb, top, metal, cut):
     """Index complete sides of rectangular VIA_* pads enclosing a V1 cut."""
     edges = {}
-    pad_sides = kdb.Edges()
     for inst in top.each_inst():
         via = inst.cell
         if not via.name.startswith("VIA_") or via.shapes(cut).is_empty():
@@ -30,10 +32,9 @@ def _landing_edges(kdb, top, metal, cut):
                     continue
                 cut_sides = kdb.Region(cut_polygon.transformed(trans)).edges()
                 for edge in placed.each_edge():
-                    pad_sides.insert(edge)
                     flush = not (kdb.Edges(edge) & cut_sides).is_empty()
                     edges[edge.bbox()] = (placed.bbox(), flush)
-    return edges, pad_sides
+    return edges
 
 
 def _extend(kdb, box, vertical, target, bias):
@@ -104,9 +105,15 @@ def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair):
         yield (landing[0], wire), True
 
 
-def _try_extensions(kdb, source, vertical, target, nearby, cuts, dbu, window):
-    for bias in range(3):
-        boxes = [_extend(kdb, box, vertical, target, bias) for box in source]
+def _try_extensions(kdb, source, mixed, vertical, target, nearby, cuts, dbu, window):
+    biases = [(bias,) * len(source) for bias in range(3)]
+    if mixed and len(source) == 2:
+        biases.extend(permutations(range(3), 2))
+    for directions in biases:
+        boxes = [
+            _extend(kdb, box, vertical, target, direction)
+            for box, direction in zip(source, directions, strict=True)
+        ]
         if any(nearby.interacting(kdb.Region(box)).count() != 1 for box in boxes):
             continue
         extended = kdb.Region()
@@ -136,7 +143,7 @@ def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, allow_pad_pai
         kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair
     ):
         added = _try_extensions(
-            kdb, source, vertical, target, nearby, cuts, dbu, window
+            kdb, source, mixed, vertical, target, nearby, cuts, dbu, window
         )
         if added is not None:
             return added, mixed
@@ -159,7 +166,12 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     tip_pairs = tip.separation_check(narrow, spacing, True, kdb.Edges.Projection)
     if narrow_pairs.is_empty() and tip_pairs.is_empty():
         return 0, 0
-    landings, pad_sides = _landing_edges(kdb, top, metal_index, cut_index)
+    landings = _landing_edges(kdb, top, metal_index, cut_index)
+    if not landings:
+        return 0, 0
+    # Even an ineligible landing (e.g. nested, V0-only or multi-cut) is via
+    # metal and cannot supply the routed-wire face of a mixed repair.
+    pad_sides = _placed_pads(kdb, layout, top, metal_index).edges()
     cuts = kdb.Region(top.begin_shapes_rec(cut_index))
     v0 = layout.find_layer(18, 0)
     if v0 is not None:
