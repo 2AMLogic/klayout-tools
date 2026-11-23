@@ -6913,6 +6913,11 @@ resolves the bare form is a property of that netlist (hierarchical vs.
 flattened with escaped names); the writer follows the DEF rather than
 guessing.
 
+The writer also preserves DEF bus indices and literal brackets on non-port
+nets and instance names. For example, the DEF spelling `u_cap/mem\[0\][3]`
+keeps both its literal word index and its bus bit in the SPEF. Regenerate
+the SPEF with the routed DEF connections to apply this fix to older output.
+
 Measured against a real OpenSTA session (issue #3448, OpenROAD
 `26Q3-1510-g6cb3f2b704`, sky130_fd_sc_hd `tt_025C_1v80`, `klt sta` in `def`
 mode with `spef`): a two-inverter DEF whose instances are named

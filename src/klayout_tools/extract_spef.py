@@ -266,10 +266,10 @@ def _renamed_def_name(name: str, original: str) -> str:
 
 
 def _def_name_to_spef(raw: str) -> str:
-    """``raw`` (a DEF identifier as spelled in the file) rendered as a SPEF
-    identifier: identical to ``_spef_name(_unescape_def_name(raw))`` except a
-    bare, unescaped ``/`` -- DEF's hierarchy divider -- stays ``/`` (SPEF
-    declares the same ``*DIVIDER /``). An escaped ``\\/`` stays escaped."""
+    """Keep the DEF's hierarchy and bus delimiters in SPEF. An escaped slash
+    or bracket is literal, while a bare slash or bracket is structural.
+    For example, a DEF memory word can have a literal index followed by a
+    bus bit. OpenSTA needs both spellings preserved in the same name."""
     out: list[str] = []
     i = 0
     while i < len(raw):
@@ -278,7 +278,7 @@ def _def_name_to_spef(raw: str) -> str:
             out.append(_spef_name(raw[i + 1]))
             i += 2
             continue
-        out.append("/" if char == "/" else _spef_name(char))
+        out.append(char if char in "/[]" else _spef_name(char))
         i += 1
     return "".join(out)
 

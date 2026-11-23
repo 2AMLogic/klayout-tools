@@ -445,6 +445,9 @@ _STA_WARNING_RE = re.compile(r"\[WARNING STA-\d+\]")
 #: whether the logger writes to stdout or stderr, and stderr cannot be
 #: interleaved with the Tcl ``puts`` markers above.
 _SPEF_READER_WARNING_RE = re.compile(r"\[WARNING STA-(?:1648|1650)\]")
+_SPEF_MISSING_NET_RE = re.compile(
+    r"\[WARNING STA-1650\] (?:.*, )?net (.+) not found\.$"
+)
 #: Upper bound on how many verbatim reader-warning lines are echoed into the
 #: response -- a diagnostic sample, not an exhaustive log (a wholesale
 #: name-convention mismatch emits one per SPEF net).
@@ -1744,7 +1747,7 @@ def _spef_annotation_block(
     names_correlated = (
         design_nets_total > 0 and design_nets_annotated == design_nets_total
     )
-    reader_warning_count, reader_warning_sample = _spef_reader_warnings(stdout, stderr)
+    reader_warnings = _spef_reader_warnings(stdout, stderr)
     delay_changed = _parse_delay_changed(stdout)
     unannotated_drivers, partial_drivers = _parse_parasitic_annotation(stdout)
     unannotated_pins, partial_pins = _parse_parasitic_driver_pins(stdout)
@@ -1785,11 +1788,16 @@ def _spef_annotation_block(
         )
         reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
-    if reader_warning_count:
+    if reader_warnings:
+        discarded = {
+            m[1] for line in reader_warnings if (m := _SPEF_MISSING_NET_RE.search(line))
+        }
         reasons.append(
-            f"read_spef discarded annotation for {reader_warning_count} "
-            "SPEF record(s) it could not resolve against the linked design "
-            "(OpenSTA STA-1650/STA-1648 'not found' warnings)"
+            f"read_spef discarded annotation for {len(reader_warnings)} "
+            f"SPEF record(s). STA-1650 identified {len(discarded)} distinct "
+            "unresolved net name(s). "
+            "design_nets_annotated counts name matches before read_spef and does "
+            "not establish that the reader accepted their parasitics"
         )
     if delay_changed is False:
         reasons.append(
@@ -1822,8 +1830,8 @@ def _spef_annotation_block(
         "design_nets_annotated": design_nets_annotated,
         "design_nets_total": design_nets_total,
         "design_nets_missing_sample": design_nets_missing_sample,
-        "reader_warning_count": reader_warning_count,
-        "reader_warning_sample": reader_warning_sample,
+        "reader_warning_count": len(reader_warnings),
+        "reader_warning_sample": reader_warnings[:_SPEF_READER_WARNING_SAMPLE_LIMIT],
         "unannotated_driver_count": unannotated_drivers,
         "partially_unannotated_driver_count": partial_drivers,
         "floating_driver_count": (
@@ -3991,43 +3999,22 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
     return data
 
 
-def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:
-    """``(count, capped_sample)`` of the diagnostics OpenSTA's *SPEF reader*
-    emitted while parsing the caller-supplied SPEF -- the conclusive signal
-    that ``read_spef`` parsed a record and then discarded it (issue #1624).
+def _spef_reader_warnings(stdout: str, stderr: str) -> list[str]:
+    """All diagnostics from the bracketed read_spef call, before sample capping.
 
-    Two matching strategies, because OpenROAD builds disagree about which
-    stream the logger writes to:
-
-    * **stdout** is bracketed by :data:`_SPEF_READ_BEGIN`/
-      :data:`_SPEF_READ_END` around the ``read_spef`` call itself, and the
-      SPEF reader is the only thing running inside that region -- so *any*
-      ``[WARNING STA-...]`` there is a reader warning, including codes this
-      module has never seen. (When the markers are absent -- an older
-      script, a truncated run -- it falls back to the narrow code match.)
-    * **stderr** cannot be interleaved with the Tcl ``puts`` markers, so it
-      is matched narrowly against :data:`_SPEF_READER_WARNING_RE`
-      (``STA-1650``/``STA-1648``) -- a liberty or clock warning on stderr
-      must not be mistaken for a SPEF-annotation failure.
+    When the stdout markers are missing, accept only known reader codes.
+    Stderr has no markers, so it always needs the narrower filter.
     """
-    matched: list[str] = []
     region = _extract_block(stdout, _SPEF_READ_BEGIN, _SPEF_READ_END)
-    if region is not None:
-        matched += [
-            line.strip() for line in region.splitlines() if _STA_WARNING_RE.search(line)
-        ]
-    else:
-        matched += [
-            line.strip()
-            for line in stdout.splitlines()
-            if _SPEF_READER_WARNING_RE.search(line)
-        ]
-    matched += [
+    stdout_pattern = _STA_WARNING_RE if region is not None else _SPEF_READER_WARNING_RE
+    output = region if region is not None else stdout
+    return [
+        line.strip() for line in output.splitlines() if stdout_pattern.search(line)
+    ] + [
         line.strip()
         for line in stderr.splitlines()
         if _SPEF_READER_WARNING_RE.search(line)
     ]
-    return len(matched), matched[:_SPEF_READER_WARNING_SAMPLE_LIMIT]
 
 
 def _parse_delay_changed(stdout: str) -> bool | None:

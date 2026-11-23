@@ -923,13 +923,12 @@ def test_spef_reader_warnings_counts_delimited_stdout_region():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
     # Only the two inside the region count -- the reader is the only thing
     # running there, but a liberty/clock warning outside it is not evidence
     # of a failed annotation.
-    assert count == 2
-    assert sample == [line.strip() for line in _READER_WARNINGS]
+    assert warnings == [line.strip() for line in _READER_WARNINGS]
 
 
 def test_spef_reader_warnings_counts_unknown_codes_inside_region():
@@ -938,10 +937,9 @@ def test_spef_reader_warnings_counts_unknown_codes_inside_region():
     the region check is deliberately broader than the STA-1648/1650 pair."""
     stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 1
-    assert sample == ["[WARNING STA-9999] some future reader warning."]
+    assert warnings == ["[WARNING STA-9999] some future reader warning."]
 
 
 def test_spef_reader_warnings_matches_stderr_narrowly():
@@ -956,35 +954,24 @@ def test_spef_reader_warnings_matches_stderr_narrowly():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+    warnings = post_route_sta._spef_reader_warnings(stdout, stderr)
 
-    assert count == 2
-    assert all("STA-16" in line for line in sample)
+    assert len(warnings) == 2
+    assert all("STA-16" in line for line in warnings)
 
 
 def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
     stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
 
-    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 2
-
-
-def test_spef_reader_warnings_sample_is_capped():
-    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
-    stdout = _spef_read_block(*warnings)
-
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
-
-    assert count == 50
-    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+    assert len(warnings) == 2
 
 
 def test_spef_reader_warnings_clean_run_reports_zero():
-    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+    warnings = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
 
-    assert count == 0
-    assert sample == []
+    assert warnings == []
 
 
 def _delay_blocks(pre: str, post: str) -> str:
