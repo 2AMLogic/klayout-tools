@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .place_and_route_asap7 import RVT_LIBRARIES
+
 #: Per-cell-library ``set_routing_layers -signal`` range for the ``"route"``
 #: stage. Same not-derivable-from-the-install, verified-not-guessed posture
 #: as :data:`_CTS_BUFFER_CELLS` -- but here ORFS *does* pin the value per
@@ -75,7 +77,6 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sg13g2_stdcell": "Metal2-TopMetal2",
 }
 
-
 #: Per-cell-library **routing-layer stack**, bottom-up -- every layer the
 #: platform's own tech LEF declares ``TYPE ROUTING``, in stack order (issue
 #: #2473). :data:`_ROUTING_LAYER_RANGE` above names only the two endpoints of
@@ -125,6 +126,8 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
 #: skips the check -- an unverified library keeps the pre-#2473 behaviour
 #: rather than being rejected on a guess.
 _ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
+    # lambdapdk v0.2.17, asap7/base/apr/asap7_tech.lef (TYPE ROUTING).
+    **dict.fromkeys(RVT_LIBRARIES, tuple(f"M{i}" for i in range(1, 10))),
     "sky130_fd_sc_hd": ("li1", "met1", "met2", "met3", "met4", "met5"),
     "gf180mcu_fd_sc_mcu9t5v0": (
         "Metal1",
