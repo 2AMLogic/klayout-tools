@@ -556,6 +556,7 @@
         "klayout_tools.lvs_hierarchy",
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_label_coverage",
+        "klayout_tools.lvs_layout_short_nets",
         "klayout_tools.lvs_layout_stage",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
