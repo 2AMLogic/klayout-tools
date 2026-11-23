@@ -1185,7 +1185,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 | `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
 
-### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
+### Asynchronous submit, status and cancel (`--submit-only`, `--job-status`, `--cancel`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073), [#4351](https://github.com/2AMLogic/klayout-tools/issues/4351))
 
 A blocking `klt sim --backend batch` run prints nothing until the fleet job
 ends. To hand a long run off instead:
@@ -1347,8 +1347,8 @@ backend" for the resolution order and the no-bucket error):
 
 | Field | Description |
 | ----- | ----------- |
-| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
-| `terminal` | `true` for `done`/`failed`/`timeout` |
+| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed`, `timeout` or `cancelled` |
+| `terminal` | `true` for `done`/`failed`/`timeout`/`cancelled` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
 | `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
 | `never_started`, `unstarted_seconds`, `diagnostic` | Derived by `klt`, present only on a `pending` job (no `status.json`) whose `job.json` is older than 1800 s (`_BATCH_PROVISION_SLACK_S`): `never_started: true`, the `job.json` age in seconds, and the same "never started" message `--attach` prints. Additive; treat all three as optional ([#5332](https://github.com/2AMLogic/klayout-tools/issues/5332)) |
@@ -1360,6 +1360,39 @@ An unknown job id (no `job.json` under the prefix) is an error envelope with
 `error.code: "batch_job_not_found"`; a malformed id is
 `"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
 2am's own `reconcile` does that.
+
+`--cancel JOB_ID` ([#4351](https://github.com/2AMLogic/klayout-tools/issues/4351))
+cancels one fleet job through 2am's `batch-fleet-provision.sh
+cancel <job-id> --apply` — the fleet-side primitive
+([2AMLogic/2am#6502](https://github.com/2AMLogic/2am/issues/6502)) that marks
+the job's `status.json` `cancelled`, writes its end record, and only then
+terminates its pending/running instances. That order is load-bearing:
+terminating first would read as `abandoned` to the fleet's `reconcile` and
+get the job re-launched, which is why `klt` never issues the AWS calls
+itself. The job's S3 prefix and partial results are left in place. Like
+`--job-status` it needs no request file; on success it exits `0` with:
+
+| Field | Description |
+| ----- | ----------- |
+| `schema_version` | `1` |
+| `job_id`, `state` | The cancelled job; `state` is `"cancelled"` |
+| `bucket`, `region`, `job_uri` | Where the job lived |
+| `warnings` | Additive: the fleet script's stderr lines (bucket redacted), only when it warned — e.g. an instance it could not terminate |
+
+A job with nothing live to terminate (already finished, already cancelled,
+or unknown to the fleet tag) fails with `error.code:
+"batch_cancel_nothing_to_cancel"`; any other script failure surfaces its
+bucket-redacted stderr. Before applying a cancellation, klt checks that
+the resolved bucket and jobs prefix match the provisioner's literal
+`BATCH_JOB_BUCKET` and `BATCH_JOBS_PREFIX` in the adjacent `batch-fleet.env`.
+If it cannot confirm the match, it exits before invoking the provisioner.
+`--cancel` conflicts (exit `2`) with `--dry-run`, `--submit-only`, `--wait-for-capacity`, `--attach`, `--job-status`, a
+non-`batch` `--backend`, and `--batch-set`. Cancelling a sharded
+`--submit-only` run takes one `--cancel` per shard job id (a shard-map form
+is future work). A cancelled job read with `--job-status` reports
+`terminal: true, known_state: true`; `--attach` or a blocking run on one
+fails fast with `error.code: "batch_job_cancelled"` instead of waiting on
+or collecting a job whose results will never come.
 
 **Progress and unit counts.** The fleet's `status.json` is written at state
 transitions only and carries no completed/total unit count; `outputs/` is
@@ -3370,8 +3403,8 @@ are accepted. `--resume` (`options.resume`) is **accepted** on
 `local`, `local-parallel` and `batch` with deck-specific semantics — see
 "Resuming a deck run" below — and refused on `remote`. `--submit-only` and
 `--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
-job id; see "Asynchronous submit and status"); they cannot be combined with
-`--resume`.
+job id; see "Asynchronous submit, status and cancel"); they cannot be combined
+with `--resume`.
 
 ### Preservation and isolation
 
