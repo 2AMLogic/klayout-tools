@@ -8,6 +8,37 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-23
 
+- **PR #7503**: fix: match byte-identical short hex pins in --expect-version
+- **PR #7487**: Recognize PEX-side worker observations in envelope path lint
+- **PR #7468**: Canonicalize extract reports without loading the layout engine
+- **PR #7455**: Share simulator version pin comparison across manifest and report checks
+- **PR #7448**: feat(sta): per-entry clock reference for input/output delay maps
+- **PR #7445**: Stamp the variant directory selected by PDK discovery
+- **PR #7420**: Explain missing expression measurements on versioned simulation runners
+- **PR #7385**: fix(signoff): require checked ERC coverage for every declared tie in item 11
+- **PR #7302**: Share model resolution and sweep validation between klt size solvers
+- **PR #7157**: fix(gen-compose): clear the drawn pad for label-derived access
+- **PR #7150**: feat: control OpenROAD threads for place-and-route
+- **PR #7131**: Describe descriptor-backed names in post-route corner sweeps
+- **PR #7038**: feat: accept local operating-condition renames in Liberty list merge
+- **Issue #7484** (closed): klt pex: env-provenance lint-envelope flags the envelope's own remote worker observations because the #5133 skip is anchored at the envelope root
+- **Issue #7399** (closed): klt sta: I/O delays are primary-clock-only, so an input-delay-vs-secondary-clock check cannot be expressed
+- **Issue #7125** (closed): place-and-route docs: two leftover `list_lib_corners` references describe sweep_corners validation that is now descriptor-driven
+- **Issue #7113** (closed): klt sim batch: measurements[].expr passes preflight but every dependent measurement errors on a runner that predates expr
+- **Issue #7090** (closed): Share model resolution and sweep validation between klt size solvers
+- **Issue #7060** (closed): Use the discovered variant directory for unpinned batch PDK stamps
+- **Issue #7049** (closed): Move extract report canonicalization out of the layout engine
+- **Issue #6987** (closed): Require checked ERC coverage for every declared tie before signoff item 11 grades met
+- **Issue #6940** (closed): Merge Liberty cell groups whose default operating condition differs only by name
+- **Issue #6815** (closed): gen-compose: ports_from_labels access search ignores routing.landing_pad_size_um, so it clears a smaller pad than compose draws
+- **Issue #6534** (closed): sim_batch_capacity_retry._run_pass: the interrupt branch's partial-outcome collection is dead code
+- **Issue #6378** (closed): sim: the engine_version pin's accept test is duplicated between the pre-submit and post-run checks
+- **Issue #6334** (closed): Reuse pdk.variant_dir_of() in bundle_expectation instead of re-deriving the variant dir
+- **Issue #6298** (closed): pdk_compat._sha_equal: byte-identical all-hex values shorter than 7 chars report mismatch
+- **Issue #6297** (closed): klt pdk check: bundle_expectation re-derives the variant dir instead of reading the one find_pdk resolved
+- **Issue #5632** (closed): abstract-cells + --abstract-cell-lef: merged substrate pin lands on the isolated 'vsubs' global, so a PG-pin gate-level reference cannot match
+- **Issue #5520** (closed): klt characterize: async set/reset arcs (preset/clear propagation, recovery/removal) for sequential cells
+- **Issue #5517** (closed): klt characterize: no sequential-cell arcs (setup/hold/recovery/removal), so a standard-cell library cannot be re-characterized end to end
 - **PR #7489**: Preserve OSDI model paths in relocated PEX testbenches
 - **PR #7477**: refactor(sim): isolate checkpoint persistence and fingerprinting
 - **PR #7473**: docs(lvs): show the sg13cmos5l plain-element reference migration
