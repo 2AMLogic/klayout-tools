@@ -3476,8 +3476,8 @@ def run_pex(
             # actually read -- `klt extract`'s own `pdk` block (`variant`,
             # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
             "pdk": extract_report.get("pdk"),
-            # Additive fields (issue #6559): present only for a runset leg.
             **_substrate_tie_fields(parasitics),
+            # Additive fields (issue #6559): present only for a runset leg.
             **pex_runset.extraction_fields(extract_report),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --

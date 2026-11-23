@@ -1427,14 +1427,14 @@ def run_extract(
     ``parasitic_variants`` (``klt extract --parasitic-variant <variant>``,
     repeatable, issue #3056) drops parasitic elements at injection time so a
     failing ``klt pex`` delta row can be attributed to R or C: ``drop-r:NET|*``
-    shorts a net's star legs into its hub, ``drop-c-ground:NET|*`` omits its
-    ground capacitor, ``drop-c-coupling`` omits every ``Ccc_*`` card. Anything
-    else raises :class:`ExtractError`, as does use without ``parasitics``; a
-    ``NET`` matching no net goes to ``warnings``, as does one that names a
-    ``--distributed-rc`` net (left unchanged). ``None``/empty (the default)
-    emits the network and report byte-identically to before this feature
-    existed; otherwise the report's ``parasitics`` block carries
-    ``parasitic_variant`` (the request, verbatim).
+    shorts a net's star legs into its hub, ``drop-r-body:NET|*`` keeps its
+    body/bulk terminals on the hub (class-aware, issue #7317),
+    ``drop-c-ground:NET|*`` omits its ground capacitor, ``drop-c-coupling``
+    omits every ``Ccc_*`` card. Anything else raises :class:`ExtractError`,
+    as does use without ``parasitics``; a ``NET`` matching no net goes to
+    ``warnings``, as does one naming a ``--distributed-rc`` net (unchanged).
+    ``None``/empty (the default) is byte-identical to before this feature
+    existed; otherwise ``parasitics.parasitic_variant`` echoes the request.
 
     ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
     issue #1700) scopes the *ground* R/C pass itself -- the base per-net
@@ -1872,12 +1872,10 @@ def run_extract(
     ``net_id`` is ``net.cluster_id`` -- unique across every net *object* in
     this circuit, the same convention ``parasitics.nets[].net_id`` already
     uses for the identical "several distinct nets share one label" shape
-    (issue #765/#811). ``pin_index`` is that net's 0-based position in the
-    written ``.SUBCKT``/instance-line port order (``circuit.each_pin()``,
-    the exact sequence ``NetlistSpiceWriter`` iterates) when it is a promoted
-    pin, ``None`` otherwise -- resolving a specific ``.SUBCKT`` port index
-    straight back to a ``nets[]`` entry, positionally, with no separate
-    ``klt lvs`` run against a reference schematic needed.
+    (issue #765/#811). For a promoted pin, ``pin_index`` is its 0-based
+    position in KLayout's ``Circuit.each_pin()`` order used by
+    ``NetlistSpiceWriter``. An explicit ``--pins`` order can reorder the
+    written top-level ``.SUBCKT`` header. Internal nets have ``pin_index=None``.
     ``label_positions_um`` is ``[{"text": str, "x_um": float, "y_um": float},
     ...]`` -- every drawn text-label shape naming this net, in this circuit's
     own local coordinate frame (same convention
