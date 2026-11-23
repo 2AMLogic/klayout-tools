@@ -333,11 +333,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2686
+      "lines": 2672
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2488
+      "lines": 2473
     },
     {
       "path": "src/klayout_tools/gen.py",
