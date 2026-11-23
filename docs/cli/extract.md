@@ -6169,11 +6169,23 @@ names:
 | Variant | Effect |
 |---|---|
 | `drop-r:NET` / `drop-r:*` | Short the net's star legs into its hub: device terminals stay on the hub, no series resistor. The hub and its ground C are unchanged. A net with no device terminal (Gamma-shunt fallback) gets no series R either. |
+| `drop-r-body:NET` / `drop-r-body:*` | Keep only the net's **body/bulk** terminals on the hub — no leg net, no series R for them — and re-split the net's total R across the remaining signal terminals, so the leg sum is unchanged (issue #7317; see the known-issue note below). Class-aware: MOS4 `B`, ResistorWithBulk/CapacitorWithBulk `W`, BJT4 `S`; a BJT3's `B` is the *base* and is never treated as a body. A net whose terminals are all body-class keeps the full star. |
 | `drop-c-ground:NET` / `drop-c-ground:*` | Omit the net's ground capacitor (and the `--mom-rlc-inductance-nh` series inductor that sits in series with it). |
 | `drop-c-coupling` | Omit every `Ccc_*` coupling card. |
 
 "All C removed" is `drop-c-ground:*` + `drop-c-coupling`; "all R removed" is
 `drop-r:*`.
+
+**Known issue — near-floating body terminals (issue #7317).** Extracted
+decks whose devices have *near-floating* body terminals — OSDI compact
+models whose body node is driven only by internal capacitances, with no
+low-impedance path of its own — can make ngspice transient analysis fail
+(`timestep_too_small`, Newton non-convergence) when the body terminal sits
+on its own star leaf behind a many-ohm series resistor. Merging the body
+leaf onto the net hub makes the transient converge. Body terminals are not
+signal paths, so a quasi-static star gains nothing from separating them:
+use `--parasitic-variant drop-r-body:*` (opt-in; default output is
+byte-identical without it).
 
 ```
 klt extract cell.gds --deck sky130 --parasitics --parasitic-variant drop-r:VOUT --format json
@@ -6182,8 +6194,9 @@ klt extract cell.gds --deck sky130 --parasitics --parasitic-variant drop-r:VOUT 
 - **Closed grammar.** Anything else is a usage error (exit 2), as is the flag
   without `--parasitics`.
 - **Unmatched `NET` is a warning**, as for `--parasitics-net`.
-- **`--distributed-rc` nets** are left unchanged by `drop-r`/`drop-c-ground`
-  (with a warning) — no new modelling for the ladder.
+- **`--distributed-rc` nets** are left unchanged by
+  `drop-r`/`drop-r-body`/`drop-c-ground` (with a warning) — no new modelling
+  for the ladder.
 - **Accounting follows the netlist.** `r_count`, `c_count`, `cc_count` and
   the `total_*` fields count what was actually emitted; per-net
   `resistance_ohm`/`capacitance_ff` remain the computed values. A net left
@@ -9101,7 +9114,7 @@ scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
 | `pin_index`    | integer \| `null` | Additive field (issue #1540). This net's 0-based position in the written `.SUBCKT`/instance-line port order (`Circuit.each_pin()`, the same sequence `NetlistSpiceWriter` iterates) when `pin` is `true`; `null` when it is not a promoted pin. Lets a caller resolve a specific `.SUBCKT` port index straight back to a `nets[]` entry, positionally, with no separate `klt lvs` run against a reference schematic. |
 | `label_positions_um` | array\<object\> | Additive field (issue #1540). Every drawn text-label shape naming this net, `[{"text": str, "x_um": number, "y_um": number}, ...]`, sorted by `(text, x_um, y_um)`; `[]` for a net with no drawn label. `(x_um, y_um)` is each label's anchor point in the top cell's own local coordinate frame — the mechanism a caller with independent floorplan knowledge (e.g. a known physical pin location from `klt place-and-route`'s DEF, or its own generator's placement record) uses to positively identify *which* of several identically-named entries it means, without guessing from `name` alone. |
 
-`nets` is sorted by `name` for deterministic, diff-clean output — `net_id`/`pin_index` are what let a caller recover the unsorted, positional `.SUBCKT` order this sort otherwise discards. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
+`nets` is sorted by `name` for deterministic output. Use `net_id` to identify a circuit net and `pin_index` to recover KLayout's original port order. If `--pins` supplies an explicit order, read the written top-level `.SUBCKT` header for its final port positions. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
 
 ### Field classes: content, bookkeeping, tool metadata (issue #1559)
 

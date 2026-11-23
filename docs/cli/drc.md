@@ -904,13 +904,41 @@ Use `--expect-rule-categories` to assert their count. An older gf180mcu layout (
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
+**Metal slotting on 3LM gf180mcu.** To check slotting on a three-metal stack,
+use the family deck.
+
+```sh
+klt drc block.gds --engine klayout --pdk gf180mcuA --deck-var decks=mslot --format json
+```
+
+The foundry’s `mslot.rb` reads `metal4_drawn` while checking the three lower
+metals. For the auto-resolved family script, klt loads a packaged Ruby macro
+before the deck when the effective stack is `3LM`. The macro supplies an empty
+Metal4 layer when the PDK omits it. This keeps the slot checks in the foundry
+deck and avoids maintaining a second implementation or patching the PDK.
+An explicit stack such as `--deck-var metal_level=4LM` takes precedence over
+the variant preset.
+Other stacks and explicit `--deck-file` runs load the original script directly.
+
+On KLayout 0.30.12 with the `f6eeac7dad08` PDK, a 40 µm square of unslotted
+Metal1 on 34/0 produced one `MSLOT1.1` violation (exit 3). The deck logged
+slot checks for Metal1 through Metal3 and declared 27 unique categories.
+Native rule IDs use `MSLOT<n>.<k>`, where `n` is the metal level. The curated
+deck lists the separate `MSLOT.<k>` IDs under `coverage.unmodeled_rules`.
+
+`native_deck.preludes` and `provenance.deck.preludes` record the macro’s name,
+SHA-256 digest and reason. `klt drc --check` verifies its digest. Selecting
+`decks=mslot` checks slotting alone. Without an independent category assertion,
+a zero-finding native run returns `coverage_unknown` (exit 4). Asserting
+all 27 slot categories returns `clean_partial` because 171 other deck IDs
+were omitted on this PDK.
+
 #### GF180 3LM deck selection
 
-On the installed gf180mcuA three-metal/30 kÅ stack, the default PDK
-`gf180mcu.drc` starts the MSLOT deck `mslot1` and aborts when its rule
-references `metal4_drawn`. That stack has three routing metals. Repeating
-the same metal globals leaves the missing fourth layer unresolved. Issue
-#6916 tracks the MSLOT implementation. An upstream PDK filing is pending.
+When run directly on the installed gf180mcuA three-metal/30 kÅ stack, the
+PDK's `gf180mcu.drc` starts `mslot1` and aborts on the missing
+`metal4_drawn` layer. The packaged macro described above lets the
+auto-resolved family deck complete the slot checks on that stack.
 
 The native runner accepts the PDK's comma-separated deck tags. Additions and
 exclusions apply from left to right starting with an empty selection. Run
@@ -937,8 +965,8 @@ reason `not_selected`. Signoff withholds full DRC credit, including T1 item 3.
 
 Read `native_deck.deck_selection` for the registry IDs selected, omitted,
 observed starting and never reached. A start establishes only that the
-runner entered a deck. The default buck run started 161 decks, including
-the failing `mslot1`, and never reached the remaining 16. On an abort,
+runner entered a deck. The original buck run without the prelude started 161 decks,
+including the failing `mslot1`, and never reached the remaining 16. On an abort,
 `error.deck_selection` accompanies the existing `abort` and `decks_executed`
 fields. Tolerating an abort with `--allow-deck-errors` also records the
 selection under `engine_deck_errors`. When a parallel run fails, `abort.decks`
@@ -3051,7 +3079,9 @@ lengths, and the minimum is the gap between those edges.
 
 | Rule on each layer | Edge condition | Minimum |
 | --- | --- | --- |
+| S.1 | Both edges > 36 nm | 18 nm projected |
 | S.2 | One edge ≤ 36 nm and the other > 36 nm | 25 nm projected |
+| S.3 | Both edges 24–36 nm inclusive | 27 nm projected |
 | S.4 | Both edges < 24 nm | 31 nm projected |
 | S.5 | One edge < 24 nm and the other 24–36 nm inclusive | 31 nm projected |
 | S.6 | Less than one database unit of projected overlap (0.25 nm) | 20 nm Euclidean corner distance |
@@ -3069,7 +3099,10 @@ in **µm**, as written in the LEF. [Pinned platform configuration](https://githu
 
 To assess router legality, apply the full LEF clauses to the particular
 geometry, including the end-width threshold, extensions and parallel-edge
-conditions. For example, in the rectangle fixture two wire ends have an
+conditions. S.1 is the case where the two numbers coincide — its 18 nm
+minimum equals the LEF's plain `SPACING 0.018` — and that coincidence does
+not establish router legality; the end-of-line and corner clauses still
+apply. For example, in the rectangle fixture two wire ends have an
 18 nm lateral gap and a 7 nm longitudinal offset. Their corner distance is
 √(18² + 7²) ≈ 19.31 nm, which triggers S.6. KLayout reported 15 markers
 on the fixture across M1–M3. OpenROAD routing acceptance requires a separate

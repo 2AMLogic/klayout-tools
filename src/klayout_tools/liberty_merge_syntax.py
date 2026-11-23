@@ -225,3 +225,116 @@ def _uncovered_output(text: str) -> tuple[str, str] | None:
         elif depth == pin_depth:
             attributes[kind] = value
     return None
+
+
+_TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
+_AXIS = re.compile(r"(variable|index)_([1-9][0-9]*)\Z")
+_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
+
+
+def _direct_words(body: str):
+    """Identifier spans at the current group level, excluding nested blocks."""
+    depth = 0
+    for kind, start, end in _tokens(body):
+        if kind == "{":
+            depth += 1
+        elif kind == "}":
+            depth -= 1
+        elif depth == 0:
+            yield body[start:end], end
+
+
+def _index_value(text: str, end: int) -> tuple[int, int] | None:
+    """Contents of a direct index attribute containing Liberty numeric values."""
+    opening, ch = _next_significant(text, end)
+    if ch != "(":
+        return None
+    closing = _find_matching(text, opening, "(", ")")
+    if _next_significant(text, closing + 1)[1] != ";":
+        return None
+    value = _normalize_header(text[opening + 1 : closing].replace("\\\n", " "))
+    numbers = re.findall(r'[^\s,"]+', value)
+    if not numbers or not all(_NUMBER.fullmatch(n) for n in numbers):
+        return None
+    return opening + 1, closing
+
+
+def _template_shape(raw: str) -> tuple[str, set[str]]:
+    """Mask direct index values, preserving every other part of the definition."""
+    opening = next(start for kind, start, _ in _tokens(raw) if kind == "{")
+    # _extract_templates already located the closing brace of this group.
+    body = raw[opening + 1 : -1]
+    pieces = [raw[: opening + 1]]
+    axes: set[str] = set()
+    last = 0
+    for word, end in _direct_words(body):
+        axis = _AXIS.fullmatch(word)
+        if not axis:
+            continue
+        if axis[1] == "variable" and _next_significant(body, end)[1] == ":":
+            axes.add("index_" + axis[2])
+        elif axis[1] == "index" and (span := _index_value(body, end)):
+            axes.add(word)
+            pieces.append(body[last : span[0]])
+            last = span[1]
+    pieces.append(body[last:] + "}")
+    return _normalize_header("".join(pieces)), axes
+
+
+def _candidate_tables(text: str, templates: dict[str, set[str]]):
+    """Yield the bodies of groups whose sole argument names a conflicting template."""
+    for kind, start, end in _tokens(text):
+        if kind != "ident":
+            continue
+        opening, ch = _next_significant(text, end)
+        if ch != "(":
+            continue
+        closing = _find_matching(text, opening, "(", ")")
+        brace, ch = _next_significant(text, closing + 1)
+        if ch != "{":
+            continue
+        name = _normalize_header(text[opening + 1 : closing]).strip('"')
+        if name in templates and text[start:end] not in _TEMPLATE_KINDS:
+            yield (
+                text[start:end],
+                name,
+                text[brace + 1 : _find_matching(text, brace, "{", "}")],
+            )
+
+
+def _local_table_axes(kind: str, body: str, required: set[str]) -> set[str] | None:
+    """Find direct numeric overrides on a lookup table."""
+    axes: set[str] = set()
+    is_table = kind in {
+        "cell_rise",
+        "cell_fall",
+        "rise_transition",
+        "fall_transition",
+        "rise_constraint",
+        "fall_constraint",
+        "rise_power",
+        "fall_power",
+        "vector",
+    }
+    for word, end in _direct_words(body):
+        if word == "values" and _next_significant(body, end)[1] == "(":
+            is_table = True
+        elif word in required:
+            is_table = True
+            if _index_value(body, end):
+                axes.add(word)
+    return axes if is_table else None
+
+
+def inherited_table_axis(
+    text: str, templates: dict[str, set[str]]
+) -> tuple[str, str] | None:
+    """First table that would rely on an ambiguous merged template axis."""
+    for kind, name, body in _candidate_tables(text, templates):
+        local = _local_table_axes(kind, body, templates[name])
+        if local is None:
+            continue
+        missing = templates[name] - local
+        if missing:
+            return name, min(missing)
+    return None
