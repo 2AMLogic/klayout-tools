@@ -35,6 +35,7 @@ extract-specific:
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import math
@@ -351,27 +352,6 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> ExtractError:
     return _batch_common.transport_error(job_id, exc, ExtractError, _NO_FALLBACK)
 
 
-def _job_failure(
-    *,
-    job_id: str,
-    status: dict[str, Any],
-    runner_error: dict[str, Any] | None,
-    note: str,
-    stderr_tail: str,
-    harness_log: str,
-) -> ExtractError:
-    return _batch_common.job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=harness_log,
-        err_cls=ExtractError,
-        no_fallback=_NO_FALLBACK,
-    )
-
-
 def _collect(
     config: sim_batch.BatchConfig,
     job_id: str,
@@ -391,7 +371,11 @@ def _collect(
         runner=runner,
         err_cls=ExtractError,
         no_fallback=_NO_FALLBACK,
-        job_failure=_job_failure,
+        job_failure=functools.partial(
+            _batch_common.job_failure,
+            err_cls=ExtractError,
+            no_fallback=_NO_FALLBACK,
+        ),
     )
 
 

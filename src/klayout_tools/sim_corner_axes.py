@@ -14,10 +14,8 @@ from . import sim_supply_waveform
 from ._jsonnum import is_number
 from .sim_corner_point import (
     CornerPoint,
-    _format_params_label,
     _validate_param_scalar,
 )
-from .sim_echo_messages import zipped_length_message
 from .sim_errors import SimError
 
 #: ``options.ngspice_options`` (issue #3111): the solver/convergence
@@ -71,67 +69,6 @@ def _validate_corner_option_name(name: Any, where: str) -> str:
             f"option; supported: {', '.join(CORNER_OPTION_NAMES)}"
         )
     return lowered
-
-
-def _expand_options_axis(
-    corners_spec: dict[str, Any],
-) -> list[dict[str, int | float]]:
-    """The zipped ``corners.options`` rows (issue #3125), or ``[{}]`` for a
-    request with no options axis. Same shape and rules as
-    :func:`_expand_param_axis`: names zip by index, every array nonempty and
-    the same length, duplicate rows rejected."""
-    spec = corners_spec.get("options")
-    if spec is None or spec == {}:
-        return [{}]
-    if not isinstance(spec, dict):
-        raise SimError(
-            "corners.options must be an object mapping solver option names "
-            "to equal-length arrays of numbers"
-        )
-    columns: dict[str, list[int | float]] = {}
-    for name, values in spec.items():
-        lowered = _validate_corner_option_name(name, "corners.options")
-        if lowered in columns:
-            raise SimError(
-                f"corners.options declares {lowered!r} more than once "
-                "(names are case-insensitive)"
-            )
-        if not isinstance(values, list) or not values:
-            raise SimError(
-                f"corners.options.{name} must be a nonempty array of numbers"
-            )
-        columns[lowered] = [
-            _validate_param_scalar(value, f"corners.options.{name}[{i}]")
-            for i, value in enumerate(values)
-        ]
-    if len({len(values) for values in columns.values()}) != 1:
-        raise SimError(zipped_length_message("corners.options", columns))
-    count = len(next(iter(columns.values())))
-    rows = [
-        dict(sorted((name, values[i]) for name, values in columns.items()))
-        for i in range(count)
-    ]
-    seen: set[str] = set()
-    for row in rows:
-        label = _format_params_label(row)
-        if label in seen:
-            raise SimError(f"corners.options declares the row {label!r} twice")
-        seen.add(label)
-    return rows
-
-
-def _normalize_option_row(raw: Any, where: str) -> dict[str, int | float]:
-    """One scalar ``{option: number}`` row (a report/wire ``options`` map),
-    validated and normalized."""
-    if not isinstance(raw, dict):
-        raise SimError(f"{where} must be an object mapping names to numbers")
-    row: dict[str, int | float] = {}
-    for name, value in raw.items():
-        lowered = _validate_corner_option_name(name, where)
-        if lowered in row:
-            raise SimError(f"{where} declares {lowered!r} more than once")
-        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
-    return dict(sorted(row.items()))
 
 
 def _parse_process_entry(
@@ -226,57 +163,29 @@ def _parse_process_section(section: Any) -> tuple[str, str | None]:
     return name, lib
 
 
-def _validate_exclude_params(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
+def _validate_exclude_numeric_axis(
+    exclude_spec: list[dict[str, Any]], declared: set[str], *, key: str, noun: str
 ) -> None:
-    """Reject an ``exclude[].params`` selector naming a parameter the request
-    does not sweep (issue #3035) -- it could never match, so it would
-    silently exclude nothing."""
+    """Reject selectors naming coordinates this request does not sweep."""
     for entry in exclude_spec:
-        if not isinstance(entry, dict) or "params" not in entry:
+        if not isinstance(entry, dict) or key not in entry:
             continue
-        selector = entry["params"]
+        selector = entry[key]
         if not isinstance(selector, dict):
-            raise SimError("exclude[].params must be an object of name: number")
+            raise SimError(f"exclude[].{key} must be an object of name: number")
         for name, value in selector.items():
             lowered = name.lower() if isinstance(name, str) else name
             if lowered not in declared:
                 raise SimError(
-                    f"exclude[].params names {name!r}, which is not a "
-                    "corners.params parameter of this request"
+                    f"exclude[].{key} names {name!r}, which is not a "
+                    f"corners.{key} {noun} of this request"
                     + (
                         f" (declared: {', '.join(sorted(declared))})"
                         if declared
                         else ""
                     )
                 )
-            _validate_param_scalar(value, f"exclude[].params.{name}")
-
-
-def _validate_exclude_options(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
-) -> None:
-    """Reject an ``exclude[].options`` selector naming an option the request
-    does not sweep (issue #3125) -- it could never match."""
-    for entry in exclude_spec:
-        if not isinstance(entry, dict) or "options" not in entry:
-            continue
-        selector = entry["options"]
-        if not isinstance(selector, dict):
-            raise SimError("exclude[].options must be an object of name: number")
-        for name, value in selector.items():
-            lowered = name.lower() if isinstance(name, str) else name
-            if lowered not in declared:
-                raise SimError(
-                    f"exclude[].options names {name!r}, which is not a "
-                    "corners.options option of this request"
-                    + (
-                        f" (declared: {', '.join(sorted(declared))})"
-                        if declared
-                        else ""
-                    )
-                )
-            _validate_param_scalar(value, f"exclude[].options.{name}")
+            _validate_param_scalar(value, f"exclude[].{key}.{name}")
 
 
 _CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
