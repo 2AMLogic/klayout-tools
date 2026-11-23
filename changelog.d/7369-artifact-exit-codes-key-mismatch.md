@@ -3,5 +3,7 @@
   exhaustive list of what `1` means but never named `key_mismatch`, which
   `put`, `get` and `delete` all emit when the broker answers a key naming
   another digest (for `get` and `delete`, also a key other than the one in
-  the `artifact:<key>` URI or `MANIFEST[#SELECTOR]` entry). The `1` row now
+  the `artifact:<key>` URI or `MANIFEST[#SELECTOR]` entry). `put` also emits
+  it, before sending a byte, when the broker binds the upload to an
+  `x-amz-checksum-sha256` that is not the file's digest. The `1` row now
   says so. Docs only; no behaviour change.
