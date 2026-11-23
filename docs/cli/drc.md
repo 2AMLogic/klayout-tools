@@ -4713,10 +4713,12 @@ rebuild its request with no PDK selection at all, so a report produced
 `fresh: null` — the sole drift entry even when every verdict-bearing field
 agreed. The rerun now resolves the PDK for its fresh run with this
 priority: the rerun invocation's own `--pdk`/`--pdk-root` flags first, then
-`$PDK`, then the variant name the committed report itself recorded
+the variant name the committed report itself recorded
 (`provenance.pdk.name`) — with `--pdk-root`, `$PDK_ROOT` and the standard
-search locations handled by the same resolver a fresh run uses. So the
-round trip closes:
+search locations handled by the same resolver a fresh run uses. `$PDK` is
+deliberately not a tier: a fresh run never resolves a PDK from `$PDK`
+alone (`provenance.pdk` stays `null`), so honouring it on the rerun would
+drift or fail a report that reproduces exactly. So the round trip closes:
 
 ```
 # produce with the PDK resolved ...
@@ -4728,7 +4730,8 @@ klt drc --check design.drc.json --rerun \
 ```
 
 A rerun with no flags still re-resolves the recorded variant when the
-install is discoverable (`$PDK_ROOT`/standard search locations). Two rules
+install is discoverable (`$PDK_ROOT`/standard search locations), whatever
+`$PDK` is set to. Two rules
 keep the replay honest: a report produced with `provenance.pdk: null`
 re-runs with no PDK at all — even on a host with `$PDK` set, it stays
 `null` exactly as it was produced — and an explicit selection that

@@ -2626,8 +2626,8 @@ def rerun_drc_report(
     run resolves into ``provenance.pdk``, so a report produced with a
     resolved PDK can re-verify in full mode instead of always drifting
     ``provenance.pdk`` with ``fresh: null``. Priority: the explicit flags,
-    then ``$PDK``, then the variant name the committed report itself
-    recorded (:func:`klayout_tools.drc_rerun_replay._rerun_pdk_selection`);
+    then the variant name the committed report itself recorded, never
+    ``$PDK`` (:func:`klayout_tools.drc_rerun_replay._rerun_pdk_selection`);
     the root keeps the existing ``--pdk-root``/``$PDK_ROOT``/search-order
     machinery a fresh run uses. A report that records no PDK re-runs with
     none -- ``fresh`` ``provenance.pdk`` stays ``null`` even on a host with
@@ -2663,9 +2663,9 @@ def rerun_drc_report(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
     # Issue #6986: the fresh run resolves `provenance.pdk` too -- explicit
-    # flags first, then `$PDK`, then the variant the committed report itself
-    # recorded -- so a PDK-resolved report re-verifies instead of always
-    # drifting `fresh: null`; a null-PDK report keeps re-running with none.
+    # flags first, then the variant the committed report itself recorded
+    # (never `$PDK`) -- so a PDK-resolved report re-verifies instead of
+    # always drifting `fresh: null`; a null-PDK report re-runs with none.
     eff_variant, eff_root = _rerun_pdk_selection(committed, pdk_variant, pdk_root)
     if committed.get("engine") == "klayout":
         # Issue #5709: same resolver as --check (override, recorded, packaged).

@@ -25,6 +25,7 @@ import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report, run_drc
+from klayout_tools.drc_rerun_replay import _rerun_pdk_selection
 
 
 @pytest.fixture
@@ -158,6 +159,92 @@ def test_rerun_of_a_null_pdk_report_stays_null_even_with_pdk_set(tmp_path, monke
 
     assert result["status"] == "match"
     assert result["fresh"]["provenance"]["pdk"] is None
+
+
+def _write_env_resolved_report(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
+    """A committed curated report for `sky130A`, produced by resolving the
+    variant through `$PDK_ROOT` (no root flag) with both `sky130A` and
+    `sky130B` installed and `$PDK` unset. Returns the report and the root."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_pdk_install(tmp_path, "sky130A")
+    _make_pdk_install(tmp_path, "sky130B")
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.delenv("PDK", raising=False)
+    report_path = tmp_path / "clean.drc.json"
+    report_path.write_text(
+        json.dumps(run_drc(str(path), "sky130", pdk_variant="sky130A"))
+    )
+    return report_path, root
+
+
+@pytest.mark.parametrize("env_pdk", ["sky130B", "gf180mcuD"])
+def test_rerun_recorded_name_outranks_a_conflicting_pdk_env(
+    tmp_path, monkeypatch, env_pdk
+):
+    """`$PDK` never outranks the variant the committed report recorded
+    (issue #6986): a fresh run's `provenance.pdk` is driven only by
+    `--pdk`/`--pdk-root` (`$PDK` alone leaves it `null`), so a `$PDK` tier
+    would reproduce neither the committed run nor a fresh one -- a same-family
+    `sky130B` would drift `provenance.pdk.name` and a cross-family
+    `gf180mcuD` would fail with a family-mismatch `DrcError`, both on a
+    report that is perfectly reproducible."""
+    report_path, _root = _write_env_resolved_report(tmp_path, monkeypatch)
+    monkeypatch.setenv("PDK", env_pdk)
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["provenance"]["pdk"]["name"] == "sky130A"
+
+
+def test_rerun_explicit_variant_outranks_a_conflicting_pdk_env(tmp_path, monkeypatch):
+    """The explicit `--pdk` still wins over `$PDK` and the recorded name
+    (issue #6986's CLI-over-environment precedence): the other installed
+    variant lands in the fresh provenance and drifts the PDK name."""
+    report_path, _root = _write_env_resolved_report(tmp_path, monkeypatch)
+    monkeypatch.setenv("PDK", "sky130A")
+
+    result = rerun_drc_report(str(report_path), pdk_variant="sky130B")
+
+    assert result["status"] == "drifted"
+    by_field = {entry["field"]: entry for entry in result["drift"]}
+    assert by_field["provenance.pdk.name"]["fresh"] == "sky130B"
+
+
+@pytest.mark.parametrize("malformed", [None, "sky130A", ["pdk"], 5])
+def test_rerun_pdk_selection_tolerates_a_malformed_provenance(malformed):
+    """`--check`/`--rerun` consume user-supplied report files, so a
+    non-dict `provenance` (or `provenance.pdk`) is reachable input: it reads
+    as "records no PDK", never an `AttributeError` traceback."""
+    assert _rerun_pdk_selection({"provenance": malformed}, None, None) == (None, None)
+    assert _rerun_pdk_selection({"provenance": {"pdk": malformed}}, None, None) == (
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize("malformed", [None, "sky130A", ["pdk"]])
+def test_cli_rerun_of_a_malformed_provenance_report_emits_an_envelope(
+    tmp_path, capsys, malformed
+):
+    """The CLI face of the same hole: a report whose `provenance` is not an
+    object is a JSON verdict (`drifted`, exit 3) or the error envelope --
+    never a bare traceback under `--format json`."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    report["provenance"] = malformed
+    report_path = tmp_path / "bad.drc.json"
+    report_path.write_text(json.dumps(report))
+    capsys.readouterr()
+
+    rc = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc in (1, 3)
+    json.loads(captured.out if rc == 3 else captured.err)
 
 
 def test_cheap_check_of_a_pdk_resolved_report_stays_hash_only(tmp_path):

@@ -15,9 +15,9 @@ same deferred-import relation ``drc`` already has with
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from ._report_verify import get_path
 from .drc import DrcError, parse_rule_selectors
 
 
@@ -65,23 +65,32 @@ def _rerun_pdk_selection(
 ) -> tuple[str | None, str | None]:
     """The PDK selection a ``--rerun`` resolves ``provenance.pdk`` with
     (issue #6986): the explicit ``--pdk``/``--pdk-root`` flags first, then
-    ``$PDK``, then the variant name the committed report itself recorded --
-    or ``(None, None)`` when the report records no PDK and no flag was
-    given, so a null-PDK report re-runs with ``provenance.pdk: null``
-    exactly as it was produced (even on a host with ``$PDK`` set).
+    the variant name the committed report itself recorded -- or
+    ``(None, None)`` when the report records no PDK and no flag was given,
+    so a null-PDK report re-runs with ``provenance.pdk: null`` exactly as it
+    was produced (even on a host with ``$PDK`` set).
 
-    Materialising the variant here (rather than letting the resolver
-    consult ``$PDK`` itself) is what makes the recorded name a *fallback*:
-    the engine runners skip PDK resolution entirely when both selection
-    args are ``None``, so a report that records a PDK must pass a concrete
-    variant down for the fresh run to resolve anything at all. The root is
+    ``$PDK`` is deliberately *not* a tier. A fresh run resolves a PDK only
+    when ``--pdk``/``--pdk-root`` is given (``$PDK`` alone leaves
+    ``provenance.pdk`` ``null``), so honouring it here would reproduce
+    neither the committed run nor a fresh one: a same-family ``$PDK`` would
+    drift ``provenance.pdk.name`` and a cross-family one would fail the
+    resolver's family check, both on a perfectly reproducible report.
+
+    Materialising the recorded variant here is what lets a report that
+    records a PDK re-resolve it at all: the engine runners skip PDK
+    resolution entirely when both selection args are ``None``. The root is
     left to the resolver's own ``--pdk-root``/``$PDK_ROOT``/search-order
     handling in every case.
+
+    ``provenance`` comes from a user-supplied report file, so it is read
+    through :func:`get_path` -- a non-dict value reads as "records no PDK"
+    rather than raising.
     """
-    recorded = committed.get("provenance", {}).get("pdk")
+    recorded = get_path(committed, ("provenance", "pdk"))
     recorded_name = recorded.get("name") if isinstance(recorded, dict) else None
     if pdk_variant is None and pdk_root is None and recorded_name is None:
         return None, None
     if pdk_variant is not None:
         return pdk_variant, pdk_root
-    return (os.environ.get("PDK") or recorded_name), pdk_root
+    return recorded_name, pdk_root

@@ -89,6 +89,7 @@ EXIT_VIOLATIONS = 3
 #: Aliases for the --check/--rerun outcome (issue #1106) -- same numeric
 #: values as a normal run's 0/3 split (see this module's docstring), just
 #: named for the "match"/"drifted" vocabulary those modes report under.
+#: Kept as the canonical 0/3 anchor `equiv_cmd`/`synthesize_cmd` cite in prose.
 EXIT_MATCH = EXIT_CLEAN
 EXIT_DRIFTED = EXIT_VIOLATIONS
 
