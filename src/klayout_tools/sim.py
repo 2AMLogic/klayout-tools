@@ -4540,12 +4540,8 @@ def _grade_corners(
     errored = sum(1 for c in corners if c["status"] == "error")
     # Count distrusted corners separately from report-wide population verdicts.
     inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
-    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
-    # design failure even when every individual sample passed -- it is only
-    # reachable via a declared sigma window, since every other rollup `fail`
-    # is already inherited from a corner that failed above -- so it feeds
-    # the same `failed` precedence input as a failed corner, rather than
-    # being reported and ignored.
+    # A Monte Carlo sigma window or a grid-wide probit sigma can fail its
+    # bound even when every corner passes. Either fails the report.
     measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
     # Issue #2109: the common rollup rule is the single decision table for
     # real failures/errors, zero/partial/unknown/malformed coverage and full

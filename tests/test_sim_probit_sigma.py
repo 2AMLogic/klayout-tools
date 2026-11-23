@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from klayout_tools import sim, sim_probit_sigma
+from klayout_tools import sim, sim_probit_sigma, yield_analysis
 from klayout_tools.cli import main
 from klayout_tools.cli.sim_measurement_text import print_measurement_head
 from klayout_tools.coverage import work_id
@@ -238,6 +238,11 @@ def test_ngspice_grid_only_bound_and_strict_signoff(
     envelope = tmp_path / "report.json"
     envelope.write_text(text)
     report = json.loads(text)
+    draws = yield_analysis._measurements_from_sim_report(report)
+    assert [(row["name"], len(row["samples"])) for row in draws] == [
+        ("lo", 20),
+        ("hi", 20),
+    ]
     assert report["coverage"]["measurements_with_limits"] == 1
     assert report["coverage"]["measurements_declared"] == 3
     assert report["inconclusive"] == 0 and report["passed"] == 20
