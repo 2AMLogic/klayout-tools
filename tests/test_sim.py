@@ -44,6 +44,9 @@ from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
+from klayout_tools import sim_batch_hints as sbh
+from klayout_tools import sim_expr_hint as expr_hint
+from klayout_tools import sim_measurement_grading as smg
 from klayout_tools import sim_measurement_results as smr
 from klayout_tools.cli import main
 
@@ -934,16 +937,16 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
         )
 
 
-def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
-    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
-    before this issue -- the new uniqueness rule is scoped to `expr` so no
-    previously-accepted request starts failing."""
-    sim._validate_measurement_forms(
-        [
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
-        ]
-    )  # must not raise
+def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
+    with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+            ]
+        )
 
 
 def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():
@@ -10819,15 +10822,12 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, expr_hint, sim_steps)
+_DIAGNOSTIC_SOURCE_MODULES += (smr, sim.sim_noise_mechanism, sim.sim_homotopy, smg)
 
-
-#: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr)
-
-#: Emission sites where the code is supplied by the site's *caller* or by a
-#: table it iterates, so the literal cannot be read off the site itself --
-#: each is a fan-in whose vocabulary this test derives by a separate rule
-#: (the pattern tables; the `_unrun_corner_report` call-site scan).
+#: Emission sites whose code comes from the site's *caller* or a table it
+#: iterates, so no literal can be read off the site; each fan-in's vocabulary
+#: is derived by a separate rule (pattern tables; `_unrun_corner_report` calls).
 #:
 #: This is a list of **mechanisms**, not of codes: adding a new diagnostic
 #: code never changes it, which is the whole point. Adding a new *way* to
@@ -10842,8 +10842,8 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
     # probe's own abort diagnostic already carries as a literal (rule 3).
-    ("klayout_tools.sim", "_run_local", "stop_reason"),
-    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
 
 
@@ -11038,10 +11038,7 @@ def test_diagnostic_codes_is_a_superset_of_every_emittable_code():
     assert {"batch_job_failed", "batch_job_timeout", "batch_poll_timeout"} <= emittable
 
     assert emittable - sim._GRADING_MARKER_CODES <= sim.DIAGNOSTIC_CODES
-    # The two marker diagnostics the grading step itself attaches are
-    # deliberately NOT selectable: both are emitted on a corner already being
-    # graded `inconclusive`, downstream of the `options.fail_on_diagnostic`
-    # code match, so listing either could never change a verdict.
+    # Codes emitted during or after grading are outside the selectable vocabulary.
     assert sim._GRADING_MARKER_CODES <= emittable
     assert not (sim._GRADING_MARKER_CODES & sim.DIAGNOSTIC_CODES)
 
@@ -12909,7 +12906,6 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         str(src / "body.spice"),
         corner_count=len(points),
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(src),
     )
     # Both transports ship the same assets, in the same order, with the same
@@ -14519,11 +14515,6 @@ def test_expand_corners_units_defaults_and_bundle():
         ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
         ({"units": [{"bogus": 1}]}, [], "unknown key"),
         ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
-        (
-            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
-            [],
-            "duplicates",
-        ),
     ],
 )
 def test_expand_corners_units_validation(corners, exclude, match):

@@ -49,6 +49,7 @@ from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, sim_batch
 from ._jsonnum import is_number
+from .sim_errors import SimError
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -95,8 +96,6 @@ NOT_CHECKED = (
 
 
 def _error(message: str, code: str | None = None):
-    from .sim import SimError
-
     return SimError(message, code=code) if code else SimError(message)
 
 
@@ -518,7 +517,6 @@ def _unit_report(
 
 
 def _build_report(
-    units: list[dict[str, Any]],
     reports: list[dict[str, Any]],
     *,
     backend: str,
@@ -573,7 +571,6 @@ def _failed_units_report(
         )
         reports[-1]["status"] = "error"
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,
@@ -649,7 +646,7 @@ def _run_local(
     else:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(units))) as pool:
             reports = list(pool.map(run, units))
-    return _build_report(units, reports, backend=backend, outdir=outdir)
+    return _build_report(reports, backend=backend, outdir=outdir)
 
 
 # --------------------------------------------------------------------------- #
@@ -728,8 +725,6 @@ def build_job_spec(
     job itself has no ``report.json`` and always exits 0 -- a failed unit is a
     reported outcome, not a failed job.
     """
-    from .sim import SimError
-
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
     command = _batch_common.build_job_command(
         tree_member=TREE_FILENAME,
@@ -872,7 +867,6 @@ def _run_batch(
             )
         reports = _install_units(units, collected=collected, outdir=outdir)
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,

@@ -6,6 +6,8 @@ the names so existing ``from .gen import _snap_square_box_um`` keeps working.
 
 from __future__ import annotations
 
+import math
+
 _GRID_DBU_UM = 0.001
 
 
@@ -83,3 +85,81 @@ def _snap_offset_um(
     edge derive from the same grid as the un-shifted box, so per-edge
     rounding can never drift an edge pair apart."""
     return (round(ox_um / dbu_um) * dbu_um, round(oy_um / dbu_um) * dbu_um)
+
+
+def _clamp_span(lo: int, hi: int, fixed_dbu: int) -> tuple[int, int]:
+    """Clamp one axis ``[lo, hi]`` (integer dbu) of a cut down to
+    ``fixed_dbu`` about its own centre, for :func:`_clamp_cut_boxes`. The
+    odd-dbu remainder goes on the high side. A no-op for ``fixed_dbu <= 0``
+    or a span already at or under ``fixed_dbu``."""
+    span = hi - lo
+    if fixed_dbu > 0 and span > fixed_dbu:
+        lo += (span - fixed_dbu) // 2
+        hi = lo + fixed_dbu
+    return lo, hi
+
+
+def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
+    """Snap one axis ``[lo, hi]`` (integer dbu) of a cut onto a ``grid_dbu``
+    manufacturing grid, for :func:`_clamp_cut_boxes`: *translate* the span to
+    the nearest grid-aligned origin when its length is a grid multiple (size
+    preserved), else round each edge to the grid independently. A no-op for
+    ``grid_dbu == 0``."""
+    if not grid_dbu:
+        return lo, hi
+
+    def _snap(v: int) -> int:
+        return int(round(v / grid_dbu)) * grid_dbu
+
+    if (hi - lo) % grid_dbu == 0:
+        shift = _snap(lo) - lo
+        return lo + shift, hi + shift
+    return _snap(lo), _snap(hi)
+
+
+def _snap_cut_box_dbu(
+    box: tuple[int, int, int, int], fixed_dbu: int, grid_dbu: int
+) -> tuple[int, int, int, int]:
+    """Apply the fixed cut size and manufacturing grid to one drawn box."""
+    x0, y0, x1, y1 = box
+    left, right = _snap_span(*_clamp_span(x0, x1, fixed_dbu), grid_dbu)
+    bottom, top = _snap_span(*_clamp_span(y0, y1, fixed_dbu), grid_dbu)
+    return left, bottom, right, top
+
+
+def _grid_snapped(dbu: float, *values_um: float) -> bool:
+    """Whether any of ``values_um`` is not an exact multiple of ``dbu``."""
+
+    def _snapped(value_um: float) -> bool:
+        count = value_um / dbu
+        return abs(count - round(count)) > 1e-9
+
+    return any(_snapped(v) for v in values_um)
+
+
+def _mfg_grid_neighbours(
+    grid_um: float, value_um: float, multiple: int = 1
+) -> tuple[float, float] | None:
+    """The nearest values below and above ``value_um`` that are exact
+    multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
+    ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
+    family's curated deck declares no ``"ongrid"`` rule, see
+    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
+    nothing to check against.
+
+    ``multiple`` is for a quantity built from ``multiple`` equal on-grid
+    parts (e.g. a ``diff_pair`` device's total width, ``splits`` unit
+    widths): the representable set is then the multiples of
+    ``multiple * grid_um``, not of ``grid_um``. Unlike :func:`_grid_snapped`
+    this checks against the PDK *manufacturing* grid, never the dbu."""
+    if grid_um <= 0 or multiple < 1:
+        return None
+    step = grid_um * multiple
+    count = value_um / step
+    nearest = round(count)
+    if abs(count - nearest) <= 1e-6:
+        return None
+    below = math.floor(count)
+    # Round away float noise so the reported values read as the grid
+    # multiples they are (e.g. 4.635, not 4.635000000000001).
+    return (round(below * step, 9), round((below + 1) * step, 9))

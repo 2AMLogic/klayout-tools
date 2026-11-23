@@ -20,24 +20,22 @@ from typing import Any
 
 from ._provenance import sha256_file
 from ._report_verify import hash_check, load_committed_report, resolve_committed_path
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
+from .request_paths import resolve_readable_files, resolve_request_path
 
 FROM_SYNTHESIZE_KEYS = ("report", "netlist")
 
 
-def _err_cls() -> type[Exception]:
-    from .functional_verification import FunctionalVerificationError
+def _request_relative(entry: str, request_dir: str, field: str = "request path") -> str:
+    """The one place a request-relative path is anchored (#5673 constraint).
 
-    return FunctionalVerificationError
-
-
-def _err(message: str) -> Exception:
-    return _err_cls()(message)
-
-
-def _request_relative(entry: str, request_dir: str) -> str:
-    """The one place a request-relative path is anchored (#5673 constraint)."""
+    ``$VAR`` / ``~`` are expanded first (issue #5678), the same convention
+    ``klt lvs`` / ``drc`` / ``extract`` / ``sim`` document.
+    """
     return os.path.abspath(
-        entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        resolve_request_path(entry, request_dir, FunctionalVerificationError, field)
     )
 
 
@@ -49,26 +47,25 @@ def _resolve_sources(
     other request-taking verb uses). ``optional`` (set only when
     ``options.from_synthesize`` is present) lets it be absent or empty."""
     if sources is None and not optional:
-        raise _err("request is missing required field: sources")
+        raise FunctionalVerificationError("request is missing required field: sources")
     if optional and (sources is None or sources == []):
         return []
     if not isinstance(sources, list) or not sources:
-        raise _err("request.sources must be a non-empty array of paths")
+        raise FunctionalVerificationError(
+            "request.sources must be a non-empty array of paths"
+        )
     if not all(isinstance(entry, str) and entry for entry in sources):
-        raise _err("request.sources entries must be non-empty strings")
+        raise FunctionalVerificationError(
+            "request.sources entries must be non-empty strings"
+        )
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _request_relative(entry, request_dir)
-        if not os.path.isfile(path):
-            raise _err(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise _err(f"could not read RTL source '{entry}': {exc}") from exc
-        resolved.append(path)
-    return resolved
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        FunctionalVerificationError,
+        field="request.sources entry",
+        noun="RTL source",
+    )
 
 
 def has_from_synthesize(options: Any) -> bool:
@@ -77,73 +74,101 @@ def has_from_synthesize(options: Any) -> bool:
 
 def _validate_option(raw: Any) -> tuple[str, str | None]:
     if not isinstance(raw, dict):
-        raise _err(
+        raise FunctionalVerificationError(
             "request.options.from_synthesize must be a JSON object "
             '{"report": <path>, "netlist": <path>|null}'
         )
     unknown = sorted(set(raw) - set(FROM_SYNTHESIZE_KEYS))
     if unknown:
-        raise _err(
+        raise FunctionalVerificationError(
             f"request.options.from_synthesize has unknown key(s): {', '.join(unknown)}"
         )
     report = raw.get("report")
     if not isinstance(report, str) or not report:
-        raise _err("request.options.from_synthesize.report must be a non-empty path")
+        raise FunctionalVerificationError(
+            "request.options.from_synthesize.report must be a non-empty path"
+        )
     netlist = raw.get("netlist")
     if netlist is not None and (not isinstance(netlist, str) or not netlist):
-        raise _err(
+        raise FunctionalVerificationError(
             "request.options.from_synthesize.netlist must be a non-empty path or null"
         )
     return report, netlist
 
 
 def resolve_from_synthesize(
-    options: Any, request_dir: str, hdl_toplevel: str, envelope
+    options: Any,
+    request_dir: str,
+    hdl_toplevel: str,
+    envelope,
+    *,
+    pdk_cell_library: str | None = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[str, dict[str, Any]] | None:
     """Resolve and verify ``options.from_synthesize``.
 
     Returns ``(netlist_path, response_block)`` or ``None`` when the key is
     absent. Raises ``FunctionalVerificationError`` on any failure to verify;
     runs before any build.
+
+    ``pdk_cell_library`` (issue #5782, the request's ``pdk.cell_library``)
+    adds the deck cross-check against the loaded report's
+    ``provenance.deck.name`` prefix: models resolved for a library the
+    netlist does not instantiate would not elaborate, and the report is
+    already loaded here, so the check needs no second read.
     """
     if not has_from_synthesize(options):
         return None
     report_rel, netlist_rel = _validate_option(options["from_synthesize"])
-    report_path = _request_relative(report_rel, request_dir)
-    report = load_committed_report(report_path, _err_cls())
+    report_path = _request_relative(
+        report_rel, request_dir, "options.from_synthesize.report"
+    )
+    report = load_committed_report(report_path, FunctionalVerificationError)
     if "netlist_path" not in report:
-        raise _err(
+        raise FunctionalVerificationError(
             f"options.from_synthesize.report '{report_rel}' is not a klt "
             "synthesize report (no netlist_path)"
         )
+    if pdk_cell_library is not None:
+        from .functional_verification_pdk import check_deck_cell_library
+
+        check_deck_cell_library(pdk_cell_library, report)
     report_top = report.get("hdl_toplevel")
     if report_top != hdl_toplevel:
-        raise _err(
+        raise FunctionalVerificationError(
             f"options.from_synthesize.report synthesized hdl_toplevel "
             f"{report_top!r}, but the request's hdl_toplevel is {hdl_toplevel!r}"
         )
-    override = _request_relative(netlist_rel, request_dir) if netlist_rel else None
+    override = (
+        _request_relative(netlist_rel, request_dir, "options.from_synthesize.netlist")
+        if netlist_rel
+        else None
+    )
     netlist = resolve_committed_path(
         report["netlist_path"], report_path=report_path, override=override
     )
     if netlist is None:
-        raise _err(
+        raise FunctionalVerificationError(
             "options.from_synthesize.report records no resolvable netlist_path "
             "(scope 'external'/'absent'); set options.from_synthesize.netlist "
             "to the netlist file"
         )
     netlist = os.path.abspath(netlist)
     if not os.path.isfile(netlist):
-        raise _err(f"options.from_synthesize netlist not found: {netlist}")
+        raise FunctionalVerificationError(
+            f"options.from_synthesize netlist not found: {netlist}"
+        )
     expected = report.get("netlist_sha256")
     check = hash_check("netlist_sha256", expected, sha256_file(netlist))
-    if not check["match"]:
+    # A run requires the synthesis pin. An FV check compares the same file
+    # to the FV report's own pin, even when synthesis has since been rerun.
+    if verify_synthesis_pin and not check["match"]:
         why = (
             "the report records no netlist_sha256"
             if expected is None
             else "the netlist is not the one that run produced"
         )
-        raise _err(
+        raise FunctionalVerificationError(
             f"options.from_synthesize netlist_sha256 mismatch ({why}): "
             f"expected {check['expected']}, actual {check['actual']}"
         )
@@ -156,19 +181,51 @@ def resolve_from_synthesize(
 
 
 def resolve_sources_with_synthesize(
-    request_doc: dict[str, Any], request_dir: str, hdl_toplevel: str, envelope
+    request_doc: dict[str, Any],
+    request_dir: str,
+    hdl_toplevel: str,
+    envelope,
+    *,
+    pdk_input: Any = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[list[str], dict[str, Any] | None]:
-    """The effective ``sources`` (verified netlist first) and the response
-    block, or ``(sources, None)`` when ``options.from_synthesize`` is unused."""
+    """The effective ``sources`` and the response block, or ``(sources,
+    None)`` when ``options.from_synthesize`` is unused.
+
+    Composition order (issue #5782): ``[verified netlist, *resolved PDK cell
+    models, *caller sources]`` -- netlist and models both precede the
+    testbench's own sources, and the models' own order is the resolver's
+    dependency order (``primitives.v`` before ``<lib>.v``). A model the
+    caller already lists in ``sources`` verbatim is not prepended twice.
+
+    ``pdk_input`` is the merged :class:`~.functional_verification_pdk.PdkInput`
+    or ``None`` (no pdk input: byte-identical to before the issue)."""
     synth = resolve_from_synthesize(
-        request_doc.get("options"), request_dir, hdl_toplevel, envelope
+        request_doc.get("options"),
+        request_dir,
+        hdl_toplevel,
+        envelope,
+        verify_synthesis_pin=verify_synthesis_pin,
+        pdk_cell_library=(pdk_input.cell_library if pdk_input is not None else None),
     )
     sources = _resolve_sources(
         request_doc.get("sources"), request_dir, optional=synth is not None
     )
+    if pdk_input is None:
+        if synth is None:
+            return sources, None
+        return [synth[0], *sources], synth[1]
+    from .functional_verification_pdk import resolve_pdk_cell_models
+
+    models, _info = resolve_pdk_cell_models(pdk_input)
+    # A model the caller already listed in ``sources`` compiles once, in the
+    # resolver's dependency order -- the caller's copy moves to the model
+    # block rather than staying put (which would leave ``<lib>.v`` compiling
+    # before the ``primitives.v`` UDPs it instantiates).
+    sources = [source for source in sources if source not in models]
     if synth is None:
-        return sources, None
-    return [synth[0], *sources], synth[1]
+        return [*models, *sources], None
+    return [synth[0], *models, *sources], synth[1]
 
 
 def with_from_synthesize(

@@ -12,16 +12,10 @@ therefore report ``route_drc_violation_count: 0`` while
 the very geometry the router inserted -- the disagreement issue #4495 asks
 this stage to surface.
 
-:func:`~klayout_tools.place_and_route_via_pad.trim_via_pads` (the sibling
-repair pass) can only act where acting is provably safe: it drops a landing
-pad fully covered by routed wire, or shrinks a protruding one back to its own
-via cut plus the deck's enclosure. Neither applies to a pad that is *already*
-minimal -- exactly the shipped ``VIA_VIA12``/``VIA_VIA23``/``VIA_VIA34``
-geometry, whose pads are drawn at cut + enclosure already. Those pads still
-break the deck's tip rules against *neighbouring* metal, and nothing this
-stage may safely change would fix it. So this pass measures and reports
-instead of repairing: it never writes geometry, so the merged GDS is
-byte-identical whether it runs or not, on every PDK including ASAP7.
+The sibling landing repair can remove redundant pads, shrink protrusions, and
+lengthen facing M1 edges at a pair of placed landings or between a
+cut-flush landing and a wire. This checker measures the resulting geometry,
+including residual wire tips and unsafe landing pairs. It only reads geometry.
 
 What it measures
 ----------------
@@ -77,7 +71,12 @@ asap7``, which stays the signoff verdict:
 * the ``router_fill`` source is only as complete as the DEF text it is
   reconstructed from: ``trim_via_pads`` scans the routed DEF when the
   caller hands it one (``def_path``), and a caller that does not simply
-  reports ``router_fill`` 0 everywhere rather than guessing.
+  reports ``router_fill`` 0 everywhere rather than guessing. The scan's
+  own ``status``/``reason``/``unresolved`` ride out beside that zero as
+  ``router_fill_scan`` (issue #6100, attached by ``trim_via_pads``;
+  ``None`` when no scan was attempted), so "measured, zero patches" stays
+  distinguishable from "never measured" and from "could not resolve every
+  item".
 
 Thresholds are declared here rather than resolved from a curated rule table
 because ASAP7 has none (``get_deck("asap7")`` raises ``UnknownDeckError`` --
@@ -243,8 +242,11 @@ def check_via_pad_tips(
 
     ``drcfill_regions`` maps a LEF routing layer name to the patch region
     :func:`~klayout_tools.place_and_route_def_drcfill.scan_def_drcfill`
-    reconstructed from the routed DEF; ``None`` (no DEF handed in) reports
-    ``router_fill`` 0 everywhere rather than guessing.
+    reconstructed from the routed DEF; ``None`` (no DEF handed in, or the
+    scan found nothing to attribute) reports ``router_fill`` 0 everywhere
+    rather than guessing. ``trim_via_pads`` attaches the scan's own
+    ``status``/``reason``/``unresolved`` beside that zero as this report's
+    ``router_fill_scan`` (issue #6100), so the zero is interpretable.
 
     Report-only: ``layout`` is never modified, so the merged GDS is
     byte-identical whether this pass runs or not.

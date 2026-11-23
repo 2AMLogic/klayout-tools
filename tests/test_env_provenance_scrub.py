@@ -76,3 +76,20 @@ def test_round_trip_clears_lint() -> None:
     assert ep.find_absolute_path_fields(payload)
     out = ep.scrub_payload(payload, [("/tmp/run1", "<WORK>"), ("/var/lib/z", "<Z>")])
     assert ep.find_absolute_path_fields(out) == []
+
+
+# Issue #6280: `klt drc --engine klayout` records `environment.klayout_binary`
+# on every run, so a committed envelope needs the documented scrub remedy.
+def test_drc_klayout_binary_envelope_scrub_is_lint_clean() -> None:
+    envelope = {"environment": {"klayout_binary": "/usr/bin/klayout"}}
+    fields = ep.find_absolute_path_fields(envelope)
+    assert [(f["field"], f["match"]) for f in fields] == [
+        ("environment.klayout_binary", "/usr/bin/klayout")
+    ]
+    clean = ep.scrub_payload(envelope, [("/usr/bin", "<KLAYOUT_BIN_DIR>")])
+    assert clean == {"environment": {"klayout_binary": "<KLAYOUT_BIN_DIR>/klayout"}}
+    assert ep.find_absolute_path_fields(clean) == []
+    assert (
+        ep.find_absolute_path_fields({"environment": {"klayout_binary": "klayout"}})
+        == []
+    )

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_mismatch_gate
+from ._jsonnum import is_finite_number
 from ._spice_number import parse as _spice_literal
 from .pdk_families import pdk_variant_family
 from .sim_errors import SimError
@@ -142,13 +143,7 @@ def wire_uses_scanned_cards(request: dict[str, Any]) -> bool:
 
 def _validate_scale(mc_spec: dict[str, Any], field: str) -> float:
     value = mc_spec["mismatch_scale"]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or value != value
-        or value in (float("inf"), float("-inf"))
-        or value < 0
-    ):
+    if not is_finite_number(value) or value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     return float(value)
 

@@ -44,7 +44,17 @@ from typing import TYPE_CHECKING, Any
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from .decks import ExtractionDeck
+from .extract_abstract_pin_join import AbstractPinJoins, tied_instances
 from .extract_spef import ExtractError
+from .extract_warnings import (
+    _collapsed_abstract_pin_warning as _collapsed_abstract_pin_warning,
+)
+from .extract_warnings import (
+    _tied_abstract_pin_warning as _tied_abstract_pin_warning,
+)
+from .extract_warnings import (
+    isolated_substrate_global_warning as isolated_substrate_global_warning,
+)
 from .lef_header import read_lef_macro_pin_ports
 from .pdk import load_gds_to_lef_layer_map, resolve_klayout_layer_map
 
@@ -92,39 +102,6 @@ _DEF_NET_NAME_PROBE_CANDIDATES = 4
 #: see :func:`_sanitize_instance_name`.
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 
-#: How many concrete ``<instance>: <pins> -> <net>`` examples
-#: :func:`_tied_abstract_pin_warning` spells out before falling back to a bare
-#: count. A block whose pin binding has genuinely gone wrong produces one
-#: entry per affected instance (126 of them in issue #1366's reported repro),
-#: which is a diagnostic, not a message a caller should have to read in full.
-_ABSTRACT_TIED_PIN_WARNING_EXAMPLES = 5
-
-#: The share of one abstracted instance's *declared* pins that must land on a
-#: **single** net before :func:`_collapsed_abstract_pin_warning` escalates the
-#: ordinary ":func:`_tied_abstract_pin_warning` ties exist" report into its own
-#: louder ``warnings[]`` entry -- issue #2695 (the deferred half of #2658).
-#:
-#: Compared **strictly** (``>``), so the natural "exactly half the pins" shapes
-#: a real library draws on purpose stay unescalated: sky130's four-pin
-#: `decap`/`tap` cells declare ``VPWR``/``VPB`` and ``VGND``/``VNB`` and tie
-#: each pair to its own rail, i.e. a dominant net carrying 2 of 4 pins == 0.5.
-#: The reported collapse this escalation exists for is ~95% (#2658: 109
-#: declared pins, nearly all on one parent net).
-_ABSTRACT_COLLAPSED_PIN_RATIO = 0.5
-
-#: How many separately declared pins a single net must carry before the
-#: majority-share test above is even applied -- issue #2695.
-#:
-#: The ratio alone cannot separate a collapse from the smallest legal ties: a
-#: deliberate two-pin tie cell (``tests/test_extract.py::
-#: test_abstract_cells_warns_when_one_instance_ties_two_declared_pins``) is a
-#: 2-of-2 == 100% dominant net by construction, and a three-pin
-#: ``VPWR``/``VPB``/``VGND`` fill cell is 2-of-3 == 67%, both entirely legal
-#: and both louder-than-useful if escalated. Four or more *separately
-#: declared* pins sharing one net, while being a majority of the macro's port
-#: list, is not a shape a correct library cell draws -- it is the signature of
-#: pins falling through onto one wide parent net.
-_ABSTRACT_COLLAPSED_PIN_MIN_PINS = 4
 
 #: The :func:`_wire_abstract_cells` ``probe_layers`` roles that are **body
 #: identity** rather than signal interconnect -- issue #2142.
@@ -795,37 +772,45 @@ def lef_layer_probe_roles(
     return roles
 
 
-def _local_pin_candidate_points(
+def _pin_labels_on_nets(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    l2n: kdb.LayoutToNetlist,
+    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]],
+) -> tuple[dict[int, set[str]], dict[tuple[int, str], list[kdb.Point]]]:
+    """Index local labels by conductor and by layer/name before abstraction (#1994)."""
+    import klayout.db as kdb
+
+    names_by_net: dict[int, set[str]] = {}
+    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
+    for layer, region in labelled_regions:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            point = kdb.Point(text.x, text.y)
+            label_points.setdefault((layer_index, text.string), []).append(point)
+            net = l2n.probe_net(region, point)
+            if net is not None:
+                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    return names_by_net, label_points
+
+
+def indexed_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
-) -> dict[str, list[tuple[kdb.Point, str]]]:
+    label_clusters: dict[str, set[int]],
+) -> dict[str, list[tuple[kdb.Point, int]]]:
     """Extra local (cell-frame) candidate access points for every in-cell
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
     internal routing -- issue #1183.
 
-    Must run *before* :func:`_erase_abstracted_cell_geometry` mutates
-    ``layout`` (the caller -- :func:`extract_netlist_from_layout` -- already
-    guarantees this: it calls this function first, over every matched cell
-    type, then erases). :func:`_resolve_abstract_cell_pins`'s
-    ``"in_cell_labels"`` path resolves a pin to exactly the one point where
-    its name label sits -- but a real standard cell's pin can legally carry
-    *several* geometrically disjoint metal shapes for one electrical node
-    (the same "one LEF pin, several PORT rectangles" shape #1181/#1182
-    already fixed for the ``"lef_abstract"`` path), and nothing guarantees
-    the label sits on the specific rectangle that ends up externally routed
-    -- the label is drawn once, at design-library time, long before any
-    particular instance's place-and-route decides which rectangle a via
-    actually lands on. When the label's own rectangle is a different,
-    internally-isolated fragment (tied to the routed one only through the
-    cell's own poly/diffusion -- exactly the connectivity
-    :func:`_erase_abstracted_cell_geometry` deliberately severs for
-    black-box abstraction), the label-only point resolves onto that isolated
-    island instead of the routed net (this issue's reported failure,
-    confirmed against the real ``gf180-trng`` ``clkload13``/``I`` case this
-    issue cites: the label's own local point resolves to an isolated net
-    while a probe at the DEF-verified via location resolves to the correctly
-    merged, externally-routed net).
+    Run before erasing the cell's internal geometry. A named metal pad can
+    reach a second access pad through the cell's own poly and contacts even
+    when the external via lands only on that second pad.
 
     This computes a *local*, cell-scoped ``LayoutToNetlist`` connectivity
     pass -- deliberately narrower than :func:`_extract_netlist`'s full
@@ -897,11 +882,8 @@ def _local_pin_candidate_points(
     precisely why :func:`_erase_abstracted_cell_geometry` severs it for the
     real extraction pass.
 
-    Deliberately *not* fixed in :func:`_abstract_pin_net_score` instead: the
-    score is presented with a candidate that genuinely does resolve onto
-    ``VPWR``, and nothing at that layer can tell it apart from a pin the
-    design really does route to the supply. The bad candidate must not be
-    produced in the first place.
+    The ``label_clusters`` output identifies labels on distinct
+    cell-local conductors for callers that require physical proof.
     """
     import klayout.db as kdb
 
@@ -932,47 +914,29 @@ def _local_pin_candidate_points(
             l2n.connect(metals[index + 1])
     l2n.extract_netlist()
 
-    # Every label this cell draws on a conductor the local graph above
-    # reaches, grouped by the cell-local net it sits on (issue #1994).
-    # `label_points` is the same scan indexed the other way round, so the
-    # second pass can ask "which shapes on this layer carry *this* pin's own
-    # label?" without re-probing.
-    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]] = [
-        (deck.poly_label, poly)
-    ] + [
-        (layer, metals[index])
-        for index, layer in enumerate(deck.metal_labels)
-        if index < len(metals)
+    # The second pass needs both the names on each conductor and each pin's
+    # own label points to reject fragments reached through a second pin.
+    labelled_regions = [
+        (deck.poly_label, poly),
+        *zip(deck.metal_labels, metals, strict=False),
     ]
-    names_by_net: dict[int, set[str]] = {}
-    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
-    for layer, region in labelled_regions:
-        if layer is None:
-            continue
-        layer_index = layout.find_layer(*layer)
-        if layer_index is None:
-            continue
-        for text in kdb.Texts(cell.shapes(layer_index)).each():
-            point = kdb.Point(text.x, text.y)
-            label_points.setdefault((layer_index, text.string), []).append(point)
-            net = l2n.probe_net(region, point)
-            if net is not None:
-                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    names_by_net, label_points = _pin_labels_on_nets(
+        layout, cell, l2n, labelled_regions
+    )
 
-    extra_points: dict[str, list[tuple[kdb.Point, str]]] = {}
-    for metal_index, layer in enumerate(deck.metal_labels):
-        if layer is None or metal_index >= len(metals):
-            continue
-        layer_index = layout.find_layer(*layer)
+    extra_points: dict[str, list[tuple[kdb.Point, int]]] = {}
+    for metal_index, (layer, target_region) in enumerate(
+        zip(deck.metal_labels, metals, strict=False)
+    ):
+        layer_index = layout.find_layer(*layer) if layer is not None else None
         if layer_index is None:
             continue
-        role = f"metal{metal_index}"
-        target_region = metals[metal_index]
         for text in kdb.Texts(cell.shapes(layer_index)).each():
             point = kdb.Point(text.x, text.y)
             net = l2n.probe_net(target_region, point)
             if net is None:
                 continue
+            label_clusters.setdefault(text.string, set()).add(net.cluster_id)
             # Issue #1994: this walk crossed from one *declared pin* to
             # another, so the net's shapes can no longer all be attributed
             # to `text.string` -- keep only the fragments carrying this
@@ -985,7 +949,7 @@ def _local_pin_candidate_points(
             for polygon in kdb.Region(shapes).merged().each():
                 if crossed and not any(polygon.inside(own) for own in own_points):
                     continue
-                candidate = (_polygon_interior_point(polygon), role)
+                candidate = (_polygon_interior_point(polygon), metal_index)
                 if candidate not in points:
                     points.append(candidate)
     return extra_points
@@ -1094,6 +1058,25 @@ def _lef_port_access_points(
     return points
 
 
+# Only a nonempty base followed entirely by numeric index groups is a bus bit.
+_BUS_BIT_RE = re.compile(r"([^<>()\[\]{}]+)((?:<\d+>|\(\d+\)|\[\d+\]|\{\d+\})+)")
+
+
+def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
+    """Compare indexed pins by base and numeric indices (issue #6843).
+
+    For example, ``A[01][0]`` and ``A<1><0>`` share a key. A literal name
+    such as ``A<B>`` keeps its spelling and has an empty index tuple.
+    """
+    match = _BUS_BIT_RE.fullmatch(pin_name)
+    if match is None:
+        return (pin_name, ())
+    return (
+        match.group(1),
+        tuple(int(index) for index in re.findall(r"\d+", match.group(2))),
+    )
+
+
 def _merge_lef_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -1102,17 +1085,19 @@ def _merge_lef_pins(
     labelled: dict[str, Any],
     pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]],
 ) -> tuple[str | None, set[str], list[str]]:
-    """Append the LEF ``MACRO``'s pins the labels did not supply to ``pins``
-    (issue #3749). Returns ``(lef_path or None if nothing merged, merged pin
-    names, warnings)``."""
+    """Append LEF-only pins, preserving label names and access points for aliases.
+
+    Return the LEF path if any pins were merged, their names, and warnings.
+    """
     entry = lef_macros.get(cell.name)
     if entry is None:
         return None, set(), []
     lef_path, lef_pins = entry
+    labelled_keys = {_bus_bit_alias_key(name) for name in labelled}
     merged: set[str] = set()
     warnings: list[str] = []
     for pin_name in sorted(lef_pins):
-        if pin_name in labelled:
+        if _bus_bit_alias_key(pin_name) in labelled_keys:
             continue
         boxes = lef_pins[pin_name]
         if not boxes:
@@ -1127,6 +1112,16 @@ def _merge_lef_pins(
         pins.append((pin_name, points))
         merged.add(pin_name)
     return (lef_path if merged else None), merged, warnings
+
+
+def _local_pin_candidate_points(
+    layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, list[tuple[kdb.Point, str]]]:
+    """Return local access points with the layer role used by abstract extraction."""
+    return {
+        name: [(point, f"metal{index}") for point, index in points]
+        for name, points in indexed_pin_candidate_points(layout, cell, deck, {}).items()
+    }
 
 
 def _resolve_abstract_cell_pins(
@@ -1185,22 +1180,14 @@ def _resolve_abstract_cell_pins(
     regardless of whether it is the one the design actually routes.
     ``resolution_source`` is:
 
-    - ``"in_cell_labels"`` -- the cell draws text on one of the deck's own
-      label layers (``metal_labels[i]``/``well_label``/``poly_label``)
-      **directly in the cell** (``cell.shapes``, never
-      ``begin_shapes_rec``): a label promoted up from a nested sub-cell
-      belongs to that sub-cell's interface, not this one's, and the whole
-      point of this mode is to stop at *this* cell's boundary. Each label
-      carries its own layer role, so the pin is probed on exactly the
-      conductor its label names.
-      **LEF merge (issue #3749):** when a ``--abstract-cell-lef`` LEF also
-      declares a ``MACRO`` of this cell's name, every LEF pin whose name the
-      labels did not supply is appended (labels win on any name present in
-      both), and ``lef_path`` names that LEF. A standard cell routinely
-      draws its substrate/well pin (``VNB``) on a label layer the deck does
-      not read (sky130 ``pwell.label``), so the labels alone silently lose
-      it; the LEF is the only place it is declared. ``lef_merged`` is the
-      set of appended pin names (always empty on the other paths).
+    - ``"in_cell_labels"`` -- only text directly on the cell's deck label
+      layers (``metal_labels[i]``/``well_label``/``poly_label``) belongs to
+      its interface. Read ``cell.shapes`` to exclude nested cells' labels
+      and keep each point's layer role for probing.
+      A matching LEF macro supplies missing pins such as sky130's
+      ``VNB`` substrate pin (#3749). Labels win for equivalent bus bits
+      such as ``DATA<0>`` and ``DATA[0]`` (#6843). When pins are appended,
+      ``lef_path`` names the LEF and ``lef_merged`` lists their names.
     - ``"lef_abstract"`` -- no such label, but a ``--abstract-cell-lef`` LEF
       declares a ``MACRO`` of this cell's name with ``PORT`` geometry. Each
       port's bounding-box centre is the access point, read directly as
@@ -1225,22 +1212,10 @@ def _resolve_abstract_cell_pins(
       into an :class:`ExtractError` when the cell type actually has
       instances.
 
-    ``warnings`` (issue #624) is only ever populated on the ``"lef_abstract"``
-    path: a LEF-declared ``PIN`` whose :func:`~klayout_tools.lef_header.
-    parse_lef_macro_pin_ports` entry resolves zero port boxes (e.g. a pin
-    drawn only via ``PATH``/``VIA`` geometry, or a malformed ``POLYGON`` --
-    both statement shapes that module's own "declarative header + pin-access-
-    point only" scope deliberately never reads, see its module docstring) is
-    dropped from the returned pin list rather than raising, mirroring every
-    other malformed/partial-LEF tolerance in this codebase -- but *this*
-    silent drop is otherwise invisible to a caller, since it never prevents
-    the macro overall from resolving (the acceptance criterion only requires
-    *some* pin to resolve). One ``warnings`` entry per dropped pin names the
-    macro and pin so the gap has a caller-visible signal instead of a
-    silently incomplete black-box ``.SUBCKT``. Always ``[]`` on the
-    ``"in_cell_labels"``/``None`` paths, where every resolved pin always
-    carries at least one concrete point (an in-cell label is never
-    geometry-less).
+    When a LEF pin has no readable PORT geometry, it is omitted.
+    On both the LEF-only and label-merge paths, ``warnings`` names each
+    such pin if the macro resolves (#624). The unresolved path returns
+    an empty list.
 
     ``local_candidates`` (issue #1183) is
     :func:`_local_pin_candidate_points`'s ``{<pin name>: [(<extra local
@@ -1256,12 +1231,10 @@ def _resolve_abstract_cell_pins(
     every candidate exactly as it already does for a multi-rectangle LEF pin
     (#1181/#1182) and pick whichever one actually lands on routed geometry.
 
-    ``lef_layer_roles`` (issue #2658) is :func:`lef_layer_probe_roles`'s
-    ``{<lower-cased LEF layer name>: "metal<i>"}`` result for the active
-    PDK. Only consulted on the ``"lef_abstract"`` path (an in-cell label
-    already knows its own layer directly). ``None`` (the default) or an
-    empty dict behaves exactly as before this issue's fix: every LEF point
-    carries ``role=None`` and is probed bottom-up.
+    ``lef_layer_roles`` maps lower-cased LEF layer names to deck metal
+    roles (#2658, :func:`lef_layer_probe_roles`). It applies to both
+    LEF-only and merged pins. A missing mapping leaves the point's role
+    unset for bottom-up probing.
     """
     import klayout.db as kdb
 
@@ -1342,11 +1315,13 @@ def _def_net_name_probes(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     metal_layers: tuple[tuple[int, int] | None, ...],
+    *,
+    all_islands: bool = False,
 ) -> dict[str, list[tuple[int, kdb.Point]]]:
-    """Per distinct DEF net name (:data:`_DEF_NET_NAME_PROPERTY_ID`), up to
-    :data:`_DEF_NET_NAME_PROBE_CANDIDATES` ``(metal_index, point)`` probe
-    candidates taken from ``top_cell``'s own routed-metal shapes carrying that
-    name, **plus** the same shapes one level down in each of ``top_cell``'s
+    """Collect ``(metal_index, point)`` probes for each DEF name. Abstract pin
+    joins request all islands. Ordinary naming uses the first
+    :data:`_DEF_NET_NAME_PROBE_CANDIDATES` candidates. Both read the top
+    cell's labelled routed-metal shapes and the same shapes in each of its
     direct child cell instances (issue #951, extended for composed macros by
     issue #1689). ``metal_layers`` is ``deck.metals`` -- the same ``(layer,
     datatype)`` list :func:`_extract_netlist` builds its flattened
@@ -1438,7 +1413,7 @@ def _def_net_name_probes(
                 iterator.next()
                 continue
             candidates = probes.setdefault(net_name, [])
-            if len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
+            if not all_islands and len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
                 iterator.next()
                 continue
             box = shape.bbox().transformed(iterator.trans())
@@ -1478,7 +1453,7 @@ def _apply_def_net_name_overrides(
     unresolved: list[str] = []
     for def_name, candidates in probes.items():
         net = None
-        for metal_index, point in candidates:
+        for metal_index, point in candidates[:_DEF_NET_NAME_PROBE_CANDIDATES]:
             if metal_index >= len(metals):
                 continue
             net = l2n.probe_net(metals[metal_index], point)
@@ -1633,6 +1608,9 @@ def _probe_abstract_pin_net(
     l2n: kdb.LayoutToNetlist,
     points: list[tuple[kdb.Point, str | None]],
     probe_layers: list[tuple[str, kdb.Region]],
+    joins: AbstractPinJoins,
+    instance: str,
+    pin: str,
 ) -> kdb.Net | None:
     """The best-resolved net across every candidate access point for one
     abstracted-cell pin (issue #1181).
@@ -1680,186 +1658,15 @@ def _probe_abstract_pin_net(
     resolved primary candidate; see :func:`_abstract_pin_net_score` for the
     full derivation of both reported impossible bindings.
     """
-    best_net: kdb.Net | None = None
-    best_score: tuple[int, int] | None = None
+    candidates: dict[int, kdb.Net] = {}
     for point, role in points:
         net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
-        if net is None:
-            continue
-        score = _abstract_pin_net_score(net)
-        if best_score is None or score > best_score:
-            best_net = net
-            best_score = score
-    return best_net
-
-
-def _tied_abstract_pin_warning(
-    tied: list[tuple[str, str, str, list[str], int]],
-) -> list[str]:
-    """A single ``warnings[]`` entry naming abstracted-cell instances that
-    resolved two or more of their *separately declared* pins onto one net --
-    or ``[]`` when there are none (issue #1366).
-
-    ``tied`` is ``[(instance name, cell name, net name, [pin names],
-    <declared pin count for that cell type>), ...]`` in
-    :func:`_wire_abstract_cells`'s own deterministic instance/pin order. The
-    declared-pin count is unused here (this entry reports the *existence* of
-    ties, at any ratio) and carried for
-    :func:`_collapsed_abstract_pin_warning`, which escalates the subset of
-    these entries whose tied share of the macro's declared pins crosses
-    :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` (issue #2695).
-
-    **Why warn rather than fail.** Tying two declared pins together is legal
-    -- a deliberately tied-off input is the standard case -- so this cannot
-    be an error. But on a ``--abstract-cells`` black box it is also
-    *unverifiable* by the caller: the cell's interior was erased by
-    construction, there are no devices left to cross-check against, and the
-    extraction summary otherwise reports a completely healthy run (``status:
-    extracted``, the expected pin count, a device count of 0). That is
-    exactly how issue #1366's pin-to-net binding regression stayed silent
-    all the way to a downstream ``klt lvs`` verdict that read as a design
-    fault: both impossible bindings it reports collapse to this one
-    observable shape -- a ground-role pin resolved onto the power net leaves
-    that instance's ``VDD`` and ``VSS`` pins on one net, and an output
-    resolved onto one of its own instance's inputs leaves that instance's
-    output and input pins on one net.
-
-    **Why it is still a warning after issue #2658, and not escalated above
-    a ratio.** That issue reports the same observable shape at extreme
-    scale -- a 109-pin hard macro with ~104 pins on one net -- and proposes
-    (as an alternative to fixing the binding) raising this to an
-    application error once the tied-pin ratio crosses some threshold. The
-    binding fault behind it is fixed at source instead
-    (:func:`lef_layer_probe_roles`: a LEF port is now probed on its own
-    declared metal before the bottom-up fallback that collapsed it), so the
-    escalation would now fire almost exclusively on the *legal* case this
-    docstring opens with -- and a hard failure there needs an opt-out flag
-    (``--allow-tied-pins`` or a deck setting) that nothing else in the
-    extraction contract has a use for. The escalation is therefore
-    deliberately deferred, not dropped: it is tracked as issue #2695, as
-    defence-in-depth for a collapse this fix cannot reach (a run without
-    ``--pdk``, a PDK with no KLayout layer map, or a LEF whose port layers
-    the map does not name), where the role-free bottom-up fallback still
-    applies.
-
-    Deliberately *not* a separate "two supply-role pins on one net" check
-    (the first of the two self-checks issue #1366 proposes): an
-    :class:`~klayout_tools.decks.ExtractionDeck` declares no power/ground
-    net names -- supply nets get their names from the layout's own drawn
-    labels like any other net -- so there is no deck-side notion of a
-    "supply-role pin" to key that check on. This check subsumes it anyway,
-    since a supply short is a two-pins-one-net collision by definition.
-    """
-    if not tied:
-        return []
-    examples = [
-        f"{instance_name} (cell '{cell_name}'): pins "
-        f"{', '.join(pin_names)} -> net '{net_name}'"
-        for instance_name, cell_name, net_name, pin_names, _declared in tied[
-            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
-        ]
-    ]
-    remainder = len(tied) - len(examples)
-    if remainder > 0:
-        examples.append(f"... and {remainder} more instance(s)")
-    return [
-        f"{len(tied)} --abstract-cells instance(s) resolved two or more of "
-        "their separately declared pins onto the same net: "
-        + "; ".join(examples)
-        + ". This is legal for a deliberately tied-off pin, but an "
-        "abstracted cell is a black box whose interior cannot be inspected "
-        "to confirm that, and it is also the signature of a pin-to-net "
-        "binding fault (a ground-role pin resolved onto the power net, or "
-        "an output resolved onto one of its own instance's inputs) -- "
-        "confirm these against the design's intent before trusting a "
-        "downstream `klt lvs` verdict built on this netlist"
-    ]
-
-
-def _collapsed_abstract_pin_warning(
-    tied: list[tuple[str, str, str, list[str], int]],
-) -> list[str]:
-    """A second, deliberately **louder** ``warnings[]`` entry for the subset
-    of :func:`_tied_abstract_pin_warning`'s ties where *most* of one
-    abstracted instance's declared pins collapsed onto a **single** net --
-    or ``[]`` when none does (issue #2695, the deferred half of #2658).
-
-    ``tied`` is :func:`_wire_abstract_cells`'s accumulator,
-    ``[(instance name, cell name, net name, [pin names], <declared pin count
-    for that cell type>), ...]``. An entry is escalated when its net carries
-    both
-
-    - at least :data:`_ABSTRACT_COLLAPSED_PIN_MIN_PINS` of that instance's
-      separately declared pins, **and**
-    - strictly more than :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` of them.
-
-    Both bounds are load-bearing, and both exist to keep this entry off the
-    legal cases the plain tie warning is built to tolerate -- see each
-    constant's own derivation. The ratio is per *net*, not per instance: it is
-    the **dominant** net's share of the macro's port list, so a cell that ties
-    ``VPWR``/``VPB`` and ``VGND``/``VNB`` to their own two rails is 2-of-N
-    twice rather than 4-of-N once, and only a genuine single-net collapse
-    (#2658's report: 109 declared pins, nearly all on one parent net) crosses
-    the line.
-
-    **Why a warning and not an error** (the decision issue #2695 exists to
-    record). This stays in ``warnings[]``; there is deliberately no
-    ``ExtractError`` path and no ``--allow-tied-pins`` opt-out:
-
-    - Above the threshold the condition is *still legal*. Nothing in the
-      extraction contract forbids a macro from tying most of its ports
-      together, and an abstracted cell is unverifiable by construction (its
-      interior was erased), so the extractor cannot distinguish a deliberate
-      multi-way tie from a binding fault -- only the design's own intent can.
-      Failing the run would therefore reject correct netlists, exactly the
-      reasoning :func:`_tied_abstract_pin_warning` already records for the
-      unconditioned case and that ``docs/cli/extract.md`` records for issue
-      #2142's identical "make it an error" ask.
-    - A hard failure would need an escape hatch the CLI does not have, so the
-      strict half of the sketch costs a new flag plus its JSON-contract
-      surface to gate a check that cannot be made sound anyway. A distinct
-      warning string in the existing ``warnings: array<string>`` container
-      buys the whole diagnostic value at no contract cost.
-
-    So this function's job is purely to make the shape *unmissable* in a
-    ``warnings[]`` list that a whole-block run legitimately fills with
-    body-tie entries: it states the ratio and names the dominant net, which
-    the aggregated tie entry does not.
-    """
-    collapsed = [
-        (instance_name, cell_name, net_name, pin_names, declared)
-        for instance_name, cell_name, net_name, pin_names, declared in tied
-        if declared > 0
-        and len(pin_names) >= _ABSTRACT_COLLAPSED_PIN_MIN_PINS
-        and len(pin_names) / declared > _ABSTRACT_COLLAPSED_PIN_RATIO
-    ]
-    if not collapsed:
-        return []
-    examples = [
-        f"{instance_name} (cell '{cell_name}'): {len(pin_names)} of "
-        f"{declared} declared pins ({len(pin_names) / declared:.0%}) -> net "
-        f"'{net_name}' (pins {', '.join(pin_names)})"
-        for instance_name, cell_name, net_name, pin_names, declared in collapsed[
-            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
-        ]
-    ]
-    remainder = len(collapsed) - len(examples)
-    if remainder > 0:
-        examples.append(f"... and {remainder} more instance(s)")
-    return [
-        f"MOST PINS ON ONE NET: {len(collapsed)} --abstract-cells instance(s) "
-        "resolved a majority of their separately declared pins onto a single "
-        "net: " + "; ".join(examples) + ". This is the many-pins-one-net "
-        "collapse signature (issue #2658): when a pin's own access point "
-        "lands on no conductor of its own layer, the cross-layer fallback can "
-        "bind it to whatever wide parent shape happens to run under it, "
-        "collapsing most of a black box's port list onto that one net. It is "
-        "reported rather than failed because a deliberately tied-off pin is "
-        "legal and an abstracted cell's interior cannot be inspected to "
-        "confirm which this is -- so check the dominant net named above "
-        "against the macro's own declared port list before trusting a "
-        "downstream `klt lvs` verdict built on this netlist"
-    ]
+        if net is not None:
+            candidates.setdefault(net.cluster_id, net)
+    winner = max(candidates.values(), key=_abstract_pin_net_score, default=None)
+    if winner is not None:
+        joins.record(instance, pin, winner, candidates)
+    return winner
 
 
 def _lef_pin_is_substrate(
@@ -1914,6 +1721,7 @@ def _wire_abstract_cells(
     ) = None,
     global_net_ports_by_cell: dict[int, int] | None = None,
     lef_layer_roles: dict[str, str] | None = None,
+    def_probes: dict[str, list[tuple[int, kdb.Point]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
@@ -2015,7 +1823,10 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
-    tied: list[tuple[str, str, str, list[str], int]] = []
+    joins = AbstractPinJoins()
+    wired: list[tuple[kdb.SubCircuit, dict[str, int]]] = []
+    # Count LEF-merged substrate-role pins even when a verbose report is disabled.
+    substrate_pins_by_cell: dict[str, set[str]] = {}
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
@@ -2049,6 +1860,7 @@ def _wire_abstract_cells(
         substrate_pins = _substrate_pin_names(
             lef_macros, cell.name, lef_merged, global_net_ports
         )
+        substrate_pins_by_cell[cell.name] = substrate_pins
         if global_net_ports > len(substrate_pins):
             warnings.append(
                 f"--abstract-cells cell type '{cell.name}' "
@@ -2080,13 +1892,7 @@ def _wire_abstract_cells(
         for index, trans in enumerate(transforms):
             instance_name = _sanitize_instance_name(f"{cell.name}_{index}")
             subcircuit = top_circuit.create_subcircuit(black_box_circuit, instance_name)
-            # Grouped by the resolved net's `expanded_name()` (unique per net
-            # within `top_circuit`, and stable for an unnamed net's `$<n>`
-            # placeholder) so the post-wiring self-check below can spot two
-            # separately declared pins of one instance landing on one net --
-            # issue #1366's single observable signature for both of its
-            # reported impossible bindings.
-            pins_by_net: dict[str, list[str]] = {}
+            wired.append((subcircuit, pin_ids))
             for pin_name, points in pins:
                 global_points = [(trans * point, role) for point, role in points]
                 # A LEF-merged substrate pin is the cell's body, not a point
@@ -2096,7 +1902,9 @@ def _wire_abstract_cells(
                 net = (
                     _substrate_net(top_circuit, deck)
                     if pin_name in substrate_pins
-                    else _probe_abstract_pin_net(l2n, global_points, probe_layers)
+                    else _probe_abstract_pin_net(
+                        l2n, global_points, probe_layers, joins, instance_name, pin_name
+                    )
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
@@ -2107,16 +1915,6 @@ def _wire_abstract_cells(
                         "any parent net"
                     )
                 subcircuit.connect_pin(pin_ids[pin_name], net)
-                pins_by_net.setdefault(net.expanded_name(), []).append(pin_name)
-            for net_name, pin_names in pins_by_net.items():
-                if len(pin_names) > 1:
-                    # `len(pins)` is this instance's *declared* pin count (every
-                    # instance of one cell type shares the resolved pin list),
-                    # i.e. the denominator `_collapsed_abstract_pin_warning`
-                    # measures the dominant net's share against -- issue #2695.
-                    tied.append(
-                        (instance_name, cell.name, net_name, pin_names, len(pins))
-                    )
 
         report.append(
             {
@@ -2128,7 +1926,17 @@ def _wire_abstract_cells(
             }
         )
 
+    joins.read_def_names(l2n, probe_layers, def_probes or {})
+    warnings.extend(joins.apply(top_circuit))
+    tied = tied_instances(wired)
     warnings.extend(_tied_abstract_pin_warning(tied))
     warnings.extend(_collapsed_abstract_pin_warning(tied))
+    # Issue #5632: run after every matched instance is wired, so the
+    # substrate global's connection counts are final for this pass.
+    warnings.extend(
+        isolated_substrate_global_warning(
+            top_circuit, deck, substrate_pins_by_cell, report
+        )
+    )
     report.sort(key=lambda entry: entry["cell"])
     return report, warnings

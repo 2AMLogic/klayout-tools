@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check_type_baseline.py"
@@ -122,7 +125,49 @@ def test_workflow_runs_the_script():
     assert "scripts/check_type_baseline.py" in WORKFLOW.read_text(encoding="utf-8")
 
 
+def _fake_mypy(monkeypatch, returncode, stdout="", stderr=""):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    monkeypatch.setattr(ctb.subprocess, "run", fake_run)
+
+
+def test_run_mypy_rc1_without_errors_is_a_tool_failure(monkeypatch):
+    # A missing mypy module exits 1 with empty stdout: not a clean run (#6368).
+    _fake_mypy(monkeypatch, 1, stderr="No module named mypy")
+    with pytest.raises(RuntimeError, match="No module named mypy"):
+        ctb.run_mypy()
+
+
+def test_run_mypy_rc1_with_notes_only_is_a_tool_failure(monkeypatch):
+    _fake_mypy(monkeypatch, 1, stdout=_line(severity="note", code=None))
+    with pytest.raises(RuntimeError):
+        ctb.run_mypy()
+
+
+def test_run_mypy_rc0_empty_stdout_is_clean(monkeypatch):
+    _fake_mypy(monkeypatch, 0)
+    assert ctb.run_mypy() == Counter()
+
+
+def test_run_mypy_rc1_with_errors_still_parses(monkeypatch):
+    _fake_mypy(monkeypatch, 1, stdout=_line())
+    assert ctb.run_mypy() == Counter({("src/a.py", "arg-type", "bad"): 1})
+
+
+def test_check_exits_2_when_mypy_is_missing(monkeypatch, capsys):
+    _fake_mypy(monkeypatch, 1, stderr="No module named mypy")
+    assert ctb.main([]) == 2
+    assert "No module named mypy" in capsys.readouterr().err
+
+
+def test_update_baseline_with_missing_mypy_writes_nothing(monkeypatch, tmp_path):
+    _fake_mypy(monkeypatch, 1, stderr="No module named mypy")
+    target = tmp_path / "b.json"
+    assert ctb.main(["--update-baseline", "--baseline", str(target)]) == 2
+    assert not target.exists()
+
+
 def test_end_to_end_against_this_checkout():
-    pytest = __import__("pytest")
     pytest.importorskip("mypy")
     assert ctb.main([]) == 0

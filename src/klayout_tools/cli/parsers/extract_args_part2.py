@@ -22,13 +22,77 @@ def add_extract_args_part2(
         metavar="OHM",
         help=(
             "per-cut via/contact resistance for --resistance-graph (issue "
-            "#2983); 0 is an ideal via. The shipped decks do curate a per-cut "
-            "table (issue #3053) but klt extract does not consume it yet, so "
-            "without this flag a net with a cross-level landing is "
-            "`unsupported` and `resistance_graph.selected_resistance_ohm` "
-            "falls back to the legacy scalar. Must be >= 0. Requires "
+            "#2983); 0 is an ideal via, and when given it overrides every "
+            "landing. Without it, each landing takes the deck's nominal "
+            "per-cut value where curated (issue #6917); a landing type the "
+            "deck does not curate is `unsupported` and "
+            "`resistance_graph.selected_resistance_ohm` falls back to the "
+            "legacy scalar. Must be >= 0. Requires --resistance-graph. See "
+            "docs/cli/extract.md's '--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-graph-max-terminals",
+        dest="resistance_graph_max_terminals",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-graph terminal cap (positive integer, default 64) "
+            "per net (issue #6964): a net with more terminals is "
+            "`graph_too_large` before its geometry is examined and keeps the "
+            "legacy R. Raising it lets a multi-terminal rail solve, at the "
+            "cost of an N x N `pair_resistance_ohm` matrix and N - 1 "
+            "injection solves for one connected net. Requires "
             "--resistance-graph. See docs/cli/extract.md's "
-            "'--resistance-graph' section."
+            "'--resistance-graph-max-*' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-graph-max-cells",
+        dest="resistance_graph_max_cells",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-graph mesh-cell cap (positive integer, default "
+            "4096) per merged conductor polygon (issue #6964): one whose "
+            "Manhattan decomposition needs more cells is `graph_too_large` "
+            "and its net keeps the legacy R. The grid is every vertex x line "
+            "times every vertex y line, so the count grows with the product "
+            "of both, and each cell becomes a graph node. Requires "
+            "--resistance-graph. See docs/cli/extract.md's "
+            "'--resistance-graph-max-*' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-graph-max-nodes",
+        dest="resistance_graph_max_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-graph node cap (positive integer, default 5000) "
+            "per net (issue #6964): one node per mesh piece plus one per "
+            "port; a larger net is `graph_too_large` and keeps the legacy R. "
+            "Raise it together with --resistance-graph-max-cells for a large "
+            "poured polygon. Requires --resistance-graph. See "
+            "docs/cli/extract.md's '--resistance-graph-max-*' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-graph-max-edges",
+        dest="resistance_graph_max_edges",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-graph edge cap (positive integer, default 20000) "
+            "per net (issue #6964): in-plane piece edges plus port and via "
+            "edges; a larger net is `graph_too_large` and keeps the legacy "
+            "R. A mesh of n pieces has at most about 2 n in-plane edges, plus "
+            "one edge per port attachment. Requires --resistance-graph. See "
+            "docs/cli/extract.md's '--resistance-graph-max-*' section."
         ),
     )
     extract_parser.add_argument(
@@ -287,6 +351,9 @@ def add_extract_args_part2(
             "cell'). Reuses --pins' own per-net, any-component-label "
             "reconciliation (issue #1687), with the DEF's own PINS section "
             "as the declared set instead of a hand-derived --pins list. "
+            "Without it (and without --pins), whether OpenSTA attaches the "
+            "SPEF's nets is layout-dependent, not a stable signature -- "
+            "assert on the --def-net-connections warning instead. "
             "Off by default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's 'DEF-derived declared pins' section."
         ),

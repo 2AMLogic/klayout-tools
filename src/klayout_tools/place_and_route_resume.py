@@ -26,7 +26,7 @@ COMMIT_SCHEMA = "klt.place_and_route.stage_commit/1"
 
 #: Request keys that do not influence what a stage computes; the per-stage
 #: script text and input-file hashes already pin everything that does.
-_REQUEST_HASH_EXCLUDE = ("target_stage",)
+_REQUEST_HASH_EXCLUDE = ("target_stage", "threads")
 
 
 def commit_path(output_dir: str, hdl_toplevel: str, stage: str) -> str:

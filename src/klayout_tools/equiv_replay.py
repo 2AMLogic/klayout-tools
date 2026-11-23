@@ -14,19 +14,16 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any
 
 from ._paths import resolve_tool_binary
 from .equiv_errors import EquivError
 
-#: Counterexample/vector *replay* backends -- an axis orthogonal to
-#: :data:`SUPPORTED_ENGINES` (which selects the *proof* engine). See this
-#: module's docstring, "Replay backend" section (issue #2223).
+#: Replay backends are independent of the proof engine (see #2223).
 SUPPORTED_SIM_BACKENDS = ("iverilog", "verilator", "both")
 
-#: The default replay backend: unchanged from before the backend selector
-#: existed, so omitting ``request.sim_backend`` reproduces the historical
-#: behavior exactly.
+#: Omitting ``request.sim_backend`` preserves the historical Icarus replay.
 DEFAULT_SIM_BACKEND = "iverilog"
 
 #: The backend whose replay is **canonical for evidence** -- it is the one
@@ -506,6 +503,122 @@ def replay_evidence_is_untrustworthy(counterexample: dict[str, Any]) -> bool:
     ] is False or replay_backends_disagreed(counterexample)
 
 
+def run_counterexample_confirmation(
+    *,
+    counterexample: dict[str, Any],
+    netlist_path: str,
+    output_dir: str,
+    diagnostics: list[dict[str, str]],
+    tb_source: str,
+    sequential: bool,
+    parse_outputs: Callable[[str], tuple[dict[str, Any], dict[int, dict[str, Any]]]],
+    sim_backend: str = DEFAULT_SIM_BACKEND,
+    request_doc: dict[str, Any],
+    request_dir: str,
+) -> None:
+    """Replay a counterexample and update it in place: ``confirmed_by_simulation``,
+    ``simulation``, and (for ``both``) ``simulation_cross_check``. Degraded
+    confirmation or backend disagreement appends warnings to ``diagnostics``.
+    Pass ``request_doc`` and ``request_dir`` to the backend for binary resolution
+    (#2423). ``parse_outputs(stdout)`` returns simulation fields and gold/gate
+    outputs by time. ``sequential`` selects the stem, block shape, cycle key,
+    verdict rule and wording for the two wrapper functions."""
+    stem = "equiv_seq_tb" if sequential else "equiv_tb"
+    tb_path = os.path.join(output_dir, f"{stem}.v")
+
+    def _warn(code: str, message: str) -> None:
+        diagnostics.append({"severity": "warning", "code": code, "message": message})
+
+    def _run(backend: str) -> tuple[str | None, str | None, dict[str, str | None]]:
+        return run_replay_backend(
+            backend=backend,
+            netlist_path=netlist_path,
+            tb_path=tb_path,
+            output_dir=output_dir,
+            stem=stem,
+            request_doc=request_doc,
+            request_dir=request_dir,
+        )
+
+    def _confirms(fields: dict[str, Any]) -> bool:
+        diverging = set(fields["diverging_outputs"])
+        if sequential:
+            return bool(diverging & set(counterexample["diverging_outputs"]))
+        return bool(diverging)
+
+    try:
+        with open(tb_path, "w", encoding="utf-8") as handle:
+            handle.write(tb_source)
+    except OSError as e:
+        _warn("simulation_unavailable", f"could not write confirmation testbench: {e}")
+        return
+    canonical_backend, cross_backend = replay_backends(sim_backend)
+    stdout, failure, canonical_binaries = _run(canonical_backend)
+    if stdout is None:
+        _warn("simulation_unavailable", failure or "counterexample replay did not run")
+        return
+    fields, by_time = parse_outputs(stdout)
+    counterexample["simulation"] = {
+        "engine": SIM_ENGINE_LABEL[canonical_backend],
+        "engine_version": sim_backend_version(
+            canonical_backend, canonical_binaries.get("iverilog_binary")
+        ),
+        "four_state": SIM_BACKEND_FOUR_STATE[canonical_backend],
+        **fields,
+        # #2423: record the resolved absolute iverilog/vvp paths actually invoked,
+        # so a saved report identifies the build, including request overrides.
+        # Verilator has no override and returns {} (both keys absent).
+        **canonical_binaries,
+    }
+    confirmed = _confirms(fields)
+    counterexample["confirmed_by_simulation"] = confirmed
+    if not confirmed:
+        scope, reach = (" trace", " on any replayed cycle") if sequential else ("", "")
+        _warn(
+            "counterexample_not_reproduced",
+            f"re-running the solver's counterexample{scope} through the flattened "
+            f"netlists via {SIM_BACKEND_LABEL[canonical_backend]} did not "
+            f"reproduce a diverging output{reach} -- treat this counterexample "
+            "with suspicion",
+        )
+    if cross_backend is None:
+        return
+    cross_stdout, cross_failure, _cross_binaries = _run(cross_backend)
+    if cross_stdout is None:
+        counterexample["simulation_cross_check"] = cross_check_block(
+            cross_backend, sequential=sequential
+        )
+        _warn(
+            "sim_backend_cross_check_unavailable",
+            f"{cross_failure} -- the canonical {canonical_backend} replay "
+            "above stands unchanged",
+        )
+        return
+    cross_fields, cross_by_time = parse_outputs(cross_stdout)
+    cross_check = cross_check_block(cross_backend, sequential=sequential)
+    cross_check.update(cross_fields)
+    mismatches: list[dict[str, Any]] = []
+    for time_value in sorted(set(by_time) | set(cross_by_time)):
+        mismatches.extend(
+            compare_replay_outputs(
+                canonical=by_time.get(time_value, {"gold": {}, "gate": {}}),
+                cross=cross_by_time.get(time_value, {"gold": {}, "gate": {}}),
+                cross_four_state=SIM_BACKEND_FOUR_STATE[cross_backend],
+                cycle=time_value if sequential else None,
+            )
+        )
+    record_cross_check_agreement(
+        counterexample=counterexample,
+        cross_check=cross_check,
+        canonical_backend=canonical_backend,
+        cross_backend=cross_backend,
+        canonical_confirmed=confirmed,
+        cross_confirmed=_confirms(cross_fields),
+        mismatches=mismatches,
+        diagnostics=diagnostics,
+    )
+
+
 def confirm_counterexample(
     *,
     counterexample: dict[str, Any],
@@ -517,140 +630,26 @@ def confirm_counterexample(
     request_dir: str,
 ) -> None:
     """Independently confirm ``counterexample`` by actually running it
-    through the flattened ``gold``/``gate`` netlists Yosys wrote to
-    ``netlist_path``, via the selected replay backend (``iverilog``/``vvp``
-    by default) -- never trusting the SAT solver's own reported values
-    uncritically (this module's own "the counterexample is executable"
-    discipline).
+    through the flattened netlists: the combinational single-vector mode
+    of :func:`run_counterexample_confirmation` (shared contract there)."""
 
-    Mutates ``counterexample`` in place (``confirmed_by_simulation``,
-    ``simulation``, and -- under ``sim_backend: "both"`` --
-    ``simulation_cross_check``); appends to ``diagnostics`` on any
-    degradation (a missing simulator binary, a compile error, a
-    re-simulation that does *not* reproduce the divergence the solver
-    reported, or a disagreement between the two replay backends).
+    def _summary(stdout):
+        gold, gate = _parse_replay_outputs(stdout)
+        fields = {"gold_outputs": gold, "gate_outputs": gate}
+        fields["diverging_outputs"] = diverging_names(gold, gate)
+        return fields, {0: {"gold": gold, "gate": gate}}
 
-    ``request_doc``/``request_dir`` (issue #2423) are threaded down to
-    :func:`run_replay_backend` for the ``iverilog``/``vvp`` binary
-    resolution -- see that function's docstring.
-    """
-    tb_path = os.path.join(output_dir, "equiv_tb.v")
-
-    tb_source = build_testbench(counterexample)
-    try:
-        with open(tb_path, "w", encoding="utf-8") as handle:
-            handle.write(tb_source)
-    except OSError as exc:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": f"could not write confirmation testbench: {exc}",
-            }
-        )
-        return
-
-    canonical_backend, cross_backend = replay_backends(sim_backend)
-
-    stdout, failure, canonical_binaries = run_replay_backend(
-        backend=canonical_backend,
-        netlist_path=netlist_path,
-        tb_path=tb_path,
-        output_dir=output_dir,
-        stem="equiv_tb",
-        request_doc=request_doc,
-        request_dir=request_dir,
-    )
-    if stdout is None:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": failure or "counterexample replay did not run",
-            }
-        )
-        return
-
-    sim_gold, sim_gate = _parse_replay_outputs(stdout)
-    sim_diverging = diverging_names(sim_gold, sim_gate)
-
-    counterexample["simulation"] = {
-        "engine": SIM_ENGINE_LABEL[canonical_backend],
-        "engine_version": sim_backend_version(
-            canonical_backend, canonical_binaries.get("iverilog_binary")
-        ),
-        "four_state": SIM_BACKEND_FOUR_STATE[canonical_backend],
-        "gold_outputs": sim_gold,
-        "gate_outputs": sim_gate,
-        "diverging_outputs": sim_diverging,
-        # Issue #2423: alongside `engine_version` above -- the resolved
-        # absolute paths `run_replay_backend` actually invoked, so a
-        # committed report distinguishes which `iverilog`/`vvp` build
-        # produced this confirmation (or an explicitly named one). `{}`
-        # (both keys absent) for the `verilator` canonical backend, which
-        # this issue's scope adds no override for.
-        **canonical_binaries,
-    }
-    confirmed = bool(sim_diverging)
-    counterexample["confirmed_by_simulation"] = confirmed
-    if not confirmed:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "counterexample_not_reproduced",
-                "message": "re-running the solver's counterexample through "
-                "the flattened netlists via "
-                f"{SIM_BACKEND_LABEL[canonical_backend]} did not reproduce "
-                "a diverging output -- treat this counterexample with "
-                "suspicion",
-            }
-        )
-
-    if cross_backend is None:
-        return
-
-    cross_stdout, cross_failure, _cross_binaries = run_replay_backend(
-        backend=cross_backend,
-        netlist_path=netlist_path,
-        tb_path=tb_path,
-        output_dir=output_dir,
-        stem="equiv_tb",
-        request_doc=request_doc,
-        request_dir=request_dir,
-    )
-    if cross_stdout is None:
-        counterexample["simulation_cross_check"] = cross_check_block(
-            cross_backend, sequential=False
-        )
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "sim_backend_cross_check_unavailable",
-                "message": f"{cross_failure} -- the canonical "
-                f"{canonical_backend} replay above stands unchanged",
-            }
-        )
-        return
-
-    cross_gold, cross_gate = _parse_replay_outputs(cross_stdout)
-    cross_check = cross_check_block(cross_backend, sequential=False)
-    cross_check["gold_outputs"] = cross_gold
-    cross_check["gate_outputs"] = cross_gate
-    cross_check["diverging_outputs"] = diverging_names(cross_gold, cross_gate)
-
-    record_cross_check_agreement(
+    run_counterexample_confirmation(
         counterexample=counterexample,
-        cross_check=cross_check,
-        canonical_backend=canonical_backend,
-        cross_backend=cross_backend,
-        canonical_confirmed=confirmed,
-        cross_confirmed=bool(cross_check["diverging_outputs"]),
-        mismatches=compare_replay_outputs(
-            canonical={"gold": sim_gold, "gate": sim_gate},
-            cross={"gold": cross_gold, "gate": cross_gate},
-            cross_four_state=SIM_BACKEND_FOUR_STATE[cross_backend],
-        ),
+        netlist_path=netlist_path,
+        output_dir=output_dir,
         diagnostics=diagnostics,
+        tb_source=build_testbench(counterexample),
+        sequential=False,
+        parse_outputs=_summary,
+        sim_backend=sim_backend,
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
 
 

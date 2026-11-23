@@ -481,7 +481,7 @@ def test_resolve_liberty_ihp_single_underscore_fallback(tmp_path, monkeypatch):
     resolve via the single-underscore fallback rather than raising "liberty
     not found" (issue #1790, missed in `post_route_sta.py`'s own copy of
     `_resolve_liberty` until issue #1652 folded it into the shared
-    `klayout_tools.pdk.resolve_liberty_for_cell_library` implementation
+    `klayout_tools.pdk_cells.resolve_liberty_for_cell_library` implementation
     `synthesize.py`/`place_and_route.py` already carried this fallback in)."""
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
@@ -923,13 +923,12 @@ def test_spef_reader_warnings_counts_delimited_stdout_region():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
     # Only the two inside the region count -- the reader is the only thing
     # running there, but a liberty/clock warning outside it is not evidence
     # of a failed annotation.
-    assert count == 2
-    assert sample == [line.strip() for line in _READER_WARNINGS]
+    assert warnings == [line.strip() for line in _READER_WARNINGS]
 
 
 def test_spef_reader_warnings_counts_unknown_codes_inside_region():
@@ -938,10 +937,9 @@ def test_spef_reader_warnings_counts_unknown_codes_inside_region():
     the region check is deliberately broader than the STA-1648/1650 pair."""
     stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 1
-    assert sample == ["[WARNING STA-9999] some future reader warning."]
+    assert warnings == ["[WARNING STA-9999] some future reader warning."]
 
 
 def test_spef_reader_warnings_matches_stderr_narrowly():
@@ -956,35 +954,24 @@ def test_spef_reader_warnings_matches_stderr_narrowly():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+    warnings = post_route_sta._spef_reader_warnings(stdout, stderr)
 
-    assert count == 2
-    assert all("STA-16" in line for line in sample)
+    assert len(warnings) == 2
+    assert all("STA-16" in line for line in warnings)
 
 
 def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
     stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
 
-    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 2
-
-
-def test_spef_reader_warnings_sample_is_capped():
-    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
-    stdout = _spef_read_block(*warnings)
-
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
-
-    assert count == 50
-    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+    assert len(warnings) == 2
 
 
 def test_spef_reader_warnings_clean_run_reports_zero():
-    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+    warnings = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
 
-    assert count == 0
-    assert sample == []
+    assert warnings == []
 
 
 def _delay_blocks(pre: str, post: str) -> str:
@@ -2124,16 +2111,11 @@ def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
-    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
-    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
-    design OpenSTA finds no hold path to measure in), the two new fields
-    degrade to ``null`` -- the same null-handling the existing setup-side
-    fields already have, never a ``KeyError``."""
+    """Older engines or unmeasurable paths can omit hold and frequency metrics."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     metrics_without_hold = {
         "timing__setup__ws": -0.15,
         "timing__setup__tns": -1.2,
-        "timing__fmax": 500_000_000.0,
         "power__total": 0.0084,
         "clock__skew__setup": 0.021,
     }
@@ -2142,6 +2124,7 @@ def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     report = run_sta(request_path)
 
     assert report["worst_slack_ns"] == -0.15
+    assert report["fmax_mhz"] is None
     assert report["worst_hold_slack_ns"] is None
     assert report["total_negative_hold_slack_ns"] is None
 
@@ -2721,8 +2704,8 @@ def test_container_runtime_hint_none_for_empty_output():
 
 def test_engine_error_message_appends_container_runtime_hint():
     """The hint is appended to -- never a replacement for -- the engine's own
-    captured output, following `place_and_route.py`'s `_mount_namespace_hint`
-    pattern (issue #1868)."""
+    captured output, following the shared `mount_namespace_hint` pattern
+    (issue #1868)."""
     completed = fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
     message = post_route_sta._engine_error_message(completed)
@@ -2857,6 +2840,8 @@ def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
     assert "corner: ss_100C_1v60" in out
     assert "worst_slack_ns: -0.15" in out
     assert "worst_slack_ns: -0.42" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "fmax_mhz: 300.0 (clock estimate excludes opposite-edge paths" in out
     assert "def_path:" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -2872,6 +2857,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "can overstate achievable frequency" in out
     assert "worst_hold_slack_ns: 0.03812" in out
     assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):
@@ -4359,10 +4346,7 @@ def _propagated_constraints(**overrides) -> dict:
 
 
 def test_clock_capture_fixture_matches_module_tcl():
-    """Fixture drift guard: the captures must come from the Tcl this module
-    emits today -- the stored fragments byte-for-byte, and the stored full
-    propagated+SPEF script equal to a fresh `_sta_script_lines` build with
-    the same placeholder paths re-substituted."""
+    """Compare the captured clock fragments and propagated script to current Tcl."""
     assert _CLOCK_CAPTURES["tcl_fragments"][
         "propagated_clock_lines"
     ] == post_route_sta._propagated_clock_lines("clk")
@@ -4391,21 +4375,24 @@ def test_clock_capture_fixture_matches_module_tcl():
         input_delay_ns=0.0,
         propagated_clock=True,
     )
-    # Issue #2780 appends the read-only constraint-completeness query as the
-    # script's last block -- after every metric/report this capture replays
-    # -- so the pre-#2780 capture still matches everything before it.
+    # The original capture predates the appended constraint and electrical queries.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    # Issue #3005 likewise inserts the electrical-limit block just before it.
     electrical = post_route_sta._electrical_check_lines()
     head = fresh[: -len(completeness)]
     assert head[-len(electrical) :] == electrical
-    # Issue #4089 pins ns/pF command units just before ``create_clock``; the
-    # pre-#4089 capture predates that line.
+    # The captured clock also predates the ns/pF unit pin (#4089).
     pinned = head[: -len(electrical)]
     pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
     assert pinned[pin_idx + 1].startswith("create_clock")
-    assert stored == pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    current = pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    # The historical capture includes every linked net. Its buffered design
+    # has no driver-only nets, so the #6970 predicate leaves its counts intact.
+    at = stored.index("    incr klt_design_total")
+    assert (
+        current
+        == stored[:at] + list(post_route_sta.SPEF_SKIP_DRIVER_ONLY) + stored[at:]
+    )
 
 
 def test_unit_pin_precedes_clock_and_metrics_issue_4089():
@@ -7196,58 +7183,39 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert report["provenance"]["input"]["content_hash"] is not None
 
 
-def _write_placed_buffered_def(tmp_path) -> str:
-    """The captured buffered DEF with every component and pin given a
-    location, so OpenROAD's `estimate_parasitics -placement` has geometry to
-    extract (the captured DEF is deliberately unplaced)."""
-    import re
+def _openroad_write_spef(tmp_path: Path) -> tuple[str, str]:
+    """Return a routed DEF and its name-mapped SPEF from OpenROAD.
 
-    text = _CLOCK_CAPTURES["defs"]["buffered"]
-    counter = iter(range(1, 1000))
-
-    def place_component(match):
-        x = 10_000 * next(counter)
-        return f"{match.group(1)} + PLACED ( {x} 20000 ) N ;"
-
-    text = re.sub(
-        r"^(    - \S+ sky130_fd_sc_hd__\S+) ;$", place_component, text, flags=re.M
-    )
-
-    def place_pin(match):
-        x = 5_000 * next(counter)
-        return (
-            f"{match.group(1)} + LAYER met2 ( -70 0 ) ( 70 140 ) + PLACED ( {x} 0 ) N ;"
-        )
-
-    text = re.sub(
-        r"^(    - \S+ \+ NET .* \+ USE SIGNAL) ;$", place_pin, text, flags=re.M
-    )
-    text = text.replace(
-        "COMPONENTS 6 ;", "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\nCOMPONENTS 6 ;"
-    )
-    return _write(tmp_path / "placed.def", text)
-
-
-def _openroad_write_spef(tmp_path, def_path: str) -> str:
-    """Have OpenROAD itself estimate placement parasitics on `def_path` and
-    `write_spef` them -- the real writer's `*NAME_MAP` form, which the
-    hand-written unit fixture only imitates."""
+    OpenRCX's `write_spef` needs extracted routing. The separate placement
+    estimator's SPEF writer omits `*NAME_MAP`.
+    """
     liberty_path, _corner, pdk_info = post_route_sta._resolve_liberty(
         "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
     )
     tech_lef, cell_lef = post_route_sta._resolve_lef("sky130_fd_sc_hd", pdk_info)
+    def_path = _write(tmp_path / "buffered.def", _CLOCK_CAPTURES["defs"]["buffered"])
+    routed_def = tmp_path / "routed.def"
     spef_path = tmp_path / "openroad.spef"
     script = _write(
         tmp_path / "write_spef.tcl",
         "\n".join(
             [
+                "set_thread_count 1",
+                f"read_liberty {liberty_path}",
                 f"read_lef {tech_lef}",
                 f"read_lef {cell_lef}",
                 f"read_def {def_path}",
-                f"read_liberty {liberty_path}",
-                "create_clock -name clk -period 2.0 [get_ports clk]",
-                "set_wire_rc -layer met2",
-                "estimate_parasitics -placement",
+                "initialize_floorplan -die_area {0 0 100 100} "
+                "-core_area {5 5 95 95} -site unithd",
+                "make_tracks",
+                "place_pins -hor_layers met3 -ver_layers met2",
+                "global_placement -density 0.3",
+                "detailed_placement",
+                "set_routing_layers -signal met1-met5",
+                "global_route",
+                "detailed_route",
+                f"write_def {routed_def}",
+                "extract_parasitics -version 2.0 -lef_rc",
                 f"write_spef {spef_path}",
             ]
         )
@@ -7257,8 +7225,9 @@ def _openroad_write_spef(tmp_path, def_path: str) -> str:
         script, str(tmp_path / "write_spef.json"), error_cls=PostRouteStaError
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert routed_def.is_file(), completed.stdout + completed.stderr
     assert spef_path.is_file(), completed.stdout + completed.stderr
-    return str(spef_path)
+    return str(routed_def), str(spef_path)
 
 
 def test_electrical_check_tcl_ends_redirect_on_error_path():
@@ -7288,8 +7257,7 @@ def test_live_engine_spef_name_map_annotation(tmp_path):
     #3755): a SPEF written by OpenROAD's own `write_spef` (so with its real
     `*NAME_MAP`) must annotate every net of the design it was extracted
     from."""
-    def_path = _write_placed_buffered_def(tmp_path)
-    spef_path = _openroad_write_spef(tmp_path, def_path)
+    def_path, spef_path = _openroad_write_spef(tmp_path)
     assert "*NAME_MAP" in Path(spef_path).read_text(encoding="utf-8")
 
     report = run_sta(

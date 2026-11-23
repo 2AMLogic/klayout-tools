@@ -35,6 +35,7 @@ from . import sim_measurement_kind, sim_raw, sim_snm
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -241,3 +242,27 @@ def extract_corner_snms(
         for position, spec in enumerate(measurements_spec)
         if is_snm(spec)
     }
+
+
+# --------------------------------------------------------------------------- #
+# Response entry
+# --------------------------------------------------------------------------- #
+
+
+def snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`ERROR_CODES`."""
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="snm", report_with_spec=True
+    )

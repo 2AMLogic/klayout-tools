@@ -43,8 +43,8 @@ from .sim_batch import (
 )
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
+from .sim_batch_receipt import COLLECTED_NETLIST_MISMATCH
 from .sim_set_runtime import (
-    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
@@ -104,9 +104,11 @@ def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
             else os.path.join(os.path.dirname(os.path.abspath(path)), ".klt", "sim")
         )
         candidate = os.path.join(base, stem)
-        if os.path.abspath(candidate) in seen:
-            candidate = os.path.join(base, f"{stem}-{index}")
-        seen.add(os.path.abspath(candidate))
+        suffix = index
+        while os.path.realpath(candidate) in seen:
+            candidate = os.path.join(base, f"{stem}-{suffix}")
+            suffix += 1
+        seen.add(os.path.realpath(candidate))
         dirs.append(candidate)
     return dirs
 
@@ -198,6 +200,7 @@ def _run_one(
             if code in CAPACITY_CODES and attempt <= capacity_retries:
                 sleep(CAPACITY_RETRY_BACKOFF_S * 2 ** (attempt - 1))
                 continue
+            entry["exit_code"] = 4 if code == COLLECTED_NETLIST_MISMATCH else 1
             entry["error"] = {"message": str(exc), "code": code}
         except Exception as exc:  # one request must never sink its siblings
             entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
@@ -282,7 +285,6 @@ def _launch_budget(capacity_wait_s: Any) -> float | None:
 
 def _execute_members(
     paths: list[str],
-    dirs: list[str],
     manifest: _Manifest,
     workers: int,
     launch_budget: float | None,
@@ -296,7 +298,16 @@ def _execute_members(
     cannot hold the process open) while a replacement worker keeps the
     concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
     unfinished member into a ``set_interrupted`` entry instead of exiting
-    silently."""
+    silently.
+
+    Issue #5849: the replacement is admitted only while no abandoned member
+    still holds a ``pending`` job -- the set then holds no more fleet capacity
+    than it has member threads. A job that never launches cannot starve the
+    set: past one more ``launch_budget`` the unstarted members become
+    ``not_launched`` entries instead of being submitted -- but, once no live
+    member remains to run them (#6278); while another member is still running,
+    its worker keeps draining the unstarted members at the reduced
+    concurrency."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)
@@ -389,7 +400,6 @@ def run_sim_set(
     launch_budget = _launch_budget(run_kwargs.get("capacity_wait_s"))
     requests = _execute_members(
         request_paths,
-        dirs,
         manifest,
         workers,
         launch_budget,

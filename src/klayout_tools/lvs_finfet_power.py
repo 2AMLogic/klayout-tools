@@ -46,6 +46,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .lvs_base import POWER_STATUS_MATCH
+
 
 def paired_supply_names(net_correspondence: Any, supply_nets: list[str]) -> list[str]:
     """The entries of a resolved ``options.supply_nets`` allowlist that a
@@ -137,8 +139,6 @@ def derive_finfet_gate_level_power(
     paired_supplies = paired_supply_names(net_correspondence, supply_nets)
     if not paired_supplies:
         return power_connectivity
-
-    from .lvs import POWER_STATUS_MATCH
 
     derived = dict(power_connectivity)
     derived["status"] = POWER_STATUS_MATCH

@@ -6,19 +6,28 @@ Split out so ``env_provenance.py`` stays under its per-file size ceiling.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-# Fields under ``environment.remote.worker_environment`` (or, for a sharded run,
-# ``environment.remote.fleet.<i>.worker_environment``) are observations of the
-# *remote worker host* (its PDK root, simulator path, banner), not paths of the
-# author's checkout, so a committer cannot make them non-reproducible (#5133).
-# Anchored at the envelope root so a ``worker_environment`` key elsewhere is
-# still linted.
-_REMOTE_WORKER_ENV_FIELD_RE = re.compile(
-    r"^environment\.remote\.(?:fleet\.\d+\.)?worker_environment(?:\.|$)"
-)
+
+def _worker_environment_parent(parts: tuple[str | int, ...]) -> bool:
+    """Match a remote environment from sim or one of PEX's two simulation sides."""
+    if len(parts) >= 2 and parts[-2] == "fleet" and isinstance(parts[-1], int):
+        parts = parts[:-2]
+    match parts:
+        case ("environment", "remote"):
+            return True
+        case (
+            "testbenches",
+            int(),
+            "sides",
+            "schematic" | "extracted",
+            "environment",
+            "remote",
+        ):
+            return True
+        case _:
+            return False
 
 
 def walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
@@ -30,17 +39,34 @@ def walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
     .diff_verdict_fields`` reports drift under, so a field named by one tool
     is findable with the other.
     """
+    return _walk(value, path, None)
+
+
+def _walk(
+    value: Any, path: str, lint_parts: tuple[str | int, ...] | None
+) -> Iterable[tuple[str, str]]:
+    """Keep JSON keys and array indices distinct when scoping the lint exemption."""
     if isinstance(value, Mapping):
         for key, item in value.items():
+            if (
+                lint_parts is not None
+                and key == "worker_environment"
+                and _worker_environment_parent(lint_parts)
+            ):
+                continue
             child = f"{path}.{key}" if path else str(key)
             if isinstance(key, str):
                 yield child, key
-            yield from walk_string_fields(item, child)
+            yield from _walk(
+                item, child, (*lint_parts, str(key)) if lint_parts is not None else None
+            )
         return
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             child = f"{path}.{index}" if path else str(index)
-            yield from walk_string_fields(item, child)
+            yield from _walk(
+                item, child, (*lint_parts, index) if lint_parts is not None else None
+            )
         return
     if isinstance(value, str):
         yield (path or "<root>"), value
@@ -48,9 +74,7 @@ def walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
 
 def walk_lintable_string_fields(payload: Any) -> Iterable[tuple[str, str]]:
     """:func:`walk_string_fields` minus the remote-worker observations."""
-    for field, text in walk_string_fields(payload, ""):
-        if not _REMOTE_WORKER_ENV_FIELD_RE.match(field):
-            yield field, text
+    return _walk(payload, "", ())
 
 
 def common_repo_root(

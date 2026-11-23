@@ -237,7 +237,7 @@ def test_refuses_an_unsupported_family_naming_both_supported_shapes(pdk_tree):
         _resolve(1, pdk_tree, pdk="bogus")
 
 
-@pytest.mark.parametrize("value", [True, -1, float("nan"), float("inf"), "2"])
+@pytest.mark.parametrize("value", [True, -1, float("nan"), float("inf"), "2", 10**400])
 def test_rejects_bad_values_before_touching_the_filesystem(pdk_tree, value):
     with pytest.raises(sim.SimError, match="finite non-negative"):
         _resolve(value, pdk_tree)
