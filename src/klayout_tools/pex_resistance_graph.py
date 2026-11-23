@@ -90,10 +90,9 @@ def _resistance_graph_echo(
         if resistance_network:
             net_echo["network"] = graph.get("network")
         nets.append(net_echo)
-    echo: dict[str, Any] = {
-        "r_cut_ohm": r_cut_ohm,
-        "resistance_network": resistance_network,
-    }
+    echo: dict[str, Any] = {"r_cut_ohm": r_cut_ohm}
+    if resistance_network:
+        echo["resistance_network"] = True
     if caps:
         echo["caps"] = effective_resistance_graph_caps(caps)
     echo["nets"] = nets

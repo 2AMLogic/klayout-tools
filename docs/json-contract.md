@@ -3013,8 +3013,8 @@ request echo, which is present as `false` under plain `--resistance-graph`:
   capacitance splits equally across its terminal nodes (the documented
   first-increment rule; per-node capacitance from the graph itself is the
   roadmap's open question).
-- `extraction.resistance_graph.resistance_network`: the boolean request
-  echo, beside the existing `r_cut_ohm`.
+- `extraction.resistance_graph.resistance_network`: `true` when the request
+  enables the reduced network. The field is absent otherwise.
 - `parasitics.model.resistance_network` (echoed in
   `extraction.model`): a string stating the mode, so a
   `klt signoff --manifest` item-7 citation can tell a graph-derived

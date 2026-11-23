@@ -281,8 +281,12 @@ def test_pex_resistance_network_trunk_fixture(tmp_path):
         resistance_graph=True,
         resistance_graph_r_cut_ohm=0.0,
         resistance_network=True,
+        resistance_graph_caps={"max_terminals": 5},
     )
-    nets = {n["net"]: n for n in report["extraction"]["resistance_graph"]["nets"]}
+    echo = report["extraction"]["resistance_graph"]
+    assert echo["resistance_network"] is True
+    assert echo["caps"]["max_terminals"] == 5
+    nets = {n["net"]: n for n in echo["nets"]}
     trunk = nets["NT"]
     assert trunk["network"] == {
         "written": "reduced",
@@ -354,7 +358,7 @@ def test_pex_resistance_network_off_is_byte_identical(tmp_path):
     for net in graph_report["extraction"]["resistance_graph"]["nets"]:
         assert "network" not in net
     assert "resistance_network" not in (graph_report["extraction"]["model"] or {})
-    assert graph_report["extraction"]["resistance_graph"]["resistance_network"] is False
+    assert "resistance_network" not in graph_report["extraction"]["resistance_graph"]
 
 
 def test_pex_resistance_network_terminal_mismatch_keeps_star(tmp_path):
@@ -480,7 +484,7 @@ def test_resistance_graph_echo_carries_network_block():
     assert echo["resistance_network"] is True
     assert echo["nets"][0]["network"]["written"] == "reduced"
     plain = _resistance_graph_echo({"nets": parasitics["nets"]}, None)
-    assert plain["resistance_network"] is False
+    assert "resistance_network" not in plain
     assert "network" not in plain["nets"][0]
     assert json.dumps(echo["nets"][0])  # JSON-clean
 
