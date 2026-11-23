@@ -1589,8 +1589,22 @@ data_setup_wns = next(
 )  # None => no data setup path in this session, not "0 slack"
 ```
 
-Use the data setup row to identify the path. Its launch and capture edges in
-the timing report determine the time available for data to propagate.
+The field is additive: `worst_slack_ns`, `total_negative_slack_ns`, both
+violation counts and `worst_*_path` are **unchanged** by it — it adds no
+engine query; it is the rows the session already parsed.
+
+Use the data setup row to identify the path: `startpoint` and `endpoint`
+are its two ends. The response carries no launch/capture clock-edge data —
+neither a group row nor a `worst_*_path.stages` block reports the edges —
+and that edge pair is what decides whether the data gets a full clock
+period to propagate in or half of one. To read it, run the full path report
+in a separate OpenSTA/OpenROAD session on the same inputs (same netlist,
+corner Liberty and constraints, written as plain SDC), selecting the path
+by the row's own fields:
+`report_checks -path_delay max -from <startpoint> -to <endpoint> -digits 6`.
+That report's clock lines — `clock clk (rise edge)` at the launch time,
+and again at the capture time — are the edge pair (verified on the boundary
+netlist below, where the report's slack matches the row's `0.69875`).
 
 ### Boundary example
 
