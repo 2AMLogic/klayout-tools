@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 # File descriptors are process-wide. Concurrent readers must restore them in
 # order, including when one reader raises or a read is nested.
@@ -21,7 +21,9 @@ def native_stdout_to_stderr() -> Iterator[None]:
     """Send lines written directly to fd 1 to the caller's stderr stream."""
     with _redirect_lock:
         if sys.stdout is not None:
-            sys.stdout.flush()
+            # Embedded callers can close the Python stream while fd 1 stays open.
+            with suppress(ValueError):
+                sys.stdout.flush()
         try:
             saved = os.dup(1)
         except OSError as exc:

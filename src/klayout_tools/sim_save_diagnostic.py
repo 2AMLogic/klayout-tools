@@ -9,10 +9,9 @@ paying the same number of lines down, so the diagnostic lives here and
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-_COMMENT_SPLIT_RE = re.compile(r";|\s\$")
+from ._spice_text import circuit_lines, logical_lines
 
 
 def preflight(
@@ -85,38 +84,12 @@ def _body_save_cards(netlist_text: str) -> list[str]:
     ``sim._netlist_declarations``."""
     cards: list[str] = []
     depth = 0
-    in_control = False
-    for line in _logical_lines(netlist_text):
+    for line in circuit_lines(logical_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
-        if word == ".control":
-            in_control = True
-        elif word == ".endc":
-            in_control = False
-        elif not in_control:
-            if word == ".subckt":
-                depth += 1
-            elif word == ".ends":
-                depth = max(0, depth - 1)
-            elif not depth and word == ".save":
-                cards.append(line)
+        if word == ".subckt":
+            depth += 1
+        elif word == ".ends":
+            depth = max(0, depth - 1)
+        elif not depth and word == ".save":
+            cards.append(line)
     return cards
-
-
-def _logical_lines(netlist_text: str) -> list[str]:
-    """Netlist lines with ``+`` continuations joined and full-line ``*`` and
-    inline ``;``/``$`` comments removed -- the same lexical pass as
-    ``sim._logical_netlist_lines``."""
-    logical: list[str] = []
-    for raw in netlist_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("*"):
-            continue
-        line = _COMMENT_SPLIT_RE.split(line, maxsplit=1)[0].strip()
-        if not line:
-            continue
-        if line.startswith("+"):
-            if logical:
-                logical[-1] += " " + line[1:].strip()
-            continue
-        logical.append(line)
-    return logical

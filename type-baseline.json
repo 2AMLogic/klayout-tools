@@ -399,12 +399,6 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
-      "code": "arg-type",
-      "message": "Argument 5 to \"_apply_sdf_physical_only_drop\" has incompatible type \"list[tuple[str, str, str]]\"; expected \"list[tuple[str, int, str]]\"",
-      "count": 1
-    },
-    {
       "file": "src/klayout_tools/functional_verification_sdf.py",
       "code": "call-overload",
       "message": "No overload variant of \"list\" matches argument type \"object\"",
@@ -2145,13 +2139,13 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/layout_plan_execute.py",
+      "file": "src/klayout_tools/layout_plan_ports.py",
       "code": "arg-type",
       "message": "Argument 1 to \"float\" has incompatible type \"Any | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
       "count": 1
     },
     {
-      "file": "src/klayout_tools/layout_plan_execute.py",
+      "file": "src/klayout_tools/layout_plan_ports.py",
       "code": "operator",
       "message": "Unsupported operand types for < (\"int\" and \"None\")",
       "count": 1

@@ -64,6 +64,12 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from .decks.finfet import FinFETExtractionDeck
+from .extract_abstract import (
+    _DEF_NET_NAME_PROPERTY_ID,
+    _apply_def_net_name_overrides,
+    _def_net_name_probes,
+)
+from .extract_detect_diode_near_miss import _extraction_deck_name
 from .extract_spef import ExtractError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -806,10 +812,7 @@ def _def_net_name_warnings(
     probes: dict[str, Any],
     top_name: str,
 ) -> list[str]:
-    """Apply ``--def-net-names`` (issue #951) to the FinFET netlist and return
-    the same loud warnings the planar path emits."""
-    from .extract import _DEF_NET_NAME_PROPERTY_ID, _apply_def_net_name_overrides
-
+    """Apply DEF net names and report unresolved probes as on the planar path."""
     renamed, unresolved = _apply_def_net_name_overrides(l2n, metals, probes)
     if not probes:
         return [
@@ -850,7 +853,6 @@ def _extract_with_parasitics(
 
     from .extract import (
         _apply_declared_pins,
-        _def_net_name_probes,
         _promote_orphan_named_nets,
         _purge_preserving_named_nets,
     )
@@ -945,8 +947,7 @@ def refuse_run_options(
     ``--parasitics`` is supported (issue #4558) and not refused."""
     if is_finfet_deck_name(deck_name):
         reject_unsupported_options(
-            deck_name,
-            **{"--pdk": pdk_variant is not None or pdk_root is not None},
+            deck_name, **{"--pdk": pdk_variant is not None or pdk_root is not None}
         )
 
 
@@ -969,14 +970,13 @@ def extract_netlist_tuple(
     the planar-only result slots are their documented empty values. Only the
     ``--parasitics`` pass (issue #4558) and the DEF-driven net naming
     (``--def-net-names``, ``--pins``; issue #4559) are honoured."""
-    from .extract import _extraction_deck_name
-
     parasitics_options = {
         key: options[key]
         for key in (
             "parasitics_top_cell_only",
             "resistance_graph",
             "resistance_graph_r_cut_ohm",
+            "resistance_graph_caps",
         )
         if key in options
     }
