@@ -4523,6 +4523,22 @@ instead of a `klt yield` citation:
 }}
 ```
 
+For a mixed-signal block with one ratified spec, declare the rows assigned to
+each partition under the manifest's top-level `spec_rows`:
+
+```json
+{"spec_rows": {"6.digital": [{"id": "interface"}], "6.analog": [{"id": "period_r1"}]}}
+```
+
+With an explicit `6.digital` declaration, the digital statement accounts for
+exactly those IDs, and the statistical scan checks those rows. Each ID in the
+full pinned spec must appear in at least one partition, and every declared ID
+must exist in the spec. A row assigned to both partitions is checked on both.
+The digital declaration requires ratified rows without gap or structural
+dispositions. The analog partition retains its independent yield grade, and
+the digital citation's `spec.row_count` counts the full pinned document.
+Without a partition assignment, the statement and scan cover the entire spec.
+
 - `spec` is the block's ratified target spec: a JSON object with
   `"status": "ratified"` and `"rows": [{"id": ...}, ...]` (no shipped spec
   schema exists yet; only `status` and the row `id`s are required).
