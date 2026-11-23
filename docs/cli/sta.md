@@ -941,8 +941,9 @@ accepted anything:
   even on a perfectly-correlated run.
 - `design_nets_annotated`/`design_nets_total` — design-side **name-match
   count**: how many eligible linked nets are named by the SPEF. A confirmed
-  internal net connected to just one instance output and no port is excluded
+  internal net with no pins or just one instance output, and no port, is excluded
   from both counts and the missing-net sample, even if it appears in the SPEF.
+  A physical terminal count from OpenDB confirms a zero-pin net is empty.
   Nets with a sink or any connected top-level port count. When OpenSTA cannot
   establish connectivity, the verifier keeps the net in the comparison. It is
   not evidence that parasitics were applied to the timing; the
