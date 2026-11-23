@@ -2987,6 +2987,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.routing must be a JSON object")
     # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
+    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
+    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
+    # sizes). The two fields select competing pad-sizing policies and are
+    # rejected together before label-derived landings are searched.
     minimal_ladder = False
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
@@ -3131,11 +3136,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
-    # sizing; True sizes a ladder's intermediate hop pads at their own
-    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
-    # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together before label-derived landings are searched.
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
