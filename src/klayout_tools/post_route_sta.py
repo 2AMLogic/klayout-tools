@@ -64,10 +64,10 @@ drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
 bug, not just duplicated code.
 
-Scope deliberately excluded from the first version and landed since: a
-``propagated_clock`` request option (issue #2739, below). Still excluded
-(not required for this issue): a bisected (rather than
-``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+Propagated-clock timing is available through ``propagated_clock`` (issue #2739).
+``fmax_mhz`` comes from OpenROAD's ``report_fmax_metric``. Its clock estimate
+uses same-clock, same-edge, single-cycle paths and can overstate achievable
+frequency when an opposite-edge path limits the period.
 
 **Propagated-clock timing (issue #2739).** By default every analyzed corner
 is timed with an **ideal** clock: ``create_clock`` alone, no
@@ -256,6 +256,7 @@ from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
+from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
 from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
@@ -299,6 +300,16 @@ from ._sta_clock_uncertainty import (
 )
 from ._sta_clock_uncertainty import (
     validate_clock_uncertainty as _validate_clock_uncertainty,
+)
+from ._sta_io_delay_clock import IoDelayMap
+from ._sta_io_delay_clock import (
+    check_port_delay_key as _check_port_delay_key,
+)
+from ._sta_io_delay_clock import (
+    entry_clock as _entry_clock,
+)
+from ._sta_io_delay_clock import (
+    validate_port_delay_maps as _validate_delay_maps,
 )
 from ._sta_period_maps import (
     check_period_maps,
@@ -445,6 +456,9 @@ _STA_WARNING_RE = re.compile(r"\[WARNING STA-\d+\]")
 #: whether the logger writes to stdout or stderr, and stderr cannot be
 #: interleaved with the Tcl ``puts`` markers above.
 _SPEF_READER_WARNING_RE = re.compile(r"\[WARNING STA-(?:1648|1650)\]")
+_SPEF_MISSING_NET_RE = re.compile(
+    r"\[WARNING STA-1650\] (?:.*, )?net (.+) not found\.$"
+)
 #: Upper bound on how many verbatim reader-warning lines are echoed into the
 #: response -- a diagnostic sample, not an exhaustive log (a wholesale
 #: name-convention mismatch emits one per SPEF net).
@@ -655,8 +669,14 @@ def run_sta(
     ) = _validate_constraints(request["constraints"])
     clock_extras = _validate_clock_extras(request["constraints"])
     check_period_maps(clock_period_ns, clock_extras, clock_port, requested_corners)
+    # Issue #7399: an entry-level `clock` may name any declared clock -- the
+    # primary plus every secondary `constraints.clocks` port.
+    declared_clocks = {clock_port}
+    declared_clocks.update(
+        clock["port"] for clock in (clock_extras or {}).get("clocks", [])
+    )
     input_delays, output_delays = _validate_port_delay_maps(
-        request["constraints"], clock_port
+        request["constraints"], clock_port, declared_clocks
     )
     input_transition_ns, input_transitions = _validate_input_transitions(
         request["constraints"], clock_port
@@ -940,8 +960,8 @@ class _StaConstraints:
 
     input_delay_ns: float | None
     output_delay_ns: float | None
-    input_delays: dict[str, dict[str, float]] | None
-    output_delays: dict[str, dict[str, float]] | None
+    input_delays: IoDelayMap | None
+    output_delays: IoDelayMap | None
     input_transition_ns: float | None
     input_transitions: dict[str, float] | None
     boundary: dict[str, Any] | None
@@ -1146,7 +1166,7 @@ def _dispatch_sta(
         "worst_hold_path": corner_fields["worst_hold_path"],
         # Additive field (issue #5424): the unreduced per-path-group rows
         # behind the two records above -- how a caller reads a data-setup
-        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        # WNS when an async recovery check determines `worst_slack_ns`.
         "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
@@ -1154,14 +1174,9 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
-    if "wire_load" in corner_fields:
-        response["wire_load"] = corner_fields["wire_load"]
-    if "port_paths" in corner_fields:
-        response["port_paths"] = corner_fields["port_paths"]
-    # Additive field (issue #5754): present only when the request named
-    # `constraints.report_instances`.
-    if "instance_paths" in corner_fields:
-        response["instance_paths"] = corner_fields["instance_paths"]
+    for field in ("wire_load", "port_paths", "instance_paths", "generated_clocks"):
+        if field in corner_fields:
+            response[field] = corner_fields[field]
     # Additive field (issue #2968): the applied exclusion list, present only
     # when the request named `constraints.false_path_from`.
     if constraints.false_path_from:
@@ -1363,7 +1378,10 @@ def _run_corner_session(
         # error it is, ahead of the generic engine-failure message.
         port_errors = _parse_port_check_errors(completed.stdout or "")
         if port_errors:
-            raise PostRouteStaError(_port_check_error_message(port_errors))
+            raise PostRouteStaError(
+                _generated.link_error(port_errors)
+                or _port_check_error_message(port_errors)
+            )
         if completed.returncode != 0:
             raise PostRouteStaError(
                 _engine_error_message(completed, pdk_info, verilog_mode=not has_def)
@@ -1485,6 +1503,7 @@ def _run_corner_session(
     )
 
     resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
+    corner_fields.update(_generated.response(clock_extras, stdout))
     return corner_fields, resolution
 
 
@@ -1744,7 +1763,7 @@ def _spef_annotation_block(
     names_correlated = (
         design_nets_total > 0 and design_nets_annotated == design_nets_total
     )
-    reader_warning_count, reader_warning_sample = _spef_reader_warnings(stdout, stderr)
+    reader_warnings = _spef_reader_warnings(stdout, stderr)
     delay_changed = _parse_delay_changed(stdout)
     unannotated_drivers, partial_drivers = _parse_parasitic_annotation(stdout)
     unannotated_pins, partial_pins = _parse_parasitic_driver_pins(stdout)
@@ -1785,11 +1804,16 @@ def _spef_annotation_block(
         )
         reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
-    if reader_warning_count:
+    if reader_warnings:
+        discarded = {
+            m[1] for line in reader_warnings if (m := _SPEF_MISSING_NET_RE.search(line))
+        }
         reasons.append(
-            f"read_spef discarded annotation for {reader_warning_count} "
-            "SPEF record(s) it could not resolve against the linked design "
-            "(OpenSTA STA-1650/STA-1648 'not found' warnings)"
+            f"read_spef discarded annotation for {len(reader_warnings)} "
+            f"SPEF record(s). STA-1650 identified {len(discarded)} distinct "
+            "unresolved net name(s). "
+            "design_nets_annotated counts name matches before read_spef and does "
+            "not establish that the reader accepted their parasitics"
         )
     if delay_changed is False:
         reasons.append(
@@ -1822,8 +1846,8 @@ def _spef_annotation_block(
         "design_nets_annotated": design_nets_annotated,
         "design_nets_total": design_nets_total,
         "design_nets_missing_sample": design_nets_missing_sample,
-        "reader_warning_count": reader_warning_count,
-        "reader_warning_sample": reader_warning_sample,
+        "reader_warning_count": len(reader_warnings),
+        "reader_warning_sample": reader_warnings[:_SPEF_READER_WARNING_SAMPLE_LIMIT],
         "unannotated_driver_count": unannotated_drivers,
         "partially_unannotated_driver_count": partial_drivers,
         "floating_driver_count": (
@@ -1969,6 +1993,10 @@ def _validate_constraints(
         clock_port = constraints.get("clock_port")
         clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
+        if constraints.get("generated_clocks"):
+            raise PostRouteStaError(
+                "constraints.generated_clocks[0] requires a declared source clock"
+            )
         raise PostRouteStaError("request.constraints.clock_port is required")
     if isinstance(clock_period_ns, dict):
         clock_period_ns = validate_period(  # values reach create_clock -period
@@ -2044,23 +2072,22 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
 
 
 def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
-    """The multi-clock additions beyond the primary clock (issue #4241):
-    ``{"clocks": [{port, period_ns}, ...secondary], "groups": [[port, ...]]}``,
-    or ``None`` when the request is the plain single-clock shorthand with no
-    ``clock_groups`` -- which keeps the generated Tcl byte-identical to the
-    pre-#4241 output. ``constraints.clock_groups`` names declared clocks only
-    and is emitted as ``set_clock_groups -asynchronous``."""
+    """Return None for one base clock to preserve its original Tcl and JSON (#4241)."""
     clocks = _validate_clocks_list(constraints)
+    declared = (
+        {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
+    )
+    generated = _generated.validate(constraints, declared)
     groups_raw = constraints.get("clock_groups")
-    groups: list[list[str]] = []
-    if groups_raw is not None:
-        declared = (
-            {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
-        )
-        groups = _validate_clock_groups(groups_raw, declared)
-    if len(clocks) <= 1 and not groups:
+    groups = (
+        _validate_clock_groups(groups_raw, declared) if groups_raw is not None else []
+    )
+    if len(clocks) <= 1 and not groups and not generated:
         return None
-    return {"clocks": clocks[1:], "groups": groups}
+    extras = {"clocks": clocks[1:], "groups": groups}
+    if generated:
+        extras["generated_clocks"] = generated
+    return extras
 
 
 def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str]]:
@@ -2313,114 +2340,17 @@ def _validate_transition_value(value: Any, field: str) -> float | None:
 
 
 def _validate_port_delay_maps(
-    constraints: dict[str, Any], clock_port: str
-) -> tuple[dict[str, dict[str, float]] | None, dict[str, dict[str, float]] | None]:
+    constraints: dict[str, Any],
+    clock_port: str,
+    declared_clocks: set[str] | None = None,
+) -> tuple[IoDelayMap | None, IoDelayMap | None]:
     """``constraints.input_delays``/``.output_delays`` (issue #2740):
-    optional per-port, per-bound I/O delay maps. Returns ``(input_delays,
-    output_delays)``, each ``None`` when the field is omitted *or* empty
-    (an empty map constrains nothing, so it reproduces the scalar-only
-    generated Tcl byte-for-byte).
-
-    Each map is ``{"<literal port name>": {"min_ns": n, "max_ns": n}}``
-    with both bounds independently optional but at least one required. A
-    supplied bound is never copied to the other side: an entry with only
-    ``min_ns`` constrains only the min (hold-side) arrival of that port, and
-    its max side stays unconstrained -- the scalar default does **not**
-    fill it in, because an explicit entry replaces the scalar default for
-    that port entirely.
-
-    Unlike the legacy scalars (non-negative), per-port bounds may be
-    negative (a boundary reference point can legitimately sit after the
-    launching edge); they must still be finite, non-boolean numbers, and
-    ``min_ns <= max_ns`` when both are given.
-
-    Keys are literal port (or single bus-bit) names -- never Tcl, never a
-    wildcard pattern. Existence and direction can only be checked against
-    the loaded design, so they are verified inside the engine session
-    (:func:`_port_check_lines`); the clock port is rejected here, since
-    ``constraints.clock_port`` already names it.
-    """
-    return (
-        _validate_port_delay_map(constraints, "input", clock_port),
-        _validate_port_delay_map(constraints, "output", clock_port),
-    )
-
-
-def _validate_port_delay_map(
-    constraints: dict[str, Any], which: str, clock_port: str
-) -> dict[str, dict[str, float]] | None:
-    """Validate one of ``constraints.{input,output}_delays`` (see
-    :func:`_validate_port_delay_maps`)."""
-    field = f"request.constraints.{which}_delays"
-    value = constraints.get(f"{which}_delays")
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise PostRouteStaError(
-            f"{field} must be a JSON object mapping port names to "
-            '{"min_ns": ..., "max_ns": ...} entries'
-        )
-    parsed: dict[str, dict[str, float]] = {}
-    for port, entry in value.items():
-        _check_port_delay_key(field, which, port, clock_port)
-        parsed[port] = _parse_port_delay_entry(field, port, entry)
-    return parsed or None
-
-
-def _check_port_delay_key(field: str, which: str, port: str, clock_port: str) -> None:
-    """Reject a malformed port-name key of an I/O delay map."""
-    if not port or port != port.strip():
-        raise PostRouteStaError(
-            f"{field} keys must be non-empty port names without "
-            f"leading/trailing whitespace (got {port!r})"
-        )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-        raise PostRouteStaError(f"{field} key {port!r} contains a control character")
-    if which == "input" and port == clock_port:
-        raise PostRouteStaError(
-            f"{field} must not name the clock port {port!r} -- "
-            "clock inputs are excluded from input delays"
-        )
-
-
-def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, float]:
-    """Validate one ``{"min_ns": n, "max_ns": n}`` entry of an I/O delay map."""
-    if not isinstance(entry, dict):
-        raise PostRouteStaError(
-            f"{field}[{port!r}] must be a JSON object with 'min_ns' and/or 'max_ns'"
-        )
-    unknown = sorted(set(entry) - {"min_ns", "max_ns"})
-    if unknown:
-        raise PostRouteStaError(
-            f"{field}[{port!r}] has unknown key(s) "
-            + ", ".join(repr(k) for k in unknown)
-            + " -- only 'min_ns' and 'max_ns' are accepted"
-        )
-    if not entry:
-        raise PostRouteStaError(
-            f"{field}[{port!r}] is empty -- give 'min_ns', 'max_ns', or both"
-        )
-    bounds: dict[str, float] = {}
-    for bound in ("min_ns", "max_ns"):
-        if bound not in entry:
-            continue
-        bound_value = entry[bound]
-        if not is_finite_number(bound_value):
-            raise PostRouteStaError(
-                f"{field}[{port!r}].{bound} must be a finite number "
-                f"(got {bound_value!r})"
-            )
-        bounds[bound] = float(bound_value)
-    if (
-        "min_ns" in bounds
-        and "max_ns" in bounds
-        and bounds["min_ns"] > bounds["max_ns"]
-    ):
-        raise PostRouteStaError(
-            f"{field}[{port!r}].min_ns ({bounds['min_ns']}) must not "
-            f"exceed max_ns ({bounds['max_ns']})"
-        )
-    return bounds
+    optional per-port, per-bound I/O delay maps -- validated by
+    :mod:`._sta_io_delay_clock`, which owns the entry rules (bounds, key
+    form, and issue #7399's optional per-entry ``clock`` naming a declared
+    clock; the primary clock when omitted, so a ``clock``-free request
+    parses identically)."""
+    return _validate_delay_maps(constraints, clock_port, declared_clocks)
 
 
 def _validate_report_ports(
@@ -2843,24 +2773,12 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
 
 
 def _propagated_clock_lines(clock_port: str) -> list[str]:
-    """``set_propagated_clock`` (issue #2739) on exactly the clock object
-    :func:`_clock_lines` created -- ``[get_clocks <clock_port>]``, not
-    ``[all_clocks]``: this session has exactly one clock (the one this
-    command itself defines), and naming it keeps the command honest if a
-    future session shape ever loads more than one. Emitted immediately
-    after ``create_clock`` and before any I/O delay / SPEF / metric
-    collection, so every report the session produces is the propagated
-    analysis. The clock-port spelling matches :func:`_clock_lines`'s own
-    (`_tcl_literal`-quoted -- the same string ``create_clock -name`` sees,
-    issue #5708)."""
+    """Quote the clock name so Tcl preserves literal bus brackets and spaces (#5708)."""
     return [f"set_propagated_clock [get_clocks {_tcl_literal(clock_port)}]"]
 
 
 def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
-    """Issue #4241: one ``create_clock`` per secondary clock, then any
-    ``set_clock_groups -asynchronous``. Empty for a single-clock request.
-
-    Clock groups are braced Tcl words (no substitution)."""
+    """Declare secondary clocks and asynchronous groups before derived clocks."""
     if not clock_extras:
         return []
     lines = [
@@ -2874,7 +2792,12 @@ def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
             "set_clock_groups -asynchronous "
             + " ".join(f"-group [get_clocks {{{' '.join(g)}}}]" for g in groups)
         )
-    return lines
+    return lines + _generated.constraint_lines(
+        clock_extras.get("generated_clocks", []),
+        _PORT_CHECK_BEGIN,
+        _PORT_CHECK_END,
+        _PORT_CHECK_EXIT_CODE,
+    )
 
 
 def _clock_latency_lines() -> list[str]:
@@ -2936,8 +2859,8 @@ def _request_io_delay_lines(
     clock_port: str,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
@@ -3001,8 +2924,8 @@ def _false_path_lines(false_path_from: list[str] | None) -> list[str]:
 
 
 def _port_check_lines(
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
@@ -3091,8 +3014,8 @@ def _port_io_delay_lines(
     clock_port: str,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
 ) -> list[str]:
     """Per-port ``set_input_delay``/``set_output_delay`` (issue #2740).
 
@@ -3108,6 +3031,10 @@ def _port_io_delay_lines(
     bits keep it. Mapped ports are fetched from ``$klt_ports_by_name``
     (built by :func:`_port_check_lines`, always emitted first) -- never
     re-looked-up by name through ``get_ports``.
+
+    Issue #7399: an entry naming a declared ``clock`` is emitted
+    ``-clock`` that clock instead of the primary (the scalar default and
+    every clock-less entry keep the primary).
     """
     lines: list[str] = []
     sides = (
@@ -3142,11 +3069,14 @@ def _port_io_delay_lines(
                 "}",
             ]
         for port, bounds in mapping.items():
+            # Issue #7399: an entry that names a declared `clock` is emitted
+            # relative to that clock (e.g. a strobe), not the primary.
+            port_clock = _entry_clock(bounds, clock_port)
             for bound, flag in (("min_ns", "-min"), ("max_ns", "-max")):
                 if bound in bounds:
                     lines.append(
                         f"{command} {flag} {bounds[bound]!r} "
-                        f"-clock {_tcl_literal(clock_port)} "
+                        f"-clock {_tcl_literal(port_clock)} "
                         f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
     return lines
@@ -3372,7 +3302,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     ``net_names`` uses the unescaped design spelling returned by
     :func:`_spef_net_names` and OpenSTA's ``get_full_name`` (issue #1422).
     The SPEF side counts every listed name found in the design. The design
-    side skips only proven driver-only nets and samples missing names (#6970)."""
+    side skips empty or driver-only internal nets and samples missing names."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -3590,8 +3520,8 @@ def _sta_script_lines(
     output_delay_ns: float | None = None,
     macro_lefs: list[str] | None = None,
     macro_liberty_paths: list[str] | None = None,
-    input_delays: dict[str, dict[str, float]] | None = None,
-    output_delays: dict[str, dict[str, float]] | None = None,
+    input_delays: IoDelayMap | None = None,
+    output_delays: IoDelayMap | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
@@ -3669,8 +3599,10 @@ def _sta_script_lines(
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
         if clock_extras:
-            for extra in clock_extras["clocks"]:
-                lines += _propagated_clock_lines(extra["port"])
+            for name in [e["port"] for e in clock_extras["clocks"]] + [
+                g["name"] for g in clock_extras.get("generated_clocks", [])
+            ]:
+                lines += _propagated_clock_lines(name)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _derate.timing_derate_lines(timing_derate)
     lines += _request_io_delay_lines(
@@ -3718,6 +3650,7 @@ def _sta_script_lines(
     # Before the completeness query, which must stay the script's last
     # statements (issue #2780): it can take the session down.
     lines += _electrical_check_lines()
+    lines += _generated.evidence_lines(clock_extras)
     lines += _constraint_completeness_lines()
     return lines
 
@@ -3737,8 +3670,8 @@ def _sta_netlist_script_lines(
     output_delay_ns: float | None = None,
     macro_lefs: list[str] | None = None,
     macro_liberty_paths: list[str] | None = None,
-    input_delays: dict[str, dict[str, float]] | None = None,
-    output_delays: dict[str, dict[str, float]] | None = None,
+    input_delays: IoDelayMap | None = None,
+    output_delays: IoDelayMap | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
@@ -3832,6 +3765,7 @@ def _sta_netlist_script_lines(
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
+    lines += _generated.evidence_lines(clock_extras)
     lines += _constraint_completeness_lines()
     return lines
 
@@ -3991,43 +3925,22 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
     return data
 
 
-def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:
-    """``(count, capped_sample)`` of the diagnostics OpenSTA's *SPEF reader*
-    emitted while parsing the caller-supplied SPEF -- the conclusive signal
-    that ``read_spef`` parsed a record and then discarded it (issue #1624).
+def _spef_reader_warnings(stdout: str, stderr: str) -> list[str]:
+    """All diagnostics from the bracketed read_spef call, before sample capping.
 
-    Two matching strategies, because OpenROAD builds disagree about which
-    stream the logger writes to:
-
-    * **stdout** is bracketed by :data:`_SPEF_READ_BEGIN`/
-      :data:`_SPEF_READ_END` around the ``read_spef`` call itself, and the
-      SPEF reader is the only thing running inside that region -- so *any*
-      ``[WARNING STA-...]`` there is a reader warning, including codes this
-      module has never seen. (When the markers are absent -- an older
-      script, a truncated run -- it falls back to the narrow code match.)
-    * **stderr** cannot be interleaved with the Tcl ``puts`` markers, so it
-      is matched narrowly against :data:`_SPEF_READER_WARNING_RE`
-      (``STA-1650``/``STA-1648``) -- a liberty or clock warning on stderr
-      must not be mistaken for a SPEF-annotation failure.
+    When the stdout markers are missing, accept only known reader codes.
+    Stderr has no markers, so it always needs the narrower filter.
     """
-    matched: list[str] = []
     region = _extract_block(stdout, _SPEF_READ_BEGIN, _SPEF_READ_END)
-    if region is not None:
-        matched += [
-            line.strip() for line in region.splitlines() if _STA_WARNING_RE.search(line)
-        ]
-    else:
-        matched += [
-            line.strip()
-            for line in stdout.splitlines()
-            if _SPEF_READER_WARNING_RE.search(line)
-        ]
-    matched += [
+    stdout_pattern = _STA_WARNING_RE if region is not None else _SPEF_READER_WARNING_RE
+    output = region if region is not None else stdout
+    return [
+        line.strip() for line in output.splitlines() if stdout_pattern.search(line)
+    ] + [
         line.strip()
         for line in stderr.splitlines()
         if _SPEF_READER_WARNING_RE.search(line)
     ]
-    return len(matched), matched[:_SPEF_READER_WARNING_SAMPLE_LIMIT]
 
 
 def _parse_delay_changed(stdout: str) -> bool | None:
