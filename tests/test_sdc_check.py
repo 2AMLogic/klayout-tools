@@ -242,3 +242,46 @@ def test_unchecked_input_keeps_wildcard_comparison_with_port_override(tmp_path):
         (m["subject"], m["bound"], m["sdc_value"], m["request_value"])
         for m in result["mismatches"]
     ] == [("a", "min", 0.5, 0.4)]
+
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+@pytest.mark.parametrize(
+    "entry_clock,explicit,expected",
+    [
+        ("dqs", None, [("min", None), ("max", None)]),
+        ("dqs", "min_only", [("max", None)]),
+        ("dqs", "correct", []),
+        ("dqs", "wrong", [("min", -0.1), ("max", 0.1)]),
+        (None, None, [("min", 0.2), ("max", 0.2)]),
+    ],
+)
+def test_per_port_delay_coverage_is_specific_to_port_bound_and_clock(
+    tmp_path, direction, entry_clock, explicit, expected
+):
+    command = f"set_{direction}_delay"
+    sdc = (
+        "create_clock -period 2 [get_ports clk]\n"
+        "create_clock -period 2 [get_ports dqs]\n"
+        f"{command} 0.2 -clock clk [all_{direction}s]\n"
+    )
+    entry = {"min_ns": -0.1, "max_ns": 0.1}
+    if entry_clock:
+        entry["clock"] = entry_clock
+    if explicit:
+        reference = "clk" if explicit == "wrong" else "dqs"
+        sdc += f"{command} -min -0.1 -clock {reference} [get_ports d0]\n"
+        if explicit != "min_only":
+            sdc += f"{command} -max 0.1 -clock {reference} [get_ports d0]\n"
+    out = _block(
+        tmp_path,
+        sdc,
+        clocks=[*CLOCKS, {"port": "dqs", "period_ns": 2.0}],
+        **{f"{direction}_delay_ns": 0.2, f"{direction}_delays": {"d0": entry}},
+    )
+    assert out["status"] == ("drift" if expected else "match")
+    assert [(m["bound"], m["sdc_value"]) for m in out["mismatches"]] == expected
+    for m in out["mismatches"]:
+        assert (m["command"], m["subject"]) == (command, "d0")
+        assert m["request_value"] == entry[f"{m['bound']}_ns"]
+        if explicit == "wrong":
+            assert (m["sdc_clock"], m["request_clock"]) == ("clk", "dqs")

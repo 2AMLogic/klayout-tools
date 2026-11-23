@@ -154,9 +154,10 @@ def refuse_unsupported(
 
 
 def extraction_fields(extract_report: Mapping[str, Any]) -> dict[str, Any]:
-    """The additive ``extraction`` fields stating what a runset-engine leg is
-    and is not -- ``{}`` for any other engine, which keeps that envelope
-    byte-identical.
+    """Forward a curated hierarchy census or report the runset leg's fields.
+
+    Curated FinFET extraction reports direct and instantiated counts separately.
+    A runset leg carries the following fields:
 
     - ``engine`` -- ``"klayout-runset"``.
     - ``parasitics_carried`` -- ``false`` for a plain runset leg (no R/C
@@ -191,7 +192,14 @@ def extraction_fields(extract_report: Mapping[str, Any]) -> dict[str, Any]:
       disagreement between the two engines is reported, not compared.
     """
     if extract_report.get("engine") != RUNSET_ENGINE:
-        return {}
+        census_keys = (
+            "device_count_scope",
+            "instantiated_device_counts",
+            "instantiated_device_count",
+        )
+        return {
+            key: extract_report[key] for key in census_keys if key in extract_report
+        }
     uncarried = extract_report.get("params_not_carried") or {}
     counts = extract_report.get("instantiated_device_counts")
     if counts is None:  # an extract report predating the hierarchy-aware count

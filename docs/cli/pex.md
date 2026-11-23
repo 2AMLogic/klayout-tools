@@ -2102,6 +2102,12 @@ full `repo`/`external`/`absent` scope meanings.
 | `warnings`           | array\<string\>   | Issue #5203 (additive; **present only when non-empty**, so non-asap7 reports are unchanged). `--deck asap7` adds one run-level entry stating the measured coupled-wiring fidelity gap: covered range (ASAP7 M2/M4, pitch 1x-4x LEF, same-level parallel neighbours, 0.36 um run, 10 kohm driver, 1 ps edge), delay error -87.8% to -97.8%, energy error -92.6% to -99.0%, "lower bound", and a pointer to `docs/design/asap7-parallel-line-fidelity.md`. It is a statement about the deck, not a per-net classification; it never changes `status` or the exit code. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
+For a hierarchical curated FinFET extraction, `extraction.device_count_scope`
+is `"selected_circuit"`: `device_count` counts devices directly in that circuit.
+`instantiated_device_counts` gives the count by device class across the selected
+hierarchy, including repeated placements, and `instantiated_device_count` gives
+their total. Flat curated extractions and non-FinFET decks omit these census fields.
+
 ### `delta[]` entries
 
 | Field             | Type            | Description                                                                          |

@@ -21,6 +21,12 @@ from klayout_tools.place_and_route import (
     check_place_and_route_report,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_asap7 import (
+    RVT_LIBRARIES,
+    RVT_LIBRARY_DEFAULTS,
+)
+from klayout_tools.place_and_route_request import _validate_library
+from klayout_tools.place_and_route_request_checks import _validate_request_level
 from test_place_and_route import (
     _base_request,
     _isolate_pdk,
@@ -253,6 +259,75 @@ def test_unknown_corner_rejected_before_any_unit_runs(tmp_path, monkeypatch):
     with pytest.raises(PlaceAndRouteError):
         run_place_and_route(request_path)
     assert not (tmp_path / ".klt" / "place-and-route" / CORNERS[0]).exists()
+
+
+@pytest.mark.parametrize(
+    "defect, message",
+    [
+        ({"target_stage": "nope"}, "request.target_stage"),
+        ({"output_dbu_um": 0}, "request.output_dbu_um"),
+        ({"post_route_sdf": True}, "post_route_sdf requires"),
+    ],
+)
+def test_request_level_defect_raises_once_before_any_unit_runs(
+    tmp_path, monkeypatch, defect, message
+):
+    # Issue #7538: a corner-independent request defect is one request error,
+    # not one `corner_runs[].error` entry per corner.
+    request_path = _setup(tmp_path, monkeypatch)
+    request = json.loads(Path(request_path).read_text())
+    request.update(defect)
+    _write_request(Path(request_path), request)
+    with pytest.raises(PlaceAndRouteError, match=message):
+        run_place_and_route(request_path)
+    for corner in CORNERS:
+        assert not (tmp_path / ".klt" / "place-and-route" / corner).exists()
+
+
+@pytest.mark.parametrize("cell_library", RVT_LIBRARIES)
+def test_request_level_checks_apply_verified_rvt_library_defaults(
+    tmp_path, cell_library
+):
+    # The extracted module must pass `cell_library` to `_validate_library`
+    # (#6932); the parameter defaults to "", so a stale call site would not
+    # raise, it would silently drop the powered-route defaults.
+    _write(tmp_path / "gcd_synth.v", "// fake mapped netlist\n")
+    request = _base_request(
+        pdk={"cell_library": cell_library}, constraints=None, io=None
+    )
+    checks = _validate_request_level(request, str(tmp_path))
+    assert checks.library == _validate_library(None, cell_library)
+    assert checks.library["cts_buffer"] == RVT_LIBRARY_DEFAULTS["cts_buffer"]
+
+
+def test_request_level_defect_message_matches_single_corner_path(tmp_path, monkeypatch):
+    multi_dir = tmp_path / "rebuild"
+    multi_dir.mkdir()
+    request_path = _setup(multi_dir, monkeypatch)
+    request = json.loads(Path(request_path).read_text())
+    request["target_stage"] = "nope"
+    _write_request(Path(request_path), request)
+    with pytest.raises(PlaceAndRouteError) as multi_exc:
+        run_place_and_route(request_path)
+
+    single_dir = tmp_path / "single"
+    single_dir.mkdir()
+    _isolate_pdk(monkeypatch, single_dir)
+    install_root = single_dir / "install"
+    _make_pdk_install(install_root, "sky130A", corner=CORNERS[0])
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(single_dir / "gcd_synth.v", "// fake mapped netlist\n")
+    single_request = _base_request(
+        pdk={"cell_library": "sky130_fd_sc_hd", "corner": CORNERS[0]},
+        constraints=None,
+        io=None,
+    )
+    single_request["target_stage"] = "nope"
+    single_path = _write_request(single_dir / "request.json", single_request)
+    with pytest.raises(PlaceAndRouteError) as single_exc:
+        run_place_and_route(single_path)
+
+    assert str(multi_exc.value) == str(single_exc.value)
 
 
 def test_request_without_the_field_keeps_the_single_run_report(tmp_path, monkeypatch):
