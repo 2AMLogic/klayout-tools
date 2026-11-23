@@ -331,7 +331,8 @@ bump. Reports without the field still verify, and `--check` treats
 
 An ordinary macro requires `lef`. The synthesis-only `verilog_blackbox`
 shortcut (issue #5612) does not supply STA with a physical abstract.
-STA separately accepts an explicit `blackbox: true` declaration for a named cell.
+In Verilog mode, STA accepts a `macros[]` entry containing only `cell` to
+declare an untimed black box. DEF mode requires a LEF abstract.
 
 Issue #2635 adds an optional `macros` array — the same shared shape `klt
 synthesize` and `klt place-and-route` accept, documented once in
