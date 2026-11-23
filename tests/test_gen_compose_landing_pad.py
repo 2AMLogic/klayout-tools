@@ -119,6 +119,7 @@ def test_override_below_the_deck_floor_names_the_binding_rule(pdk_root):
     message = str(excinfo.value)
     assert "routing.landing_pad_size_um" in message
     assert rule_id in message
+    assert "resolved PDK deck" in message
     assert f">= {floor:.4g}um" in message
 
 

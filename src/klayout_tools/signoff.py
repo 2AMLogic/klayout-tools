@@ -54,7 +54,7 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
-from ._git_tracked import is_untracked_yield_sample
+from ._git_tracked import is_untracked_working_tree_file
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -186,6 +186,7 @@ from .signoff_envelopes import _YieldRequired as _YieldRequired
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
+    common_input_hash,
     content_hash_pin_state,
     declared_hash_unbound_disclosure,
     generic_binding_check,
@@ -3609,11 +3610,9 @@ def _check_input_hashes(
     comparison exactly as before instead of dropping into a bucket of its
     own and quietly weakening the gate.
 
-    The emitted ``field`` stays ``"input.content_hash"`` for every role (the
-    value ``docs/cli/signoff.md`` documents and consumers match on); the
-    disagreeing role is carried in the additive ``role`` key beside it, so a
-    bundle that disagrees on two roles at once produces two distinguishable
-    entries.
+    A merged sim report compares on its common shard digest. Mixed or
+    missing shard hashes produce a mismatch even within one report.
+    The mismatch preserves the original values and their artifact role.
     """
     by_role: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
@@ -3634,8 +3633,8 @@ def _check_input_hashes(
         )
 
     for role, entries in sorted(by_role.items()):
-        distinct = {entry["value"] for entry in entries}
-        if len(distinct) > 1:
+        distinct = {common_input_hash(entry["value"]) for entry in entries}
+        if None in distinct or len(distinct) > 1:
             mismatches.append({"field": _INPUT_HASH, "role": role, "values": entries})
 
 
@@ -4823,7 +4822,7 @@ def _yield_samples_content_hash(
     disclosure with the manifest path and a named ``reason`` (issue #5963).
 
     Drop untracked candidates before hashing and from ``searched`` so both
-    disclosures use the same git-index basis (issue #6139). A future
+    disclosures use the one git-index basis (#6139, #7195). A future
     ``provenance.input.content_hash`` takes precedence in :func:`_grade_evidence`.
     """
     samples = envelope.get("samples")
@@ -4837,7 +4836,7 @@ def _yield_samples_content_hash(
     cwd_relative = _resolve_relative_to_spec(samples, spec)
     if cwd_relative not in candidates:
         candidates.append(cwd_relative)
-    candidates = [c for c in candidates if not is_untracked_yield_sample(c)]
+    candidates = [c for c in candidates if not is_untracked_working_tree_file(c)]
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
@@ -6074,7 +6073,7 @@ def _resolve_evidence(
 
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
-    actual_hash = input_block.get("content_hash")
+    actual_hash = common_input_hash(input_block.get("content_hash"))
     content_hash_unresolved: dict[str, Any] | None = None
     yield_samples_source: str | None = None
     samples_basis: str | None = None
