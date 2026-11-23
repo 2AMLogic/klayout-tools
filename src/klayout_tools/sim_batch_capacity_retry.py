@@ -95,11 +95,11 @@ def _run_pass(
             for index, future in futures.items():
                 outcomes[index] = _outcome(future)
         except (KeyboardInterrupt, BatchClientInterrupted):
-            # Keep what already finished; the caller records the interrupt.
+            # An interrupted pass contributes nothing: ``outcomes`` is dropped
+            # with this frame and the caller skips the splice, so the shards
+            # this pass was retrying keep their ``lost_shard`` entries and stay
+            # resumable. The caller records the interrupt.
             fleet.abort.set()
-            for index, future in futures.items():
-                if index not in outcomes and future.done():
-                    outcomes[index] = _outcome(future)
             raise
     return outcomes
 
