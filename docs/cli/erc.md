@@ -12,7 +12,7 @@ the antenna + ERC signoff epic
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
                       [--findings-only] [--omit-antenna-tables]
-                      [--format text|json]
+                      [--format text|json] [-o PATH]
 klt erc --check <report> [--rerun] [--format text|json]
 klt erc --validate-spec <spec> [--format text|json]
 klt erc --pnr-response <run.json> [--format json]
@@ -71,6 +71,10 @@ klt erc --pnr-response <run.json> [--format json]
   running a fresh check. Mutually exclusive with `<file>`/`<spec>`. See
   "`--check` / `--rerun`" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `-o PATH` / `--output PATH` also saves the full JSON report on a fresh layout
+  run, including a completed `violations` or `not_checked` verdict. A `.gz`
+  suffix selects deterministic gzip compression. The tool replaces the
+  report file after the complete write succeeds. Stdout follows `--format`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
@@ -84,7 +88,8 @@ then run ERC on the GDS from that route.
 ```sh
 klt erc --pnr-response run.json --format json > supply.json
 klt erc --validate-spec supply.json --format json
-klt erc routed.gds supply.json --findings-only --format json > erc.json
+klt erc routed.gds supply.json --findings-only -o erc.json
+klt erc --check erc.json --format json
 ```
 
 Generation writes the spec itself. It uses the Sky130 extraction deck's
