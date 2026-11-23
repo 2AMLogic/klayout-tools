@@ -828,8 +828,10 @@ matched.
 ## Multicycle timing on the mapped netlist
 
 When `constraints.multicycle_paths` contains entries, synthesis runs standalone
-`klt sta` in Verilog mode on its final mapped netlist, using the same cell library,
-corner and declared hard macros. Selectors name **mapped** instances or pins.
+`klt sta` in Verilog mode on `netlist_path` (`<top>_synth.v`), using the same
+cell library, corner and declared hard macros. Both `sta` and `constrained_timing`
+measure this mapped netlist even when timing restructuring writes a separate
+`<top>_synth_restructured.v`. Selectors name **mapped** instances or pins.
 Check the emitted Verilog for their names after Yosys mapping. Entry syntax and
 selector rules are shared with [standalone STA](sta.md#multicycle-paths-constraintsmulticycle_paths-issue-6921).
 
