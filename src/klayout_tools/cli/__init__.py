@@ -8,6 +8,7 @@ is the API.
 
 import sys
 
+from .. import _warn
 from ..build_identity import build_version
 from .parser import create_parser
 
@@ -29,7 +30,21 @@ def main(argv: list[str] | None = None) -> int:
     if post_parse is not None:
         post_parse(args)
 
-    return args.func(args)
+    # Issue #6935: under --format json, stderr is reserved for the error
+    # envelope, so klt's own human-readable warnings are deferred for the
+    # invocation and dropped/resumed at the shared output boundary
+    # (`cli.output.emit_error`/`emit_success`) once the outcome is known.
+    # Text invocations (and verbs without --format) never arm the deferral:
+    # their warnings print as they happen, byte-identical to before.
+    if getattr(args, "format", None) != "json":
+        return args.func(args)
+    _warn.arm()
+    try:
+        return args.func(args)
+    finally:
+        # A command that emitted through neither boundary still shows its
+        # warnings -- no envelope was written for them to pollute.
+        _warn.flush()
 
 
 if __name__ == "__main__":

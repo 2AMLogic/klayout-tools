@@ -15,6 +15,7 @@ from test_sim_batch import (
     _CLIENT_VERSION,
     _batch_request,
     _envelope,
+    _errored_report_without_include_code,
     _FakeRunner,
     _identity,
     _install_fake_batch_transport,
@@ -158,3 +159,32 @@ def test_pop_remote_diagnostics_lifts_one_entry_per_kind_from_a_fleet():
     assert pop_remote_diagnostics(remote) == [{"code": "feature"}, diag]
     assert all("runner_version_diagnostic" not in m for m in remote["fleet"] if m)
     assert pop_remote_diagnostics(None) == []
+
+
+def test_exit_4_batch_job_fatal_message_carries_card_and_cause(tmp_path, monkeypatch):
+    """Issue #7032: the back-filled `ngspice_fatal` diagnostic carries the
+    echoed card and the cause line under the `Error on line N` header, so a
+    remote unit's failure reason is readable from the report without a local
+    rerun."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\n"
+            "Error on line 1204 or its substitute:\n"
+            "  m.x1 d g s b nfet w=1u l=0.15u\n"
+            "  could not find a valid modelname\n"
+            "Simulation interrupted due to error!\n"
+        ),
+    }
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "ngspice_fatal"]
+    message = diagnostics[1]["message"]
+    assert message.startswith("Error on line 1204")
+    assert "m.x1 d g s b nfet w=1u l=0.15u" in message
+    assert "could not find a valid modelname" in message
+    assert diagnostics[1]["analysis_started"] is False

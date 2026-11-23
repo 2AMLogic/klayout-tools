@@ -83,6 +83,7 @@ from .netlist_inputs import (
     inputs_record_line,
     split_inputs_record,
 )
+from .netlist_instances import instances_payload
 from .netlist_paths import _PATH_COMMENT_RE, fold_continuations, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
@@ -288,9 +289,8 @@ def _launch_xschem(
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            # The child gets its own session (and therefore its own process
-            # group) so `_signal_group` has a group handle to kill -- see its
-            # docstring.
+            # The child gets its own session (and therefore its own process group) so
+            # `_signal_group` has a group handle to kill -- see its docstring.
             start_new_session=True,
         )
     except FileNotFoundError as exc:
@@ -968,8 +968,7 @@ def run_netlist(
             rcfile=rcfile,
         )
         # Captured *before* the launch, so the freshness test can never be
-        # satisfied by a file that already existed (see
-        # `_resolve_produced_netlist`).
+        # satisfied by a file that already existed (see `_resolve_produced_netlist`).
         started_at = time.time()
         # Netlist_pdk (size split); snapshot pre-dates the symbol-path merge.
         xschem_env, exported_pdk_env = _pdk_xschem_env(pdk_block, resolved_symbol_path)
@@ -1021,6 +1020,7 @@ def run_netlist(
                 "symbol_path": resolved_symbol_path,
             },
             "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
+            **instances_payload(fresh_data),
         }
 
         if pdk_block is not None:

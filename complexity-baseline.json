@@ -79,7 +79,7 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/cli/extract_cmd.py",
+      "file": "src/klayout_tools/cli/extract_text.py",
       "function": "_print_text",
       "complexity": 25
     },
@@ -159,8 +159,8 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/equiv_sequential.py",
-      "function": "_confirm_sequential_counterexample",
+      "file": "src/klayout_tools/equiv_replay.py",
+      "function": "run_counterexample_confirmation",
       "complexity": 11
     },
     {
@@ -202,6 +202,11 @@
       "file": "src/klayout_tools/extract.py",
       "function": "_extract_netlist",
       "complexity": 120
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "_resolve_mos_capacitors",
+      "complexity": 14
     },
     {
       "file": "src/klayout_tools/extract.py",
@@ -711,7 +716,7 @@
     {
       "file": "src/klayout_tools/power.py",
       "function": "_compute_em_verdict",
-      "complexity": 20
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/power.py",
@@ -780,7 +785,7 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "_run_local_parallel",
+      "function": "_run_local_corners_pooled",
       "complexity": 14
     },
     {

@@ -78,7 +78,7 @@ from typing import Any
 #: The shared local-only opt-out (issue #6144): `KLT_SKIP_NGSPICE_TESTS=1`
 #: skips real-ngspice tiers on hosts that have the binary, so the oracle's
 #: gating consults it instead of re-probing `$PATH` a second time.
-from helpers.tool_probes import NGSPICE_TESTS_SKIPPED
+from helpers.tool_probes import NGSPICE_TESTS_SKIPPED, read_ngspice_version
 from klayout_tools._provenance import sha256_file
 
 #: Both binaries are PATH-discovered, like `fastcap` in
@@ -114,19 +114,7 @@ def xyce_version() -> str | None:
 def ngspice_version() -> str | None:
     """ngspice's own reported version from its ``--version`` banner (e.g.
     ``"47"``), or ``None``. Never raises."""
-    if NGSPICE_BINARY is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [NGSPICE_BINARY, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - host-dependent
-        return None
-    match = re.search(r"ngspice-([\w.]+)", completed.stdout or "")
-    return match.group(1) if match else None
+    return read_ngspice_version(NGSPICE_BINARY)
 
 
 def oracle_skip_reason() -> str | None:

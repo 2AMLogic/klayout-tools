@@ -80,6 +80,7 @@ jobs:
 
       - name: Run the Xyce cross-validation oracle
         run: |
+          set -o pipefail
           uv run --frozen --extra dev pytest \
             tests/test_sim_xyce_oracle.py \
             -v -rs | tee pytest-xyce-oracle.log

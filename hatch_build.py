@@ -28,7 +28,7 @@ distribution:
     VERSION = "0.2.1.dev3+g<sha>"  # the distribution version chosen above
 
 ``DECK_HASHES`` (issue #2451) records the content hash of every built-in deck
-module (``src/klayout_tools/decks/*.py``, keyed by module stem) *as built*.
+and its declared rule sources, keyed by primary module stem, *as built*.
 :mod:`klayout_tools.decks.history` lets a release build vouch for its own
 decks only when a queried hash equals the hash recorded here -- never the
 current on-disk bytes, which a post-install edit could change while the
@@ -82,12 +82,13 @@ Design notes:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any
 
 try:  # pragma: no cover - hatchling is present only in the build environment
@@ -155,17 +156,16 @@ def deck_hashes(root: str) -> dict[str, str] | None:
         names = sorted(os.listdir(directory))
     except OSError:
         return None
+    # Load the dependency-free digest by path in the isolated Hatch environment.
+    source_file_hash = runpy.run_path(
+        str(Path(__file__).parent / "src/klayout_tools/_deck_hash.py")
+    )["source_file_hash"]
     hashes: dict[str, str] = {}
     for filename in names:
-        if not filename.endswith((".py", ".drc")):
-            continue
-        try:
-            with open(os.path.join(directory, filename), "rb") as handle:
-                digest = hashlib.sha256(handle.read()).hexdigest()
-        except OSError:
-            return None
-        key = filename[: -len(".py")] if filename.endswith(".py") else filename
-        hashes[key] = f"sha256:{digest}"
+        if filename.endswith((".py", ".drc")):
+            digest = source_file_hash(os.path.join(directory, filename))
+            if digest is not None:
+                hashes[filename.removesuffix(".py")] = digest
     return hashes or None
 
 

@@ -2,10 +2,7 @@
 power-only circuit pruning for ``reference.form: "gate-level-verilog"``
 (issues #1622, #2021, #2244).
 
-Split out of :mod:`klayout_tools.lvs` as a pure move. ``LvsError``/
-``CATEGORY_*``/``POWER_PINS_RULE_*`` constants stay defined in ``lvs`` and are
-imported *inside* the functions that need them, the same dependency direction
-as :mod:`klayout_tools.lvs_power`; ``lvs`` re-imports every name defined here.
+The gate-level checks use the shared finding categories from ``lvs_base``.
 """
 
 from __future__ import annotations
@@ -13,7 +10,11 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-from .extract import spice_safe_net_name
+from .extract_base import spice_safe_net_name
+from .lvs_base import (
+    CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED,
+    CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED,
+)
 from .lvs_combine import _purge_emptied_nets
 from .lvs_mismatch import _mismatch, _SupplyPinUniverse
 
@@ -591,8 +592,6 @@ def _apply_gate_level_port_aliases(
     case).
     """
 
-    from .lvs import CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED
-
     entries: list[dict[str, Any]] = []
     any_joined = False
     for module_name in sorted(port_aliases):
@@ -749,8 +748,6 @@ def _power_only_pruned_mismatch(
     side(s), so a ``"match"`` reached this way stays auditable without the
     entry count itself becoming a second signal.
     """
-
-    from .lvs import CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED
 
     total = len(removed_layout_names) + len(removed_reference_names)
     if removed_layout_names and removed_reference_names:

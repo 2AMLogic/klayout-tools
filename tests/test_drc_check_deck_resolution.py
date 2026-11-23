@@ -13,7 +13,7 @@ import klayout_tools.drc_report_check as rc
 from klayout_tools._provenance import content_hash
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_check_text
-from klayout_tools.decks import asap7_rules, deck_source_path
+from klayout_tools.decks import asap7_rules, deck_content_hash
 from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report
 
 DECK = str(asap7_rules.DECK_PATH)
@@ -140,22 +140,23 @@ def test_crosscheck_native_side_resolves_packaged_deck(tmp_path):
     assert _deck_check(result)["field"] == "reports.native.provenance.deck.content_hash"
 
 
-def _curated_report(tmp_path: Path) -> str:
-    """A curated report whose ``deck`` is a name resolved through
-    :func:`deck_source_path` -- the shape an ``--engine both`` envelope's
-    curated side carries."""
+def _curated_report(tmp_path: Path, *, engine: str | None = "curated") -> str:
+    """Write a curated report with a name-resolved deck.
+
+    Pass ``engine=None`` to omit the key as standalone curated runs do.
+    """
     layout = tmp_path / "top.gds"
     layout.write_bytes(b"gds-bytes")
-    deck_path = deck_source_path("sky130")
     doc = {
-        "engine": "curated",
         "file": str(layout),
         "deck": "sky130",
         "provenance": {
             "input": {"content_hash": content_hash(str(layout))},
-            "deck": {"content_hash": content_hash(deck_path)},
+            "deck": {"content_hash": deck_content_hash("sky130")},
         },
     }
+    if engine is not None:
+        doc["engine"] = engine
     path = tmp_path / "curated.json"
     path.write_text(json.dumps(doc))
     return str(path)
@@ -190,9 +191,23 @@ def test_crosscheck_override_applies_to_native_side_only(tmp_path):
     assert "deck_not_found" not in native_check
 
 
-def test_override_ignored_for_curated_report(tmp_path):
+def test_override_rejected_for_curated_report(tmp_path):
+    # Issue #6070: --check agrees with --rerun -- a curated single report has
+    # no deck override, so the flag is an error, never a silent no-op.
+    with pytest.raises(DrcError, match="--deck-file"):
+        check_drc_report(_curated_report(tmp_path), deck_path=DECK)
+
+
+def test_cli_rejects_deck_file_for_curated_report_without_engine(tmp_path, capsys):
+    report = _curated_report(tmp_path, engine=None)
+    code = main(["drc", "--check", report, "--deck-file", DECK, "--format", "json"])
+
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["command"] == "drc"
     assert (
-        check_drc_report(_curated_report(tmp_path), deck_path=DECK)["status"] == "match"
+        error["message"]
+        == "--deck-file cannot be combined with --check on a curated report"
     )
 
 
