@@ -16,8 +16,9 @@ Producers:
   and the row-rail fallback caveat (issue #1985), composed by
   :func:`_response_warnings`;
 - the antenna-repair skip caveat (:func:`_antenna_repair_warnings`);
-- the KLayout layer-map caveat (issue #4481,
-  :func:`_layer_map_warnings`);
+- the KLayout layer-map caveat (issue #4481) is composed by
+  :func:`klayout_tools.place_and_route_layer_map.layer_map_warnings`, not
+  here;
 - the Liberty-model caveat (issue #7411,
   :func:`liberty_model_response_warnings` and the stage-loop accumulators):
   when any stage's own Liberty read made OpenSTA **discard a timing model**
@@ -57,19 +58,6 @@ def _antenna_repair_warnings(
         "antenna repair did not run: request.library.antenna_diode is "
         "null (the library has no antenna diode), so repair_antennas "
         "was not called; the antenna check still ran"
-    ]
-
-
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
     ]
 
 

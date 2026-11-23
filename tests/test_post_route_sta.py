@@ -2124,16 +2124,11 @@ def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
-    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
-    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
-    design OpenSTA finds no hold path to measure in), the two new fields
-    degrade to ``null`` -- the same null-handling the existing setup-side
-    fields already have, never a ``KeyError``."""
+    """Older engines or unmeasurable paths can omit hold and frequency metrics."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     metrics_without_hold = {
         "timing__setup__ws": -0.15,
         "timing__setup__tns": -1.2,
-        "timing__fmax": 500_000_000.0,
         "power__total": 0.0084,
         "clock__skew__setup": 0.021,
     }
@@ -2142,6 +2137,7 @@ def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     report = run_sta(request_path)
 
     assert report["worst_slack_ns"] == -0.15
+    assert report["fmax_mhz"] is None
     assert report["worst_hold_slack_ns"] is None
     assert report["total_negative_hold_slack_ns"] is None
 
@@ -2857,6 +2853,8 @@ def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
     assert "corner: ss_100C_1v60" in out
     assert "worst_slack_ns: -0.15" in out
     assert "worst_slack_ns: -0.42" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "fmax_mhz: 300.0 (clock estimate excludes opposite-edge paths" in out
     assert "def_path:" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -2872,6 +2870,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "can overstate achievable frequency" in out
     assert "worst_hold_slack_ns: 0.03812" in out
     assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):

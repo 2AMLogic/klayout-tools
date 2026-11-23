@@ -164,7 +164,14 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
         f"{indent}total_negative_hold_slack_ns: "
         f"{fields['total_negative_hold_slack_ns']}"
     )
-    print(f"{indent}fmax_mhz: {fields['fmax_mhz']}")
+    fmax = fields["fmax_mhz"]
+    caveat = (
+        " (clock estimate excludes opposite-edge paths"
+        " and can overstate achievable frequency)"
+        if fmax is not None
+        else ""
+    )
+    print(f"{indent}fmax_mhz: {fmax}{caveat}")
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
     _print_constraint_completeness(fields.get("constraint_completeness"), indent=indent)

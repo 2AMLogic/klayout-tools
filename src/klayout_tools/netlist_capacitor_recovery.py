@@ -103,6 +103,8 @@ import re
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING
 
+from .extract_base import MOM_FEED_TOKENS
+from .extract_passive_regions import mom_capacitor_device_class
 from .netlist_class_registry import shared_device_class as _shared_device_class
 from .netlist_inductor_recovery import recover_inductor_x_card
 
@@ -409,8 +411,6 @@ def _recover_mom_x_card(
     against a freshly extracted side that measured them.
     """
 
-    from .extract import mom_capacitor_device_class
-
     class_name = custom_lookup.get(model.upper())
     if class_name is None:
         return False
@@ -446,7 +446,6 @@ def _recover_mom_x_card(
 def _mom_feed_code(value: object) -> int:
     """The ``MOM_FEED_*`` code for a card's ``FEED=`` value (issue #2445), or
     ``0`` ("unstated") for an absent/unrecognised one."""
-    from .extract import MOM_FEED_TOKENS
 
     token = str(value).strip().lower() if value is not None else ""
     for code, name in MOM_FEED_TOKENS.items():
