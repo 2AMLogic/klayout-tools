@@ -56,7 +56,8 @@ from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 #: ("from behind") family and the block-interior crossings come from
 #: ``gen_compose_routing._obstacle_rejection_reason``; the three
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
-#: route-vs-route gate ``route_bundle()`` itself runs.
+#: route-vs-route gate ``route_bundle()`` itself runs. The pad-contact marker
+#: covers a landing pad touching another net's block on the current plane.
 #:
 #: The self-net classes (``#433``'s pad footprint, ``#453``'s degenerate
 #: same-facing jog and drawn-metal overlap, ``#1527``'s own-block escape,
@@ -90,6 +91,7 @@ _CLIMBABLE_REASON_MARKERS = (
     "overlaps already-routed net",
     "shares a conductive edge with already-routed net",
     "shares a conductive corner with already-routed net",
+    "a pad touches a block hosting no pin of its net",
     "self-net backbone crosses",
     "self-net between two same-facing ports",
     "self-net's drawn",

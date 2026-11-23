@@ -192,10 +192,6 @@
       "lines": 1004
     },
     {
-      "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 512
-    },
-    {
       "path": "src/klayout_tools/components.py",
       "lines": 532
     },
@@ -457,7 +453,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1799
+      "lines": 1798
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -573,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10827
+      "lines": 10779
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -1037,7 +1033,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15827
+      "lines": 15823
     },
     {
       "path": "tests/test_sim_batch.py",

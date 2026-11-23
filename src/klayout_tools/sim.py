@@ -97,6 +97,7 @@ from . import (
     env_provenance,
     output_lock,
     sim_ac_waveform,
+    sim_batch_history,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -111,6 +112,7 @@ from . import (
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
+    sim_mismatch_scale,
     sim_noise,
     sim_noise_mechanism,
     sim_op_args,
@@ -159,14 +161,15 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
     resolve_tool_binary,
     validate_request_shape,
 )
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import sha256_file as sha256_file
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -179,6 +182,13 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
+from .ngspice_build import ENGINE_BANNER_MAX
+from .ngspice_build import (
+    engine_version as _extract_engine_version,
+)
+from .ngspice_build import (
+    probe_engine_build as _probe_engine_build,
+)
 from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -228,7 +238,14 @@ from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports wo
     _load_checkpoint,
     restore_checkpoint,
 )
-from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+from .sim_convergence_retry import (
+    DEFAULT_CONVERGENCE_RETRY as DEFAULT_CONVERGENCE_RETRY,
+)
+from .sim_convergence_retry import (
+    _validate_convergence_retry,
+    is_retryable_convergence_failure,
+    note_not_retried,
+)
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
 #: under its per-file size ratchet; re-exported here -- self-aliased where
@@ -327,6 +344,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
+from . import sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -575,12 +593,16 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
+        sim_spiceinit.MODEL_SELECTION_INIT_HINT,
         # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
         "expr_no_value",
         # Report-level (top-level `diagnostics[]`, issue #5385): process legs
         # with bit-identical results; a warning.
         "process_leg_check",
+        # Report-level (top-level `diagnostics[]`, issue #5486): a selected
+        # `*_mismatch` section whose family `mismatch_scale` did not reach.
+        "mismatch_scale_unreached_family",
         # Report-level (top-level `diagnostics[]`, issue #6720); a warning.
         "batch_convergence_all_failed",
     }
@@ -1903,68 +1925,6 @@ def _portable_substitutions(
             entry["models_lib_sha256"] = models_lib_sha256
         out.append(entry)
     return out
-
-
-#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
-#: retried unit runs with when the object form leaves a key out. ``gear``
-#: integration and a looser ``reltol`` are the standard first remedies for
-#: ngspice's "time step too small".
-DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
-    "max_attempts": 1,
-    "reltol": 0.003,
-    "method": "gear",
-}
-_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
-
-
-def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
-    """Validate and normalise ``options.retry_on_convergence_error`` (issue
-    #2973).
-
-    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
-    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
-    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
-    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
-    unknown key is an application error (``SimError``) rather than a silent
-    no-op, like :func:`_validate_fail_on_diagnostic`.
-    """
-    if value is None or value is False:
-        return None
-    if value is True:
-        return dict(DEFAULT_CONVERGENCE_RETRY)
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.retry_on_convergence_error must be a boolean or an object "
-            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
-        )
-    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
-    if unknown:
-        raise SimError(
-            "options.retry_on_convergence_error has unknown key(s): "
-            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
-        )
-    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
-    attempts = resolved["max_attempts"]
-    if not is_int(attempts) or attempts < 1:
-        raise SimError(
-            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
-        )
-    reltol = resolved["reltol"]
-    if (
-        isinstance(reltol, bool)
-        or not isinstance(reltol, (int, float))
-        or not 0 < reltol < 1
-    ):
-        raise SimError(
-            "options.retry_on_convergence_error.reltol must be a number "
-            "between 0 and 1 (exclusive)"
-        )
-    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
-        raise SimError(
-            "options.retry_on_convergence_error.method must be one of: "
-            + ", ".join(_CONVERGENCE_RETRY_METHODS)
-        )
-    return resolved
 
 
 def _resolve_convergence_retry(
@@ -3324,7 +3284,13 @@ def _prepare_sim_request(
             corner_points,
             monte_carlo_spec,
             injected,
-            mismatch_scale=_resolve_mismatch_scale(monte_carlo_spec, models.get("pdk")),
+            mismatch_scale=_resolve_mismatch_scale(
+                monte_carlo_spec,
+                models.get("pdk"),
+                corner_points=corner_points,
+                models=_model_resolution_models(request, models),
+                request_dir=request_dir,
+            ),
         )
         monte_carlo_info = _with_family_mismatch(
             monte_carlo_info,
@@ -3356,6 +3322,15 @@ def _prepare_sim_request(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
         monte_carlo_info.update(_mc_window_scope_echo(monte_carlo_spec, window_scope))
+
+    # Issue #6778: a `--regrade` second pass rides this same request -- the
+    # internal `_regrade` field selects the re-run units (after this
+    # module's own expansion, so corner identities and Monte Carlo seeds are
+    # preserved), `options.tightened_rerun` is validated on every run, and a
+    # request without either returns the expansion unchanged.
+    corner_points = sim_regrade.prepare_regrade(
+        corner_points, request, analysis, engine
+    )
 
     # Issue #2995: per-instance mismatch gating. Validated before any probe or
     # backend dispatch; the gated netlist copy is what local backends run.
@@ -3996,6 +3971,18 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
+    shard_fingerprint = (
+        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
+    )
+    history = sim_batch_history.begin(
+        artifacts_dir,
+        shard_fingerprint,
+        request,
+        hosts,
+        bool(resume),
+        bool(pre_completed),
+        attach_job_id,
+    )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
         # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
@@ -4020,7 +4007,7 @@ def _run_sim_corners(
             **local_engine_kwargs,
             **(
                 {
-                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "shard_fingerprint": shard_fingerprint,
                     "netlist_sha256": netlist_digests.sha256,
                     "explicit_points": dispatch_points
                     if len(dispatch_points) < len(corner_points)
@@ -4047,7 +4034,7 @@ def _run_sim_corners(
         # already ran instead of paying for them again.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "shard_fingerprint": shard_fingerprint,
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4117,31 +4104,17 @@ def _run_sim_corners(
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
+    # Issue #6778: a runner that predates `--regrade` ignores the request's
+    # selection field and runs the whole matrix -- refuse that by id.
+    sim_regrade.require_regrade_echo(request, dispatch_points, corners_new, backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
     remote_environment = sim_batch_resume.merge_resume_environment(
         harvested_env, remote_environment
     )
 
-    if resume:
-        # Reassemble the full corner list in the request's own order: a
-        # corner is either freshly run just now (`corners_new`) or reused
-        # verbatim from a matching checkpoint (`pre_completed`) -- every
-        # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Lost batch shards synthesize unrun reports
-        # per point, so every dispatched point still has a report.
-        new_by_id = {corner["corner_id"]: corner for corner in corners_new}
-        corners = [
-            new_by_id[point.corner_id]
-            if point.corner_id in new_by_id
-            else pre_completed[point.corner_id]
-            for point in corner_points
-        ]
-    else:
-        # The exact pre-#473 assignment -- `corners_new` is already the
-        # full, correctly-ordered report for every backend (including
-        # `remote`, whose corners this process never reconciles against a
-        # local `CornerPoint` list).
-        corners = corners_new
+    corners = sim_batch_resume.reassemble_corners(
+        bool(resume), corner_points, corners_new, pre_completed
+    )
     _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
@@ -4188,6 +4161,9 @@ def _run_sim_corners(
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
 
+    remote_environment = sim_batch_history.finish(
+        history, remote_environment, corners, len(corner_points)
+    )
     sharded_attach = attach_job_id is not None and attach_job_id.endswith(".json")
     if (
         backend == "batch"
@@ -4377,6 +4353,11 @@ def _run_sim_corners(
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
+    # Issue #6778: the declared tightened-rerun settings (present in both
+    # passes) and, for a regrade run itself, the applied selection.
+    environment.update(
+        sim_regrade.regrade_environment_entries(request, analysis, engine)
+    )
     environment.update(
         sim_env_report.budget_environment(
             budget_s,
@@ -4403,9 +4384,6 @@ def _run_sim_corners(
 
     remote = environment.get("remote")
     remote_diagnostics = pop_remote_diagnostics(remote)
-    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
-        backend, engine, ngspice_init_lines, remote
-    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4457,7 +4435,9 @@ def _run_sim_corners(
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     diag_candidates = (
         *remote_diagnostics,
-        init_diagnostic,
+        sim_spiceinit.report_init_diagnostic(
+            backend, engine, ngspice_init_lines, remote, corners
+        ),
         bin_diagnostic,
         save_diagnostic,
     )
@@ -4465,6 +4445,9 @@ def _run_sim_corners(
         report["diagnostics"] = top_diags
     _attach_runner_hints(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
+    sim_mismatch_scale.attach_unreached_families(
+        report, monte_carlo_info, dispatch_points
+    )
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -4714,7 +4697,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         " confidence corners decks engine engine_version exclude"
         " expect_netlist_identity measurements models monte_carlo netlist"
         " netlist_overrides netlist_source options remote schema"
-        " schema_version target_ci_halfwidth _explicit_points"
+        " schema_version target_ci_halfwidth _explicit_points _regrade"
     ).split()
     + [sim_staging.STAGED_MODEL_INPUTS_FIELD, sim_stimulus.REQUEST_KEY]
 )
@@ -5317,35 +5300,16 @@ def _validate_k_sigma(value: Any, field: str) -> float:
 
 
 def _resolve_mismatch_scale(
-    mc_spec: dict[str, Any], pdk: Any
-) -> tuple[float, str] | None:
-    """Validate the optional ``request.monte_carlo.mismatch_scale`` (issue
-    #3942) and return ``(scale, param)`` -- the factor and the PDK family's
-    mismatch ``.param`` it sets -- or ``None`` when the request omits it.
-
-    The scale is applied by writing the family's multiplicative mismatch
-    switch (:data:`sim_mismatch_gate.MISMATCH_SWITCH`), so only a family
-    whose switch is verified to scale the ``AGAUSS``/``delvto`` terms
-    linearly is supported; any other family (or an undeterminable PDK) is
-    refused rather than approximated."""
-    if "mismatch_scale" not in mc_spec:
-        return None
-    value = mc_spec["mismatch_scale"]
-    field = "request.monte_carlo.mismatch_scale"
-    if not is_finite_number(value):
-        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    if value < 0:
-        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    family = pdk_variant_family(pdk) if pdk else None
-    param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if param is None:
-        known = ", ".join(sorted(sim_mismatch_gate.MISMATCH_SWITCH))
-        raise SimError(
-            f"{field} is only supported for PDK families with a verified "
-            f"multiplicative mismatch switch ({known}); models.pdk "
-            f"{pdk!r} resolves to family {family!r}"
-        )
-    return float(value), param
+    mc_spec: dict[str, Any], pdk: Any, **kwargs: Any
+) -> sim_mismatch_scale.MismatchScale | None:
+    """``request.monte_carlo.mismatch_scale`` (issues #3942, #5486), resolved
+    to the deck ``.param`` cards that apply it -- see
+    :func:`klayout_tools.sim_mismatch_scale.resolve` for the two PDK shapes
+    (a verified multiplicative switch, or sigma ``.param``s scanned out of
+    the selected mismatch sections' libraries)."""
+    return sim_mismatch_scale.resolve(
+        mc_spec, pdk, resolve_lib_ref=_resolve_lib_ref, **kwargs
+    )
 
 
 def _validate_spec_row(value: Any, field: str) -> str | None:
@@ -5657,7 +5621,7 @@ def _mc_sample_seed(
     varies: tuple[bool, bool],
     scope_key: object,
     sample_index: int,
-    mismatch_scale: tuple[float, str] | None,
+    mismatch_scale: sim_mismatch_scale.MismatchScale | None,
 ) -> dict[str, Any]:
     """The ``mc_seed`` record of one Monte Carlo sample (see
     :func:`_expand_monte_carlo`'s seed contract)."""
@@ -5689,8 +5653,8 @@ def _mc_sample_seed(
         mc_seed["seed_mode"] = seed_mode
     if mismatch_scale is not None:
         # Rides the point (and so the fleet wire and the deck
-        # writer); echoed only when declared (issue #3942).
-        mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
+        # writer); echoed only when declared (issue #3942/#5486).
+        mc_seed.update(mismatch_scale.seed_fields())
     return mc_seed
 
 
@@ -5698,7 +5662,7 @@ def _expand_monte_carlo(
     corner_points: list[CornerPoint],
     mc_spec: dict[str, Any],
     injected: tuple[list[dict[str, Any]], float] | None = None,
-    mismatch_scale: tuple[float, str] | None = None,
+    mismatch_scale: sim_mismatch_scale.MismatchScale | None = None,
 ) -> tuple[list[CornerPoint], dict[str, Any]]:
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
@@ -5724,8 +5688,8 @@ def _expand_monte_carlo(
     ``.param`` expressions): ngspice receives only the combined
     ``.options seed=<rndseed>``, derived from both components, so it still
     changes per sample under ``vary: "process"``. For such decks, request
-    ``monte_carlo.mismatch_scale: 0`` (issue #3942; sky130/gf180mcu) to
-    switch the deck's own mismatch off and get a sigma=0 control.
+    ``monte_carlo.mismatch_scale: 0`` (issues #3942/#5486) to switch the
+    deck's own mismatch off and get a sigma=0 control.
 
     Requesting the *same* ``mc_spec["seed"]`` again (same process, different
     process, doesn't matter) reproduces the exact same sequence of derived
@@ -5794,7 +5758,7 @@ def _expand_monte_carlo(
     if "seed_mode" in mc_spec:
         info["seed_mode"] = seed_mode
     if mismatch_scale is not None:
-        info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
+        info.update(mismatch_scale.seed_fields())
     return sampled, info
 
 
@@ -6413,8 +6377,6 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 # Per-corner ngspice invocation
 # --------------------------------------------------------------------------- #
-
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 
 
 _WAVEFORM_KEYWORDS = frozenset(
@@ -8429,15 +8391,12 @@ def _write_corner_deck(
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
-    if point.mc_seed is not None and "mismatch_scale" in point.mc_seed:
-        # Issue #3942: the sigma scale. Must come after the `.lib` (whose
-        # section sets the switch itself, e.g. sky130 `.param mc_mm_switch=0`
-        # or `=1` in the `_mm` sections) so the request's value is the last
-        # definition and wins.
-        lines.append(
-            f".param {point.mc_seed['mismatch_param']}="
-            f"{_format_param_value(point.mc_seed['mismatch_scale'])}"
-        )
+    # Issues #3942/#5486: the sigma scale -- one `.param` card for a switch
+    # family, one per scanned sigma for sg13g2. Must come after the `.lib`
+    # (whose section sets the switch or defines the sigmas itself, e.g.
+    # sky130 `.param mc_mm_switch=1` in the `_mm` sections) so the request's
+    # value is the last definition and wins.
+    lines.extend(sim_mismatch_scale.deck_lines(point.mc_seed, _format_param_value))
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
     lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
     # Issue #3338: the two-port's per-port z0 + AC-source cards.
@@ -8825,10 +8784,7 @@ def _write_xyce_deck(
         handle.write("\n".join(lines) + "\n")
 
 
-#: Bound on the recorded ``--version`` banner; matches the worker capture's
-#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
-_ENGINE_BANNER_MAX = 2000
-_ENGINE_BANNER_TIMEOUT_S = 10
+_ENGINE_BANNER_MAX = ENGINE_BANNER_MAX
 
 
 def _engine_build_with_comparison(
@@ -8846,66 +8802,6 @@ def _engine_build_with_comparison(
         attach_engine_build_comparison(remote_environment, engine_build)
         attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
-
-
-def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """The local ngspice build identity (issue #3095) -- ``--version`` banner plus
-    binary sha256 -- probed once per sweep into ``environment.engine_build`` on
-    ``local`` reports, ``client_engine_build`` off-host (#5566 rewrites ``engine_build``
-    to the worker's). ``engine_version`` is the major version only and two builds of one
-    major can differ in options (FFTW vs. padded FFT). ``None`` for engines without a
-    probe (xyce). A failed probe never fails the run; ``probe`` / ``reason`` say why."""
-    if ngspice_binary is None:
-        return None
-    build: dict[str, Any] = {
-        "version_banner": None,
-        "binary_sha256": None,
-        "probe": "ok",
-        "reason": None,
-    }
-    try:
-        build["binary_sha256"] = sha256_file(ngspice_binary)
-    except OSError:
-        pass
-    try:
-        proc = subprocess.run(
-            [ngspice_binary, "--version"],
-            capture_output=True,
-            text=False,
-            timeout=_ENGINE_BANNER_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        build.update(
-            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
-        )
-        return build
-    except Exception as exc:  # the probe must never fail the sweep
-        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
-        return build
-    raw = proc.stdout or proc.stderr or b""
-    text: str = (
-        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-    )[: _ENGINE_BANNER_MAX * 4]
-    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
-        :_ENGINE_BANNER_MAX
-    ]
-    if proc.returncode != 0 or not banner:
-        build.update(
-            probe="error",
-            reason=(
-                f"--version exited {proc.returncode}"
-                if proc.returncode != 0
-                else "--version printed no banner"
-            ),
-        )
-        return build
-    build["version_banner"] = banner
-    return build
-
-
-def _extract_engine_version(stdout: str) -> str | None:
-    match = _ENGINE_VERSION_RE.search(stdout or "")
-    return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------- #

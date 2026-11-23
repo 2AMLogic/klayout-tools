@@ -309,6 +309,8 @@ def add_pex_extraction_args(
             "drop parasitic elements at injection time (issue #3056); "
             "repeatable and composable. One of drop-r:NET|* (short the "
             "net's star legs into its hub -- no series R), "
+            "drop-r-body:NET|* (keep body/bulk terminals on the hub, "
+            "signal terminals keep the star, issue #7317), "
             "drop-c-ground:NET|* (omit the net's ground C), or "
             "drop-c-coupling (omit every Ccc_* card). Requires "
             "--parasitics. Anything else is a usage error; a NET matching "
