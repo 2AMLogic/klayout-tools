@@ -126,6 +126,18 @@ a separate, second failure mode: a query that exhausts the wasm32 guest's
 [`docs/cli/equiv.md`](equiv.md) ("Which binaries are run") documents it
 (issue #5804).
 
+The WASI builds also lose ABC's redirected stdout entirely (issue #7010):
+the `abc` pass runs ABC in-process and its `stime -p` summary never reaches
+the captured `<top>_abc.log`, which on earlier `klt` versions left `timing`
+unconditionally `null` even though the mapping itself completed. `klt
+synthesize` now stages the engine's own constrained script with the report
+widened to `stime -pd`, so ABC additionally dumps its statistics file into
+the run directory and a single-region design recovers an integer-precision
+`timing` from it (see "`timing`" below for the precision and per-region
+limits). Full precision and per-region attribution still need a native
+`yosys` — the `PATH=/usr/bin:$PATH` advice above is the workaround when
+only the timing figure matters.
+
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
 in process — see "`sta`" below) analyzes that netlist's timing graph. It is
@@ -315,8 +327,10 @@ the directory is cleared — see [`place-and-route.md`](place-and-route.md)'s
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
 library enables ABC constraints. Missing artifacts fail explicitly. A current
-ABC log without a readable `stime` summary produces `timing: null` and a
-`timing_unavailable` warning; any requested clock target remains unverified.
+ABC log without a readable `stime` summary falls back to the run's ABC
+statistics dump (see "`timing`" below); when that cannot attribute a delay
+either, the run produces `timing: null` and a `timing_unavailable` warning,
+and any requested clock target remains unverified.
 Unknown-library capability warnings still describe unavailable ABC constraints.
 
 Provenance hashes are computed before engine execution. Before returning,
@@ -338,13 +352,15 @@ retained directory next to that request.
 | File | Contents |
 | --- | --- |
 | `synth_<top>.ys` | The generated Yosys script (`script_path` in the response) — the **commit-safe** form, with the liberty written as `$PDK_ROOT/…` (issue #1870). |
-| `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root and no token was written. |
+| `synth_<top>.run.ys` | The rehydrated, **runnable** sibling (`run_script_path` in the response) — identical apart from its header block and the substituted absolute liberty path. This is the script Yosys is invoked on; it is machine-specific, so commit `synth_<top>.ys` instead. Absent (and `run_script_path` equal to `script_path`) when the liberty resolved outside the PDK install root, no token was written, **and** no statistics-dump capture was staged — with the capture (issue #7010) the sibling exists for its own sake, carrying absolute paths so Yosys can execute from the run directory. |
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
 | `<top>_latch_map.v` | The generated `techmap` rule file for `request.latch_map` (`latch_map.techmap_path`) — present only when the request sets `latch_map`. Commit-safe. |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
+| `abc_stime_capture.script` | The staged ABC script (issue #7010) used instead of the `abc` pass's built-in one on the constrained mapping path: the engine's own documented constrained script — parsed from `help abc`, so the selected mapping commands are preserved, `-D` substitution included — with the `stime` tail widened to also dump statistics. Written only when the engine's help documents the script in the parsed shape. |
+| `stats.txt` | ABC's own `stime -d` statistics dump (issue #7010), written into the run directory because Yosys executes from there. Read only when the captured ABC log carries no readable `stime` summary, and only in its unambiguous single-record form (see "`timing`"). ABC appends to this file — a manual replay of the run script adds records to it. |
 | `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
@@ -362,10 +378,12 @@ Use the optional top-level `synthesis` object to select ABC mapping effort and a
 Fast mapping reduces effort on both passes. On builds without the native
 `-fast` option, klt emits the corresponding Yosys 0.67 commands explicitly.
 With Liberty timing constraints it retains the buffer, sizing and `stime -p`
-steps. A custom script applies only to standard-cell mapping so it can refer
-to the target library. Use `--verify-equivalence` to check the resulting
-gate-level netlist against the source RTL. To populate ABC timing with a
-custom script, include `stime -p` and enable the appropriate ABC constraints.
+steps — and widens the report to `stime -pd` so the run's statistics dump is
+recoverable (issue #7010). A custom script applies only to standard-cell
+mapping so it can refer to the target library. Use `--verify-equivalence` to
+check the resulting gate-level netlist against the source RTL. To populate
+ABC timing with a custom script, include `stime -p` and enable the
+appropriate ABC constraints.
 
 `abc_fast` accepts a boolean. `abc_script` names a file relative to the
 request directory (the working directory for stdin). A leading `+` is a
@@ -897,10 +915,43 @@ runs — it was simply discarded, because `-constr` was never passed
 (`docs/design/synthesize-qor-improvements-survey.md` sections 1.2/1.4).
 Signoff timing is still Phase 4's OpenROAD/OpenSTA step.
 
+**WASI engines and the statistics-file fallback (issue #7010).** The
+YoWASP/WASI Yosys builds lose ABC's redirected stdout, so on those engines
+the captured `<top>_abc.log` never carries the `stime` line at all. When
+that happens, `klt synthesize` reads the run's own `stats.txt` — ABC's
+`stime -d` statistics dump, staged into the run directory as described
+above — and reports:
+
+```json
+"timing": {
+  "source": "abc_stime_stats_file",
+  "wire_load": null,
+  "critical_path_ps": 771,
+  "precision_ps": 1,
+  "delay_target_ps": null,
+  "regions": [{"module": "top", "critical_path_ps": 771}]
+}
+```
+
+The differences from the `abc_stime` shape are the honest labels: ABC
+writes the dump's delay as an **integer** (truncated, not rounded — echoed
+as `precision_ps`), and it carries no wire-load echo at all, so
+`wire_load` is `null` because it is *unknown*, not because it is `"none"`.
+Only the unambiguous case is reported: exactly one measured region. A
+design whose ABC runs once per region leaves percentage records in the
+dump (ratios to the first region, not delays), so multi-region designs on
+a WASI engine stay `timing: null` with the `timing_unavailable` warning —
+run a native `yosys` for those. And because the integer is truncated, a
+`critical_path_ps` *equal to* `delay_target_ps` does not establish that
+the target was met (the true delay may sit anywhere in the truncated
+value's one-picosecond window); only a value strictly below the target
+does.
+
 `timing` is `null` — never a fabricated number — when the resolved
 `cell_library` has no ABC constraint-table entry (so `-constr`, and
-therefore `stime -p`, never ran), or when the resolved ABC printed no
-recognisable summary line.
+therefore `stime`, never ran), when the resolved ABC printed no
+recognisable summary line, or when the statistics dump is missing or
+ambiguous (the multi-region case above).
 
 ## `sta`: the native gate-level critical-path report
 
