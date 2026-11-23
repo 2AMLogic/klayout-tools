@@ -164,6 +164,28 @@ def test_supersede_warning_edge_cases(tmp_path, monkeypatch, body):
     assert len(_supersede(report)) == 1
 
 
+@pytest.mark.parametrize(
+    ("cards", "expected"),
+    [
+        (".save $5", ".save $5"),
+        (".save v(out) $5", ".save v(out) $5"),
+        (".save v(a)\n$ whole-line comment\n+ v(b)", ".save v(a) v(b)"),
+    ],
+)
+def test_supersede_warning_quotes_complete_save_card(
+    tmp_path, monkeypatch, cards, expected
+):
+    report = _run_save_request(
+        tmp_path,
+        monkeypatch,
+        body=f"R1 $5 0 1k\n{cards}\n",
+        options={"waveforms": True},
+    )
+    (warning,) = _supersede(report)
+    assert f"({expected})" in warning["message"]
+    assert warning["save_cards"] == 1
+
+
 def test_supersede_preflight_never_raises_on_an_unreadable_netlist(tmp_path):
     kwargs = {
         "engine": "ngspice",

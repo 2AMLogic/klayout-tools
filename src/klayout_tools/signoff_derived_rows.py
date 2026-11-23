@@ -174,17 +174,22 @@ def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] |
     )
 
 
+def _limit_keys(limits: Any) -> list[str]:
+    """Return the non-null bounds the simulation producer recognises."""
+    if not isinstance(limits, dict):
+        return []
+    return [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
+
+
 def _bounds_checked(
     measurement: dict[str, Any],
     corners: Any,
     record: tuple[set[str], set[str]] | None,
 ) -> bool:
     """Confirm each declared bound for each reported corner using its full work ID."""
-    name, limits = measurement.get("name"), measurement.get("limits")
-    if not isinstance(name, str) or not name or not isinstance(limits, dict):
-        return False
-    keys = [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
-    if not keys:
+    name = measurement.get("name")
+    keys = _limit_keys(measurement.get("limits"))
+    if not isinstance(name, str) or not name or not keys:
         return False
     if record is None:
         return True
@@ -241,8 +246,8 @@ def envelope_tagged_rows(
 ) -> tuple[bool, set[str]]:
     """Return whether the envelope has tagged measurements and which rows they cover.
 
-    A passing measurement with limits credits its tagged row. A failed sim
-    citation also needs evidence that every bound was checked at every corner
+    A passing measurement with a non-null min or max credits its tagged row.
+    A failed sim citation also needs evidence of checks for every bound and corner
     (#6027). Only a yield citation can credit a ``reported`` measurement,
     and only for an unratified row (#5490).
     """
@@ -256,14 +261,12 @@ def envelope_tagged_rows(
     covering = {
         m["spec_row"]
         for m in tagged
-        if m.get("limits")
-        and (
-            m.get("status") == "pass"
-            or (
-                kind == "yield"
-                and m.get("status") == "reported"
-                and m["spec_row"] in unratified
-            )
+        if (m.get("status") == "pass" and _limit_keys(m.get("limits")))
+        or (
+            kind == "yield"
+            and m.get("status") == "reported"
+            and m.get("limits")
+            and m["spec_row"] in unratified
         )
     }
     return bool(tagged), covering

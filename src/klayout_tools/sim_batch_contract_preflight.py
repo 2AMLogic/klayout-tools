@@ -30,6 +30,7 @@ from .sim_batch_contract_spec import (
     _request_features,
     _runner_gate_release,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     pass
@@ -86,8 +87,6 @@ def _runner_preflight_script(
     )
     # Only a validated N.N is ever embedded in the shell below.
     if client_release is None or not re.fullmatch(r"\d+\.\d+", client_release):
-        from .sim import SimError
-
         raise SimError(
             f"the submitting client's klt version {client_version!r} cannot be "
             "pinned against the fleet runner (expected only [A-Za-z0-9._+-] "
@@ -213,8 +212,6 @@ def assess_remote_runner_features(
     manifest, a legacy entry without ``klt_version``) proceeds to
     :func:`remote_feature_preflight` on the host. Never relaxed by a warn
     policy: ``remote`` has none, and a silently dropped metric is worse."""
-    from .sim import SimError
-
     features = [
         name
         for name in _request_features(request)
