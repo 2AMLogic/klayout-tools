@@ -36,6 +36,10 @@ CASES = {
     ),
     "post_route_sta_path_groups": None,
     "post_route_sta_stages": None,
+    "post_route_sta_violating_endpoints": (
+        "_validate_max_violating_endpoints",
+        [{"max_violating_endpoints": 0}],
+    ),
 }
 
 

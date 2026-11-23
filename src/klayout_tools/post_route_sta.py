@@ -1134,21 +1134,9 @@ def _dispatch_sta(
         "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
         "total_negative_hold_slack_ns": corner_fields["total_negative_hold_slack_ns"],
         "fmax_mhz": corner_fields["fmax_mhz"],
-        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
-        # `null` -- whether the four slack fields above are measurements at
-        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
-        # restated. A design whose only timing paths run input-port ->
-        # register / register -> output-port reports that sentinel unless
-        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
-        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
-        # gate would otherwise report "timing closed" on a design that was
-        # never timed. Check this field before trusting any slack number in
-        # this response.
+        # A positive OpenSTA sentinel can represent an unconstrained path.
         "timing_status": corner_fields["timing_status"],
-        # Additive field (issue #2780): constraint completeness -- unconstrained
-        # endpoints and unclocked registers, with counts and identities. A
-        # finite WNS (`timing_status: "constrained"`) only says *some* path
-        # was timed; this says whether any endpoint/register was left out.
+        # Measured slack can coexist with unclocked registers or unconstrained pins.
         "constraint_completeness": corner_fields["constraint_completeness"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
@@ -1164,32 +1152,21 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
-    if "wire_load" in corner_fields:
-        response["wire_load"] = corner_fields["wire_load"]
-    if "port_paths" in corner_fields:
-        response["port_paths"] = corner_fields["port_paths"]
-    # Additive field (issue #5754): present only when the request named
-    # `constraints.report_instances`.
-    if "instance_paths" in corner_fields:
-        response["instance_paths"] = corner_fields["instance_paths"]
-    # Additive field (issue #7418): only when the knob was requested.
-    if "violating_endpoints" in corner_fields:
-        response["violating_endpoints"] = corner_fields["violating_endpoints"]
-    # Additive field (issue #2968): the applied exclusion list, present only
-    # when the request named `constraints.false_path_from`.
+    # These fields are present only when the corner session produced them.
+    for key in ("wire_load", "port_paths", "instance_paths", "violating_endpoints"):
+        if key in corner_fields:
+            response[key] = corner_fields[key]
     if constraints.false_path_from:
         response["false_path_from"] = list(constraints.false_path_from)
-    response["spef_annotation"] = corner_fields["spef_annotation"]
-    # Additive field (issue #2739): the propagated-clock evidence block --
-    # what propagation actually reached -- `null` unless the request asked
-    # for propagated-clock timing (see `_parse_clock_latency`).
-    response["clock_propagation"] = corner_fields["clock_propagation"]
-    # Additive field (issue #2886): the post-route SDF this corner's session
-    # wrote -- `{path, scope, content_hash}`, `null` unless `request.sdf`.
-    response["sdf"] = corner_fields["sdf"]
-    # Additive field (issue #3005): see `_electrical_checks_block`.
-    response["electrical_checks"] = corner_fields["electrical_checks"]
-    response["engine_log"] = corner_fields["engine_log"]
+    # Required corner fields can carry null when a requested measurement is unavailable.
+    for key in (
+        "spef_annotation",
+        "clock_propagation",
+        "sdf",
+        "electrical_checks",
+        "engine_log",
+    ):
+        response[key] = corner_fields[key]
 
     return response
 
@@ -1451,23 +1428,15 @@ def _run_corner_session(
             stdout, wire_load_model, wire_load_mode, has_def=has_def
         )
     )
-    # Additive field (issue #3042): only present when the request named
-    # `constraints.report_ports`, so an unrequested response is unchanged.
+    # Optional timing-path details are included only when requested.
     if constraints.report_ports:
-        corner_fields["port_paths"] = _port_paths(
-            completed.stdout or "", constraints.report_ports
-        )
-    # Additive field (issue #5754): only present when the request named
-    # `constraints.report_instances`, so an unrequested response is unchanged.
+        corner_fields["port_paths"] = _port_paths(stdout, constraints.report_ports)
     corner_fields.update(
-        _instance_paths_corner_field(
-            completed.stdout or "", constraints.report_instances
-        )
+        _instance_paths_corner_field(stdout, constraints.report_instances)
     )
-    # Additive field (issue #7418): only when the knob was requested.
     corner_fields.update(
         _violating_endpoints_corner_field(
-            completed.stdout or "",
+            stdout,
             constraints.max_violating_endpoints,
             setup_violation_count,
             hold_violation_count,
