@@ -43,6 +43,7 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._openroad_engine import (
     _count_violations,
     _run_openroad,
@@ -112,12 +113,11 @@ def _corner_sweep_script_lines(
     ``report_worst_slack_metric -setup``/``-hold`` (run here for the first
     and only time in this session, so no scoping concern applies) writes
     this invocation's own ``-metrics`` dump's ``timing__setup__ws``/
-    ``timing__hold__ws`` keys -- automatically the worst value across every
-    corner :func:`klayout_tools.pdk.list_lib_corners` enumerated (confirmed
-    live: setup slack worst-cases at the slowest loaded corner, hold slack
-    at the fastest, exactly the industrial "setup at slow PVT, hold at fast
-    PVT" convention this survey's section 3.3 describes -- no manual
-    slow/fast corner classification needed in Python).
+    ``timing__hold__ws`` keys. Each is the worst slack across the loaded
+    ``corners``. The route stage uses descriptor keys for mapped libraries
+    and :func:`klayout_tools.pdk_cells.list_lib_corners` for conventional
+    discovery. A requested ``pdk.sweep_corners`` subset limits both metrics.
+    OpenROAD selects the worst setup and hold corners independently.
 
     ``report_tns_metric -setup``/``-hold`` (issue #1866) rides alongside the
     two ``report_worst_slack_metric`` calls above, in the same session and
@@ -270,8 +270,8 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` net but a confirmed driver-only
-      internal one, as standalone ``klt sta`` also skips (#6970/#7267)):
+    - *design-side* (linked nets after excluding confirmed empty or
+      driver-only internal nets, as in standalone ``klt sta``):
       how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
@@ -482,7 +482,9 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -591,7 +593,7 @@ def _post_route_spef_metrics(
     flow's original names verbatim). Passed through as ``run_extract``'s
     ``def_net_connections``, this makes every real design pin on an
     unambiguously-named net a genuine, resolvable node in the written
-    SPEF's RC network -- see :func:`~klayout_tools.extract._write_spef`'s
+    SPEF's RC network -- see :func:`~klayout_tools.extract_spef._write_spef`'s
     docstring for the exact ``*CONN``/``*RES`` shape and the duplicate-net-
     name guard (a net name shared by several un-strapped islands, e.g.
     `gcd`'s 105 ``VGND`` islands, is skipped rather than asserting
@@ -648,22 +650,20 @@ def _post_route_spef_metrics(
 
     spice_path = os.path.join(output_dir, f"{hdl_toplevel}_route_parasitics.spice")
     spef_path = os.path.join(output_dir, f"{hdl_toplevel}_route.spef")
-    # Issue #961 defect 1: the DEF's own `PINS` section is the ground truth
-    # for which nets are genuine top-level design ports, independent of the
-    # `def_net_names=True` renaming below (which gives *every* routed net a
-    # real name, and would otherwise get all of them promoted to `*PORTS`).
-    # `None` (no parseable `PINS` section -- not expected for a real routed
-    # DEF) falls back to not passing `declared_pins` at all, never to
-    # declaring zero ports.
+    # Issue #961 defect 1: the DEF's own `PINS` section is the ground truth for which
+    # nets are genuine top-level design ports, independent of the `def_net_names=True`
+    # renaming below (which gives *every* routed net a real name, and would otherwise
+    # get all of them promoted to `*PORTS`). `None` (no parseable `PINS` section -- not
+    # expected for a real routed DEF) falls back to not passing `declared_pins` at all,
+    # never to declaring zero ports.
     declared_pins = _def_pin_net_names(def_path)
-    # Issue #961's own remaining scope (device-terminal `*CONN` pin
-    # correlation): the DEF's own `NETS` section names each net's real
-    # `(instance, pin)` connections, in the same instance/pin spelling the
-    # linked gate-level design uses -- see `def_net_instance_pins`'s own
-    # docstring for the exact `*I`/`*RES` shape this produces and the
-    # duplicate-net-name guard that skips it. `{}` (never `None`, matching
-    # `def_net_instance_pins`'s own "absence is not proof of zero" posture)
-    # for a DEF with no parseable `NETS` section.
+    # Issue #961's own remaining scope (device-terminal `*CONN` pin correlation): the
+    # DEF's own `NETS` section names each net's real `(instance, pin)` connections, in
+    # the same instance/pin spelling the linked gate-level design uses -- see
+    # `def_net_instance_pins`'s own docstring for the exact `*I`/`*RES` shape this
+    # produces and the duplicate-net-name guard that skips it. `{}` (never `None`,
+    # matching `def_net_instance_pins`'s own "absence is not proof of zero" posture) for
+    # a DEF with no parseable `NETS` section.
     net_instance_pins = def_net_instance_pins(def_path)
     try:
         extraction = run_extract(
@@ -673,19 +673,17 @@ def _post_route_spef_metrics(
             top=hdl_toplevel,
             parasitics=True,
             spef_output=spef_path,
-            # Issue #951: name every routed net from the DEF net name
-            # KLayout's LEF/DEF reader left on its geometry (GDS shape
-            # property 1) when `_merge_def_to_gds` produced this GDS, rather
-            # than from text labels -- which the merge only emits for
-            # top-level pins. This is what makes the SPEF's `*D_NET` names
-            # the same strings the OpenSTA session below has linked, and so
-            # what makes `read_spef` annotate anything at all.
+            # Issue #951: name every routed net from the DEF net name KLayout's LEF/DEF
+            # reader left on its geometry (GDS shape property 1) when
+            # `_merge_def_to_gds` produced this GDS, rather than from text labels --
+            # which the merge only emits for top-level pins. This is what makes the
+            # SPEF's `*D_NET` names the same strings the OpenSTA session below has
+            # linked, and so what makes `read_spef` annotate anything at all.
             def_net_names=True,
-            # Issue #961: restrict the promoted-pin set (and so the written
-            # SPEF's `*PORTS`/`*P` entries) to the DEF's own declared ports --
-            # see this function's docstring, "declared_pins" paragraph.
-            # `None` is `run_extract`'s own "no restriction" default, i.e.
-            # exactly the pre-#961 behaviour.
+            # Issue #961: restrict the promoted-pin set (and so the written SPEF's
+            # `*PORTS`/`*P` entries) to the DEF's own declared ports -- see this
+            # function's docstring, "declared_pins" paragraph. `None` is `run_extract`'s
+            # own "no restriction" default, i.e. exactly the pre-#961 behaviour.
             declared_pins=declared_pins,
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation --
             # see this function's docstring, "def_net_connections" paragraph.
@@ -725,7 +723,9 @@ def _post_route_spef_metrics(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
+        repo_root=repo_root,
     )
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
@@ -761,15 +761,14 @@ def _post_route_spef_metrics(
         nets_check if nets_check is not None else (0, len(net_names), 0, 0)
     )
 
-    # The loud half of issue #948's "do not silently drop annotation on
-    # unmatched nets": an incomplete correlation is stated in the response
-    # itself, in words, rather than left for a caller to notice by comparing
-    # two integers -- because the numbers next to it (`worst_slack_ns` &c.)
-    # look exactly like a real measurement whether or not any net was
-    # actually annotated. Keyed on the *design*-side ratio (issue #951): the
-    # SPEF-side one counts flat extraction's intra-standard-cell nodes, which
-    # a gate-level linked design never has and whose absence says nothing
-    # about the quality of the annotation.
+    # The loud half of issue #948's "do not silently drop annotation on unmatched nets":
+    # an incomplete correlation is stated in the response itself, in words, rather than
+    # left for a caller to notice by comparing two integers -- because the numbers next
+    # to it (`worst_slack_ns` &c.) look exactly like a real measurement whether or not
+    # any net was actually annotated. Keyed on the *design*-side ratio (issue #951): the
+    # SPEF-side one counts flat extraction's intra-standard-cell nodes, which a
+    # gate-level linked design never has and whose absence says nothing about the
+    # quality of the annotation.
     annotation_complete = (
         design_nets_total > 0 and design_nets_annotated == design_nets_total
     )
@@ -824,8 +823,10 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> tuple[
     float | None,
     float | None,
@@ -978,7 +979,9 @@ def _run_corner_sweep(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
+        repo_root=repo_root,
     )
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
@@ -991,11 +994,10 @@ def _run_corner_sweep(
     worst_hold_raw = metrics.get("timing__hold__ws")
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
     worst_hold = round(worst_hold_raw, 5) if worst_hold_raw is not None else None
-    # Issue #1866: the combined session's own TNS pair, read the same way as
-    # the worst-slack pair above -- used only in the `len(corners) == 1`
-    # branch below (the combined aggregate *is* that single corner's own
-    # value there); the `len(corners) > 1` loop below reads each corner's
-    # own single-corner invocation's TNS instead.
+    # Issue #1866: the combined session's own TNS pair, read the same way as the
+    # worst-slack pair above -- used only in the `len(corners) == 1` branch below (the
+    # combined aggregate *is* that single corner's own value there); the `len(corners) >
+    # 1` loop below reads each corner's own single-corner invocation's TNS instead.
     tns_setup_raw = metrics.get("timing__setup__tns")
     tns_hold_raw = metrics.get("timing__hold__tns")
     tns_setup = round(tns_setup_raw, 5) if tns_setup_raw is not None else None
@@ -1091,7 +1093,9 @@ def _run_corner_sweep(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
+            repo_root=repo_root,
         )
         with corner_completed.diagnostics(PlaceAndRouteError):
             if corner_completed.returncode != 0:
@@ -1130,12 +1134,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* effective design-rule
-                # verdict, from its own single-corner invocation's stdout --
-                # the per-corner counterpart of the combined aggregates
-                # above, letting a caller see which deck's limits a pin
-                # actually breaks (exactly the per-corner attribution #1092
-                # added for slack).
+                # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,

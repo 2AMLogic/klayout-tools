@@ -27,6 +27,7 @@ _CODE_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*UNSUPPORTED_WORKER_CODE$")
 #: whole request after the grid ran, so a warn-only registry row would keep
 #: exactly the failure mode this guard exists to prevent.
 _CODE_TO_FEATURE = {
+    "REGRADE_UNSUPPORTED_WORKER_CODE": "_regrade",
     "PARAMS_UNSUPPORTED_WORKER_CODE": "corners.params",
     "OPTIONS_UNSUPPORTED_WORKER_CODE": "corners.options",
     "NODESET_UNSUPPORTED_WORKER_CODE": "options.nodeset",

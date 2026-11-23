@@ -440,6 +440,11 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 
 ## The DUT `.include` swap
 
+Request-relative `options.osdi_preload` paths use the testbench request's
+directory on every simulation leg, including when `--outdir` moves the
+generated requests. The executing host resolves literal `$PDK_ROOT/` and
+`${PDK_ROOT}/` entries using the same rules as `klt sim`.
+
 A `klt sim` request's `netlist` field is one file with no built-in
 distinction between "the DUT" and "the stimulus" (see
 [`sim.md`](sim.md#netlist-convention-a-circuit-body-not-a-full-deck)).
@@ -822,6 +827,16 @@ extracted-side leg whose testbench did not hand-author a tie hit ngspice's
 `Warning: singular matrix:  check node x<dut>.vsubs`, and the
 gmin/source-stepping recovery that followed could return a non-reproducible
 operating point rather than failing loudly.
+
+Single-top comparison and `--extract-only` JSON reports include
+`extraction.substrate_dc_tie` when the extraction engine supplies tie metadata.
+Each `nets[]` entry identifies the substrate `net` and resistor `device`.
+The block's `reference_node` is SPICE ground (`"0"`), and `resistance_ohm`
+is the value written in each resistor card. The default 1e12 Ω shunt provides
+a DC path while allowing substrate motion during a transient. A zero-ohm
+request reports `mode: "hard"` with the 0.001 Ω floor. An explicit positive
+0.001 Ω request reports `mode: "shunt"`. An empty `nets` list records zero
+written ties. An absent block means the engine supplied no tie metadata.
 
 `klt extract --parasitics` now emits one `R<net>_dctie <net> 0 1e+12` shunt
 per synthesized substrate net **inside the extracted `.SUBCKT` body** — see
@@ -1786,7 +1801,7 @@ the same input, rather than a lookalike that can drift:
 
 Every entry in `legs` expands to that same unit list: the extracted-side
 (and `--device-only-leg`) requests are deep copies of the testbench request
-with only the DUT netlist, its models library and `netlist_source` changed,
+with the DUT netlist swapped, model paths rebased and `netlist_source` set,
 so the corner / Monte Carlo expansion is identical on every leg.
 
 ### What it writes: nothing

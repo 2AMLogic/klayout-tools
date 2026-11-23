@@ -16,13 +16,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .signoff import input_set_digest
 from .signoff_attest import (
     AttestationError,
     _file_check,
     _path_list,
     _validated_command_checks,
 )
+from .signoff_base import input_set_digest
 
 #: ``role`` of a stream member of ``provenance.input.paths`` / of an input's check.
 STREAM_ROLE = "stream"

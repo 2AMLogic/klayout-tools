@@ -230,7 +230,7 @@ from .coverage import (
     rollup_status,
     work_id,
 )
-from .extract import ExtractError, run_extract
+from .extract import SPICE_GLOBAL_GROUND_NODE, ExtractError, run_extract
 from .pex_asap7 import (
     adapt_leg_netlists,
     netlist_adaptation_for_deck,
@@ -243,6 +243,7 @@ from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
     TIE_SOURCE_DECLARED,
     _body_bias_report,
 )
+from .pex_errors import PexError as PexError
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -258,6 +259,7 @@ from .pex_resistance_graph import (
     _resistance_graph_echo,
 )
 from .sim import SimError, load_request, run_sim
+from .sim_osdi_pin import rebase_osdi_preload
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
 __all__ = [
@@ -328,27 +330,6 @@ MEASURE_COMMAND_TIMEOUT_S = 1800.0
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
 #: measurement, so :func:`_row_status` needs no command-mode special case.
 _MEASUREMENT_STATUSES = ("pass", "fail", "error")
-
-
-class PexError(Exception):
-    """Raised when a `klt pex` run cannot be completed: a bad testbench
-    request, a testbench with no `.include`/`.inc` DUT reference, testbenches
-    that reference different schematic netlists, or a failure in the
-    extraction/simulation steps this command drives (wrapping the original
-    :class:`~klayout_tools.extract.ExtractError` /
-    :class:`~klayout_tools.sim.SimError`).
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other `klt` verb's error contract.
-
-    ``code`` is an optional machine-readable classification emitted as the
-    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
-    (every pre-#2889 error) keeps the envelope byte-identical.
-    """
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _validate_tie_nets(
@@ -430,6 +411,13 @@ def _tie_nets_in_legs(
     _apply_tie_nets(extracted_netlist_path, ties)
     if device_only_netlist_path is not None:
         _apply_tie_nets(device_only_netlist_path, ties)
+
+
+def _substrate_tie_fields(parasitics: Mapping[str, Any]) -> dict[str, Any]:
+    tie = parasitics.get("substrate_dc_tie")
+    if tie is None:
+        return {}
+    return {"substrate_dc_tie": {**tie, "reference_node": SPICE_GLOBAL_GROUND_NODE}}
 
 
 def _parasitic_integrity_report(
@@ -2118,11 +2106,9 @@ def _prepare_dut_swapped_request(
     ``"extracted"``). Returns the written request file's path, suitable for
     :func:`~klayout_tools.sim.run_sim`.
 
-    A relative ``models.lib`` the original request declares *in the
-    request-dir-relative shape* (no ``models.pdk``/``models.pdk_root``) is
-    resolved to an absolute path first -- the written copy lives in
-    ``work_dir``, not next to the original testbench file, so a relative
-    reference would otherwise resolve against the wrong directory.
+    Resolve request-relative OSDI preloads and literal ``models.lib`` paths
+    against the original testbench directory. Keep literal PDK-root preloads
+    for the executing host to resolve.
 
     A ``models`` block that *does* carry ``pdk``/``pdk_root`` is copied
     through **unmodified** (issue #1395): in that shape a relative ``lib``
@@ -2150,6 +2136,7 @@ def _prepare_dut_swapped_request(
         handle.write(swapped_body_text)
 
     swapped_request = copy.deepcopy(request)
+    rebase_osdi_preload(swapped_request, request_dir)
     models = swapped_request.get("models")
     if (
         isinstance(models, dict)
@@ -3453,19 +3440,10 @@ def run_pex(
             "net_count": extract_report["net_count"],
             "netlist_sha256": extracted_netlist_sha256,
             "model": parasitics.get("model"),
-            # Additive field (issue #976): echoes `--critical-net` back --
-            # `[]` when the flag was never given, byte-identical to before
-            # this feature existed.
+            # Preserve the extraction defaults for older reports (#976, #977).
             "critical_nets": parasitics.get("critical_nets") or [],
-            # Additive field (issue #977): echoes `--distributed-rc` back --
-            # `False` when the flag was never given, byte-identical to
-            # before this feature existed.
             "distributed_rc": bool(parasitics.get("distributed_rc")),
-            # Additive field (issue #988, Epic #709 Phase 3a): `None`
-            # unless `--mom-rlc-net` was given, in which case it is `klt
-            # extract`'s own substitution report (see
-            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
-            # byte-identical to before this feature existed otherwise.
+            # Echo the extractor's MOM substitution report when requested (#988).
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
             # Additive field (issue #2686): `klt extract`'s own
             # `label_layers` echo for this run's extraction -- the applied
@@ -3500,6 +3478,7 @@ def run_pex(
             # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
             "pdk": extract_report.get("pdk"),
             # Additive fields (issue #6559): present only for a runset leg.
+            **_substrate_tie_fields(parasitics),
             **pex_runset.extraction_fields(extract_report),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --

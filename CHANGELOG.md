@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt place-and-route` warns on two deck-known gf180mcu power configurations**
+  (issue #7311, 2026-11-23): a `request.power` on `gf180mcu_fd_sc_mcu9t5v0`/
+  `gf180mcu_fd_sc_mcu7t5v0` that applies `power.connects[].split_cuts`
+  (explicitly, or by overriding a preset's `connects`), or whose effective
+  `power.tapcell_distance_um` exceeds 15 µm (the libraries' 100 µm default
+  included), now adds a `warnings[]` string beginning `gf180mcu deck warning
+  (issue #7311)`. The `split_cuts` entry names the applied value and strap
+  pair, the seven `klt drc --deck gf180mcu` rule ids it was measured to trip
+  (#4301) and that other values are unverified; the tap entry names
+  `comp.tap_distance.{nwell,psub}.mv.1`, the effective pitch and whether it is
+  the per-library default or a `power.tapcell.distance_um` override (the 15 µm
+  limit is read from the deck's own rule table). Both are derived from the
+  request alone — no DRC runs inside place-and-route — and go to stderr like
+  every other `warnings` entry. **Additive — `schema_version` unchanged:**
+  `status`, the exit code and `route_drc_violation_count` keep their meanings
+  and no existing field changes, but a full-PDN gf180mcu run's `warnings` is
+  no longer `[]` by default; a consumer asserting an exact empty list on such
+  a run must expect the tap-distance entry. The `split_cuts` field, the
+  presets and the default tapcell pitch are unchanged.
 - **`klt version --format json` lists the install's commands** (#7324): the
   payload gains an additive `commands` field — one `{"name", "summary"}`
   object per top-level verb, sorted by `name`, derived from the live parser
@@ -25,6 +44,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   probe). Verbs hidden from `klt --help` are hidden here too; nested
   subcommands are not listed. `--format text`, `klt --version`, and
   `schema_version` are unchanged.
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
 
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
@@ -577,8 +598,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
-- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
-  2026-11-17): the single-request batch dry run now reaches the same
+- **`klt sim --dry-run` validates batch request settings and runs the
+  batch ceiling/split plan** (#5674, 2026-11-17; widened by #6437,
+  2026-11-18): the single-request batch dry run now reaches the same
   `plan_batch_job` the submit path runs, so a request the fleet would
   refuse is refused by the dry run with the submit path's own
   `error.code` and message — `batch_max_units_per_job_invalid` for a
@@ -586,11 +608,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   `job_ceiling_check: "enforce"` (both used to dry-run clean), and
   `batch_job_ceiling_exceeded` for a request whose bound exceeds
   `max_job_seconds` under `"enforce"` (never checked on this path at
-  all). The dry-run report gains an additive `job_ceiling` field — the
+  all). The dry run now checks `batch.job_ceiling_check`, `max_concurrent_jobs`,
+  `runner_version_check`, `max_job_seconds`, `capacity_wait_s`,
+  `capacity_retries`, `job_timeout_s` and `interrupted_grace_s` before
+  resolving fleet configuration. Malformed values produce the submit path's
+  existing error code and message even without a provision script or bucket.
+  Polling values (`poll_interval_s`, `poll_timeout_s`) are parsed only after
+  both resolve, so malformed polling values can still dry-run as valid on an
+  unconfigured host. The dry-run report gains an additive `job_ceiling` field — the
   `environment.remote.job_ceiling` name and shape, including
   `split`/`effective_hosts` when a split mode is active — present only
-  when a batch configuration resolves on this host, so a configless host
-  dry-runs clean exactly as before. The warn / serial-bound (#4982) /
+  when a batch configuration resolves on this host. The warn / serial-bound (#4982) /
   split stderr notices print as a submit would print them. `hosts` keeps
   its meaning (the request's `remote.hosts`; the planned shard count is
   `job_ceiling.effective_hosts`, never a redefinition), and `--format
@@ -757,6 +785,16 @@ not `klt --version`, if you need to detect this kind of drift. See
     keep the generic (accurate) messages.
   Request/response shape change is additive only (a new optional
   `routing.*` request field; no response field changed).
+- **`klt sim --op-lint` honors `--pdk-root` and reports its resolved PDK**
+  (#5751, 2026-11-17): `--pdk-root` was refused with `--op-lint` ("has no
+  effect") although the lint's resolution already reads `models.pdk_root`; it is
+  now folded in exactly as on the graded path (`--job-status` still refuses it).
+  An unpinned lint on a multi-install host now prints the same stderr ambiguity
+  warning as the graded path, and `--format text` prints the `pdk:` /
+  `pdk: WARNING` lines; `--format json` is unchanged. The `batch`
+  `models_pdk_root_host_path` refusal now names `$PDK_ROOT`, the client-side pin
+  that does work there (code and refuse-before-submit behavior unchanged).
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -1277,7 +1315,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `foo.sim`, `sim_request.json` -> `sim_request`). `requests[].report` and
   `set-manifest.json`'s per-request `dir` are unchanged in shape and always
   name the directory actually written -- read them from the envelope rather
-  than re-deriving the path. **Migration:** a set started on 0.9.2 or
+  than re-deriving the path. Consumers spanning 0.9.2 and later can resolve
+  each member report through `set-manifest.json`’s `requests[].dir`, written
+  since 0.8.0. **Migration:** a set started on 0.9.2 or
   earlier and resumed with the new version finds no `batch-shards.json` in
   the renamed directory and re-runs every member from scratch; move the old
   directory first (`mv <outdir>/<stem>.request <outdir>/<stem>`) to resume
