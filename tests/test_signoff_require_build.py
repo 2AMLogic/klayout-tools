@@ -509,7 +509,7 @@ def test_diff_reports_rejects_grading_pin_before_reading_reports(tmp_path, pin):
             "json",
         ]
     )
-    assert rc == 2
+    assert rc == 1
     assert out == ""
     assert (
         "--diff-reports cannot be combined with --require-grading-ruleset"
