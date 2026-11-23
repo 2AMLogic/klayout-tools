@@ -4898,7 +4898,7 @@ partition-qualified `"5.analog"` key works too):
 - A citation naming a joint row in its own `rows` is `invalid_evidence` — the
   same refusal as naming an undeclared or `gap` row; that is exactly the
   one-bench false claim this form exists to prevent.
-- `joint_grid` and `gap` (either form) are mutually exclusive; a malformed
+- A `joint_grid` row cannot also declare `structural` or `gap` (either form); a malformed
   `joint_grid` — not an object, an unknown key, an empty, shorter-than-two or
   duplicate-bearing `members`, a non-string member, an empty axis, a
   non-numeric axis value, supply rails of differing lengths — degrades item 5

@@ -443,12 +443,9 @@ def multi_row_info(
     Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
     ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
 
-    Issue #6985: a row carrying the ``structural`` disposition is listed
-    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
-    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
-    covered nor a gap: its claim is evidenced by inspecting the pinned
-    artifact, not by a measurement). The key is omitted when no structural
-    row is declared, keeping a disposition-free report byte-identical.
+    Structural rows (#6985) appear separately in optional ``structural_rows``
+    entries with their id, claim and pinned artifact. They do not contribute
+    measured coverage, gaps or uncovered rows.
     """
     if spec_rows is None:
         return {}

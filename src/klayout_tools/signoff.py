@@ -238,6 +238,7 @@ from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
     _check_justified_gap_rationales,
     _check_structural_artifacts,
+    _declared_artifact_outcome,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -6747,22 +6748,6 @@ def _grade_required_kinds(
         {**row_info, "missing_kinds": missing},
         extra,
     )
-
-
-def _declared_artifact_outcome(
-    failure: tuple[str, dict[str, Any]] | None,
-    row_info: dict[str, Any],
-    extra: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet`` outcome for a failing declared-artifact hash check (a
-    justified gap's rationale, issue #5599, or a structural row's artifact,
-    #6985); ``None`` when it passed. A broken declaration is a distinct
-    documented reason -- never silently demoted to a lesser form, whose
-    reason would be ``partial_coverage``."""
-    if failure is None:
-        return None
-    reason, detail = failure
-    return "unmet", reason, None, {**row_info, **detail}, extra
 
 
 def _post_member_outcome(

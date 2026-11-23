@@ -73,14 +73,6 @@ from typing import Any
 from ._jsonnum import is_number
 from .signoff_derived_rows import envelope_tagged_rows
 
-#: The one T1 item whose ``spec_rows`` accept the ``joint_grid`` form. Item
-#: 6 shares the list form and the reader, not the form.
-JOINT_GRID_ITEM_ID = 5
-
-#: The only keys a ``joint_grid`` object may carry: the explicit ``members``
-#: list plus the PVT axes of a `klt sim` request's ``corners`` block.
-_JOINT_KEYS = frozenset({"members", "process", "supply_v", "temperature_c"})
-
 
 def _multi_citation_rows(
     report_list: bool,
@@ -128,61 +120,6 @@ def _members_rows_declared(
         for _, rows in members
         for row_id in rows or []
     )
-
-
-def read_joint_grid(raw: Any) -> dict[str, Any] | None:
-    """Normalize one declared row's ``joint_grid`` object, or ``None`` when
-    it is malformed (the caller degrades its item to ``invalid_evidence``).
-    The stored form keeps the declared values verbatim; the request-side
-    axis defaults are applied by :func:`required_grid_points`, so a reader
-    of the declaration sees what the manifest said."""
-    if not isinstance(raw, dict) or set(raw) - _JOINT_KEYS:
-        return None
-    members = raw.get("members")
-    if (
-        not isinstance(members, list)
-        or len(members) < 2
-        or not all(isinstance(m, str) and m for m in members)
-        or len(set(members)) != len(members)
-    ):
-        return None
-    process = raw.get("process")
-    if process is not None and (
-        not isinstance(process, list)
-        or not process
-        or not all(isinstance(p, str) and p for p in process)
-    ):
-        return None
-    supply = raw.get("supply_v")
-    if supply is not None:
-        if not isinstance(supply, dict) or not supply:
-            return None
-        lengths: set[int] = set()
-        for rail, values in supply.items():
-            if (
-                not isinstance(rail, str)
-                or not rail
-                or not isinstance(values, list)
-                or not values
-                or not all(is_number(v) for v in values)
-            ):
-                return None
-            lengths.add(len(values))
-        if len(lengths) != 1:  # rails sweep zipped, as in a sim request
-            return None
-    temperature = raw.get("temperature_c")
-    if temperature is not None and (
-        not isinstance(temperature, list)
-        or not temperature
-        or not all(is_number(t) for t in temperature)
-    ):
-        return None
-    return {
-        "members": list(members),
-        "process": process,
-        "supply_v": supply,
-        "temperature_c": temperature,
-    }
 
 
 def _format_supply_value(value: int | float) -> str:
