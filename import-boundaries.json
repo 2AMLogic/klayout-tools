@@ -993,6 +993,7 @@
         "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_corner_axes",
         "klayout_tools.sim_corner_extremes",
+        "klayout_tools.sim_probit_sigma",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_corner_point",
         "klayout_tools.sim_corner_rules",

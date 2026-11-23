@@ -9396,6 +9396,54 @@ responses are unchanged. `error` and `inconclusive` still outrank a window
 declared) never fails the measurement. For a single-corner request both
 scopes agree.
 
+### Noise sigma from binary decisions at two stimuli
+
+Use `monte_carlo.probit_sigma` when a specification bounds noise inferred from
+two binary decision measurements across the PVT grid. The two source
+measurements may be unbounded. This example uses stimuli of −1 and +1 mV.
+
+```json
+{
+  "netlist": "comparator.spice",
+  "analysis": {"kind": "tran", "args": "0.1n 2n"},
+  "corners": {"temperature_c": [27, 85]},
+  "measurements": [
+    {"name": "lo", "spice": ".meas tran lo FIND v(decision_lo) AT=1n"},
+    {"name": "hi", "spice": ".meas tran hi FIND v(decision_hi) AT=1n"}
+  ],
+  "monte_carlo": {
+    "n": 10, "seed": 37, "vary": "mismatch",
+    "probit_sigma": {
+      "name": "noise_sigma", "spec_row": "noise", "unit": "mV",
+      "sources": [
+        {"measurement": "lo", "stimulus": -1},
+        {"measurement": "hi", "stimulus": 1}
+      ],
+      "grid": "mean", "limits": {"max": 2.5}
+    }
+  }
+}
+```
+
+For each requested corner, the fit divides the stimulus difference by the
+difference between the inverse standard-normal CDFs of the two fractions
+of high decisions. With high counts of 1/10 and 9/10 at 27 °C, the corner
+sigma is 0.780304 mV. Counts of 4/10 and 6/10 at 85 °C give 3.947154 mV.
+
+| `grid` | Reported value and source | Verdict at 2.5 mV |
+| --- | --- | --- |
+| `mean` | 2.363729 mV, source `grid`. Each corner has equal weight. | `pass`, exit 0 |
+| `worst` | 3.947154 mV, source `default/novdd/85C`. | `fail`, exit 3 |
+
+The derived entry in `measurements[]` records the bound, unit, spec row and
+per-corner trusted counts, fractions and sigma. The comparison uses the
+unrounded value and includes equality. Every draw must produce both trusted
+numeric decisions (0 or 1). Missing or distrusted data, saturated fractions,
+and flat or reversed slopes produce a null grid value. The affected corner
+carries a reason and the run is `inconclusive` (exit 4). A simulation error
+keeps its existing precedence. A passing item 5 citation can credit the tagged
+row as derived when this statistic is the request’s only bound.
+
 ## Model library resolution (via `klt pdk`)
 
 `models` resolves through the same discovery/resolution library that backs
