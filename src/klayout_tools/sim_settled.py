@@ -66,8 +66,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_raw import parse_ascii_rawfile
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -135,12 +137,7 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
         )
     sim_crossings._validate_signal(name, body.get("signal"))
     tol = body.get("tol_pct")
-    if (
-        isinstance(tol, bool)
-        or not isinstance(tol, (int, float))
-        or not math.isfinite(tol)
-        or tol < 0
-    ):
+    if not is_finite_number(tol) or tol < 0:
         raise SimError(
             f"measurement '{name}': settled.{key}.tol_pct is required and "
             f"must be a finite number >= 0, in percent (got {tol!r})"
@@ -407,8 +404,6 @@ def extract_corner_settleds(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["settled"]
     name = spec["name"]
     if not os.path.isfile(raw_path):

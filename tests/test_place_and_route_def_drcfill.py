@@ -438,3 +438,30 @@ def test_merge_attributes_drcfill_patch_tip_in_tip_check(tmp_path):
     entry = by_rule["M3.S.2"]
     assert entry["violations"] == 1
     assert entry["router_fill"] == 1 and entry["via_pads"] == 0
+
+
+def test_merge_without_diearea_writes_routed_gds_and_reports_repair(tmp_path):
+    from klayout_tools import place_and_route
+
+    kwargs = _build_merge_fixture(tmp_path)
+    routed_def = tmp_path / "design.def"
+    routed_def.write_text(
+        "".join(
+            line
+            for line in routed_def.read_text().splitlines(keepends=True)
+            if not line.startswith("DIEAREA ")
+        )
+    )
+    info = place_and_route._merge_def_to_gds(**kwargs)
+
+    merged = kdb.Layout()
+    merged.read(str(tmp_path / "out.gds"))
+    assert not merged.top_cell().bbox().empty()
+    # This three-metal fixture's layer map names no M4/M5/V3/V4, so the pass
+    # reports a named skip: it did not look, which is not "ran, nothing to
+    # repair" (``status: "clean"``).
+    repair = info["power_stack_repair"]
+    assert repair["status"] == "skipped"
+    assert repair["reason"] == "no M4/M5/V3/V4 layer in the KLayout layer map"
+    assert repair["patches"] == 0
+    assert info["via_pad_trim"]["tip_check"]["router_fill_violations"] == 1

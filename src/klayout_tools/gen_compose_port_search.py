@@ -26,14 +26,13 @@ from typing import TYPE_CHECKING, Any
 
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import GenError
+from .gen_compose_base import GenComposeError
 from .gen_compose_routing import (
-    _landing_pad_side_um_for_layer,
-    _min_enclosing_margin_um_for_layer,
-    _min_width_um_for_layer,
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
 )
+from .gen_compose_via_cuts import _array_extra_um, _stack_sizes, landing_pad_half_dbu
 from .gen_layer_params import mfg_grid_um
 
 if TYPE_CHECKING:
@@ -67,31 +66,6 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
     return best
 
 
-def _stack_sizes(
-    variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
-) -> tuple[dict[_LayerPair, float], dict[_LayerPair, float]]:
-    """``(pad side per metal, cut side per via)`` in um, sized exactly as
-    ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
-    from .gen_compose import _VIA_DROP_SIZE_UM, _fixed_cut_side_um, _via_fixed_size_um
-
-    cuts: dict[_LayerPair, float] = {}
-    for via, _, _ in ladder:
-        floor = _min_width_um_for_layer(variant, via)
-        cuts[via] = _fixed_cut_side_um(
-            max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-            _via_fixed_size_um(variant, via),
-        )
-    pads: dict[_LayerPair, float] = {}
-    for via, lower, upper in ladder:
-        for metal in (lower, upper):
-            side = _landing_pad_side_um_for_layer(variant, metal)
-            enclosure = _min_enclosing_margin_um_for_layer(variant, metal, via)
-            if enclosure is not None:
-                side = max(side, cuts[via] + 2 * enclosure[0])
-            pads[metal] = max(pads.get(metal, 0.0), side)
-    return pads, cuts
-
-
 def _array_pitches_um(
     variant: str,
     cuts_um: dict[_LayerPair, float],
@@ -110,11 +84,6 @@ def _array_pitches_um(
         raw = side + _min_spacing_um(variant, via)
         pitches[via] = math.ceil(raw / unit - 1e-9) * unit
     return pitches
-
-
-def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
-    """How much wider than one cut the (square-bounded) array footprint is."""
-    return (max(array) - 1) * pitch_um
 
 
 def _box(x: int, y: int, half: int, grow: int = 0) -> Any:
@@ -204,8 +173,6 @@ def _grid_candidates(
     order is fully determined by geometry, never by dict/set iteration."""
     import klayout.db as kdb
 
-    from .gen_compose_port_access import _err
-
     polygons = list(net_region.merged().each())
     total = 0
     for poly in polygons:
@@ -214,7 +181,7 @@ def _grid_candidates(
         ny = len(range(-(-box.bottom // step) * step, box.top + 1, step))
         total += nx * ny
     if total > _MAX_ENUMERATED_POINTS:
-        raise _err(
+        raise GenComposeError(
             "ports_from_labels: the port net spans too many grid points "
             f"({total}) -- raise access.grid_um to coarsen the search"
         )
@@ -295,33 +262,30 @@ def _search_landing(
     net_layer: _LayerPair,
     label_xy: tuple[int, int],
     access: dict[str, Any],
+    pad_override_um: float | None = None,
 ) -> dict[str, Any]:
     """Find the nearest legal via-stack landing on ``net``; raises a
     ``GenComposeError`` listing per-category rejections when none exists."""
-    from .gen_compose_port_access import _err
-
     up_to_layer = _resolve_route_layer(variant, access["up_to"])
     ladder, ladder_error = _resolve_via_drop_layer(nets.deck, up_to_layer, net_layer)
     if ladder_error is not None:
-        raise _err(f"ports_from_labels: port '{name}': {ladder_error}")
+        raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    pads_um, cuts_um = _stack_sizes(variant, ladder)
+    hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
-    pad_extra_um: dict[_LayerPair, float] = {}
+    pads_um: dict[_LayerPair, float] = {} if ladder else {net_layer: 0.0}
+    pad_half: dict[_LayerPair, int] = {}
+    cut_half: dict[_LayerPair, int] = {}  # Round outward with a DBU tolerance.
     for via, lower, upper in ladder:
         extra = _array_extra_um(array, pitches_um[via]) if pitches_um else 0.0
-        cuts_um[via] += extra
         for metal in (lower, upper):
-            pad_extra_um[metal] = max(pad_extra_um.get(metal, 0.0), extra)
-    for metal, extra in pad_extra_um.items():
-        pads_um[metal] += extra
-    if not ladder:
-        pads_um = {net_layer: 0.0}
-    to_half = lambda um: max(1, int(math.ceil(um / dbu / 2.0)))  # noqa: E731
-    pad_half = {pair: to_half(side) for pair, side in pads_um.items() if side > 0}
-    cut_half = {pair: to_half(side) for pair, side in cuts_um.items()}
+            side = hop_pads_um[metal, via] + extra
+            pads_um[metal] = max(pads_um.get(metal, 0.0), side)
+            half = landing_pad_half_dbu(side, cuts_um[via], dbu)
+            pad_half[metal] = max(pad_half.get(metal, 0), half)
+        cut_half[via] = max(1, math.ceil((cuts_um[via] + extra) / (2 * dbu) - 1e-9))
     space_dbu = {
         pair: int(round(_min_spacing_um(variant, pair) / dbu))
         for pair in {**pad_half, **cut_half}
@@ -375,7 +339,7 @@ def _search_landing(
         if len(samples[category]) < _REJECTION_SAMPLES:
             samples[category].append(f"({x * dbu:g}, {y * dbu:g}) um: {detail}")
     if not candidates:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: no candidate landing point for port '{name}' on "
             f"layer {net_layer[0]}/{net_layer[1]}: no grid point at "
             f"grid_um={step * dbu:g} falls inside the net shapes and the net has "
@@ -384,7 +348,7 @@ def _search_landing(
         )
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     detail_lines = "; ".join(s for key in counts for s in samples[key])
-    raise _err(
+    raise GenComposeError(
         f"ports_from_labels: no legal landing for port '{name}' on layer "
         f"{net_layer[0]}/{net_layer[1]} up to '{access['up_to']}' -- "
         f"{len(candidates)} candidate(s) rejected ({summary})"

@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from klayout_tools import sim_set
 from klayout_tools.sim_batch_observer import current_job_observer
@@ -53,6 +54,59 @@ def test_stuck_member_becomes_not_launched_entry(tmp_path, monkeypatch):
     assert manifest["requests"][2]["error_code"] == sim_set.NOT_LAUNCHED_CODE
 
 
+def test_refused_member_locates_a_later_report_with_colliding_stems(
+    tmp_path, monkeypatch
+):
+    _fast_poll(monkeypatch)
+    path = _write_set(tmp_path, 1)[0]
+    out = tmp_path / "out"
+    late = out / "req0-1" / sim_set.REPORT_FILENAME
+    late.parent.mkdir(parents=True)
+    late.write_text(json.dumps(_fake_report(job_id="job-stale")))
+    release = threading.Event()
+    finished = threading.Event()
+
+    def run(path, *, artifacts_dir, **kwargs):
+        if Path(artifacts_dir) == late.parent:
+            observer = current_job_observer()
+            observer.on_job("job-late")
+            observer.on_state("job-late", "pending")
+            release.wait(10)
+            return _fake_report(job_id="job-late")
+        return _fake_report(job_id="job-first")
+
+    original = sim_set._run_one
+
+    def observe_completion(index, *args, **kwargs):
+        entry = original(index, *args, **kwargs)
+        if index == 1:
+            finished.set()
+        return entry
+
+    monkeypatch.setattr(sim_set, "_run_one", observe_completion)
+    try:
+        envelope = sim_set.run_sim_set(
+            [path, path], outdir=str(out), capacity_wait_s=0.05, run=run
+        )
+        first, refused = envelope["requests"]
+        assert first["status"] == "pass" and "expected_report" not in first
+        assert refused["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert refused["job_ids"] == ["job-late"] and refused["report"] is None
+        candidate = Path(refused["expected_report"])
+        assert candidate == late
+        assert json.loads(candidate.read_text())["environment"]["remote"]["job_id"] == (
+            "job-stale"
+        )
+    finally:
+        release.set()
+        assert finished.wait(10)
+    assert (
+        json.loads(candidate.read_text())["environment"]["remote"]["job_id"]
+        in (refused["job_ids"])
+    )
+    assert refused["report"] is None
+
+
 def test_never_launching_job_ends_unstarted_members_as_not_launched(
     tmp_path, monkeypatch
 ):
@@ -80,6 +134,7 @@ def test_never_launching_job_ends_unstarted_members_as_not_launched(
         assert entry["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
         assert "job-stuck" in entry["error"]["message"]
         assert entry["job_ids"] == []
+        assert "expected_report" not in entry
     assert report["status"] == "error"
     manifest = json.loads((tmp_path / "out" / sim_set.MANIFEST_FILENAME).read_text())
     for i in (1, 2):
@@ -189,6 +244,116 @@ def test_interrupt_while_gate_held_still_terminates(tmp_path, monkeypatch):
     assert by_index[1]["error"]["code"] == sim_set.SET_INTERRUPTED_CODE
     assert by_index[2]["status"] == "pass"
     assert report["status"] == "error"
+
+
+def test_held_job_spares_pending_members_while_a_worker_is_live(tmp_path, monkeypatch):
+    """Issue #6278: with ``max_in_flight=2``, one member's job held ``pending``
+    past the window must not convert the unstarted members to ``not_launched``
+    while the other worker is still live -- that worker keeps draining them
+    (each outlasting the window) instead of being cut."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            release.wait(30)
+        else:
+            time.sleep(0.25)  # outlast the abandonment + grace window
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert by_index[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    assert by_index[0]["job_ids"] == ["job-held"]
+    for i in (1, 2, 3, 4):
+        assert by_index[i]["status"] == "pass", by_index[i]
+    assert report["status"] == "error"  # member 0 still errored
+
+
+def test_held_job_with_one_healthy_drainer_still_terminates(tmp_path, monkeypatch):
+    """Issue #6278 starvation shape: the held job never leaves ``pending`` and
+    one long-running healthy member outlasts the window. The set must still
+    terminate with an entry per member: the healthy member and whatever it
+    drained pass; nothing hangs behind the never-freeing job."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            release.wait(30)
+        elif "req1" in path:
+            time.sleep(0.25)  # the long-running healthy member
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert len(by_index) == 5
+    assert by_index[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    for i in (1, 2, 3, 4):
+        assert by_index[i]["status"] == "pass", by_index[i]
+
+
+def test_all_started_members_stall_pending_tail_still_terminates(tmp_path, monkeypatch):
+    """Issue #6278 edge: with every started member stalled ``pending``
+    simultaneously there is no live worker to drain ``pending``, so the
+    termination arm still fires and the unstarted tail ends as ``not_launched``
+    naming a held job."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        name = "job-" + os.path.basename(path).removesuffix(".json")
+        observer.on_job(name)
+        observer.on_state(name, "pending")
+        release.wait(30)
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert len(by_index) == 5
+    for i in (0, 1):
+        assert by_index[i]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert by_index[i]["job_ids"] == [f"job-req{i}"]
+    for i in (2, 3, 4):
+        assert by_index[i]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert by_index[i]["job_ids"] == []
 
 
 def test_single_member_set_stuck(tmp_path, monkeypatch):

@@ -16,6 +16,7 @@ closed). Off by default, so existing citations grade unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ._jsonnum import is_int
@@ -23,13 +24,84 @@ from ._jsonnum import is_int
 _REASON_CHECK_FAILED = "check_failed"
 
 
-def _scopes(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+def _scopes(envelope: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """The corner set graded by ``_sta_timing_passed``: every ``corners[]``
     entry of a multi-corner response, or the flat envelope itself."""
     corners = envelope.get("corners")
     if isinstance(corners, list):
         return [c for c in corners if isinstance(c, dict)]
     return [envelope]
+
+
+def _exception_entry(entry: Any) -> dict[str, Any] | None:
+    """Project a measured record onto the exception that the session applied."""
+    if not isinstance(entry, dict):
+        return None
+    if not all(
+        isinstance(entry.get(key), str) and entry[key] for key in ("from", "to")
+    ):
+        return None
+    through = entry.get("through")
+    if through is not None and (not isinstance(through, str) or not through):
+        return None
+    if not is_int(entry.get("index")) or entry["index"] < 0:
+        return None
+    if not all(is_int(entry.get(key)) and entry[key] > 0 for key in ("setup", "hold")):
+        return None
+    return {
+        key: entry.get(key)
+        for key in ("index", "from", "through", "to", "setup", "hold")
+    }
+
+
+def sta_exception_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """The exception identities for the same corners that signoff grades."""
+    corners = []
+    for scope in _scopes(envelope):
+        if "multicycle_paths" not in scope or scope["multicycle_paths"] == []:
+            continue
+        paths = scope["multicycle_paths"]
+        records = (
+            [_exception_entry(entry) for entry in paths]
+            if isinstance(paths, list)
+            else None
+        )
+        corners.append(
+            {
+                "corner": scope.get("corner"),
+                "multicycle_paths": records
+                if records is not None and None not in records
+                else None,
+            }
+        )
+    if not corners:
+        return {}
+    provenance = envelope.get("provenance")
+    digest = provenance.get("request_sha256") if isinstance(provenance, dict) else None
+    return {
+        "applied_exceptions": {
+            "request_sha256": digest if isinstance(digest, str) else None,
+            "corners": corners,
+        }
+    }
+
+
+def sta_citation_detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
+    """Attach the exception detail to its own citation in a compound item."""
+    detail = sta_exception_disclosure(envelope) if kind == "sta" else {}
+    return {"detail": detail} if detail else {}
+
+
+def sta_item_exception_detail(item_id: int, extra: dict[str, Any]) -> dict[str, Any]:
+    """An item with one exception-backed STA report can name its request and corners."""
+    if item_id != 5:
+        return {}
+    details = [
+        c["detail"]
+        for c in extra.get("citations", [])
+        if c.get("kind") == "sta" and "applied_exceptions" in c.get("detail", {})
+    ]
+    return details[0] if len(details) == 1 else {}
 
 
 def _check_count(block: dict[str, Any], key: str) -> int | None:
@@ -44,7 +116,7 @@ def _check_count(block: dict[str, Any], key: str) -> int | None:
     return count
 
 
-def constraint_completeness_status(scope: dict[str, Any]) -> str | None:
+def constraint_completeness_status(scope: Mapping[str, Any]) -> str | None:
     """A corner's ``constraint_completeness.status`` (``None`` if absent)."""
     block = scope.get("constraint_completeness")
     if not isinstance(block, dict):

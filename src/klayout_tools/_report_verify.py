@@ -16,12 +16,14 @@ the comparison idiom ``klt signoff``'s ``_grade_evidence()``
 already established: a mismatch always renders as a **failure to verify**,
 never a false pass.
 
-Both modes report the same two-value ``status``:
+The result carries a verification ``status``:
 
 - ``"match"`` -- every check passed (cheap mode: every hash matched; full
   mode: no verdict-bearing field drifted).
-- ``"drifted"`` -- at least one check failed (cheap mode: names which hash
-  moved; full mode: names which field(s) changed).
+- ``"drifted"`` -- a hash differs, a baseline is absent, or a full rerun
+  changed a verdict-bearing field.
+- ``"unverifiable"`` -- LVS/extract cheap checks could not hash a recorded input
+  and found no independent drift.
 
 ``drc.py``/``lvs.py``/``extract.py``/``synthesize.py``/``place_and_route.py``
 each supply the verb-specific pieces (which hashes to re-derive, how to re-run
@@ -46,12 +48,13 @@ committing flow evidence next to its request needs to know.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from typing import Any
 
 from . import env_provenance
-from ._paths import _load_request_json
+from ._jsongz import READ_ERRORS, open_text
 from ._report_verify_diff import diff_verdict_fields
 from ._report_verify_exclude import LIST_ITEM
 
@@ -115,7 +118,8 @@ def get_path(data: Any, path: tuple[str, ...]) -> Any:
 
 def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read and minimally validate a previously committed ``klt drc``/``klt
-    lvs`` ``--format json`` report from ``path``.
+    lvs`` ``--format json`` report from ``path``. Gzip compression is
+    detected by content, regardless of the filename's suffix.
 
     Raises ``error_cls`` (the caller's own ``DrcError``/``LvsError``, so the
     CLI layer's existing single ``except`` clause keeps working unchanged)
@@ -125,7 +129,18 @@ def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, An
     for "an old report predating #331" / a malformed path (issue #1106's
     acceptance criteria).
     """
-    data = _load_request_json(path, error_cls)
+    if not os.path.exists(path):
+        raise error_cls(f"file not found: {path}")
+    if os.path.isdir(path):
+        raise error_cls(f"not a file: {path}")
+
+    try:
+        with open_text(path) as handle:
+            data = json.load(handle)
+    except READ_ERRORS as exc:
+        raise error_cls(f"could not read request '{path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise error_cls(f"request '{path}' is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise error_cls(f"committed report must be a JSON object: {path}")
     return data
@@ -146,7 +161,8 @@ def resolve_committed_path(
       still-plain-string field): returned verbatim, so the historical
       anchoring is byte-unchanged -- a relative value still resolves against
       the current process's cwd, the convention ``klt drc --check``
-      established and :func:`klayout_tools.lvs._input_hash_check` documents.
+      established and :func:`klayout_tools._report_verify_hints.input_hash_check`
+      documents.
     - the ``{path, scope}`` object :func:`~klayout_tools.env_provenance
       .repo_relative_path` builds: ``scope: "repo"`` is joined to the repo
       root discovered from **the committed report's own location**, which is
@@ -236,6 +252,21 @@ def build_check_result(
     }
     if skipped is not None:
         result["skipped"] = skipped
+    return result
+
+
+def build_input_check_result(
+    *, report_path: str, checks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Distinguish an unavailable input from a changed digest for LVS and extract."""
+    result = build_check_result(report_path=report_path, checks=checks)
+    for check in checks:
+        if check["expected"] is not None and check["actual"] is None:
+            check["status"] = "unverifiable"
+    if result["status"] == "drifted" and all(
+        check["match"] or check.get("status") == "unverifiable" for check in checks
+    ):
+        result["status"] = "unverifiable"
     return result
 
 
