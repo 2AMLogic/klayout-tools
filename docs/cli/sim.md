@@ -1562,10 +1562,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   (`foo.sim.json` -> `out/foo.sim/`). Without `-o` the directories live under the
   single-request default (`.klt/sim/<stem>/` next to each request file). A
   repeated stem gets the member's index appended (`foo-1`) so two members
-  never share a directory or an output lock. `requests[].report` in the
-  aggregate envelope (and each request's `dir` in `set-manifest.json`) is
-  the authoritative path to a member's `report.json` -- read it from the
-  envelope rather than re-deriving the stem.
+  never share a directory or an output lock.
+
+  **Across versions.** Through klt 0.9.2, only the last suffix was stripped:
+  `foo.request.json` wrote to `out/foo.request/`. After 0.9.2 it writes to
+  `out/foo/`; `foo.sim.json` writes to `out/foo.sim/` in both versions.
+  Since 0.8.0, `set-manifest.json` has recorded each member directory in
+  `requests[].dir`. Append `report.json` to that path for a collected member,
+  or read its full report path from `requests[].report` in the completed
+  aggregate envelope. When `-o` is relative, resolve these paths from the
+  directory where the batch-set command ran.
 - **Netlist identity.** For each corner batch job, collection compares the
   runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
   bytes, including rewritten include paths. A mismatch rejects the result

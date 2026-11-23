@@ -103,7 +103,7 @@ def _enforce_published_engine_version_pin(
     version (legacy entry, unparseable value), or any one image that
     satisfies the pin, defers to :func:`check_offhost_engine_version_pin`
     above -- a manifest records what was *published*, not what the launched
-    instance runs. Shares :func:`klayout_tools.sim._version_components` with
+    instance runs. Shares :func:`klayout_tools.sim._version_satisfies_pin` with
     that check so the two can never disagree about a match, and
     ``runner_version_check`` does not relax it: the pin is a request-level
     requirement, not version-skew policy. A non-``ngspice`` ``engine``
@@ -122,8 +122,7 @@ def _enforce_published_engine_version_pin(
     unmet: list[dict[str, Any]] = []
     for image in images:
         found = image.get("ngspice_version")
-        parsed = sim._version_components(found) if found else None
-        if parsed is None or parsed[: len(pin)] == pin:
+        if sim._version_satisfies_pin(pin, found) is not False:
             return  # unknown version, or one image satisfies the pin
         unmet.append(image)
     required = ".".join(str(part) for part in pin)
