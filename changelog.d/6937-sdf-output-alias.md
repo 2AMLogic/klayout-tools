@@ -1,0 +1,1 @@
+- `klt functional-verification` recognizes separately assigned output bus bits in ANSI gate-level netlists, counts zero-delay SDF arcs across these joins, and names unsupported nonzero arcs before running Icarus (#6937).
