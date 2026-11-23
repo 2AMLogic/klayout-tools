@@ -1198,12 +1198,12 @@ def _dispatch_sta(
     for field in ("wire_load", "port_paths", "instance_paths", "generated_clocks"):
         if field in corner_fields:
             response[field] = corner_fields[field]
-    # Additive field (issue #2968): the applied exclusion list, present only
-    # when the request named `constraints.false_path_from`.
+    # Echo the exclusions only when requested (#2968).
     if constraints.false_path_from:
         response["false_path_from"] = list(constraints.false_path_from)
     if multicycle:  # additive (issue #6921): only when entries named
-        response["multicycle_paths"] = corner_fields["multicycle_paths"]
+        for field in ("multicycle_paths", "multicycle_engine_sessions"):
+            response[field] = corner_fields[field]
     response["spef_annotation"] = corner_fields["spef_annotation"]
     # Additive field (issue #2739): the propagated-clock evidence block --
     # what propagation actually reached -- `null` unless the request asked
