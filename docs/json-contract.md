@@ -863,8 +863,13 @@ file per instantiated hard macro — so `provenance.pdk` alone cannot answer
 "where did this cell's pin order come from". Like `klt erc`'s `spec`, it is a
 verb-local field rather than a `build_provenance()` parameter, and it is
 omitted entirely (never an empty list) for every reference form that reads no
-pin-order source. See [`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level
-LVS".
+pin-order source. A file under the resolved PDK root is recorded as the
+string `"$PDK_ROOT/<relative>"` (issue #5812) rather than an absolute host
+path, so a committed report does not leak where the PDK is installed (the PDK
+identity is in `provenance.pdk`); a `reference.pin_order_files` entry outside
+the PDK root stays absolute unless the request sets `portable_paths: true`.
+Same field and type, no `schema_version` bump. See
+[`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level LVS".
 
 `klt signoff` emits **no** `provenance` block of its own — it resolves no
 PDK, applies no deck, and reads no single input stream; the evidence it
@@ -2432,6 +2437,14 @@ A satisfied assertion of either kind marks the declared categories checked
 and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
+
+For `--engine klayout`, optional `violations[].values` contains the
+verbatim XML character data of each non-geometry RDB value in document
+order, including any tag such as `[#RATIO]`. Only findings with such
+values carry the field. `--engine both` retains it in
+`reports.native.violations[]`. `--check --rerun` compares the strings.
+They provide evidence only and do not affect the coverage verdict,
+`coverage_unknown`, or `--expect-rule-categories`.
 
 **Deck stdout as additive evidence** (issue #6613): every `--engine
 klayout` DRC report carries a top-level `deck_output` object —
