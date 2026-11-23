@@ -1291,6 +1291,7 @@ def _mos_array_layout(
     dogbone_terminals: bool = False,
     mirror: bool = False,
     tap_reach_um: float = 0.0,
+    well_enclosure_um: float = WELL_ENCLOSURE_MARGIN_UM,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1303,8 +1304,7 @@ def _mos_array_layout(
     follow it without any further arithmetic here (exactly as ``gate_contact``
     already does).
 
-    Also computes ``well_box_um`` -- a single well shape (per
-    :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
+    Also computes ``well_box_um`` with ``well_enclosure_um`` around every real and dummy
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
     used only when the caller requests ``flavor="pfet"``.
@@ -1508,7 +1508,7 @@ def _mos_array_layout(
                     )
                 )
 
-    margin = WELL_ENCLOSURE_MARGIN_UM
+    margin = well_enclosure_um
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
     # `voltage_flavor` marker box (issue #1054, margin widened by #1577):
     # independent of `well_box` -- see `_voltage_flavor_mark_margin_um`'s own
