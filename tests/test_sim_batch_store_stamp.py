@@ -70,6 +70,25 @@ def _searchable_home(monkeypatch, tmp_path):
     return home
 
 
+def test_search_resolved_flat_stamp_ignores_same_named_non_pdk_child(
+    _searchable_home, monkeypatch
+):
+    flat = _make_install(_searchable_home, "sg13g2", sources="flat side\n")
+    child = flat / "sg13g2"
+    child.mkdir()
+    (child / "SOURCES").write_text("nested side\n", encoding="utf-8")
+    monkeypatch.setattr(pdk, "STORE_DIRS", [str(flat)])
+
+    assert pdk.variant_dir_of(pdk.find_pdk(variant="sg13g2")) == str(flat)
+    expected = {
+        "variant": "sg13g2",
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(b"flat side").hexdigest(),
+    }
+    assert pdk_store.client_pdk_stamp("sg13g2", str(flat)) == expected
+    assert sb._client_pdk_stamp({"models": {"pdk": "sg13g2"}}) == expected
+
+
 def test_search_resolved_install_supplies_the_client_stamp(_searchable_home):
     """No ``models.pdk_root``, no ``$PDK_ROOT`` -- the default worker setup --
     still compares against the install `provenance.pdk` names, rather than

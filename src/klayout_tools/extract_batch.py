@@ -49,6 +49,8 @@ from typing import Any
 
 from . import _batch_collect, _batch_common, remote_transport, sim_batch
 from . import netlist_batch as _nb
+from .extract_base import REQUEST_SCHEMA
+from .extract_netlist_target import _default_output_path
 from .extract_spef import ExtractError
 from .netlist import NetlistError
 
@@ -100,7 +102,6 @@ def _translate(exc: NetlistError) -> ExtractError:
 def argv_request(args_values: dict[str, Any]) -> dict[str, Any]:
     """The runner request for an argv-form invocation (``file`` plus the
     :data:`ARGV_FORWARDED` flags and ``--deck-option`` pairs)."""
-    from .extract import REQUEST_SCHEMA
 
     request: dict[str, Any] = {"schema": REQUEST_SCHEMA}
     for key in ARGV_FORWARDED:
@@ -459,8 +460,6 @@ def run_extract_batch(
     )
     no_netlist = bool(request.get("no_netlist"))
     if output is None and not no_netlist:
-        from .extract import _default_output_path
-
         output = _default_output_path(_abs(request["file"], base_dir))
     config = _resolve_config(pdk, timeout_s)
     ceiling = _check_ceiling(config, timeout_s)

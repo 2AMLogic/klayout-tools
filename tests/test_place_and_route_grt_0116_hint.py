@@ -104,7 +104,7 @@ def _stub_openroad_route_failure(
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] != ["openroad", "-version"]:
-            script_path = cmd[5]
+            script_path = cmd[-1]
             if Path(script_path).name.endswith("_route.tcl") and (
                 fail_corner is None or fail_corner in Path(script_path).parts
             ):
