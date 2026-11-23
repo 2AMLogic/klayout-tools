@@ -361,6 +361,22 @@ def test_run_extract_rejects_an_unknown_cap():
         )
 
 
+def test_run_extract_rejects_emit_selected_resistance_without_the_graph():
+    """`emit_selected_resistance` (issue #4037) reads the graph result, so it is
+    refused up front without `resistance_graph`. This validator moved into
+    `extract_validate.py` with this PR's size-ratchet displacement, where the
+    module's 100% coverage floor leaves its `raise` arm no slack."""
+    with pytest.raises(
+        ExtractError, match="emit_selected_resistance requires resistance_graph"
+    ):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            parasitics=True,
+            emit_selected_resistance=True,
+        )
+
+
 def test_caps_reach_the_finfet_extraction_path(tmp_path):
     """The FinFET route forwards only the parasitics options it names to the
     shared pass, so a cap missing there would parse, validate and echo but
