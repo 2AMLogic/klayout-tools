@@ -540,7 +540,7 @@ def build_digital_job_description(
             "check": "place-and-route",
             "name": "place-and-route",
             "args": {"request": PLACE_AND_ROUTE_REQUEST_FILENAME},
-            "threshold": {"metric": "stage_reached", "equals": candidate.target_stage},
+            "threshold": {"metric": "status", "equals": "ok"},
         },
     ]
     metrics: list[dict[str, Any]] = [
