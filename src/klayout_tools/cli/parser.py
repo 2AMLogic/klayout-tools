@@ -94,6 +94,7 @@ from .parsers.em import add_em_parser
 from .parsers.extract import add_extract_parser
 from .parsers.signoff import add_signoff_parser
 from .parsers.version import add_version_parser
+from .pdk_expect import add_expect_bundle_arg, add_expect_version_arg
 
 
 def _add_format_arg(
@@ -189,21 +190,6 @@ def _add_pdk_args(
     if include_pdk:
         parser.add_argument("--pdk", default=None, help=pdk_help)
     parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
-
-
-def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
-    """Register ``--expect-version`` on ``klt pdk find``/``check`` (issue #3810)."""
-    parser.add_argument(
-        "--expect-version",
-        dest="expect_version",
-        default=None,
-        metavar="STAMP_OR_SHA",
-        help=(
-            "assert the installed PDK identity: an open_pdks commit SHA "
-            "(>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 "
-            "(payload still emitted) on mismatch or unknown identity"
-        ),
-    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -2363,7 +2349,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(find_parser)
+    add_expect_version_arg(find_parser)
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
@@ -2423,7 +2409,8 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(check_parser)
+    add_expect_version_arg(check_parser)
+    add_expect_bundle_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 
@@ -4041,8 +4028,8 @@ def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
             "Assert structural regularity of a cell array: layer-by-layer "
             "mirror or translation symmetry (XOR residual per layer) and/or "
             "abutment of the unit-cell placements at a declared pitch and "
-            "count (no gap, no overlap, length == count x pitch). Purely "
-            "geometric; fully headless via KLayout's batch database API. "
+            "count, checked per lane against a seam gap derived from the pitch. "
+            "Purely geometric; fully headless via KLayout's batch database API. "
             "See docs/cli/array-check.md."
         ),
     )
@@ -4081,7 +4068,7 @@ def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help="ignore deviations below this many um (default 0)",
     )
     p.add_argument("--pitch", default=None, help="abutment pitch in um (> 0)")
-    p.add_argument("--count", default=None, help="expected number of placements")
+    p.add_argument("--count", default=None, help="expected placements per lane")
     p.add_argument(
         "--direction",
         choices=("x", "y"),

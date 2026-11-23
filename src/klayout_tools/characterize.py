@@ -370,8 +370,6 @@ def _characterize_cell(
         options=options,
         arcs=arcs,
     )
-    plan = build_plan()
-
     build_request = partial(
         _build_sim_request,
         request=request,
@@ -383,7 +381,6 @@ def _characterize_cell(
 
     legs = run_cell_legs(
         work_dir=work_dir,
-        plan=plan,
         split_grid=options["split_grid"],
         slew_count=len(grid["input_transition_ns"]),
         build_plan=lambda rows: build_plan(slew_rows=rows),
@@ -394,6 +391,7 @@ def _characterize_cell(
         resume=resume,
         batch_shard=batch_shard,
     )
+    plan = legs.plan_metadata
     tables = _build_tables(plan, grid, legs.values, thresholds)
     _check_settle_margin(grid, tables, options)
     power_tables = _build_power_tables(plan, grid, legs.values, corner)

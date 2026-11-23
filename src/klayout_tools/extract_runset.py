@@ -2,26 +2,12 @@
 own KLayout LVS runset in batch and take the **extracted netlist** out of the
 ``.lvsdb`` it writes.
 
-This is the ``klt extract`` sibling of ``klt lvs --engine klayout-runset``
-(:func:`klayout_tools.lvs_runset.run_lvs_klayout_runset`, issue #2849), and it
-drives the very same launcher: binary resolution, ``-rd`` construction,
-timeout, "no database written" and non-zero-exit error text all come from
-``lvs_runset`` itself, never from a copy. Those helpers are still private
-names there (``_run_runset`` and friends): ``lvs_runset.py`` sits exactly on
-its file-size ceiling, so this module reaches them through
-``import-boundaries.json``'s ``shared_private_permissions`` -- the convention
-``lvs_runset_reference`` already uses for ``netlist_normalize`` -- and they
-should be promoted to public when that file is next split. Calling them
-*through the module* (never ``from ... import``) is also what keeps the
-existing tests that monkeypatch those names covering both engines.
+The engine shares the launcher, timeout handling and error reporting of
+``klt lvs --engine klayout-runset`` through :mod:`.lvs_runset`.
 
-**Why this engine exists.** ``klt extract``'s default engine runs a *curated*
-deck (``decks/``), so a device family that deck declares no class for is simply
-not extracted: IHP's ``pnpMPA`` on ``sg13cmos5l`` comes back
-``device_count: 0``. ``klt lvs`` could already reach such a family by running
-the PDK's own runset -- but a *verdict* is not a netlist, so there was no way
-to get a simulatable extracted netlist for a block whose core devices live in
-such a family. This engine closes exactly that gap.
+A vendor runset can extract device families outside the curated decks, such
+as IHP's ``pnpMPA`` on ``sg13cmos5l``. Its extracted circuit feeds the same
+device and net report as a curated run.
 
 **What it does NOT do.** No parasitics (``--parasitics`` and everything built
 on it is refused by name, not silently ignored): joining runset devices with
@@ -82,6 +68,8 @@ from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
+from .extract_base import SCHEMA_VERSION, _build_metrics
+from .extract_progress import _staged
 
 # Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
@@ -125,6 +113,11 @@ from .extract_runset_flags import (
 )
 from .extract_runset_flags import (
     validate_engine as validate_engine,
+)
+from .extract_runset_labels import (
+    NumberedLabels,
+    numbered_label_net_ids,
+    numbered_labels,
 )
 from .extract_runset_spice import (
     DeviceParams,
@@ -304,7 +297,7 @@ def run_extract_klayout_runset(
     database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
-    from .extract import _build_metrics, _normalized_netlist_sha256, _staged
+    from .extract import _normalized_netlist_sha256
     from .extract_progress import stage
     from .extract_report import _describe_devices, _describe_nets
 
@@ -325,7 +318,7 @@ def run_extract_klayout_runset(
     # The top cell has to be known before the runset runs: the stub schematic
     # is named after it, and the runset is told which cell to extract.
     with stage("layout_load"):
-        top_cell_name, dbu_um = _layout_identity(path, top)
+        top_cell_name, dbu_um, labels = _layout_identity(path, top)
 
     binary = _resolve_binary(klayout_binary, base_dir)
 
@@ -381,7 +374,12 @@ def run_extract_klayout_runset(
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
         instantiated = _instantiated_device_counts(circuit)
-        nets = _staged("describe_nets", _describe_nets, circuit)
+        nets = _staged(
+            "describe_nets",
+            _describe_nets,
+            circuit,
+            runset_label_ids=numbered_label_net_ids(lvsdb, circuit, labels),
+        )
         runset_block = {
             "deck_file": deck_file,
             "deck_vars": vars_,
@@ -424,7 +422,7 @@ def run_extract_klayout_runset(
     provenance["runset"] = runset_block
 
     result: dict[str, Any] = {
-        "schema_version": _schema_version(),
+        "schema_version": SCHEMA_VERSION,
         # Present only under this engine, so a curated-deck report is
         # byte-identical to one produced before this engine existed.
         "engine": RUNSET_ENGINE,
@@ -484,17 +482,10 @@ def run_extract_klayout_runset(
     return result
 
 
-def _layout_identity(path: str, top: str | None) -> tuple[str, float]:
-    """``(top cell name, dbu in um)`` for ``path``, resolving ``top`` the same
-    way the curated engine does."""
+def _layout_identity(path: str, top: str | None) -> tuple[str, float, NumberedLabels]:
+    """Resolve the top, units and labels which can resemble serialized net numbers."""
     from ._layout import load_layout, resolve_top_cell
 
     layout = load_layout(path, ExtractError)
     cell = resolve_top_cell(layout, top, ExtractError, path=path)
-    return cell.name, layout.dbu
-
-
-def _schema_version() -> int:
-    from .extract import SCHEMA_VERSION
-
-    return SCHEMA_VERSION
+    return cell.name, layout.dbu, numbered_labels(layout, cell)

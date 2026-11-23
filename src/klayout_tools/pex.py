@@ -243,6 +243,7 @@ from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
     TIE_SOURCE_DECLARED,
     _body_bias_report,
 )
+from .pex_errors import PexError as PexError
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -258,6 +259,7 @@ from .pex_resistance_graph import (
     _resistance_graph_echo,
 )
 from .sim import SimError, load_request, run_sim
+from .sim_osdi_pin import rebase_osdi_preload
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
 __all__ = [
@@ -328,27 +330,6 @@ MEASURE_COMMAND_TIMEOUT_S = 1800.0
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
 #: measurement, so :func:`_row_status` needs no command-mode special case.
 _MEASUREMENT_STATUSES = ("pass", "fail", "error")
-
-
-class PexError(Exception):
-    """Raised when a `klt pex` run cannot be completed: a bad testbench
-    request, a testbench with no `.include`/`.inc` DUT reference, testbenches
-    that reference different schematic netlists, or a failure in the
-    extraction/simulation steps this command drives (wrapping the original
-    :class:`~klayout_tools.extract.ExtractError` /
-    :class:`~klayout_tools.sim.SimError`).
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other `klt` verb's error contract.
-
-    ``code`` is an optional machine-readable classification emitted as the
-    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
-    (every pre-#2889 error) keeps the envelope byte-identical.
-    """
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _validate_tie_nets(
@@ -2125,11 +2106,9 @@ def _prepare_dut_swapped_request(
     ``"extracted"``). Returns the written request file's path, suitable for
     :func:`~klayout_tools.sim.run_sim`.
 
-    A relative ``models.lib`` the original request declares *in the
-    request-dir-relative shape* (no ``models.pdk``/``models.pdk_root``) is
-    resolved to an absolute path first -- the written copy lives in
-    ``work_dir``, not next to the original testbench file, so a relative
-    reference would otherwise resolve against the wrong directory.
+    Resolve request-relative OSDI preloads and literal ``models.lib`` paths
+    against the original testbench directory. Keep literal PDK-root preloads
+    for the executing host to resolve.
 
     A ``models`` block that *does* carry ``pdk``/``pdk_root`` is copied
     through **unmodified** (issue #1395): in that shape a relative ``lib``
@@ -2157,6 +2136,7 @@ def _prepare_dut_swapped_request(
         handle.write(swapped_body_text)
 
     swapped_request = copy.deepcopy(request)
+    rebase_osdi_preload(swapped_request, request_dir)
     models = swapped_request.get("models")
     if (
         isinstance(models, dict)

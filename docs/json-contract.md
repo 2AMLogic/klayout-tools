@@ -106,6 +106,12 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+When a `klt sim` measurement declares a supply-relative `limits.min` or
+`limits.max`, its per-corner result gains `limits_resolved` containing
+the numeric bounds for that corner. The aggregate measurement retains the
+declared `limits`, including its `{"frac_of": "<rail>", "fraction": k}`
+object. A measurement with only literal bounds keeps its existing shape.
+
 `measurements[].optional` (issue #2925) is an opt-in boolean (default
 `false`) that extends the per-measurement `status` vocabulary with an
 additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
@@ -389,6 +395,31 @@ unchanged. `klt extract` adds no field for the caps: its per-net
 `graph_too_large` diagnostic names the cap that was exceeded and the value
 applied. No `schema_version` bump.
 
+**A *derived* per-entry identity field, present on every entry and
+`null` when not derivable, is additive the same way — flag-gated or not.**
+`klt extract` now annotates every `nets[]` entry with `structural_id`
+(issue #5735): the net's numbering-independent `$anon<...>` structural
+handle, the same identity `netlist_normalized_sha256` (issue #3407) and
+`--check --rerun` already derive to canonicalize anonymous `\$N` spellings,
+now emitted per net so a testbench probing an unlabeled internal node can
+address it across re-extractions. It is `null` exactly when no identity is
+derivable — a named net (its `name` is the label a consumer already joins
+on; where names collide across internally-repeated sub-cells no unique
+per-net identity would be sound, so none is minted) or an anonymous net
+with zero device terminals — so no consumer ever sees the member appear or
+disappear; its stability bound is exactly #3407's (equal across builds that
+only renumber anonymous nets, not a promise that device instance names are
+stable). Two constraints made this land without invalidating any committed
+evidence: `--check --rerun`'s canonicalization strips the field alongside
+`net_id` — not because it is unstable (it is *content* class, a
+deterministic function of the same numbering-normalized connectivity) but
+because a report committed before the field existed lacks the key and must
+not diff against a fresh one on it — which also keeps
+`netlist_normalized_sha256` byte-identical across the field's introduction.
+No `schema_version` bump; recorded in `CHANGELOG.md` and documented in
+`docs/cli/extract.md`'s `nets[]` schema table and "Anonymous net numbering"
+section.
+
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
 engine reports a sentinel instead of a measurement, the honest fix looks like
@@ -561,6 +592,26 @@ count.
 Consumers that switch on `body_bias.status` already must tolerate an unknown
 value per the rule above. No `schema_version` bump on either verb. See
 [`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
+
+## Same-name response field on two verbs: `cell_exclusions`
+
+`klt synthesize` and `klt place-and-route` both report a `cell_exclusions`
+block for cell exclusions, and deliberately differ in **presence** (issue
+#7388): synthesize's is always present (issue #2382), while place-and-route's
+appears only when the request supplied `library.dont_use` — the safer
+additive choice for a verb whose whole block describes a request-supplied
+list. Within the block, the shared keys mean the same thing on both verbs,
+including `validated`: `true` when each requested pattern was matched
+against the resolved Liberty's cell names, `null` when that cell list could
+not be established and the zero-match check was skipped — the check-performed
+disclosure of the "Requested-but-unperformed analysis" rule below, so a
+caller mirroring one `dont_use` list between the two verbs gets the same
+signal from each. (`validated` cannot take the third value it can on
+synthesize, "nothing to check": place-and-route validates the request list
+non-empty before emitting the block.) Synthesize additionally reports `mode`
+and `engine_supports_dont_use`, which have no place-and-route analogue.
+Per-verb details: [`docs/cli/synthesize.md`](cli/synthesize.md) and
+[`docs/cli/place-and-route.md`](cli/place-and-route.md).
 
 ## Requested-but-unperformed analysis
 
@@ -775,6 +826,19 @@ Xyce or malformed worker observations are `null`; no client value is used
 as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
+
+When a collected corner-mode ngspice batch request declares
+`options.ngspice_init`, top-level `diagnostics[]` includes a warning with
+`code: "batch_ngspice_init_unverified"`, `feature: "options.ngspice_init"`
+and `simulator_application: "unverified"`. Its `jobs[]` contains one record
+per job, in fleet order. Each record has `job_id` (string or null),
+`fleet_index` (zero-based integer for a fleet, null for a single job) and
+`request_identity`. The two identity values are `"digest_reported"` when
+the worker reports the requested lines and their matching digest, including
+any worker thread pin, and `"unverified"` otherwise. The digest identifies
+the reported contents. Application by ngspice remains unverified for every
+job. This warning preserves the simulation grade and is absent when the
+request omits the init lines.
 
 The same worker block carries `threads_per_worker`, the positive integer pin
 from the worker report's `environment.threads_per_worker`. Each shard,

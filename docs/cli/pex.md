@@ -440,6 +440,11 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 
 ## The DUT `.include` swap
 
+Request-relative `options.osdi_preload` paths use the testbench request's
+directory on every simulation leg, including when `--outdir` moves the
+generated requests. The executing host resolves literal `$PDK_ROOT/` and
+`${PDK_ROOT}/` entries using the same rules as `klt sim`.
+
 A `klt sim` request's `netlist` field is one file with no built-in
 distinction between "the DUT" and "the stimulus" (see
 [`sim.md`](sim.md#netlist-convention-a-circuit-body-not-a-full-deck)).
@@ -1796,7 +1801,7 @@ the same input, rather than a lookalike that can drift:
 
 Every entry in `legs` expands to that same unit list: the extracted-side
 (and `--device-only-leg`) requests are deep copies of the testbench request
-with only the DUT netlist, its models library and `netlist_source` changed,
+with the DUT netlist swapped, model paths rebased and `netlist_source` set,
 so the corner / Monte Carlo expansion is identical on every leg.
 
 ### What it writes: nothing

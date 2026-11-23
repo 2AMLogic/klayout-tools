@@ -132,6 +132,63 @@ def test_climb_is_disabled_when_the_net_named_its_own_plane():
     assert "reaches the pin from behind" in rejected[0]["reason"]
 
 
+def test_climbable_reason_classes():
+    # #6912: the self-net pad-crossing classes (#433/#453/#1527 -- each
+    # names the met2/via escape in its own remedy text and is layer-guarded
+    # at the point of the check) and the guard/collector-ring classes
+    # (#199 case 2 / #434 -- plane-conditional since #1960, so the climbed
+    # retry re-proves no shared conductor via `_leg_plane_clears_ring`) are
+    # climbable; the classes that stay a property of the pin pair (a
+    # too-narrow channel, an unresolvable via drop, a gapped ring that
+    # reports too few side ports to check at all) are not.
+    from klayout_tools.gen_compose_plane_climb import _climbable
+
+    climbable = (
+        # #433 self-net pad footprint
+        "self-net backbone crosses 1.545um through block 'p1''s own port "
+        "'U0_D' on the same drawing layer -- bussing this net across the "
+        "block would draw a silent short to that pad",
+        # #453 degenerate same-facing jog
+        "self-net between two same-facing ports on the same row jogs "
+        "directly over block 'a''s own port 'U0_S'",
+        # #453/#469 drawn-metal overlap
+        "self-net's drawn 0.17um metal overlaps 0.3um^2 of block 'a''s own "
+        "drawn pad metal on the route layer",
+        # #1527 own-block escape
+        "leg's drawn 0.17um metal overlaps 0.2um^2 of block 'c''s own drawn "
+        "geometry on the route layer",
+        # #199 case 2 closed ring
+        "block 'p1' has a closed guard/collector ring (reports a TAP_*/"
+        "COLL_* port and no GAP_* opening) -- a route to its non-tap port "
+        "'U0_D' would cross the ring's own metal loop",
+        # #434 opening-crossing family (no opening / outside / too close /
+        # runs-along all share the "block 'X''s ring on its <side>" stem)
+        "backbone crosses block 'p3''s ring on its E side, which declares "
+        "no opening -- the route would merge this net with the ring's tap "
+        "net",
+        "backbone runs along block 'p3''s ring on its N side -- a route "
+        "laid on the ring's own metal merges this net with the ring's tap "
+        "net",
+        "backbone crosses block 'p3''s ring on its E side at 1.87um, "
+        "outside the [1.2, 2.2]um opening it declares",
+    )
+    for reason in climbable:
+        assert _climbable(reason), reason
+
+    not_climbable = (
+        "channel between blocks 'a' and 'b' is 0.12um wide, less than the "
+        "route's own 0.34um width",
+        "block 'p1' declares a ring opening but reports no port locating "
+        "its ring's N/S side(s) -- the route cannot be shown to pass "
+        "through the opening",
+        "no via declared between li1 and met1 for the via drop",
+        None,
+        "",
+    )
+    for reason in not_climbable:
+        assert not _climbable(reason), reason
+
+
 def test_climb_width_floors_up_to_the_planes_own_deck_minimum():
     # met3's curated deck floor (0.3um on sky130) is wider than the request's
     # 0.17um: a leg that has to climb that high draws at the plane's own
