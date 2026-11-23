@@ -1789,6 +1789,7 @@ the field.
 Not supported: generated clocks (#6925), case analysis, `-to`/`-through`
 false-path forms and list-valued selectors (#6926), hold-only or
 setup-only entries, per-corner multiplier values.
+
 ## Timing derate (`constraints.timing_derate`, issue #7014)
 
 A flow whose constraints of record apply `set_timing_derate -early/-late`

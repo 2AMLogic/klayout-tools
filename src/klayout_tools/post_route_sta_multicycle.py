@@ -175,7 +175,6 @@ def _measure_row_problem(parts: list[str]) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
 # The response block
 # --------------------------------------------------------------------------- #
 
@@ -313,7 +312,7 @@ def multicycle_corner_field(
     measurements = parse_multicycle_measurements(stdout, entries)
     for entry in entries:
         index = entry["index"]
-        if not (measurements[index]["setup"] or measurements[index]["hold"]):
+        if measurements[index]["setup"] == [] and measurements[index]["hold"] == []:
             raise PostRouteStaError(no_timed_path_error(entry))
     without: dict[int, dict[str, Any]] = {}
     for entry in entries:

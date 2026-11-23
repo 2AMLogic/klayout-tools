@@ -222,6 +222,22 @@ def test_run_sta_no_timed_path_is_request_error(tmp_path, monkeypatch):
         run_sta(request_path)
 
 
+@pytest.mark.parametrize("failed_sides", [("max", "min"), ("max",), ("min",)])
+def test_failed_with_query_preserves_diagnostic(tmp_path, monkeypatch, failed_sides):
+    request = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_multicycle_constraints()
+    )
+    blocks = _mcp_stdout(1.0, -1.0, 0.5)
+    blocks["with"] = _mcp_block(
+        *(f"MCPERR\t0\t{side}\tno such object" for side in failed_sides)
+    )
+    _stub_openroad_multicycle(monkeypatch, blocks)
+    (record,) = run_sta(request)["multicycle_paths"]
+    assert record["setup_slack_ns"]["with"] is None
+    assert record["hold_slack_ns"]["with"] is None
+    assert "no such object" in record["reason"]
+
+
 def test_run_sta_without_run_failure_surfaces(tmp_path, monkeypatch):
     request_path = _setup_verilog_success_env(
         tmp_path, monkeypatch, constraints=_multicycle_constraints()
@@ -273,7 +289,7 @@ endmodule
 """
 
 
-def _feedback_request(tmp_path, multicycle: bool) -> str:
+def _feedback_request(tmp_path, multicycle: bool, *, entry=_ENTRY) -> str:
     _write(tmp_path / "fb.v", _feedback_netlist())
     constraints = {
         "clock_port": "clk",
@@ -281,7 +297,7 @@ def _feedback_request(tmp_path, multicycle: bool) -> str:
         "report_instances": ["ff_adj", "ff_fb"],
     }
     if multicycle:
-        constraints["multicycle_paths"] = [_ENTRY]
+        constraints["multicycle_paths"] = [entry]
     return _write_request(
         tmp_path / "request.json",
         {
@@ -298,14 +314,15 @@ def _feedback_request(tmp_path, multicycle: bool) -> str:
     reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
     "KLT_SKIP_OPENROAD_TESTS unset",
 )
-def test_live_engine_multicycle_feedback_four_periods(tmp_path):
+@pytest.mark.parametrize("entry", [_ENTRY, {**_ENTRY, "through": "u_mux/X"}])
+def test_live_engine_multicycle_feedback_four_periods(tmp_path, entry):
     """The #6908 release criterion on the pinned engine: the same-enable
     feedback path fails setup at one period (the entry's "without" run) and
     passes at four (the "with" run); hold is recorded on both; the
     adjacent-phase path keeps its one-period slack; the unclocked register
     stays reported as unclocked -- an exception never converts it."""
     report = run_sta(
-        _feedback_request(tmp_path, multicycle=True), pdk_variant="sky130A"
+        _feedback_request(tmp_path, multicycle=True, entry=entry), pdk_variant="sky130A"
     )
 
     (record,) = report["multicycle_paths"]
