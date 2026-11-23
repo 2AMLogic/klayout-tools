@@ -3054,8 +3054,7 @@ Kron-reduced terminal network of the solved graph in place of the star for
 every net whose graph solved `ok` with three or more terminals and whose
 device terminals map one-to-one onto its graph terminals, so a tree-routed
 net's stub arms stop adding series resistance to the current path. The
-additive fields, absent without the flag (byte-identical output) except the
-request echo, which is present as `false` under plain `--resistance-graph`:
+additive fields, all absent without the flag (byte-identical output):
 
 - `parasitics.nets[].resistance_graph.network` (from `klt extract`, echoed
   verbatim into `extraction.resistance_graph.nets[].network`):
