@@ -720,6 +720,7 @@
         "klayout_tools._c_stdout",
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
+        "klayout_tools.place_and_route_asap7",
         "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_batch_job",
         "klayout_tools.place_and_route_batch_single",
