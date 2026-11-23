@@ -42,6 +42,7 @@ from typing import Any
 
 from . import macros as macro_spec
 from . import output_lock
+from . import place_and_route_library_limits as _library_limits
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
@@ -889,6 +890,12 @@ _SETUP_VIOLATIONS_END = "===KLT_SETUP_VIOLATIONS_END==="
 _HOLD_VIOLATIONS_BEGIN = "===KLT_HOLD_VIOLATIONS_BEGIN==="
 _HOLD_VIOLATIONS_END = "===KLT_HOLD_VIOLATIONS_END==="
 
+# The public facade also exposes the library-only sweep markers used by the Tcl emitter.
+_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN = _library_limits.SLEW_BEGIN
+_MAX_TRANSITION_LIBRARY_VIOLATIONS_END = _library_limits.SLEW_END
+_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN = _library_limits.CAPACITANCE_BEGIN
+_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END = _library_limits.CAPACITANCE_END
+
 #: Same marker convention as the setup/hold pair above, isolating the
 #: post-route corner sweep's own design-rule-check reports (issue #1709's
 #: "Two smaller things found alongside" item 1, folded into that issue's own
@@ -900,31 +907,6 @@ _MAX_TRANSITION_VIOLATIONS_BEGIN = "===KLT_MAX_TRANSITION_VIOLATIONS_BEGIN==="
 _MAX_TRANSITION_VIOLATIONS_END = "===KLT_MAX_TRANSITION_VIOLATIONS_END==="
 _MAX_CAPACITANCE_VIOLATIONS_BEGIN = "===KLT_MAX_CAPACITANCE_VIOLATIONS_BEGIN==="
 _MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
-
-#: Issue #2357: a **second**, library-only pass of the same two
-#: ``report_check_types`` blocks above, run *before*
-#: :func:`_design_rule_constraint_lines` applies any caller-stated
-#: ``constraints.max_transition_ns``/``.max_capacitance_pf`` override to
-#: ``[current_design]`` -- see :func:`_design_rule_check_lines`'s
-#: ``transition_begin``/``transition_end``/``capacitance_begin``/
-#: ``capacitance_end`` parameters and
-#: :func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`
-#: for where the two passes are ordered. Distinct markers so
-#: :func:`_count_violations` can isolate this pass's own stdout block from
-#: the effective (library-*and*-constraint) one the original markers above
-#: still isolate.
-_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN = (
-    "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN==="
-)
-_MAX_TRANSITION_LIBRARY_VIOLATIONS_END = (
-    "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_END==="
-)
-_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN = (
-    "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN==="
-)
-_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END = (
-    "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END==="
-)
 
 #: Same marker convention as the setup/hold pair above, isolating
 #: `check_antennas`'s own stdout (run post-`repair_antennas`, `"route"`
@@ -1039,6 +1021,7 @@ _TOP_LEVEL_METRIC_KEYS = (
     # gating as the pair above.
     "max_transition_violation_count_vs_library",
     "max_capacitance_violation_count_vs_library",
+    "library_limit_report_path",
     # Additive (issue #1865): `"constrained"` / `"unconstrained"` / `null` --
     # whether the slack fields above are measurements at all, or OpenSTA's
     # own unconstrained-design sentinel (`1e+39`) restated. See
@@ -1837,6 +1820,7 @@ def _run_single_corner(
         # Issue #2357
         max_transition_violation_count_vs_library: int | None = None
         max_capacitance_violation_count_vs_library: int | None = None
+        library_limit_report_path: str | None = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
             # Same deterministic path `_stage_script_lines` built for
@@ -1877,6 +1861,7 @@ def _run_single_corner(
                 # any caller-stated constraint is applied.
                 max_transition_violation_count_vs_library,
                 max_capacitance_violation_count_vs_library,
+                library_limit_report_path,
             ) = _run_corner_sweep(
                 threads=threads,
                 engine_logs=engine_logs,
@@ -1915,6 +1900,7 @@ def _run_single_corner(
                 max_capacitance_violation_count_vs_library=(
                     max_capacitance_violation_count_vs_library
                 ),
+                library_limit_report_path=library_limit_report_path,
                 congestion=congestion,
             )
         )
@@ -1926,7 +1912,8 @@ def _run_single_corner(
             hdl_toplevel,
             stage,
             input_hash=stage_hash,
-            artifacts=stage_artifacts,
+            artifacts=stage_artifacts
+            + _library_limits.retained_artifacts(output_dir, stages[-1]),
             stage_entry=stages[-1],
             engine_logs=engine_logs[logs_before:],
             placement_routability=placement_routability,
@@ -2760,6 +2747,7 @@ def _extract_stage_metrics(
     max_capacitance_violation_count: int | None = None,
     max_transition_violation_count_vs_library: int | None = None,
     max_capacitance_violation_count_vs_library: int | None = None,
+    library_limit_report_path: str | None = None,
     congestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
@@ -2842,6 +2830,7 @@ def _extract_stage_metrics(
         # pre-`"route"` stage reports.
         if corners is not None:
             entry["corners"] = corners
+            entry["library_limit_report_path"] = library_limit_report_path
         # Issue #1709: the design-rule-check verdict at those same swept
         # corners -- absent (never present-but-null) on every stage but
         # `"route"`, exactly like the two slack aggregates above, since the
