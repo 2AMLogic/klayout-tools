@@ -77,12 +77,12 @@ from .env_provenance import find_repo_root, repo_relative_path
 from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
-from .place_and_route_fences import checked_fence_reports, fence_failure_context
 
 # Deck-known configuration warnings (issue #7311) for the two gf180mcu
 # `request.power` shapes the bundled deck is known to reject: pure, static
 # (no DRC run) strings kept out of this file for its size ceiling.
 from .place_and_route_deck_warnings import deck_warnings
+from .place_and_route_fences import checked_fence_reports, fence_failure_context
 
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
