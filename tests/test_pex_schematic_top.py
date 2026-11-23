@@ -256,3 +256,51 @@ def test_async_manifest_binds_root_case_insensitively(tmp_path, design, monkeypa
     with pytest.raises(pex.PexError, match="schematic DUT selection"):
         pex.run_pex(str(gds), [str(request)], "sky130", attach=str(manifest), **options)
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("fault", "diagnostic"),
+    [
+        ("file_scope_collision", "instead of the extracted top"),
+        ("private_root_only", "no .subckt 'res'"),
+        ("parenthesized_order", "pin_order_mismatch"),
+        ("comma_arity", "1 nodes for 2 pins"),
+    ],
+)
+def test_mapped_root_refusals_before_either_leg(
+    tmp_path, design, monkeypatch, fault, diagnostic
+):
+    gds, dut, tb, request = design
+    if fault == "file_scope_collision":
+        with tb.open("a") as handle:
+            handle.write("\n.subckt layout_res p n\nRfake p n 1\n.ends\n")
+    elif fault == "private_root_only":
+        dut.write_text(".subckt fixture p n\n" + dut.read_text() + ".ends fixture\n")
+    elif fault == "parenthesized_order":
+        dut.write_text(dut.read_text().replace("RES RA RB", "RES (RB RA)"))
+    else:
+        dut.write_text(dut.read_text().replace("RES RA RB", "RES RA,RB"))
+        tb.write_text(tb.read_text().replace("Xres RA RB", "Xres RA"))
+    calls = []
+    _fake_async_sim(monkeypatch, calls)
+    options = _kwargs(tmp_path)
+    options.update(backend="batch", submit_only=True)
+    with pytest.raises(pex.PexError, match=diagnostic):
+        pex.run_pex(str(gds), [str(request)], "sky130", **options)
+    assert calls == []
+
+
+@real_ngspice
+@pytest.mark.parametrize("header", ["(RA RB)", "RA,RB", "(RA, RB)"])
+def test_real_public_interface_after_private_namesake(tmp_path, design, header):
+    gds, dut, tb, request = design
+    dut.write_text(
+        ".subckt fixture a b c\n.subckt RES a b c\nRprivate a b 1\n"
+        ".ends RES\n.ends fixture\n"
+        f".subckt RES {header}\nRpublic RA RB 289.2\n.ends RES\n"
+    )
+    report = pex.run_pex(str(gds), [str(request)], "sky130", **_kwargs(tmp_path))
+    assert report["status"] == "pass"
+    (row,) = report["delta"]
+    assert row["schematic_value"] == pytest.approx(1.39621, rel=1e-4)
+    assert row["extracted_value"] == pytest.approx(1.11626, rel=1e-4)

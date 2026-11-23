@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ._spice_text import strip_spice_inline_comment
-from ._spice_tokens import split_spice_tokens
+from ._spice_tokens import spice_nodes, split_spice_tokens
 from ._text import read_text
 from .pex_netlist_text import _subckt_interfaces
 from .spice_flatten import SpiceFlattenError, _x_call
@@ -32,18 +32,6 @@ def _masked_body(text: str) -> str:
             control = False
         lines.append(code.ljust(len(line)))
     return "\n".join(lines)
-
-
-def _node_count(nodes: list[str]) -> int:
-    # Commas separate pins wherever they fall (`a,b`, `a , b`, `(a,b)`), but
-    # the shared lexer keeps those spellings as different tokens. The original
-    # tokens are still needed to find the target's byte offset in the input.
-    count = 0
-    for node in nodes:
-        if node.startswith("(") and node.endswith(")"):
-            node = node[1:-1]
-        count += len(split_spice_tokens(node.replace(",", " ")))
-    return count
 
 
 _SUBCKT_LINES = re.compile(r"^[ \t]*\.(?:subckt|ends)\b[^\n]*", re.I | re.M)
@@ -93,6 +81,7 @@ def retarget_calls(
     end = 0
     masked = _masked_body(text)
     scopes = _scopes(masked)
+    public = {scope.name for scope in scopes if scope.parent is None}
     for match in _X_CARDS.finditer(masked):
         card = _CONTINUATION.sub(lambda prefix: " " * len(prefix[0]), match[0])
         tokens = split_spice_tokens(card)
@@ -103,14 +92,19 @@ def retarget_calls(
         if target.casefold() != schematic.casefold():
             continue
         private = _private_names(scopes, match.start())
-        if schematic.casefold() in private:
+        if schematic.casefold() in private or schematic.casefold() in public:
             continue
         if physical.casefold() in private:
             raise ValueError(
                 f"instance '{tokens[0]}' would call a private .subckt "
                 f"'{physical}' instead of the extracted top"
             )
-        actual_pins = _node_count(nodes)
+        if physical.casefold() in public:
+            raise ValueError(
+                f"instance '{tokens[0]}' would call the testbench .subckt "
+                f"'{physical}' instead of the extracted top"
+            )
+        actual_pins = len(spice_nodes(nodes))
         if pin_count is not None and actual_pins != pin_count:
             raise ValueError(
                 f"instance '{tokens[0]}' has {actual_pins} nodes for {pin_count} pins"
@@ -137,12 +131,14 @@ def bind(
     extracted_path: str | None,
 ) -> list[str | None]:
     """Resolve both headers and all testbenches before dispatch."""
-    roots = _subckt_interfaces(read_text(schematic_path) or "")
+    roots = _subckt_interfaces(read_text(schematic_path) or "", file_scope_only=True)
     if schematic.lower() not in roots:
         raise ValueError(f"no .subckt '{schematic}' in {schematic_path}")
     pin_count: int | None = len(roots[schematic.lower()][1])
     if extracted_path is not None:
-        extracted = _subckt_interfaces(read_text(extracted_path) or "")
+        extracted = _subckt_interfaces(
+            read_text(extracted_path) or "", file_scope_only=True
+        )
         if physical.lower() not in extracted:
             raise ValueError(f"no .subckt '{physical}' in {extracted_path}")
         # The established structured pin_count_mismatch takes precedence.

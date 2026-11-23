@@ -662,8 +662,13 @@ def _pin_count_mismatch(
     """
     schematic_text = _read_text(reference_netlist)
     extracted_text = _read_text(extracted_netlist)
-    schematic_interfaces = _subckt_interfaces(schematic_text or "")
-    extracted_interfaces = _subckt_interfaces(extracted_text or "")
+    public = schematic_top is not None
+    schematic_interfaces = _subckt_interfaces(
+        schematic_text or "", file_scope_only=public
+    )
+    extracted_interfaces = _subckt_interfaces(
+        extracted_text or "", file_scope_only=public
+    )
 
     candidates = (
         [subcircuit.lower()] if subcircuit is not None else list(extracted_interfaces)
@@ -781,12 +786,12 @@ def _pin_order_mismatch(
     parasitic references alphabetically; the schematic uses symbol order.
     The pin-count and flat-DUT checks handle their own failure cases.
     """
-    schematic_interface = _subckt_interfaces(_read_text(reference_netlist) or "").get(
-        (schematic_top or top_cell).lower()
-    )
-    extracted_interface = _subckt_interfaces(_read_text(extracted_netlist) or "").get(
-        top_cell.lower()
-    )
+    schematic_interface = _subckt_interfaces(
+        _read_text(reference_netlist) or "", file_scope_only=True
+    ).get((schematic_top or top_cell).lower())
+    extracted_interface = _subckt_interfaces(
+        _read_text(extracted_netlist) or "", file_scope_only=True
+    ).get(top_cell.lower())
     if schematic_interface is None or extracted_interface is None:
         return None
     schematic_pins = [pin.lower() for pin in schematic_interface[1]]
