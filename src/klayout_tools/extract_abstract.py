@@ -1474,26 +1474,13 @@ def _probe_single_abstract_pin_point(
     role: str | None,
     probe_layers: list[tuple[str, kdb.Region]],
 ) -> tuple[kdb.Net | None, bool]:
-    """The extracted net at exactly one candidate ``point``, via
-    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``, paired with whether
-    the point **landed** on its own declared conductor (issue #7561): the
-    returned flag is ``True`` only when ``role`` is not ``None`` and the
-    probe against that very role's region is the one that resolved. A
-    ``False`` flag means the net came from the bottom-up cross-layer
-    fallback below -- an overlapping conductor that happens to be at the
-    coordinate, not geometry this pin declared -- which is evidence the
-    joiner (:class:`AbstractPinJoins`) refuses to absorb a routed net on.
+    """Probe one access point and return its net and declared-conductor hit flag.
 
-    ``role`` names the conductor **this point** was read off -- the layer its
-    own label was drawn on, or the ``deck.metals`` level a
-    :func:`_local_pin_candidate_points` fragment was discovered on. It is a
-    property of the point, not of the pin (issue #2142): a hard macro
-    routinely labels one declared pin on several conductors, and probing all
-    of that pin's points against one cell-wide role is what sent the
-    off-role points into the cross-layer fallback below. That layer is
-    probed first and its answer is authoritative. ``None`` (the LEF
-    fallback, whose LEF layer name is not translated to a GDS layer) has no
-    declared layer to be authoritative about.
+    Each point carries its own label or fragment layer (#2142). A macro can
+    label the same pin on several layers. Probe the declared layer first.
+    A hit there returns ``(net, True)`` and supplies landing evidence for
+    :meth:`AbstractPinJoins.record` (#7561). A LEF point has no translated
+    GDS layer. A cross-layer hit returns ``(net, False)``.
 
     **The cross-layer fallback never reaches ``nwell``/``tap``** unless one
     of them *is* this point's own ``role`` (a ``deck.well_label`` pin) --
@@ -1508,13 +1495,8 @@ def _probe_single_abstract_pin_point(
     reports as a per-instance "no conductor found at its resolved access
     point" warning rather than silently shorting the pin into a rail.
 
-    Returns ``(None, False)`` when no eligible conductor carries geometry at
-    that point at all.
-
-    This is the single-candidate core :func:`_probe_abstract_pin_net` calls
-    once per access-point candidate for a pin (issue #1181) -- kept separate
-    so that per-point probing logic and the multi-point "pick the best
-    result" policy stay independently readable.
+    If every eligible layer misses, return ``(None, False)``.
+    :func:`_probe_abstract_pin_net` ranks hits across the pin's points (#1181).
     """
     if role is not None:
         for name, region in probe_layers:
@@ -1645,13 +1627,9 @@ def _probe_abstract_pin_net(
     lands on no conductor anywhere" case the caller already reports as a
     per-instance warning.
 
-    Each resolved candidate also records whether its probe landed on the
-    point's own declared conductor (:func:`_probe_single_abstract_pin_point`'s
-    second return value), which :meth:`AbstractPinJoins.record` keeps per
-    group: a later join that would absorb an anonymous routed net into a
-    differently named one needs that landing evidence on both sides
-    (issue #7561) -- a cross-layer fallback hit on an overlapping conductor
-    alone must not short a routed signal into a named rail.
+    :meth:`AbstractPinJoins.record` retains declared-layer hits for the group.
+    Joining an anonymous routed net to a differently named net requires a
+    declared-layer hit on each side (#7561).
 
     **``points`` order is pin-access provenance, and the tiebreak leans on
     that** (issue #1366). :func:`_resolve_abstract_cell_pins` always lists a
