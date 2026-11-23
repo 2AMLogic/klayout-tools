@@ -1473,9 +1473,16 @@ def _probe_single_abstract_pin_point(
     point: kdb.Point,
     role: str | None,
     probe_layers: list[tuple[str, kdb.Region]],
-) -> kdb.Net | None:
+) -> tuple[kdb.Net | None, bool]:
     """The extracted net at exactly one candidate ``point``, via
-    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
+    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``, paired with whether
+    the point **landed** on its own declared conductor (issue #7561): the
+    returned flag is ``True`` only when ``role`` is not ``None`` and the
+    probe against that very role's region is the one that resolved. A
+    ``False`` flag means the net came from the bottom-up cross-layer
+    fallback below -- an overlapping conductor that happens to be at the
+    coordinate, not geometry this pin declared -- which is evidence the
+    joiner (:class:`AbstractPinJoins`) refuses to absorb a routed net on.
 
     ``role`` names the conductor **this point** was read off -- the layer its
     own label was drawn on, or the ``deck.metals`` level a
@@ -1501,8 +1508,8 @@ def _probe_single_abstract_pin_point(
     reports as a per-instance "no conductor found at its resolved access
     point" warning rather than silently shorting the pin into a rail.
 
-    Returns ``None`` when no eligible conductor carries geometry at that
-    point at all.
+    Returns ``(None, False)`` when no eligible conductor carries geometry at
+    that point at all.
 
     This is the single-candidate core :func:`_probe_abstract_pin_net` calls
     once per access-point candidate for a pin (issue #1181) -- kept separate
@@ -1514,15 +1521,15 @@ def _probe_single_abstract_pin_point(
             if name == role:
                 net = l2n.probe_net(region, point)
                 if net is not None:
-                    return net
+                    return net, True
                 break
     for name, region in probe_layers:
         if name in _BODY_IDENTITY_PROBE_ROLES and name != role:
             continue
         net = l2n.probe_net(region, point)
         if net is not None:
-            return net
-    return None
+            return net, False
+    return None, False
 
 
 def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
@@ -1638,6 +1645,14 @@ def _probe_abstract_pin_net(
     lands on no conductor anywhere" case the caller already reports as a
     per-instance warning.
 
+    Each resolved candidate also records whether its probe landed on the
+    point's own declared conductor (:func:`_probe_single_abstract_pin_point`'s
+    second return value), which :meth:`AbstractPinJoins.record` keeps per
+    group: a later join that would absorb an anonymous routed net into a
+    differently named one needs that landing evidence on both sides
+    (issue #7561) -- a cross-layer fallback hit on an overlapping conductor
+    alone must not short a routed signal into a named rail.
+
     **``points`` order is pin-access provenance, and the tiebreak leans on
     that** (issue #1366). :func:`_resolve_abstract_cell_pins` always lists a
     pin's *primary*, declared access point(s) first -- its own drawn text
@@ -1659,13 +1674,16 @@ def _probe_abstract_pin_net(
     full derivation of both reported impossible bindings.
     """
     candidates: dict[int, kdb.Net] = {}
+    landed: set[int] = set()
     for point, role in points:
-        net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
+        net, declared = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
         if net is not None:
             candidates.setdefault(net.cluster_id, net)
+            if declared:
+                landed.add(net.cluster_id)
     winner = max(candidates.values(), key=_abstract_pin_net_score, default=None)
     if winner is not None:
-        joins.record(instance, pin, winner, candidates)
+        joins.record(instance, pin, winner, candidates, landed)
     return winner
 
 
