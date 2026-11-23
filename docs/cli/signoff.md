@@ -4725,6 +4725,75 @@ path resolves as given (like a `not_applicable` document), so a relative
 path is read against the process working directory. `schema_version`: no
 bump; every new report field is omitted when unused.
 
+#### Structural rows: the `structural` disposition (issue #6985)
+
+Some ratified spec rows are not measured quantities at all: a row that
+states a **design constant** the bench itself wires in (measuring the node
+the bench drives would grade the bench's own source, not the design — a
+tautology), or a row whose claim is a **structural property** (device
+sizing, array population, geometry legality) checked by inspecting the
+deck or layout. For such rows no producible envelope can ever carry a
+covering measurement, so before this form they could only be asserted
+through some envelope's `rows` (a false claim) or declared a gap — and a
+gap reads identically whether the row is unevidenced or evidenced by a
+real structural check the grader cannot see.
+
+The `structural` disposition makes such a row representable and distinct.
+It is an object on the row (mutually exclusive with `gap`, either form)
+carrying a human **claim** and the inspected **artifact**, pinned by
+content hash — the same `{file, content_hash}` binding the `not_applicable`
+and justified-gap forms use:
+
+```json
+{
+  "id": "vref_const",
+  "structural": {
+    "claim": "reference is the 0.9 V source `Vref` wired in tb_ota.spice, not a measured node",
+    "artifact": {"file": "sim/tb_ota.spice", "content_hash": "sha256:..."}
+  }
+}
+```
+
+The hash pin proves the artifact is **unchanged**, not that the property
+holds: `klt signoff` records and freshness-pins the artifact, it does not
+execute any check (mirroring `executed_by_klt: false` for `model-run`
+evidence). Outcomes:
+
+- a structural row is listed under `detail.structural_rows`
+  (`[{id, claim, artifact}]`) — never in `declared_gaps`,
+  `justified_gaps`, `uncovered_rows` or `row_sources`, so it is distinct
+  from both a gap and an (impossible) coverage. The key is omitted when
+  no structural row is declared, so a disposition-free report is
+  byte-identical to this build's previous rendering (`--check` sees no
+  drift); `--format text` lists each row's claim and its artifact + hash
+  beside the item;
+- a declared structural row forces the item `unmet` / `partial_coverage`
+  exactly as a justified gap does — the roll-up is deliberately
+  unchanged (that a gap keeps blocking `tier: "T1"` is the operator
+  ruling on #5858; whether a structural disposition may ever *satisfy*
+  item 5 is a separate operator-level ruling in the same family, not
+  decided here);
+- the artifact is hash-checked at grading time like any cited artifact:
+  missing or unreadable grades `unmet` / `structural_artifact_unreadable`,
+  a mismatched content hash `unmet` / `structural_artifact_stale`
+  (`detail` names the row, the file, and both hashes);
+- a malformed `structural` object — a missing or empty `claim`, a
+  missing or malformed `artifact`, an unknown key, a non-object, or
+  `structural` together with `gap` (either form) — is
+  `invalid_evidence` for that item alone, never a raise and never a
+  silent demotion to an undispositioned or gap row;
+- a citation naming a structural row in its `rows` is
+  `invalid_evidence` (a structural row is never covered by a
+  measurement), and the `spec_rows[]` table renders the row in the
+  `structural` state beside `gap` / `no_evidence` (see "The per-spec-row
+  table" below).
+
+Item 6 rows share the reader and grading branch, so they accept the same
+form with the same outcomes. The artifact path resolves as given (like a
+`not_applicable` document or a justified gap's rationale). Additive:
+`schema_version` is not bumped, and every new report field is omitted
+when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -4922,11 +4991,15 @@ The block is a **projection of the same evidence grading already read**, not a
 second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
 because of it. Its rules:
 
-- **States.** Every declared row gets a record, in one of four states. `graded`
-  — at least one cited, file-backed envelope carries a `spec_row`-tagged
-  measurement naming the row. `gap` — the row declares a free-text or justified
-  gap. The record quotes the free text or the justified gap's `reason` in
-  `gap` and has no measured values, even if a citation names it.
+- **States.** Every declared row gets a record, in one of five states.
+  `graded` — at least one cited, file-backed envelope carries a
+  `spec_row`-tagged measurement naming the row. `gap` — the row declares a
+  free-text or justified gap. The record quotes the free text or the
+  justified gap's `reason` in `gap` and has no measured values, even if a
+  citation names it. `structural` — the row carries the `structural`
+  disposition (#6985): the record has no measured values and instead
+  carries the disposition's `claim` and `artifact` (with its content
+  hash); grading refuses citations naming the row, exactly as for a gap.
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
@@ -5010,7 +5083,9 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
   against a proposed limit is provisional) separately; item 6's rows also
   accept the justified object form of `gap` (issue #5599, listed under
   `detail.justified_gaps` with the same outcomes as item 5's -- see
-  "Declared gaps" above);
+  "Declared gaps" above) and the `structural` disposition (issue #6985,
+  listed under `detail.structural_rows`, same outcomes as item 5's -- see
+  "Structural rows" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;

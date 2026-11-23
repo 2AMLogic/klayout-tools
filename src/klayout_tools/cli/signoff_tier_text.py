@@ -2,13 +2,10 @@
 
 Moved out of :mod:`.cli.signoff_cmd` to keep that module under its size
 ratchet, following the same precedent as the ``signoff_*`` module splits:
-the "not applicable" (issue #2865) and justified declared-gap (issue #5599)
-renderers -- the count suffixes on the ``T1: ...`` summary line and the
-per-item evidence listings -- live here. Both dispositions render beside an
-item that is still ``unmet``; neither ever reads as ``met``. So does the
-composition rendering (issue #6927): a ``met_by_composition`` row is real
-sub-block evidence that still does not satisfy the tier, so it renders as
-its own ``[COMP ]`` marker, never ``MET``, with the sub-blocks named.
+the not-applicable, justified-gap, structural-row and composition renderers
+live here. The tier summary and per-item listings distinguish these
+dispositions from met items. Composed rows use ``[COMP ]`` and name the
+sub-blocks that supply their evidence.
 """
 
 from __future__ import annotations
@@ -148,3 +145,17 @@ def _print_justified_gaps(item: dict) -> None:
                 f"          finding: {FINDING_JUSTIFIED_GAP_WITHOUT_ISSUE_LINK} "
                 "-- no issue names what would close this gap"
             )
+
+
+def _print_structural_rows(item: dict) -> None:
+    """Each structurally dispositioned row with its evidence (issue #6985):
+    the claimed fact and the hash-bound artifact that evidences it. The
+    hash pin proves the artifact is unchanged, not that the property holds
+    -- ``klt`` records and freshness-pins it, it does not execute any
+    check."""
+    for row in (item.get("detail") or {}).get("structural_rows") or []:
+        print(f"        structural: {row['id']} [{row['claim']}]")
+        print(
+            f"          artifact: {row['artifact']['file']} "
+            f"(content_hash={row['artifact']['content_hash']})"
+        )
