@@ -4,17 +4,17 @@ Moved verbatim out of ``run_extract``: the flag-combination checks that run
 before any extraction work, in their original order with their original
 messages. Returns the values the block derives (frozen net sets, parsed
 parasitic variants, net selectors, the substrate-tie resistance).
-
-The helpers it calls that still live in ``extract.py`` are imported inside the
-function body: ``extract.py`` imports this module at its top level, so a
-module-level ``from .extract import ...`` would be a circular import.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
+from ._jsonnum import is_int
+from .extract_base import SUBSTRATE_DC_TIE_RESISTANCE_OHM
+from .extract_netselect import _build_net_selectors, _selects_critical
 from .extract_resistance_graph_caps import validate_resistance_graph_caps
 from .extract_spef import ExtractError
 
@@ -118,13 +118,6 @@ def validate_run_extract_args(
     matched_device_groups: Any,
     parasitics: Any,
 ) -> ValidatedExtractArgs:
-    from .extract import (
-        _build_net_selectors,
-        _require_parasitics,
-        _resolve_substrate_tie_ohms,
-        _selects_critical,
-        _validate_resistance_path_args,
-    )
     from .extract_parasitics import parse_parasitic_variants
 
     if mom_net is not None and not parasitics:
@@ -285,3 +278,133 @@ def validate_run_extract_args(
         variants,
         net_selectors,
     )
+
+
+def _resolve_substrate_tie_ohms(value: float | None, parasitics: bool) -> float:
+    """Validate ``--substrate-tie-ohms`` (issue #3089) and return the
+    requested tie resistance, defaulting to
+    :data:`SUBSTRATE_DC_TIE_RESISTANCE_OHM` when the flag was not given.
+
+    Raises :class:`ExtractError` when given without ``--parasitics`` (the
+    tie only exists in a parasitic netlist) or when not a finite value
+    ``>= 0``.
+    """
+    _require_parasitics("--substrate-tie-ohms", value, parasitics)
+    if value is None:
+        return SUBSTRATE_DC_TIE_RESISTANCE_OHM
+    if not math.isfinite(value) or value < 0:
+        raise ExtractError(
+            f"--substrate-tie-ohms must be a finite value >= 0 (got {value!r})"
+        )
+    return float(value)
+
+
+def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
+    """Reject ``flag`` when it was given without ``--parasitics``.
+
+    Several flags piggyback on the lumped-RC pass and are meaningless
+    without it (``--mom-net``, ``--spef``, ``--critical-net``, …, and
+    ``--substrate-spreading`` as of issue #2561), and all raise the same
+    ``"<flag> requires --parasitics"`` :class:`ExtractError`. The older ones
+    still test for it inline in :func:`run_extract` — deliberately left
+    alone, since rewriting them is not this issue's business — but a *new*
+    one routes through here instead, so it adds no further branch to a
+    function that already carries many.
+    """
+    if value is not None and not parasitics:
+        raise ExtractError(f"{flag} requires --parasitics")
+
+
+def _validate_resistance_path_args(
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+    *,
+    parasitics: bool,
+    distributed_rc: bool,
+) -> None:
+    """Up-front validation of ``--resistance-path`` and its limits (issue
+    #2765) -- every violation is an :class:`ExtractError`, the same "a flag
+    naming something invalid is an error, not a silent no-op" convention
+    the other opt-in parasitics flags follow."""
+    from .resistance_path import validate_limits
+
+    if not resistance_paths:
+        if max_nodes is not None or max_resistors is not None:
+            raise ExtractError(
+                "--resistance-path-max-nodes/--resistance-path-max-resistors "
+                "require --resistance-path"
+            )
+        return
+    if not parasitics:
+        raise ExtractError("--resistance-path requires --parasitics")
+    if not distributed_rc:
+        raise ExtractError("--resistance-path requires --distributed-rc")
+    for query in resistance_paths:
+        net_id = query[0]
+        if not is_int(net_id):
+            raise ExtractError(
+                f"--resistance-path NET_ID must be an integer "
+                f"parasitics.nets[].net_id (got {net_id!r})"
+            )
+    try:
+        validate_limits(
+            _resistance_path_limit(max_nodes, "nodes"),
+            _resistance_path_limit(max_resistors, "resistors"),
+        )
+    except ValueError as exc:
+        raise ExtractError(
+            f"--resistance-path limits: {exc} "
+            "(--resistance-path-max-nodes/--resistance-path-max-resistors)"
+        ) from exc
+
+
+def _resistance_path_limit(value: int | None, kind: str) -> int:
+    """``value``, or the module default for ``kind`` (``"nodes"``/
+    ``"resistors"``) when ``None``."""
+    from .resistance_path import DEFAULT_MAX_NODES, DEFAULT_MAX_RESISTORS
+
+    if value is not None:
+        return value
+    return DEFAULT_MAX_NODES if kind == "nodes" else DEFAULT_MAX_RESISTORS
+
+
+def _attach_resistance_paths(
+    parasitics_report: dict[str, Any],
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+) -> None:
+    """Answer every ``--resistance-path`` query (issue #2765) over the
+    finished ``parasitics_report["nets"]`` and store the results, in request
+    order, as ``parasitics_report["resistance_paths"]``. A no-op (the key
+    stays absent) when no query was given, so default output is unchanged.
+
+    A malformed emitted ladder would be an internal inconsistency, not a
+    caller error -- surfaced as an :class:`ExtractError` rather than an
+    answer computed over silently dropped segments.
+    """
+    if not resistance_paths:
+        return
+    from .resistance_path import ResistanceGraphError, query_parasitic_net
+
+    nets = parasitics_report["nets"]
+    results = []
+    for net_id, source, target in resistance_paths:
+        try:
+            results.append(
+                query_parasitic_net(
+                    nets,
+                    net_id,
+                    source,
+                    target,
+                    max_nodes=_resistance_path_limit(max_nodes, "nodes"),
+                    max_resistors=_resistance_path_limit(max_resistors, "resistors"),
+                )
+            )
+        except ResistanceGraphError as exc:
+            raise ExtractError(
+                f"--resistance-path: net_id {net_id}'s emitted ladder is "
+                f"malformed: {exc}"
+            ) from exc
+    parasitics_report["resistance_paths"] = results

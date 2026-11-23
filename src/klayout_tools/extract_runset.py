@@ -68,6 +68,9 @@ from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
+from .extract_base import SCHEMA_VERSION, _build_metrics
+from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
 
 # Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
@@ -295,7 +298,6 @@ def run_extract_klayout_runset(
     database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
-    from .extract import _build_metrics, _normalized_netlist_sha256, _staged
     from .extract_progress import stage
     from .extract_report import _describe_devices, _describe_nets
 
@@ -420,7 +422,7 @@ def run_extract_klayout_runset(
     provenance["runset"] = runset_block
 
     result: dict[str, Any] = {
-        "schema_version": _schema_version(),
+        "schema_version": SCHEMA_VERSION,
         # Present only under this engine, so a curated-deck report is
         # byte-identical to one produced before this engine existed.
         "engine": RUNSET_ENGINE,
@@ -487,9 +489,3 @@ def _layout_identity(path: str, top: str | None) -> tuple[str, float, NumberedLa
     layout = load_layout(path, ExtractError)
     cell = resolve_top_cell(layout, top, ExtractError, path=path)
     return cell.name, layout.dbu, numbered_labels(layout, cell)
-
-
-def _schema_version() -> int:
-    from .extract import SCHEMA_VERSION
-
-    return SCHEMA_VERSION

@@ -20,14 +20,10 @@ from typing import Any
 from ._paths import resolve_tool_binary
 from .equiv_errors import EquivError
 
-#: Counterexample/vector *replay* backends -- an axis orthogonal to
-#: :data:`SUPPORTED_ENGINES` (which selects the *proof* engine). See this
-#: module's docstring, "Replay backend" section (issue #2223).
+#: Replay backends are independent of the proof engine (see #2223).
 SUPPORTED_SIM_BACKENDS = ("iverilog", "verilator", "both")
 
-#: The default replay backend: unchanged from before the backend selector
-#: existed, so omitting ``request.sim_backend`` reproduces the historical
-#: behavior exactly.
+#: Omitting ``request.sim_backend`` preserves the historical Icarus replay.
 DEFAULT_SIM_BACKEND = "iverilog"
 
 #: The backend whose replay is **canonical for evidence** -- it is the one
@@ -520,13 +516,13 @@ def run_counterexample_confirmation(
     request_doc: dict[str, Any],
     request_dir: str,
 ) -> None:
-    """Run the shared six-step counterexample confirmation + cross-check orchestration
-    for one replay mode, degrading to a ``diagnostics`` warning
-    on every failure path; its two wrappers (:func:`confirm_counterexample`
-    and ``equiv_sequential._confirm_sequential_counterexample``) carry the mode
-    contracts. ``parse_outputs(stdout)`` returns the mode's ``simulation``
-    payload fields plus a ``{time: {"gold": ..., "gate": ...}}`` index; ``sequential``
-    selects the stem, block shape, ``cycle`` key, verdict rule, and wording."""
+    """Replay a counterexample and update it in place: ``confirmed_by_simulation``,
+    ``simulation``, and (for ``both``) ``simulation_cross_check``. Degraded
+    confirmation or backend disagreement appends warnings to ``diagnostics``.
+    Pass ``request_doc`` and ``request_dir`` to the backend for binary resolution
+    (#2423). ``parse_outputs(stdout)`` returns simulation fields and gold/gate
+    outputs by time. ``sequential`` selects the stem, block shape, cycle key,
+    verdict rule and wording for the two wrapper functions."""
     stem = "equiv_seq_tb" if sequential else "equiv_tb"
     tb_path = os.path.join(output_dir, f"{stem}.v")
 
@@ -569,6 +565,9 @@ def run_counterexample_confirmation(
         ),
         "four_state": SIM_BACKEND_FOUR_STATE[canonical_backend],
         **fields,
+        # #2423: record the resolved absolute iverilog/vvp paths actually invoked,
+        # so a saved report identifies the build, including request overrides.
+        # Verilator has no override and returns {} (both keys absent).
         **canonical_binaries,
     }
     confirmed = _confirms(fields)

@@ -23,6 +23,11 @@ CASES = {
         "validate_clock_uncertainty",
         [{"clock_uncertainty_ns": -1}],
     ),
+    "_sta_generated_clocks": ("validate", [{"generated_clocks": [{}]}, []]),
+    "_sta_io_delay_clock": (
+        "validate_port_delay_maps",
+        [{"input_delays": {"data": {"min_ns": 0.1, "clock": "missing"}}}, "clk"],
+    ),
     "_sta_period_maps": ("validate_period", [0, "clock"]),
     "_sta_request_diag": None,
     "_sta_sdc_check": ("resolve_sdc_check", [False, "."]),

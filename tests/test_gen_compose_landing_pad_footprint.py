@@ -120,3 +120,13 @@ def test_landing_pad_half_keeps_the_margin_against_the_rounded_via():
     # 0.1555 um via -> 77.75 DBU half, drawn as 78. The pad's own half is
     # exactly 100 DBU, but enclosing the rounded via needs 78 + 22.25 -> 101.
     assert landing_pad_half_dbu(0.2, 0.1555, DBU) == 101
+
+
+def test_search_can_use_an_override_smaller_than_the_default_baseline():
+    # On the sky130 MCON hop 0.30 um clears the LI1 and MET1 floors.
+    mcon, li1, met1 = (67, 44), (67, 20), (68, 20)
+    ladder = ((mcon, li1, met1),)
+    defaults, _ = _stack_sizes("sky130A", ladder)
+    pads, _ = _stack_sizes("sky130A", ladder, 0.30)
+    assert defaults[met1, mcon] == pytest.approx(0.42)
+    assert pads == {(li1, mcon): 0.30, (met1, mcon): 0.30}
