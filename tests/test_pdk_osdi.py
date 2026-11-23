@@ -140,6 +140,26 @@ if model!='two.osdi' or {mode!r}!='no_registration':
         result = result["error"]
     else:
         assert status == 0
+        assert (
+            main(
+                [
+                    "pdk",
+                    "osdi",
+                    "--pdk",
+                    "ihp-sg13g2",
+                    "--pdk-root",
+                    str(variant),
+                    "--load-probe",
+                    "--format",
+                    "text",
+                ]
+            )
+            == 0
+        )
+        assert (
+            capsys.readouterr().out.splitlines()[-1]
+            == "Verified registration on ngspice 46"
+        )
     probe = result["load_probe"]
     assert (
         probe["engine_build"]["binary_sha256"]
@@ -175,3 +195,33 @@ def test_opaque_setup_and_malformed_pins_do_not_disclose_host_paths(tmp_path, ca
     setup = variant / "libs.tech/ngspice/.spiceinit"
     setup.write_text("osdi '$SOME_OTHER_DIR/model.osdi'\n")
     assert check(variant, capsys)[1]["error"]["code"] == "osdi_setup_unreadable"
+
+
+def test_text_inventory_lists_each_model_digest(tmp_path, capsys):
+    names = ["two.osdi", "one.osdi"]
+    variant = install(tmp_path, names)
+    assert (
+        main(
+            [
+                "pdk",
+                "osdi",
+                "--pdk",
+                "ihp-sg13g2",
+                "--pdk-root",
+                str(variant),
+                "--format",
+                "text",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "ihp-sg13g2 OSDI models: 2",
+        *(f"{name}  {hashlib.sha256(name.encode()).hexdigest()}" for name in names),
+    ]
+
+
+def test_unresolved_pdk_reports_a_path_free_cli_error(tmp_path, capsys):
+    code, report = check(tmp_path / "absent", capsys)
+    assert code == 1
+    assert report["error"]["code"] == "pdk_not_found"
