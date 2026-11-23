@@ -310,6 +310,7 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
+from .extract_pin_clusters import _promoted_pin_nets_by_cluster
 from .extract_preflight import preflight_layout, require_declared_set_for_rename
 from .extract_progress import StageTimer, active_timer, stage
 
@@ -329,8 +330,7 @@ from .extract_progress import StageTimer, active_timer, stage
 # rather than dropped. Because ruff's isort merges same-module plain-name
 # groups into one statement, the F401 suppression that marks them re-exports
 # sits on the whole group rather than on each line. `extract_report.py`'s own
-# three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
-# `_each_pin_net`) have no caller here and are deliberately not imported.
+# report-only helpers have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
     _describe_devices,
     _describe_matched_device_groups,
@@ -3874,7 +3874,10 @@ def _canonicalize_extract_report_for_rerun_diff(
     differences as ``status: "drifted"``:
 
     - every ``net_id`` (KLayout's per-run cluster counter) is stripped
-      recursively. Only top-level net rows lose ``structural_id``, so
+      recursively. Same-run consumers use that counter to resolve nets with
+      colliding names (see :func:`~klayout_tools.extract_parasitics._net_identity_name`
+      and :func:`_mom_ground_entry_for_crosscheck`). Only top-level net rows lose
+      ``structural_id``, so
       pre-field committed reports stay comparable (#5735);
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
@@ -3990,7 +3993,9 @@ def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
 
 
 def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> Any:
-    """Strip per-run net IDs and rewrite anonymous names throughout the report."""
+    """Walk the entire report, dropping every ``net_id`` and rewriting anonymous
+    names in string leaves. New fields carrying either need no registration.
+    The caller separately handles ``structural_id`` on top-level net rows."""
     if isinstance(value, dict):
         return {
             key: _strip_net_id_and_rewrite_names(val, name_map)
@@ -4949,26 +4954,6 @@ def _duplicated_declared_pin_names(
                 name_net_ids.setdefault(component, set()).add(net.cluster_id)
 
     return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
-
-
-def _promoted_pin_nets_by_cluster(circuit: Any) -> dict[int, tuple[Any, list[int]]]:
-    """Every promoted pin's net of ``circuit`` exactly once, keyed by
-    ``Net.cluster_id`` and in ``each_pin()`` order (deterministic for a given
-    netlist): two pins can resolve to one net object, and the rename pass
-    (issue #2854) must process -- and rename -- that net once. Values are
-    ``(net, [pin_id, ...])``.
-
-    A pin with no net, or whose net carries no name, is skipped: there is
-    nothing to match a declared name against.
-    """
-    pin_nets: dict[int, tuple[Any, list[int]]] = {}
-    for pin in circuit.each_pin():
-        net = circuit.net_for_pin(pin.id())
-        if net is None or not net.expanded_name():
-            continue
-        entry = pin_nets.setdefault(net.cluster_id, (net, []))
-        entry[1].append(pin.id())
-    return pin_nets
 
 
 def _declared_pin_short_finding(

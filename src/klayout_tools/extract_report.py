@@ -16,10 +16,9 @@ recognition engine, which is exactly why the two concerns split cleanly.
 
 Every caller lives in ``extract.py``: ``run_extract`` assembles the bulk of
 the report from these functions, and ``_extract_netlist`` calls
-:func:`_net_label_positions` once while the layout is still open. Three
-helpers -- :func:`_describe_layers_in_set`, :func:`_pin_index_by_net_id`
-and :func:`_each_pin_net` -- are private to this module (their only callers
-are its own siblings), so ``extract.py`` does not import them.
+:func:`_net_label_positions` once while the layout is still open. The report uses
+:func:`_pin_index_by_net_id` from the pin-cluster helpers.
+:func:`_describe_layers_in_set` and :func:`_each_pin_net` serve only this module.
 
 :func:`_describe_devices` still needs the
 ``_PARAM_PRECISION_UM``/``_PARAM_PRECISION_FARAD``/``_PARAM_PRECISION_OHM``
@@ -39,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, ParasiticsDeck
 from .extract_parasitics import spice_safe_net_name
+from .extract_pin_clusters import _pin_index_by_net_id
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -440,22 +440,6 @@ def _net_label_positions(
     return positions
 
 
-def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
-    """Map each promoted pin's underlying net's ``cluster_id`` to its 0-based
-    position in ``circuit.each_pin()`` order -- issue #1540.
-
-    KLayout writes SPICE ports in this order. Matching by cluster ID keeps
-    separately drawn nets with the same name distinct. Manually created
-    nets can share cluster ID zero and lack geometric disambiguation.
-    """
-    result: dict[int, int] = {}
-    for index, pin in enumerate(circuit.each_pin()):
-        net = circuit.net_for_pin(pin.id())
-        if net is not None:
-            result[net.cluster_id] = index
-    return result
-
-
 def _net_structural_id(net: kdb.Net, runset_label_ids: set[int] | None) -> str | None:
     """Identify an unnamed net by its own device terminals, even if names collide."""
     if net.name:
@@ -479,8 +463,13 @@ def _describe_nets(
 ) -> list[dict[str, Any]]:
     """Describe top-level nets, including their drawn labels and SPICE pin positions.
 
-    Use the same cluster IDs as :func:`_net_label_positions` and
-    :func:`_pin_index_by_net_id` to distinguish nets sharing a name.
+    Flattening repeated cells can give separate nets the same name (#1540).
+    ``net_id`` identifies the KLayout cluster within this extraction.
+    ``pin_index`` gives its zero-based SPICE port position, or ``None`` for
+    an internal net. ``label_positions_um`` locates the labels that named it.
+    Both :func:`_net_label_positions` and :func:`_pin_index_by_net_id` use
+    cluster identity. An omitted ``net_label_positions`` defaults to an empty
+    mapping, so a net without supplied label geometry gets an empty list.
     """
     pin_nets = {pin.expanded_name() for pin in _each_pin_net(circuit)}
     pin_index_by_net_id = _pin_index_by_net_id(circuit)
