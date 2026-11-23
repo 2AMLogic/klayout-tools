@@ -40,8 +40,8 @@ from ._provenance import sha256_file
 from .extract import ExtractError, run_extract
 from .extract_netlist_target import resolve_netlist_target
 from .extract_preflight import preflight_layout
+from .pex_errors import PexError
 from .pex_net_correspondence import (
-    _pex_error,
     build_probes,
     correspondence,
     preferred_renames,
@@ -211,7 +211,7 @@ def _circuit_bounds(lines: Sequence[str], top: str) -> tuple[int, int]:
                 start = i
         elif words[0].upper() == ".ENDS" and start is not None:
             return start, i
-    raise _pex_error(f"merged leg: missing complete .SUBCKT block for '{top}'")
+    raise PexError(f"merged leg: missing complete .SUBCKT block for '{top}'")
 
 
 def _rename_nodes(card: str, renames: Mapping[str, str]) -> str:
