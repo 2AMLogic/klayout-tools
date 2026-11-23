@@ -252,6 +252,7 @@ from .gen_compose_landing_pads import (
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
+from .gen_compose_pad_conflicts import leg_pad_notch_conflict
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -3733,21 +3734,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             Automatic climbs and GF180 9K/11K top-metal landings also
             check intermediate and far pads for spacing.
 
-            A literal positive-area overlap is still always rejected first,
-            then, on both entries, a shared edge or corner (#7024, #7221):
-            ``kdb.Region.interacting`` -- shares at least one point, as
-            ``LayoutToNetlist`` connects -- is the contact test, and needs no
-            space rule. For the primary entry, when the two regions neither
-            overlap nor touch but sit closer together than the resolved deck's
-            own same-layer ``"space"`` rule for ``layer``
-            (:func:`_min_spacing_um_for_layer`), one side is grown by that
-            threshold (``kdb.Region.sized`` -- the standard "distance < d"
-            Minkowski-sum test, symmetric regardless of which side grows)
-            before the same intersection test -- catching the class of
-            violation issue #1386 reported (`nets[].legs[].routed: true` legs
-            that still failed `klt drc`'s `li1.space.1`/`met1.space.1`) that
-            the overlap-only version could not see. A layer with no known
-            ``"space"`` rule keeps those two tests only (#6961)."""
+            Reject intersections and conductive contacts before checking the
+            deck's spacing rule. A via-drop leg also needs room between its
+            landing pad and its own backbone on the primary route layer."""
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None
             if candidate_width_um is None:
@@ -3918,11 +3907,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return own_via_cut_clearance_reason(
+            cut_conflict = own_via_cut_clearance_reason(
                 via_drops,
                 pdk_info["variant"],
                 _min_spacing_um_for_layer,
                 _own_block_layer_geometry,
+            )
+            if cut_conflict is not None or not via_drops:
+                return cut_conflict
+            return leg_pad_notch_conflict(
+                layer_regions[layer], layer, own_spacing, _drawing_dbu()
             )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
