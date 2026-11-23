@@ -136,7 +136,7 @@ from ._provenance import (
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -156,7 +156,66 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .extract_netlist_write import write_spice_netlist
 from .extract_progress import StageTimer, active_timer, stage
+from .lvs_base import (  # noqa: F401 -- shared vocabulary re-exported by lvs
+    _COLLATERAL_NET_DESCRIPTION,
+    _MAX_PARAMETER_TOLERANCE,
+    _MAX_TOLERANCE_PASSES,
+    _PARAM_ABS_EPSILON,
+    _PARAM_DISPLAY_NAMES,
+    _PARAM_REL_EPSILON,
+    _POWER_INSTANCE_SAMPLE_LIMIT,
+    BODY_STATUS_UNCHECKED,
+    BODY_STATUS_UNVERIFIED,
+    BODY_STATUS_VERIFIED,
+    CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED,
+    CATEGORY_COMPARE_TIMEOUT,
+    CATEGORY_DEVICE_BODY_UNVERIFIED,
+    CATEGORY_DEVICE_BULK_RECONCILED,
+    CATEGORY_DEVICE_CLASS,
+    CATEGORY_DEVICE_CLASS_ARITY,
+    CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE,
+    CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+    CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED,
+    CATEGORY_DEVICE_FINFET_BULK_TIED,
+    CATEGORY_DEVICE_FLAVOUR_MISMATCH,
+    CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED,
+    CATEGORY_DEVICE_PARAMETER_EXCLUDED,
+    CATEGORY_DEVICE_PARAMETER_TOLERATED,
+    CATEGORY_DEVICE_PLACEHOLDER_VALUE,
+    CATEGORY_DEVICE_PROPERTY,
+    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+    CATEGORY_DEVICE_UNMATCHED,
+    CATEGORY_DEVICE_UNMERGED_FINGERS,
+    CATEGORY_HINTS_CONSTANT_NETS_DECLARED,
+    CATEGORY_HINTS_REJECTED,
+    CATEGORY_HINTS_SHORT_NETS_APPLIED,
+    CATEGORY_NET_MERGED,
+    CATEGORY_NET_SPLIT,
+    CATEGORY_NET_UNMATCHED,
+    CATEGORY_PIN_COUNT,
+    CATEGORY_PIN_DECLARED_SHORT,
+    CATEGORY_PIN_UNMATCHED,
+    CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL,
+    CATEGORY_TOPOLOGY,
+    CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+    CATEGORY_TOPOLOGY_FLATTENED,
+    CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH,
+    CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED,
+    CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED,
+    CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED,
+    POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
+    POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    POWER_STATUS_UNCHECKED,
+    RULE_POWER_INCONSISTENT_PIN_NET,
+    RULE_POWER_UNCONNECTED_PIN,
+    RULE_POWER_UNEXPECTED_PIN_NET,
+    STATUS_INCONCLUSIVE,
+    LvsError,
+)
 from .lvs_body import (
     _body_net_warnings,
     _body_verification_report,
@@ -178,6 +237,7 @@ from .lvs_coverage import (
     _coverage_kind,
     _geometry_disclosure_kind,
 )
+from .lvs_deck_defaults import apply_deck_ignored_parameters
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
@@ -207,6 +267,7 @@ from .lvs_gate_level_convert import (
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
+from .lvs_label_coverage import REFERENCE_PORT_ALIAS_CATEGORY  # noqa: F401
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -241,6 +302,16 @@ from .lvs_power import (
     _with_stub_power_connectivity_reason,
 )
 from .lvs_reference_stage import _read_reference_stage
+from .lvs_replay import (
+    _anchor_top_level_pins_replay_options,
+    _combine_devices_max_attempts_replay_options,
+    _constant_nets_replay_hints,
+    _omit_mismatches_replay,
+    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report/lvs_runset)
+    _reference_conversion_replay,
+    _supply_nets_replay_options,
+    _validate_omit_mismatches,
+)
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
@@ -256,6 +327,8 @@ from .netlist_capacitor_recovery import (
     parse_capacitor_class_comments,
     resistor_classes_for_deck,
 )
+from .netlist_inductor_recovery import inductor_classes_for_deck
+from .netlist_normalize_scan import recovery_subckt_names
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
 from .verilog_netlist import (
@@ -299,381 +372,6 @@ SUPPORTED_ENGINES = ("klayout", "netgen", "klayout-runset")
 #: opts into converting a `klt place-and-route` `verilog_path` gate-level
 #: Verilog netlist first (see ``docs/cli/lvs.md``).
 _REFERENCE_FORMS = ("plain-element", "subckt-call", "gate-level-verilog")
-
-#: Stable mismatch-category ids (spike section 2b). Never renumbered/
-#: repurposed once shipped -- the same contract guarantee a DRC rule id
-#: carries.
-CATEGORY_NET_UNMATCHED = "net.unmatched"
-CATEGORY_NET_MERGED = "net.merged"
-CATEGORY_NET_SPLIT = "net.split"
-CATEGORY_DEVICE_UNMATCHED = "device.unmatched"
-CATEGORY_DEVICE_CLASS = "device.class"
-#: Issue #504: a layout-side and reference-side device class share a name
-#: but declare a different terminal list (e.g. a deck's `*WithBulk` device
-#: extractor's three-terminal resistor class vs. a plain-element reference's
-#: two-terminal one) -- see `_device_class_arity_mismatch`.
-CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
-#: Issue #2421: the reference netlist instantiates **two or more** device
-#: classes that the layout-side deck derives from one and the same drawn
-#: geometry and tells apart only by a whole-run `deck_options` key
-#: (`ResistorDevice.flavour_option`/`CapacitorDevice.flavour_option` -- e.g.
-#: gf180mcu's `poly_res`, whose `ppolyf_u_1k`/`_2k`/`_3k` are the *same*
-#: drawn `Resistor`-marked poly segment at three sheet-rho interpretations).
-#: Because the deck recognises exactly one of those names per run -- the
-#: flavour is a property of the wafer's process option, not of the drawn
-#: shape -- such a reference cannot match under *any* option value: whichever
-#: one is selected, every instance of the other class(es) is compared against
-#: a device class the extraction never produces. Reported as a pre-flight
-#: diagnosis so the run does not look like an ordinary `device.class`/
-#: `device.unmatched` mismatch that a different `deck_options` value might
-#: fix (see `_device_class_family_findings`).
-CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE = "device.class_family_unsatisfiable"
-#: Issue #4729: the reference names one class of an option-selected family
-#: (e.g. gf180mcu `PPOLYF_U_3K`) other than the one `deck_options` selected for
-#: this run (`ppolyf_u_1k` by default). Warning only; names both values.
-CATEGORY_DEVICE_FLAVOUR_MISMATCH = "device.flavour_mismatch"
-#: Issue #4729: parallel layout fingers (same class, L and terminals) left
-#: unmerged because `options.combine_devices` is unset, whose widths sum to the
-#: width of one reference device. One grouped error replaces the per-finger
-#: `device.unmatched`/`device.property` entries.
-CATEGORY_DEVICE_UNMERGED_FINGERS = "device.unmerged_fingers"
-#: Issue #506: `request.reference.device_bulk` reconciled a reference device
-#: class up to the layout side's terminal list before comparing -- the
-#: disclosure that a match on that class rests on a caller assertion, not on
-#: connectivity read from the reference netlist (see
-#: `_apply_reference_device_bulk`).
-CATEGORY_DEVICE_BULK_RECONCILED = "device.bulk_reconciled"
-#: Issue #2813: `options.finfet_bulk` tied a FinFET layout's bulk net to a named
-#: net before comparing (always a warning; see `lvs_finfet.apply_finfet_bulk`).
-CATEGORY_DEVICE_FINFET_BULK_TIED = "device.finfet_bulk_tied"
-#: Issue #1907: `reference.form: "subckt-call"` converted a resistor/capacitor
-#: class whose plain-element value token is the literal `0` *placeholder*
-#: (`netlist_normalize.py` has no PDK sheet-resistance/capacitance-per-area
-#: table to compute a real one from), so that one parameter was excluded from
-#: the compare -- the disclosure that the class's resistance/capacitance
-#: dimension was never verified, and that pairing rests on topology and
-#: geometry alone (see `_apply_reference_placeholder_values`).
-CATEGORY_DEVICE_PLACEHOLDER_VALUE = "device.placeholder_value"
-CATEGORY_DEVICE_PROPERTY = "device.property"
-#: Issue #589: `options.parameter_tolerance` absorbed a matched device pair's
-#: parameter difference -- the disclosure that a `"match"` verdict rests on a
-#: caller-supplied *design* tolerance rather than on the two values actually
-#: agreeing (see `_collect_tolerance_snaps`).
-CATEGORY_DEVICE_PARAMETER_TOLERATED = "device.parameter_tolerated"
-#: Issue #1928: `options.compare_parameters` disabled a device class
-#: parameter via `klayout.db.DeviceClass.enable_parameter(name, False)`
-#: before the comparer ran -- the disclosure that a `"match"` verdict rests
-#: on a caller-scoped subset of that class's parameters, not the full set the
-#: class declares (see `_apply_compare_parameters`).
-CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
-#: Issue #2461: a resistor/capacitor device class took part in this compare
-#: with one or more of its own declared parameters *never compared* -- KLayout's
-#: `DeviceClassResistor` compares only its primary `R` (`L`/`W`/`A`/`P` are
-#: secondary), and `DeviceClassCapacitor` only its primary `C` (`A`/`P` are
-#: secondary), so the whole geometric sizing of such a class sits outside every
-#: default compare. Nothing said so before this category existed: a reader of a
-#: `subckt-call` report saw only `device.placeholder_value` (the *value* half)
-#: and reasonably concluded the geometry had been compared and only the value
-#: had not. Emitted once per participating class per run, never per instance,
-#: and never for a parameter some *other* disclosure already names as excluded
-#: for this run (`device.placeholder_value`/`device.parameter_excluded`) -- see
-#: `_device_parameter_coverage`. Machine-checkable counterpart: the response's
-#: `device_parameter_coverage` block, which is built from the same
-#: determination.
-CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED = "device.geometry_not_compared"
-CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
-CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
-#: Issue #4165: `options.compare_timeout_s` expired; `status` is
-#: `"inconclusive"` and this is the only `mismatches[]` entry.
-CATEGORY_COMPARE_TIMEOUT = "compare.timeout"
-#: Issues #1497/#2374: KLayout's native `Netlist.combine_devices()` can
-#: return **normally** with a combined device's parameters inconsistent with
-#: the parallel group it folded -- with no exception raised and no
-#: `device.combine_incomplete` warning (the existing #1185/#466 retry only
-#: catches KLayout's own `RuntimeError`, which never fires here: the call
-#: succeeds, just with wrong numbers). Two shapes have been reported:
-#:
-#: * issue #1497 -- a capacitor's *primary* `C` left at a single pre-combine
-#:   instance's own value instead of the summed total across its parallel
-#:   group, while that same group's *secondary* `A`/`P` parameters summed
-#:   correctly;
-#: * issue #2374 -- a `DeviceClassBJT3Transistor` array's accumulation
-#:   *inverted*: the emitter parameters the fold should sum (`AE`, `NE`)
-#:   left at one instance's value, and the shared base/collector region
-#:   parameters it should leave alone (`AB`/`PB`/`AC`/`PC`) summed instead.
-#:
-#: See `_correct_combine_parameters`.
-CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
-#: Issue #3017: `options.combine_devices` folded a pure series chain of N>1
-#: resistor primitives of a class whose deck row has a nonzero
-#: `fixed_offset_ohm`, and the deferred correction (#559) charged that offset
-#: once for the folded device -- so `(N-1) * fixed_offset_ohm` the drawn
-#: chain physically carries was absorbed by the fold. Always `severity:
-#: "warning"`. See `_series_fold_offset_absorbed_warnings`.
-CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED = "device.series_fold_offset_absorbed"
-CATEGORY_PIN_UNMATCHED = "pin.unmatched"
-#: Issue #2845: `options.strict_top_level_pin_count` found the two compared
-#: top circuits declaring a different number of pins. Always `severity:
-#: "error"`; `details` carries both counts.
-CATEGORY_PIN_COUNT = "pin.count"
-CATEGORY_TOPOLOGY = "topology"
-#: Issue #499: a `hints.same_nets` pairing the caller asserted with
-#: `must_match=True` that the comparer refused to confirm -- see
-#: `_build_mismatches`'s `same_nets_hints` handling.
-CATEGORY_HINTS_REJECTED = "hints.rejected"
-#: Issue #1085: `options.flatten_reference`/`options.flatten_layout`
-#: collapsed that side's subcircuit-call hierarchy into its top circuit(s)
-#: before comparing -- the disclosure that a verdict rests on a caller-opted
-#: structural flatten rather than the netlist's original hierarchy (see
-#: `_flatten_netlist_safely`).
-CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
-#: Issues #4548/#5756: a hierarchy asymmetry between the compared sides --
-#: flat layout vs hierarchical reference, or the inverse after the tool's own
-#: flatten -- advisory naming the fix (see `_hierarchy_mismatch_warnings`).
-CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH = "topology.hierarchy_mismatch"
-#: Issue #1552: one of `options.combine_devices_per_circuit`'s own glob
-#: patterns matched zero circuits on this side -- most often a typo'd
-#: circuit name, or one written in the request's own source-file case
-#: instead of the upper-cased form `NetlistSpiceReader` reads circuit names
-#: back as (see `_resolve_combine_devices_per_circuit_targets`). Never
-#: raised as an `LvsError`: a pattern legitimately naming a circuit that
-#: exists on only one side (e.g. a reference-only lumped macro with no
-#: layout-side counterpart yet) is not itself a mistake.
-CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.unmatched"
-#: Issue #1622 (layout side) / #2244 (reference side): a circuit every one of
-#: whose declared pins is a power/ground pin of the reference standard-cell
-#: library (a filler/tap-cell master, e.g. sky130's unconditionally-inserted
-#: `tapvpwrvgnd_1` tap cell or a `fill_*` row-gap filler -- the
-#: classification is derived from the library's own pin-order data, see
-#: `_gate_level_power_pin_names`), plus every subcircuit instance of it, was
-#: removed before comparing against a `reference.form: "gate-level-verilog"`
-#: reference -- from the layout side, the reference side, or both, depending
-#: on which side(s) actually instantiate it -- see
-#: `_prune_power_only_circuits`.
-CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
-#: Issue #4296: interchangeable same-cell instances whose outputs are
-#: one-terminal dangling nets on both sides (CTS dummy loads, unused flop
-#: outputs) that the comparer cannot pair. Always ``severity: "warning"``;
-#: ``status`` is still the engine's own verdict.
-CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguous"
-#: Issue #2021: a `reference.form: "gate-level-verilog"` reference declared a
-#: port whose only Verilog-level connection was a plain `assign <port> =
-#: ...;` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`, two port names
-#: for one electrical node) -- `convert_gate_level_verilog` never resolves a
-#: module's own declared port list the way it resolves an instance
-#: connection, so that pin reads back as its own isolated, disconnected net.
-#: The alias pin's net was joined onto its canonical target's net (`Circuit
-#: .connect_pin`) before comparing, so it is not reported as
-#: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
-CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
-#: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
-#: declared on *both* sides to its own net on the other side
-#: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
-#: `hints.same_nets` exposes by hand) before comparing -- the disclosure that
-#: this run's verdict rests on name-anchored boundary pins, not on topology
-#: alone. `NetlistComparer` pairs nets purely by topology, so without this a
-#: topologically-symmetric swap between two boundary nets (two bits of a
-#: black-box macro's bus, both wired straight through to a top-level pin) is
-#: interchangeable with its neighbour and compares clean. See
-#: `_apply_top_level_pin_anchors`; a pin pairing the comparer *refuses* is
-#: reported as `hints.rejected` (carrying `details.anchored_top_level_pin`),
-#: exactly as a hand-written `hints.same_nets` entry would be.
-CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED = "topology.top_level_pins_anchored"
-
-#: Issue #3014: the single ``severity: "warning"`` disclosure a run emits when
-#: it applied any ``hints.constant_nets`` binding -- the caller's explicit
-#: statement of which layout node carries logic-0 / logic-1. Distinct from
-#: :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED`: those anchors are
-#: inferred from pin names, these are declared by the caller. A binding the
-#: comparer refuses is reported as `hints.rejected` carrying
-#: `details.declared_constant_net`.
-CATEGORY_HINTS_CONSTANT_NETS_DECLARED = "hints.constant_nets_declared"
-#: Issue #2653: `hints.short_nets` resolved a mask-option (metal-option/
-#: probe-pad/e-fuse trim) reference's behavioural option construct to one
-#: concrete drawn state before comparing -- every reference net group the
-#: request named was joined into one net (a "drawn/shorted" link), and every
-#: reference device the request named (both "drawn" and "cut" link devices --
-#: neither has a fabricated counterpart in a correctly drawn layout) was
-#: removed, before `NetlistComparer` is constructed. See
-#: `_apply_short_nets_hint`.
-CATEGORY_HINTS_SHORT_NETS_APPLIED = "hints.short_nets_applied"
-
-#: Issue #2854: `layout.rename_declared_pins` found a promoted pin net
-#: carrying 2+ declared pin names -- one conductor shorting two declared
-#: interface pins, a layout defect the rename pass reports and never
-#: repairs (the net keeps its joined name). One entry per offending net,
-#: `severity: "error"` but diagnostic-only (it never moves `status` on its
-#: own): the compare that already ran reports the mismatch this entry
-#: *explains* -- the layout's joined interface net against the reference's
-#: two separate pins. Mirrored from `klt extract`'s own
-#: `pin_renames.findings[]` (`code: "declared_pin_short"`). See
-#: `_declared_pin_short_mismatches`.
-CATEGORY_PIN_DECLARED_SHORT = "pin.declared_short"
-
-#: Issue #2952: a reference-side ``X`` card calls a subcircuit that is
-#: defined nowhere the reader could see (no ``.subckt`` in the file or its
-#: includes), that no reference conversion turned into a device, and that has
-#: no same-named circuit on the layout side to be compared against by name.
-#: ``NetlistSpiceReader`` does not raise on such a call -- it synthesises an
-#: empty, pin-only placeholder circuit -- so the instance carries no devices
-#: and, once flattened (``options.flatten_reference``), vanishes without
-#: trace: a zero-device layout then reported ``status: "match"`` against a
-#: reference whose only device was discarded. One ``severity: "error"`` entry
-#: per offending instance (reachable from the compared reference top), and
-#: ``status`` is forced to ``"mismatch"``. See
-#: ``_unresolved_reference_subckt_calls``.
-CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL = "reference.unresolved_subckt_call"
-
-#: Issue #1952: ``power_connectivity.status`` values. Deliberately a
-#: *separate* verdict from the report's top-level ``status``, which stays
-#: exactly what it has always been -- ``NetlistComparer.compare()``'s own
-#: signal-connectivity result. A caller that wants full LVS on a
-#: ``reference.form: "gate-level-verilog"`` compare gates on both. See
-#: :func:`_power_connectivity_report` and
-#: ``docs/design/pg-connectivity-check-decision.md``.
-POWER_STATUS_MATCH = "match"
-POWER_STATUS_MISMATCH = "mismatch"
-POWER_STATUS_UNCHECKED = "unchecked"
-
-#: Issue #1983: ``body_verification.status`` values -- the machine-checkable
-#: counterpart of the ``device.body_unverified`` ``mismatches[]`` warning
-#: (issue #281). Deliberately a *separate* verdict from the report's top-level
-#: ``status``: it is a coverage statement about the layout's MOS bodies, not a
-#: compare failure, so it never changes ``status`` (see
-#: :func:`_body_verification_report`).
-#:
-#: - ``"verified"``: every MOS body terminal the check inspected (issue
-#:   #5749's ``inspected_count``) resolved to a real, drawn/labelled net.
-#: - ``"unverified"``: at least one inspected body terminal was compared
-#:   against a deck-synthesized net (the ``device.body_unverified`` condition).
-#: - ``"unchecked"``: this run could not answer the question at all -- no
-#:   ``layout.deck`` was given (the pre-extracted ``layout.netlist`` form), or
-#:   no MOS device was eligible to inspect (``inspected_count`` 0, issue
-#:   #5749). Never means "verified": the reason says which case it is.
-BODY_STATUS_VERIFIED = "verified"
-BODY_STATUS_UNVERIFIED = "unverified"
-BODY_STATUS_UNCHECKED = "unchecked"
-
-#: ``power_connectivity.findings[].rule``: one standard-cell power/ground pin
-#: name reaches more than one distinct net across the design's instances --
-#: the single-power-domain invariant a ``klt place-and-route`` block is built
-#: on, violated. One finding per offending pin name (never per instance): the
-#: check reports the *disagreement*, and deliberately does not nominate a
-#: winner, because with two instances disagreeing there is no majority to
-#: appeal to. Declare ``options.power_connectivity.expected_nets`` to get the
-#: stronger, absolute form (:data:`RULE_POWER_UNEXPECTED_PIN_NET`) instead.
-RULE_POWER_INCONSISTENT_PIN_NET = "power.inconsistent_pin_net"
-
-#: ``power_connectivity.findings[].rule``: the caller declared which net this
-#: power/ground pin name must reach (``options.power_connectivity.
-#: expected_nets``) and at least one instance's pin reaches a different one.
-#: Strictly stronger than :data:`RULE_POWER_INCONSISTENT_PIN_NET` -- it also
-#: catches a design where *every* instance is miswired the same way, which no
-#: amount of cross-instance agreement can.
-RULE_POWER_UNEXPECTED_PIN_NET = "power.unexpected_pin_net"
-
-#: ``power_connectivity.findings[].rule``: a standard-cell instance's
-#: power/ground pin resolved to no net at all -- the pin never landed on
-#: routed conductor (the extraction could not probe it to a net). Reported
-#: separately from the two net-identity rules above because the defect is
-#: different in kind: not "connected to the wrong rail" but "connected to
-#: nothing".
-RULE_POWER_UNCONNECTED_PIN = "power.unconnected_pin"
-
-#: ``power_connectivity.power_pins_derivation.rule`` (issue #2076): the one
-#: rule :func:`_gate_level_power_pin_evidence` applies -- a pin name is
-#: admitted to the power/ground universe only when **every** library cell the
-#: reference instantiates declares it and **no** reference circuit carries it.
-#: Stated in the report as a stable identifier so a record reader can tell
-#: which derivation a ``power_pins`` list came from without reading this
-#: module; a future rule would be a new value here, never a silent change of
-#: meaning for this one.
-POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER = "declared-by-every-instantiated-master"
-
-#: ``power_connectivity.power_pins_derivation.rule`` (issue #2707): the rule
-#: applied when the instantiated masters come from **more than one** pin-order
-#: source library (a standard-cell library plus a macro library, #2693). A pin
-#: name is admitted when every instantiated master *of one library* declares
-#: it and no reference circuit carries it; the universe is the union of those
-#: per-library intersections. A hard macro declares its own supply names
-#: (``vccd1``/``vssd1``), so a single cross-library intersection would always
-#: be empty. A single-library reference keeps
-#: :data:`POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER`, with its meaning unchanged.
-POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY = (
-    "declared-by-every-instantiated-master-per-library"
-)
-
-#: How many individual instances each ``power_connectivity.findings[].nets[]``
-#: group names before truncating (``instances_truncated: true``). A real
-#: routed block has hundreds of standard-cell instances on one rail, and a
-#: finding that dumped all of them would bury the few that actually differ;
-#: the group's own ``instance_count`` is always the exact, untruncated total.
-_POWER_INSTANCE_SAMPLE_LIMIT = 10
-
-#: Third ``status`` value (issue #1370), alongside ``"match"``/
-#: ``"mismatch"``: the compare the caller asked for could not be performed,
-#: so no verdict about the design was reached. Emitted only when
-#: ``options.combine_devices`` was requested and
-#: :func:`_combine_devices_safely` exhausted its retry budget on at least one
-#: side -- see :func:`run_lvs`'s symmetric-degrade block. Mirrors ``klt
-#: equiv``'s own ``"inconclusive"`` vocabulary and its dedicated exit code
-#: (``cli/equiv_cmd.py``'s ``EXIT_INCONCLUSIVE = 4``, ``docs/cli/equiv.md``'s
-#: "Timeout and the inconclusive verdict"): a run that could not reach a
-#: trustworthy verdict must never be reported under one of the two verdict
-#: values a caller gates on.
-STATUS_INCONCLUSIVE = "inconclusive"
-
-
-#: Parameter-name -> reported-property-name map, mirroring ``extract.py``'s
-#: own ``w_um``/``l_um`` convention for the two parameters every consumer
-#: cares about; every other declared parameter is reported under its own
-#: lower-cased name (see this module's docstring: no unit suffix is assumed
-#: beyond the two names ``extract.py`` already documents in micrometres).
-_PARAM_DISPLAY_NAMES = {"W": "w_um", "L": "l_um"}
-
-#: A parameter difference below this (absolute-or-relative) threshold is
-#: floating-point round-trip noise (e.g. a SPICE writer's decimal
-#: truncation), not a real design difference -- mirrors ``extract.py``'s own
-#: ``_PARAM_PRECISION_UM`` rounding intent, applied here as a compare-time
-#: tolerance instead of an output rounding.
-_PARAM_ABS_EPSILON = 1e-9
-_PARAM_REL_EPSILON = 1e-6
-
-#: Upper bound on ``options.parameter_tolerance`` (issue #589), exclusive. A
-#: relative tolerance of ``1.0`` would call any two same-signed values within
-#: a factor of the larger equal -- a rubber stamp, not a design tolerance --
-#: so it is rejected as a malformed request rather than silently honoured.
-_MAX_PARAMETER_TOLERANCE = 1.0
-
-#: How many *extra* ``NetlistComparer.compare()`` passes
-#: ``options.parameter_tolerance`` may spend (issue #589). Each pass snaps the
-#: in-tolerance parameter differences the previous pass exposed and re-compares;
-#: the loop stops as soon as a pass produces no new snap, so this cap only
-#: bounds a pathological input, it is not the normal path (one extra pass
-#: resolves every case this module's own fixtures produce).
-_MAX_TOLERANCE_PASSES = 4
-
-#: Description carried by a ``net.unmatched`` entry that is pure collateral
-#: from a single unmatched device pair already reported as
-#: ``device.property`` (issue #282, see ``_degraded_param_pair``).
-_COLLATERAL_NET_DESCRIPTION = (
-    "net has no counterpart on the other side, but only because the one "
-    "device pair reported as 'device.property' failed to pair -- no other "
-    "device or subcircuit touches this net, so it is collateral, not an "
-    "independent connectivity defect"
-)
-
-
-class LvsError(Exception):
-    """Raised when an LVS run cannot even be attempted: a missing/malformed
-    request file, an unresolvable/unreadable layout or reference netlist, an
-    unknown extraction deck, or an unsupported engine.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback. Distinct from a documented ``status: "mismatch"`` response --
-    that is a trustworthy verdict, not a failure to run (see this module's
-    docstring).
-    """
 
 
 class _ReferenceNetlistParseError(LvsError):
@@ -1222,6 +920,7 @@ def run_lvs(
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
     progress: bool | str = False,
+    omit_mismatches: bool = False,
 ) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
 
@@ -1236,6 +935,24 @@ def run_lvs(
     both a flag and its request field is a clean :class:`LvsError`.
 
     ``deck`` (issue #5733): the ``klt lvs --deck`` spelling of ``layout.deck``.
+
+    ``omit_mismatches`` (issue #5610) is the ``klt lvs --omit-mismatches``
+    CLI value for the compaction knob every verb with a verdict-bearing list
+    eventually needs (``klt erc`` has ``--omit-antenna-tables``): when true
+    -- given as the flag, as the request document's top-level boolean
+    ``omit_mismatches`` (the flag wins when both name it), or both -- the
+    response's ``mismatches[]`` is emitted as ``[]`` (the key stays present;
+    it is schema-required) beside a ``mismatches_omitted: true`` echo, while
+    ``status``, ``mismatch_count``, ``error_count``, ``category_counts``,
+    ``category_error_counts`` and the exit code keep their full-run values:
+    the compare still runs in full and the tally still runs over the full
+    list, only the per-entry echo is dropped, so a failing flat compare's
+    report stays committable. Omitted/false, the response is unchanged
+    apart from the always-present ``mismatches_omitted: false`` echo.
+    ``klt lvs --check`` verifies such a report as-is (cheap mode never reads
+    ``mismatches[]``), and ``--check --rerun`` replays the omission from
+    the report's own echo (see :func:`_reconstruct_lvs_request` /
+    :func:`_reconstruct_runset_request`).
 
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
@@ -1485,6 +1202,12 @@ def run_lvs(
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
     _merge_layout_deck(loaded, deck)
     portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
+    # Issue #5610: the request key is validated even when the CLI flag won,
+    # so a malformed value stays visible; the flag (a `store_true`, so it can
+    # only raise the value to `True`) takes precedence over the request
+    # field.
+    request_omit_mismatches = _validate_omit_mismatches(loaded.get("omit_mismatches"))
+    omit_mismatches = bool(omit_mismatches) or request_omit_mismatches
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
@@ -1494,14 +1217,8 @@ def run_lvs(
         raise LvsError("request.reference must be a JSON object")
 
     if engine == RUNSET_ENGINE:
-        # Issue #2849: the PDK's own runset does extraction and compare; the
-        # verdict is read back from its .lvsdb (see lvs_runset.py). Its
-        # report records klayout_binary as a basename in both modes (#5795,
-        # finishing what #3988 started for portable_paths).
-        return _finish_response(
-            run_lvs_klayout_runset(request, request_dir),
-            portable=portable_paths,
-            request_dir=request_dir,
+        return _run_runset_response(
+            request, request_dir, portable_paths, omit_mismatches
         )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
@@ -1519,9 +1236,11 @@ def run_lvs(
     import klayout.db as kdb
 
     from .lvs_layout_stage import _resolve_layout_stage
+    from .lvs_passive_pairing import curated_pairing
 
+    layout_coverage: dict[str, Any] = {}
     layout_stage = _resolve_layout_stage(
-        layout_spec, reference_spec, request_dir, opts, progress
+        layout_spec, reference_spec, request_dir, opts, progress, layout_coverage
     )
     (
         layout_netlist,
@@ -1537,6 +1256,7 @@ def run_lvs(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
     ) = layout_stage
 
     ref_stage = _read_reference_stage(
@@ -1551,18 +1271,11 @@ def run_lvs(
         power_only_pruning_warnings,
         combine_per_circuit_warnings,
     )
-    reference_netlist_path = ref_stage.reference_netlist_path
-    reference_form = ref_stage.reference_form
     anchor_top_level_pins = ref_stage.anchor_top_level_pins
     power_connectivity = ref_stage.power_connectivity
     reference_device_bulk = ref_stage.reference_device_bulk
-    reference_pdk_info = ref_stage.reference_pdk_info
-    reference_pin_order_sources = ref_stage.reference_pin_order_sources
     reference_placeholder_classes = ref_stage.reference_placeholder_classes
-    reference_gate_level_case_folds = ref_stage.reference_gate_level_case_folds
     supply_universe = ref_stage.supply_universe
-    unresolved_subckt_call_findings = ref_stage.unresolved_subckt_call_findings
-    reference_pin_order_files = ref_stage.reference_pin_order_files
     reference_netlist = ref_stage.reference_netlist
 
     (
@@ -1582,7 +1295,7 @@ def run_lvs(
         opts,
         flatten_warnings,
         power_connectivity,
-        reference_form,
+        ref_stage.reference_form,
     )
 
     bulk_warnings: list[dict[str, Any]] = []
@@ -1598,22 +1311,14 @@ def run_lvs(
     # `device_classes` follow, never a spuriously empty `[]` that would read
     # as "no resistor/capacitor class participated".
     device_parameter_coverage: list[dict[str, Any]] | None = None
-    # Issue #2461: every `(class, parameter)` pair a request-side hook took
-    # out of *this* run's compare, so the classification pass downstream never
-    # reports one of them as a `device.property` error in the same report that
-    # discloses it as excluded. Kept as two sets so the coverage block can name
-    # which hook excluded each one.
+    # Suppress property mismatches for every disabled (class, parameter) pair.
+    # For coverage, track the source of each exclusion separately. A deck
+    # default or caller option only narrows coverage for parameters that were
+    # primary before the hook ran. Previously secondary parameters retain
+    # their built-in reason (#2461, #2654).
+    excluded_parameters: set[tuple[str, str]] = set()
     placeholder_excluded: set[tuple[str, str]] = set()
-    compare_scoped_excluded: set[tuple[str, str]] = set()
-    # Issue #2654: the subset of `compare_scoped_excluded` that
-    # `options.compare_parameters` actually took *out of* the compare -- the
-    # parameters that were primary before `enable_parameter` ran. The option
-    # can only narrow, so scoping a class to one subset also disables every
-    # sibling the caller did not name; a sibling the class itself declares
-    # secondary was never compared, so the coverage block must not attribute
-    # its exclusion to the caller's option (see
-    # `_record_excluded_parameters`). The full set above still drives the
-    # classification pass's suppression, unchanged.
+    deck_narrowed: set[tuple[str, str]] = set()
     compare_scoped_narrowed: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
@@ -1628,23 +1333,18 @@ def run_lvs(
     # the other request-side disclosures further down.
     anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
-    # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
-    # roles as `anchored_pins`/`anchor_warnings` above.
     constant_bindings: list[_ConstantNetBinding] = []
     constant_warnings: list[dict[str, Any]] = []
 
+    passive_pairing = None
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
-        # trim) reference's behavioural option construct to one concrete
-        # drawn state *before* anything else below -- every other reference-
-        # side normalisation in this block (`device_bulk`, placeholder
-        # values, `compare_parameters`, the parameter-coverage summary)
-        # should see the already-resolved device/net set, exactly as it
-        # would for a reference hand-authored at that one option code to
-        # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
-        # immediately) for every request that does not declare it, so a
-        # reference with no option construct present stays byte-identical to
-        # before this hook existed.
+        # trim) reference's behavioural option construct to one concrete drawn
+        # state *before* anything else below -- every other reference-side
+        # normalisation here (`device_bulk`, placeholder values,
+        # `compare_parameters`, the coverage summary) should see the resolved
+        # device/net set. Opt-in via `hints.short_nets`; a no-op (returns `[]`)
+        # without it, so a reference with no option construct is unchanged.
         short_nets_warnings = _apply_short_nets_hint(
             request.get("hints") or {},
             reference_netlist,
@@ -1653,13 +1353,11 @@ def run_lvs(
 
         # Issue #506: normalise the reference side's device classes up to the
         # layout side's terminal list *before* the comparer is constructed, so
-        # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
-        # resistor's three-terminal `RES_X`) can be compared against a
-        # schematic-derived reference that does not model that terminal at
-        # all. Runs after the `combine_devices()` step above so combining
-        # still sees each side's own, unmodified device classes (the
-        # status-quo behaviour), and returns the `severity: "warning"`
-        # disclosure entries appended to `mismatches[]` further down.
+        # a deck's bulk-terminal flavour (e.g. a `bulk_to_substrate` resistor's
+        # three-terminal `RES_X`) can be compared against a schematic-derived
+        # reference that does not model that terminal. Runs after the
+        # `combine_devices()` step so combining still sees each side's own
+        # classes, and returns the `warning` disclosures appended further down.
         bulk_warnings = _apply_reference_device_bulk(
             reference_device_bulk,
             layout_netlist,
@@ -1667,13 +1365,11 @@ def run_lvs(
         )
 
         # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
-        # just above -- a `form: "subckt-call"` conversion's placeholder `0`
-        # value has to be taken out of the comparison *before* the comparer is
-        # constructed, since `NetlistComparer` reads each device class's
-        # `equal_parameters` when it builds its device-equivalence seeding.
-        # Runs after `combine_devices()` for the same reason too (combining
-        # still sees each side's unmodified classes), and returns the
-        # `severity: "warning"` disclosure entries appended further down.
+        # -- a `form: "subckt-call"` conversion's placeholder `0` value has to
+        # leave the comparison *before* the comparer is constructed, since
+        # `NetlistComparer` reads each class's `equal_parameters` when it seeds
+        # device equivalence. Runs after `combine_devices()` for the same
+        # reason, and returns the `warning` disclosures appended further down.
         placeholder_warnings = _apply_reference_placeholder_values(
             reference_placeholder_classes,
             layout_netlist,
@@ -1681,16 +1377,23 @@ def run_lvs(
             placeholder_excluded,
         )
 
-        # Issue #1928: same placement rationale once more -- `enable_parameter`
-        # has to run before the comparer is constructed for the same reason
-        # `equal_parameters` does just above, and after `combine_devices()`
-        # so combining still sees each side's unmodified classes. Returns
-        # the `severity: "warning"` disclosure entries appended further down.
-        compare_parameter_warnings = _apply_compare_parameters(
+        # Issues #1928, #4312: same placement rationale -- `enable_parameter` has
+        # to run before the comparer is built, after `combine_devices()`. The
+        # deck's own ignored parameters go first and skip any class
+        # `compare_parameters` names. Returns the disclosures appended below.
+        compare_parameter_warnings = apply_deck_ignored_parameters(
+            layout_deck,
             opts.compare_parameters,
             layout_netlist,
             reference_netlist,
-            compare_scoped_excluded,
+            placeholder_excluded,
+            excluded_parameters,
+            deck_narrowed,
+        ) + _apply_compare_parameters(
+            opts.compare_parameters,
+            layout_netlist,
+            reference_netlist,
+            excluded_parameters,
             compare_scoped_narrowed,
         )
 
@@ -1708,9 +1411,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             placeholder_excluded,
+            deck_narrowed,
             compare_scoped_narrowed,
         )
-        excluded_parameters = placeholder_excluded | compare_scoped_excluded
+        excluded_parameters.update(placeholder_excluded)
 
         logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
@@ -1803,8 +1507,6 @@ def run_lvs(
                 # state, so the second pass would otherwise compare on
                 # topology alone and could reach a `"match"` the first,
                 # anchored pass had already refused.
-                # Issue #3014: bindings are comparer state too, so they are
-                # re-applied on the fresh comparer exactly like the hints.
                 constant_bindings, constant_warnings = _apply_constant_nets(
                     comparer,
                     request.get("hints") or {},
@@ -1871,15 +1573,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
-            # Issue #2692: an anchored pin pairing the comparer refused is a
-            # real finding, reported through the same reconciliation a
-            # hand-written `hints.same_nets` refusal goes through.
             anchored_pins=[
                 (anchor.layout_net, anchor.reference_net, anchor.pin)
                 for anchor in anchored_pins
             ],
-            # Issue #3014: a refused constant binding is a `hints.rejected`
-            # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
@@ -1936,9 +1633,14 @@ def run_lvs(
                 "matched": logger.matched_pins,
             },
         }
+        passive_pairing = curated_pairing(
+            (layout_deck_name, reference_spec.get("deck")),
+            logger,
+            counts["devices"],
+            status,
+            (layout_netlist, reference_netlist),
+        )
     else:
-        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member;
-        # see `_run_netgen_engine_branch`.
         (
             status,
             mismatches,
@@ -1991,17 +1693,26 @@ def run_lvs(
         power_only_pruning_warnings=power_only_pruning_warnings,
         family_findings=family_findings,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
-        reference_gate_level_case_folds=reference_gate_level_case_folds,
+        reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
         supply_findings=supply_findings,
-        unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        unresolved_subckt_call_findings=ref_stage.unresolved_subckt_call_findings,
     )
     note_known_limit(
-        mismatches, opts.finfet_layout, status, reference_spec, layout_spec
+        mismatches,
+        opts.finfet_layout,
+        status,
+        reference_spec,
+        layout_spec,
+        layout_counts=layout_known_limit_counts,
+        reference_counts=ref_stage.reference_known_limit_counts,
     )
 
     return assemble_lvs_report(
+        layout_coverage=layout_coverage,
+        passive_pairing=passive_pairing,
         mismatches=mismatches,
+        omit_mismatches=omit_mismatches,
         status=status,
         engine=engine,
         engine_version=engine_version,
@@ -2012,12 +1723,12 @@ def run_lvs(
         layout_circuit=layout_circuit,
         layout_abstracted_cells=layout_abstracted_cells,
         reference_circuit=reference_circuit,
-        reference_form=reference_form,
+        reference_form=ref_stage.reference_form,
         reference_spec=reference_spec,
-        reference_pdk_info=reference_pdk_info,
-        reference_pin_order_sources=reference_pin_order_sources,
-        reference_pin_order_files=reference_pin_order_files,
-        reference_netlist_path=reference_netlist_path,
+        reference_pdk_info=ref_stage.reference_pdk_info,
+        reference_pin_order_sources=ref_stage.reference_pin_order_sources,
+        reference_pin_order_files=ref_stage.reference_pin_order_files,
+        reference_netlist_path=ref_stage.reference_netlist_path,
         extracted_netlist_path=extracted_netlist_path,
         equivalent_pins_applied=equivalent_pins_applied,
         constant_bindings=constant_bindings,
@@ -2044,6 +1755,20 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
+
+
+def _run_runset_response(
+    request: dict[str, Any],
+    request_dir: str,
+    portable_paths: bool,
+    omit_mismatches: bool,
+) -> dict[str, Any]:
+    """Apply compact output after the runset has tallied all findings."""
+    report = run_lvs_klayout_runset(request, request_dir)
+    report["mismatches_omitted"] = omit_mismatches
+    if omit_mismatches:
+        report["mismatches"] = []
+    return _finish_response(report, portable=portable_paths, request_dir=request_dir)
 
 
 def _finish_response(
@@ -2135,7 +1860,7 @@ def check_lvs_report(
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
-    if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
+    if committed.get("engine") == RUNSET_ENGINE:
         # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
@@ -2148,7 +1873,7 @@ def check_lvs_report(
                 include_repo_root=True,
             )
         )
-    result = build_check_result(report_path=report_path, checks=checks)
+    result = build_input_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
     return result
 
@@ -2192,6 +1917,11 @@ def _reconstruct_runset_request(
     for key in ("deck_vars", "options"):
         if committed.get(key):
             request[key] = committed[key]
+    # Issue #5610: replay the omission from the committed report's own echo
+    # (same helper as `_reconstruct_lvs_request`; the runset's `options`
+    # echo carries no compaction knob, so without this a flagged runset
+    # report reruns uncompacted and reports its own blanked list as drift).
+    request.update(_omit_mismatches_replay(committed))
     return request
 
 
@@ -2397,112 +2127,18 @@ def _reconstruct_lvs_request(
     # Issue #3014: replay the applied `hints.constant_nets` bindings; other
     # hints are not echoed and stay best-effort (see the docstring).
     request.update(_constant_nets_replay_hints(committed))
+    # Issue #5610: replay the omission from the committed report's own
+    # `mismatches_omitted` echo, the way `klt erc --rerun` replays
+    # `antenna_tables_omitted` (`erc.py`) -- without it a compacted report
+    # (`mismatches: []`) diffs against a fresh, uncompacted list and reports
+    # false drift. This is a response echo replayed as a top-level request
+    # field (the field lives outside `options`, which only echoes
+    # compare-shaping inputs), so it deliberately does not go through the
+    # `_strict_top_level_pin_count_replay_options` helpers, which re-assert
+    # entries of the `options` block. A report without the echo replays
+    # uncompacted, exactly as it was produced.
+    request.update(_omit_mismatches_replay(committed))
     return request
-
-
-def _combine_devices_max_attempts_replay_options(
-    echoed: dict[str, Any],
-) -> dict[str, Any]:
-    """``{"combine_devices_max_attempts": <echoed value>}`` when the committed
-    report recorded one (issue #2682), else ``{}`` so a legacy report replays
-    at the parser's default. The value is passed through unmodified, so a
-    malformed recorded budget is rejected by the parser on replay rather than
-    silently becoming a valid one."""
-    key = "combine_devices_max_attempts"
-    return {key: echoed[key]} if key in echoed else {}
-
-
-def _reference_conversion_echo(
-    reference_form: str,
-    reference_spec: dict[str, Any],
-    pin_order_files: list[str] | None = None,
-) -> dict[str, Any]:
-    """``{"reference_conversion": {...}}`` for a ``subckt-call`` or
-    ``gate-level-verilog`` reference, else ``{}`` (issues #2673, #4353).
-
-    The conversion is a function of the reference file *and* this context, so
-    a report that records only the file cannot be replayed: ``--rerun`` would
-    re-read the simulation-form SPICE / structural Verilog as plain-element
-    SPICE. ``subckt-call`` echoes ``deck``/``device_map``; ``gate-level-
-    verilog`` echoes ``library``/``pdk``/``pdk_root`` and the *resolved*
-    ``pin_order_files`` (``null`` when omitted). Values are echoed as the
-    caller gave them.
-    """
-    if reference_form == "subckt-call":
-        return {
-            "reference_conversion": {
-                "form": reference_form,
-                "deck": reference_spec.get("deck"),
-                "device_map": reference_spec.get("device_map"),
-            }
-        }
-    if reference_form == "gate-level-verilog":
-        return {
-            "reference_conversion": {
-                "form": reference_form,
-                "library": reference_spec.get("library"),
-                "pdk": reference_spec.get("pdk"),
-                "pdk_root": reference_spec.get("pdk_root"),
-                "pin_order_files": list(pin_order_files) if pin_order_files else None,
-            }
-        }
-    return {}
-
-
-def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """The ``request.reference`` keys that rebuild a committed report's
-    ``reference_conversion`` echo (issues #2673, #4353); ``{}`` for a report
-    without one (every other form, and any committed before the echo existed
-    -- those stay best-effort, as documented)."""
-    echoed = committed.get("reference_conversion")
-    if not isinstance(echoed, dict):
-        return {}
-    if echoed.get("form") == "gate-level-verilog":
-        spec: dict[str, Any] = {"form": "gate-level-verilog"}
-        for key in ("library", "pdk", "pdk_root"):
-            if echoed.get(key) is not None:
-                spec[key] = echoed[key]
-        if isinstance(echoed.get("pin_order_files"), list):
-            spec["pin_order_files"] = list(echoed["pin_order_files"])
-        return spec
-    if echoed.get("form") != "subckt-call":
-        return {}
-    spec = {"form": "subckt-call"}
-    if echoed.get("deck") is not None:
-        spec["deck"] = echoed["deck"]
-    if isinstance(echoed.get("device_map"), dict):
-        spec["device_map"] = dict(echoed["device_map"])
-    return spec
-
-
-def _constant_nets_replay_hints(committed: dict[str, Any]) -> dict[str, Any]:
-    """``{"hints": {"constant_nets": {...}}}`` when the committed report
-    echoed applied bindings, else ``{}`` (issue #3014)."""
-    applied = committed.get("constant_nets_applied")
-    if isinstance(applied, dict) and applied:
-        return {"hints": {"constant_nets": dict(applied)}}
-    return {}
-
-
-def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
-    """``{"anchor_top_level_pins": <bool>}`` when the committed report echoed
-    an explicit value for it, else ``{}`` (issue #2692).
-
-    Includes ``false``: unlike every other option
-    :func:`_reconstruct_lvs_request` replays, omitting this one does **not**
-    mean "off" for every reference form -- a ``gate-level-verilog`` request
-    that omits it gets anchoring *on* (see
-    :func:`_anchor_top_level_pins_enabled`). Dropping an explicit ``false``
-    would therefore replay the original compare with anchoring turned on, and
-    report the resulting (correct, but different) verdict as drift.
-    """
-    requested = echoed.get("anchor_top_level_pins")
-    return {"anchor_top_level_pins": requested} if isinstance(requested, bool) else {}
-
-
-def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
-    names = echoed.get("supply_nets")
-    return {"supply_nets": list(names)} if isinstance(names, list) else {}
 
 
 #: `rerun_lvs_report`'s own exclusion set (issue #1223), layered on top of
@@ -2672,6 +2308,11 @@ def rerun_lvs_report(
             # Issue #1983: same rule -- a report committed before the
             # `body_verification` block existed cannot have drifted in it.
             "body_verification",
+            "ignored_layers",
+            "warnings",
+            "pin_set_difference",
+            "mismatches_omitted",
+            "sg13g2_passive_pairing",
         )
         if field not in committed
     )
@@ -3066,6 +2707,7 @@ def _resolve_layout(
     def_net_names: bool = False,
     def_pins: frozenset[str] | None = None,
     progress: bool | str = False,
+    coverage: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3245,12 +2887,7 @@ def _resolve_layout(
         progress_scope.enter_context(active_timer(StageTimer(progress=progress)))
         progress_scope.enter_context(stage("extract_layout"))
         try:
-            # LVS is topological -- no parasitics_deck, so the 5th return
-            # (parasitic_nets) is always None here and is ignored. The 6th
-            # return (black_box_regions, issue #293) still takes effect --
-            # any reserved-annotation-layer region in the layout is excluded
-            # from connectivity the same as `klt extract` -- but is not
-            # surfaced in `klt lvs`'s own response, out of scope here. The 7th
+            # Black-box regions affect connectivity as in klt extract. The 7th
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
@@ -3306,6 +2943,7 @@ def _resolve_layout(
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
+                layout_coverage=coverage,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
@@ -3369,11 +3007,10 @@ def _resolve_layout(
             os.makedirs(os.path.dirname(extracted_netlist_path), exist_ok=True)
             writer = kdb.NetlistSpiceWriter()
             writer.use_net_names = True
+            description = f"extracted by klt lvs (deck {deck_name})"
             try:
-                netlist.write(
-                    extracted_netlist_path,
-                    writer,
-                    f"extracted by klt lvs (deck {deck_name})",
+                write_spice_netlist(
+                    netlist, extracted_netlist_path, writer, description
                 )
             except Exception as exc:
                 raise LvsError(
@@ -3412,17 +3049,10 @@ def _resolve_layout(
         reference_deck_name,
         layout_spec.get("deck"),
     )
-    # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
-    # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
-    # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of a mangled-name abstract circuit. A best-effort lookup only: an
-    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
-    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
-    # this function returns and raises the authoritative `LvsError`, so
-    # this must not duplicate (and potentially reorder) that validation.
-    # Empty when `layout.deck` was never given, unchanged for old requests.
+    # run_lvs validates layout.deck and its options after X-card recovery.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
+    inductor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
     if deck_name:
         try:
@@ -3433,17 +3063,21 @@ def _resolve_layout(
             custom_device_classes = custom_device_classes_for_deck(
                 layout_deck_for_recovery
             )
-            # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
+            inductor_classes = inductor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
-    from .netlist_normalize import defined_subckt_names
-
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
-        defined_subckt_names=defined_subckt_names(layout_netlist_text),
+        inductor_classes=inductor_classes,
+        defined_subckt_names=recovery_subckt_names(
+            layout_netlist_text,
+            layout_netlist_path,
+            custom_device_classes.keys()
+            | resistor_classes.keys()
+            | inductor_classes.keys(),
+        ),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3604,7 +3238,6 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
-        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3702,17 +3335,11 @@ def _read_reference_netlist(
 
     netlist = kdb.Netlist()
     recovered_capacitor_classes = parse_capacitor_class_comments(read_text)
-    # Issue #1942: the same round-tripped custom-device-class recognition
-    # `_resolve_layout` wires for `layout.deck` above, keyed off
-    # `reference.deck` instead -- a best-effort lookup: an unresolvable
-    # `deck` name here is deliberately swallowed (not raised) since this
-    # function's *existing* `deck`/`device_map` resolution (the
-    # `form="subckt-call"` conversion above) already owns raising the
-    # authoritative error for a bad `reference.deck`. `{}` when `deck` was
-    # never given, unchanged from every request that predates this
-    # parameter.
+    # Recover bare extract X cards using reference.deck (#1942, #1157, #6726).
+    # The subckt-call conversion above reports bad deck names.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
+    inductor_classes: dict[str, str] = {}
     if deck:
         try:
             reference_deck_for_recovery = get_extraction_deck(deck)
@@ -3722,10 +3349,8 @@ def _read_reference_netlist(
             custom_device_classes = custom_device_classes_for_deck(
                 reference_deck_for_recovery
             )
-            # Issue #1157: the reference side gets the same drawn-resistor
-            # `X`-card recovery the layout side wired above -- a bare-mode
-            # extract output is a legitimate reference netlist too.
             resistor_classes = resistor_classes_for_deck(reference_deck_for_recovery)
+            inductor_classes = inductor_classes_for_deck(reference_deck_for_recovery)
     # Issue #2813: a FinFET layout deck reads `M` cards through the
     # nfin-preserving reader (the planar reader would drop `nfin`).
     read_path, read_text, tmp_path = sliced_reference_file(
@@ -3737,7 +3362,14 @@ def _read_reference_netlist(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
-            defined_subckt_names=defined_subckt_names(read_text),
+            inductor_classes=inductor_classes,
+            defined_subckt_names=recovery_subckt_names(
+                read_text,
+                read_path,
+                custom_device_classes.keys()
+                | resistor_classes.keys()
+                | inductor_classes.keys(),
+            ),
         ),
     )
     try:
@@ -6158,6 +5790,7 @@ def _apply_compare_parameters(
 #: * ``"placeholder_value"`` -- excluded by
 #:   :func:`_apply_reference_placeholder_values` (issue #1907); already
 #:   disclosed as :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE`.
+#: * ``"deck"`` -- excluded by the layout deck's ignored parameters (#4312).
 #: * ``"compare_parameters"`` -- *narrowed away* by
 #:   :func:`_apply_compare_parameters` (issue #1928): it was being compared
 #:   (``is_primary == True``) until that option scoped the class to a subset
@@ -6167,6 +5800,7 @@ def _apply_compare_parameters(
 #:   secondary.
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
+PARAMETER_NOT_COMPARED_DECK = "deck"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
 
 
@@ -6196,6 +5830,7 @@ def _device_parameter_coverage(
     layout_netlist: Any,
     reference_netlist: Any,
     placeholder_excluded: AbstractSet[tuple[str, str]],
+    deck_narrowed: AbstractSet[tuple[str, str]],
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
@@ -6233,10 +5868,8 @@ def _device_parameter_coverage(
     comparing it.
 
     **Never duplicates another disclosure.** A parameter in
-    ``placeholder_excluded``/``compare_scoped_narrowed`` is already reported
-    as ``device.placeholder_value``/``device.parameter_excluded``; it appears
-    in the coverage block (with that ``reason``) but never in the warning,
-    which is reserved for the case that had no disclosure at all.
+    any of the three exclusion sets already has a ``device.placeholder_value``
+    or ``device.parameter_excluded`` disclosure. Coverage records its source.
 
     ``compare_scoped_narrowed`` is :func:`_apply_compare_parameters`'
     *narrowed* set, not its full excluded set (issue #2654): a parameter that
@@ -6277,6 +5910,8 @@ def _device_parameter_coverage(
             pair = (key, param.name.lower())
             if pair in placeholder_excluded:
                 reason = PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE
+            elif pair in deck_narrowed:
+                reason = PARAMETER_NOT_COMPARED_DECK
             elif pair in compare_scoped_narrowed:
                 reason = PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS
             elif param.is_primary:

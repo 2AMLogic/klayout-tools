@@ -5807,7 +5807,7 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 5
+    assert len(result["checks"]) == 6
     assert all(check["match"] for check in result["checks"])
     defines = [c for c in result["checks"] if c["field"] == "defines"]
     assert len(defines) == 1 and defines[0]["match"] is True
@@ -5923,7 +5923,7 @@ def test_check_synthesize_report_skip_deck_matches_without_a_pdk(tmp_path, monke
     assert result["status"] == "match"
     fields = [c["field"] for c in result["checks"]]
     assert "provenance.deck.content_hash" not in fields
-    assert len(fields) == 4 and all(c["match"] for c in result["checks"])
+    assert len(fields) == 5 and all(c["match"] for c in result["checks"])
     assert result["skipped"] == [
         {
             "field": "provenance.deck.content_hash",
@@ -5940,7 +5940,7 @@ def test_check_synthesize_report_without_skip_deck_has_no_skipped_key(
     )
     result = synthesize.check_synthesize_report(report_path, request_path)
     assert "skipped" not in result
-    assert len(result["checks"]) == 5
+    assert len(result["checks"]) == 6
 
 
 def test_check_synthesize_report_skip_deck_detects_rtl_edit(tmp_path, monkeypatch):

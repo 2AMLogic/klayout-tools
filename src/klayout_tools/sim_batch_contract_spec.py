@@ -16,6 +16,7 @@ from . import (
     remote_transport,
     sim_eye,
     sim_op_check,
+    sim_post_commands,
     sim_search,
     sim_settled,
     sim_slope_band_meas,
@@ -208,6 +209,24 @@ def _runner_gate_release(version: str) -> str | None:
 #: (``measurements[].slope_band``, #5518) missed the ``v0.9.2`` tag (it was not
 #: in that release), so ``0.9.3`` is its first release segment; an older runner
 #: would reject the unknown form or drop the measurement, hence mandatory.
+#: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
+#: likewise first ships in ``0.9.3``; an older runner would reject the unknown
+#: key (at best) or grade the raw crossing count, hence mandatory.
+def _uses_extended_eye(request: dict[str, Any]) -> bool:
+    for step in request.get("analysis_steps") or []:
+        if isinstance(step, dict) and any(
+            isinstance(spec, dict) and sim_eye.is_eye(spec)
+            for spec in step.get("measurements") or []
+        ):
+            return True
+    return any(
+        isinstance(spec, dict)
+        and isinstance(spec.get("eye"), dict)
+        and spec["eye"].get("phase") is not None
+        for spec in request.get("measurements") or []
+    )
+
+
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -223,6 +242,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         _declared(sim_slope_band_meas.slope_band_measurements),
     ),
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
+    "eye_step_or_phase": ((0, 9, 3), _uses_extended_eye),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
@@ -235,6 +255,19 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             and spec["search"].get("param") is not None
             for spec in request.get("measurements") or []
         ),
+    ),
+    "crossings_value_from": (
+        (0, 9, 3),
+        lambda request: any(
+            isinstance(spec, dict)
+            and isinstance(spec.get("crossings"), dict)
+            and spec["crossings"].get("value_from") is not None
+            for spec in request.get("measurements") or []
+        ),
+    ),
+    "post_commands": (
+        (0, 9, 3),
+        lambda request: sim_post_commands.is_declared(request.get("analysis")),
     ),
     "stimulus": (
         (0, 7, 1),
@@ -281,21 +314,32 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235). The #5645 five
+#: process x temperature with ``status: pass`` (#4235). ``post_commands`` is
+#: mandatory because an older runner ignores the field, composing the deck
+#: without ``linearize``/``fft`` and evaluating ``expr`` measurements against
+#: the transient plot with ``status: pass`` (#6080). The #5645 five
 #: (``corners.options``, ``options.nodeset``,
 #: ``options.initial_conditions``, ``analysis_overrides``,
 #: ``analysis.op_check``) are mandatory because each one's post-run
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
 #: -- mandatory membership mirrors that severity, moving the identical
 #: refusal from after the grid ran to before anything is launched.
+#: ``lossless supply_v corner_id spelling`` is mandatory because its
+#: post-run ``supply_precision_unsupported_worker`` echo check
+#: hard-fails the request (#5870); its registry version is still ``None``
+#: (unreleased), so it has no detector row yet and the pre-launch gates
+#: engage only once a release pins the version -- until then the echo
+#: check is the gate.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
         "slope_band",
+        "crossings_value_from",
         "search",
         "search_param",
         "eye",
+        "eye_step_or_phase",
         "step_resolution",
         "settled",
         "stress",
@@ -310,6 +354,8 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "options.initial_conditions",
         "analysis_overrides",
         "analysis.op_check",
+        "lossless supply_v corner_id spelling",
+        "post_commands",
     }
 )
 

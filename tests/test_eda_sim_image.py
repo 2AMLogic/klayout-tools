@@ -42,6 +42,7 @@ SMOKE_SH = EDA_SIM_DIR / "smoke.sh"
 FETCH_PDK = EDA_SIM_DIR / "eda-sim-fetch-pdk"
 README = EDA_SIM_DIR / "README.md"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-eda-sim-image.yml"
+INSTALL_XSCHEM_SH = REPO_ROOT / "scripts" / "install-xschem.sh"
 
 
 @pytest.fixture(scope="module")
@@ -126,6 +127,10 @@ _VERSION_PIN_PATHS = [
     ("tools", "ngspice", "sha256"),
     ("tools", "xschem", "tag"),
     ("tools", "xschem", "commit"),
+    ("tools", "xschem", "asset"),
+    ("tools", "xschem", "release_repo"),
+    ("tools", "xschem", "release_tag"),
+    ("tools", "xschem", "sha256"),
     ("tools", "ciel", "version"),
     ("tools", "klayout_tools", "version"),
 ]
@@ -181,6 +186,33 @@ def test_no_version_literal_is_duplicated_in_the_workflow(manifest, pin_path):
         f"{'.'.join(pin_path)} = {value!r} is hardcoded in "
         ".github/workflows/publish-eda-sim-image.yml. The workflow must read "
         "pins through `docker/eda-sim/build.sh`, never restate them."
+    )
+
+
+@pytest.mark.parametrize(
+    "pin_path",
+    [p for p in _VERSION_PIN_PATHS if p[:2] == ("tools", "xschem")],
+    ids=lambda p: ".".join(p),
+)
+def test_no_version_literal_is_duplicated_in_the_installer(manifest, pin_path):
+    """A `tools.xschem` pin hardcoded in install-xschem.sh forks the fleet pin.
+
+    The installer is self-contained on purpose (chip-repo CI copies the one
+    file), and stays honest by reading every `tools.xschem` pin from
+    pdk-versions.json or `$XSCHEM_MANIFEST` -- that is what makes a copied
+    script track the fleet pin instead of freezing it. A literal restated in
+    the script's *code* (say `tag=3.4.7` as a fallback default) would drift
+    from the manifest with no failure anywhere: the manifest would move, the
+    copy would keep downloading and sha256-verifying the old release asset.
+    Comments are exempt (the header documents where pins come from); code is
+    not. Issue #6575.
+    """
+    value = _pin(manifest, pin_path)
+    body = _code_only(INSTALL_XSCHEM_SH)
+    assert value not in body, (
+        f"{'.'.join(pin_path)} = {value!r} is hardcoded in "
+        "scripts/install-xschem.sh. The installer reads every tools.xschem "
+        "pin from the manifest; a literal here forks the fleet pin."
     )
 
 

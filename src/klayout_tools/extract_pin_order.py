@@ -14,15 +14,11 @@ def _apply_pin_order_to_spice(
     order; every other pin keeps its existing relative order. A no-op when
     ``order`` is empty or the header is absent (device-free layout).
 
-    A header pin matches a declared name when **any** of its component labels
-    does (issue #5534) -- the same per-label rule ``--pins`` already uses to
-    decide *which* nets promote (issue #1687), rather than the whole-token
-    comparison this function used before. ``Net.expanded_name()`` joins the
-    distinct labels on one net with ``,``, which the SPICE writer respells as
-    ``|`` for a node/pin token (see
-    :func:`~klayout_tools.extract_parasitics.spice_safe_net_name`), so a
-    two-label net reaches this function as ``A|A0``. A single-label pin is the
-    one-element case and behaves exactly as before.
+    Match any component label on a promoted pin (#5534), or the complete
+    header token (#6021). The SPICE writer joins multiple drawn labels with
+    a pipe and hex-escapes a pipe inside a single drawn label. Compare each
+    component with the declared label's escaped spelling. Promotion itself
+    uses individual layout labels before the header reaches this function.
 
     The pin's token text is never rewritten -- only its position moves -- and a
     pin matching several declared names is emitted once, at the position of the
@@ -46,9 +42,12 @@ def _apply_pin_order_to_spice(
     first: list[str] = []
     for name in order:
         wanted = name.lower()
-        for pin in [
-            p for p in pool if wanted in {part.lower() for part in p.split("|")}
-        ]:
+        written_label = wanted.replace("|", r"\x7c")
+        matches = [p for p in pool if written_label in p.lower().split("|")]
+        if not matches and "|" in wanted:
+            # The joined spelling is a fallback for an already promoted port.
+            matches = [p for p in pool if wanted == p.lower()]
+        for pin in matches:
             pool.remove(pin)
             first.append(pin)
     rebuilt = head + first + pool

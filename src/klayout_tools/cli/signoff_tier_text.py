@@ -2,10 +2,11 @@
 
 Moved out of :mod:`.cli.signoff_cmd` to keep that module under its size
 ratchet, following the same precedent as the ``signoff_*`` module splits:
-the "not applicable" (issue #2865) and justified declared-gap (issue #5599)
-renderers -- the count suffixes on the ``T1: ...`` summary line and the
-per-item evidence listings -- live here. Both dispositions render beside an
-item that is still ``unmet``; neither ever reads as ``met``.
+the "not applicable" (issue #2865), justified declared-gap (issue #5599)
+and structural-row (issue #6985) renderers -- the count suffixes on the
+``T1: ...`` summary line and the per-item evidence listings -- live here.
+Every disposition rendered here sits beside an item that is still
+``unmet``; none ever reads as ``met``.
 """
 
 from __future__ import annotations
@@ -129,3 +130,17 @@ def print_upstream_source(result: dict, label: str) -> None:
     upstream = result.get("upstream_source")
     if upstream:
         print(f"{label}: {upstream['repository']} @ {upstream['commit']}")
+
+
+def _print_structural_rows(item: dict) -> None:
+    """Each structurally dispositioned row with its evidence (issue #6985):
+    the claimed fact and the hash-bound artifact that evidences it. The
+    hash pin proves the artifact is unchanged, not that the property holds
+    -- ``klt`` records and freshness-pins it, it does not execute any
+    check."""
+    for row in (item.get("detail") or {}).get("structural_rows") or []:
+        print(f"        structural: {row['id']} [{row['claim']}]")
+        print(
+            f"          artifact: {row['artifact']['file']} "
+            f"(content_hash={row['artifact']['content_hash']})"
+        )

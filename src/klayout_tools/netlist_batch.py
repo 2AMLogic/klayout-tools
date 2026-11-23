@@ -48,6 +48,7 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
+import functools
 import os
 import shlex
 import subprocess
@@ -450,27 +451,6 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     )
 
 
-def _job_failure(
-    *,
-    job_id: str,
-    status: dict[str, Any],
-    runner_error: dict[str, Any] | None,
-    note: str,
-    stderr_tail: str = "",
-    harness_log: str | None = None,
-) -> NetlistError:
-    return _batch_common.job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=harness_log,
-        err_cls=NetlistError,
-        no_fallback=_NO_FALLBACK,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
@@ -592,7 +572,11 @@ def _collect(
         runner=runner,
         err_cls=NetlistError,
         no_fallback=_NO_FALLBACK,
-        job_failure=_job_failure,
+        job_failure=functools.partial(
+            _batch_common.job_failure,
+            err_cls=NetlistError,
+            no_fallback=_NO_FALLBACK,
+        ),
     )
 
 

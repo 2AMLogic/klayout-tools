@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from typing import Any, TypeVar
 
 from . import env_provenance
+from .sim_errors import SimError
 
 # ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
 # keyword shape that ``type[Exception]`` cannot express, so construction goes
@@ -262,7 +263,6 @@ def resolve_batch_config(
     request, so the fleet config resolves exactly as for ``klt sim``. Its
     ``SimError``/``BatchError`` becomes ``err_cls``."""
     from . import sim_batch
-    from .sim import SimError
 
     try:
         return sim_batch._resolve_batch_config(
