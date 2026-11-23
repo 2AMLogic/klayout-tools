@@ -1,16 +1,35 @@
-"""``klt pex``'s per-net ``extraction.resistance_graph`` echo (issue #4037).
+"""``klt pex``'s resistance-graph helpers (issue #4037): the per-net
+``extraction.resistance_graph`` echo, the ``--distributed-rc`` refusal, and
+the cap echo of the ``--resistance-graph-max-*`` passthrough (issue #6964).
 
 Factored out of ``pex.py`` (issue #5747) with no behaviour change: the
-per-net ``fallback_reason`` derivation and the request/result echo it
-feeds. They depend on nothing in ``pex.py``, so they live here rather
-than keeping that module's line count climbing; ``pex`` re-imports the
-echo it calls, and tests import both names from here directly.
+per-net ``fallback_reason`` derivation and the request/result echo it feeds;
+issue #6964 moved the refusal here too, as ``pex.py`` sits at its file-size
+ceiling. They depend on nothing in ``pex.py`` at import time, so they live
+here rather than keeping that module's line count climbing; ``pex`` re-imports
+what it calls, and tests import the names from here directly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+
+from .extract_resistance_graph_caps import effective_resistance_graph_caps
+
+
+def _reject_resistance_graph_with_distributed_rc(
+    resistance_graph: bool, distributed_rc: bool
+) -> None:
+    """Issue #4037: the ladder keeps the legacy per-level resistance."""
+    if resistance_graph and distributed_rc:
+        from .pex import PexError  # lazy: `pex` imports this module
+
+        raise PexError(
+            "--resistance-graph cannot be combined with --distributed-rc: the "
+            "ladder keeps the legacy per-level resistance, so a critical net "
+            "would mix resistance sources"
+        )
 
 
 def _resistance_graph_fallback_reason(graph: Mapping[str, Any]) -> str | None:
@@ -33,11 +52,13 @@ def _resistance_graph_fallback_reason(graph: Mapping[str, Any]) -> str | None:
 
 
 def _resistance_graph_echo(
-    parasitics: Mapping[str, Any], r_cut_ohm: float | None
+    parasitics: Mapping[str, Any],
+    r_cut_ohm: float | None,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The ``extraction.resistance_graph`` block (issue #4037): the request
     (``r_cut_ohm``, and ``resistance_network`` for the reduced-network mode
-    of issue #6899) and, per net with a graph result, which scalar the
+    of issue #6899, plus the four effective build caps when requested) and, per net with a graph result, which scalar the
     extracted netlist's lumped R used (``resistance_source``) next to both
     candidate values and, when it is not the graph value, why
     (``fallback_reason``, issue #5747). Under ``--resistance-network`` each
@@ -55,7 +76,7 @@ def _resistance_graph_echo(
         graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
         if not isinstance(graph, dict):
             continue
-        echo = {
+        net_echo = {
             "net": entry.get("net"),
             "net_id": entry.get("net_id"),
             "resistance_source": graph.get("resistance_source"),
@@ -66,32 +87,16 @@ def _resistance_graph_echo(
             "pair_resistance_ohm": graph.get("pair_resistance_ohm"),
         }
         if resistance_network:
-            echo["network"] = graph.get("network")
-        nets.append(echo)
-    return {
+            net_echo["network"] = graph.get("network")
+        nets.append(net_echo)
+    echo: dict[str, Any] = {
         "r_cut_ohm": r_cut_ohm,
         "resistance_network": resistance_network,
-        "nets": nets,
     }
-
-
-def _reject_resistance_graph_with_distributed_rc(
-    resistance_graph: bool, distributed_rc: bool
-) -> None:
-    """Issue #4037: the ladder keeps the legacy per-level resistance.
-
-    Moved verbatim from ``pex.py`` (issue #6899 pays for its growth with
-    the move); :class:`~klayout_tools.pex.PexError` imports lazily because
-    ``pex`` imports this module at its top level.
-    """
-    if resistance_graph and distributed_rc:
-        from .pex import PexError
-
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
+    if caps:
+        echo["caps"] = effective_resistance_graph_caps(caps)
+    echo["nets"] = nets
+    return echo
 
 
 def _reject_resistance_network_without_graph(

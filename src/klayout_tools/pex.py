@@ -2521,6 +2521,7 @@ def run_pex(
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
     resistance_network: bool = False,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2590,22 +2591,16 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
-    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
-    to ``klt extract``'s terminal-aware resistance graph and make the
-    extracted netlist use each ``resistance_source == "graph"`` net's
-    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
-    legacy scalar). ``extraction.resistance_graph`` echoes the request and
-    one per-net entry, only when the flag was given -- otherwise the report
-    and netlist are byte-identical. Combining it with ``distributed_rc``
-    raises :class:`PexError` (the ladder keeps the legacy scalar).
+    before this feature existed.
 
-    ``resistance_network`` (issue #6899) requires ``resistance_graph`` and
-    writes the Kron-reduced terminal network per solved 3+-terminal net;
-    ``False`` is byte-identical to before.
+    ``resistance_graph`` selects the extracted graph resistance or legacy
+    fallback per net. Its report echoes terminals, pair resistances, fallback
+    reasons and the optional per-cut resistance. Explicit caps are echoed
+    with all four effective limits. ``resistance_network`` requires the graph
+    and writes a Kron-reduced network for each solved net with three or more
+    terminals. The graph is incompatible with the distributed RC ladder.
 
-    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    ``critical_net_patterns``/``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
     issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
     straight through; ``extraction.critical_nets`` then echoes the resolved
@@ -2886,6 +2881,7 @@ def run_pex(
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
             resistance_network=resistance_network,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -3524,7 +3520,9 @@ def run_pex(
             **(
                 {
                     "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
+                        parasitics,
+                        resistance_graph_r_cut_ohm,
+                        resistance_graph_caps,
                     )
                 }
                 if resistance_graph

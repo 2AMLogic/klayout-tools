@@ -938,6 +938,9 @@ test-only). The solve is `solve_ir_drop`'s pure-Python sparse CG over
 adjacency lists, and its default iteration cap is `max(500, 10*n)`.
 Exceeding a bound yields diagnostic `graph_too_large` (with the counts) and
 the legacy scalar stands; the builder never truncates silently.
+Since #6964 a caller raises any of these four bounds for one run with `klt
+extract` / `klt pex --resistance-graph-max-{terminals,cells,nodes,edges}`;
+the defaults above are unchanged and the diagnostic names the value applied.
 
 **Failure behaviour.** Geometry or coefficient problems never raise and never
 change the legacy output. Each produces a diagnostic with a stable code and

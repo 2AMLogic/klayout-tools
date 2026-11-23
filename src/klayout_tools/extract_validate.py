@@ -12,8 +12,10 @@ module-level ``from .extract import ...`` would be a circular import.
 
 from __future__ import annotations
 
+import math
 from typing import Any, NamedTuple
 
+from .extract_resistance_graph_caps import validate_resistance_graph_caps
 from .extract_spef import ExtractError
 
 
@@ -71,6 +73,38 @@ def _require_resistance_graph_for_network(
         )
 
 
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
+def _require_resistance_graph_for_emit(
+    emit_selected_resistance: bool, resistance_graph: bool
+) -> None:
+    """``emit_selected_resistance`` (issue #4037) reads the graph result."""
+    if emit_selected_resistance and not resistance_graph:
+        raise ExtractError("emit_selected_resistance requires resistance_graph")
+
+
+def _validate_resistance_graph_r_cut(
+    resistance_graph: bool, r_cut_ohm: float | None
+) -> None:
+    if r_cut_ohm is None:
+        return
+    if not resistance_graph:
+        raise ExtractError("--resistance-graph-r-cut requires --resistance-graph")
+    if isinstance(r_cut_ohm, bool) or not (
+        isinstance(r_cut_ohm, (int, float))
+        and math.isfinite(r_cut_ohm)
+        and r_cut_ohm >= 0
+    ):
+        raise ExtractError(
+            "--resistance-graph-r-cut must be a finite number >= 0 (0 = ideal via)"
+        )
+
+
 def validate_run_extract_args(
     *,
     mom_net: Any,
@@ -84,6 +118,7 @@ def validate_run_extract_args(
     parasitics_top_cell_only: Any,
     resistance_graph: Any,
     resistance_graph_r_cut_ohm: Any,
+    resistance_graph_caps: Any,
     emit_selected_resistance: Any,
     emit_resistance_network: Any,
     critical_net_patterns: Any,
@@ -105,11 +140,8 @@ def validate_run_extract_args(
     from .extract import (
         _build_net_selectors,
         _require_parasitics,
-        _require_parasitics_for_resistance_graph,
-        _require_resistance_graph_for_emit,
         _resolve_substrate_tie_ohms,
         _selects_critical,
-        _validate_resistance_graph_r_cut,
         _validate_resistance_path_args,
     )
     from .extract_parasitics import parse_parasitic_variants
@@ -175,6 +207,9 @@ def validate_run_extract_args(
     # `parasitics.nets[]` entries, so it needs `--parasitics`.
     _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
     _validate_resistance_graph_r_cut(resistance_graph, resistance_graph_r_cut_ohm)
+    # `--resistance-graph-max-*` (issue #6964) raise the builder's own caps;
+    # their rules live with the cap table, so both stay one source of truth.
+    validate_resistance_graph_caps(resistance_graph, resistance_graph_caps)
     _require_resistance_graph_for_emit(emit_selected_resistance, resistance_graph)
     _require_resistance_graph_for_network(
         emit_resistance_network, resistance_graph, spef_output

@@ -243,6 +243,7 @@ def run_extract_leg(
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
     resistance_network: bool = False,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -293,6 +294,7 @@ def run_extract_leg(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -333,6 +335,7 @@ def run_extract_leg(
         # which is the exact `run_extract` call made before they existed.
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=resistance_graph,
         # Issue #6899: the reduced-network emission (the runset shapes are
         # refused by name in `refuse_unsupported` before reaching here).

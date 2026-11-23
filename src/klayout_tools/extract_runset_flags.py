@@ -19,6 +19,7 @@ from typing import Any
 
 from ._digest import content_hash
 from ._report_verify import get_path, hash_check
+from .extract_resistance_graph_caps import RESISTANCE_GRAPH_CAP_FLAGS
 from .extract_spef import ExtractError
 
 #: ``engine`` value selecting the PDK-runset engine (the ``klt lvs`` spelling).
@@ -126,7 +127,9 @@ def parse_device_params(
 #: each parameter's own default, so a flag that was never given is never
 #: refused. Kept explicit rather than derived: a new ``run_extract`` parameter
 #: should force a deliberate decision here, not silently become "accepted".
-REFUSED_FLAG_BY_PARAM: dict[str, str] = {
+#: A parameter that bundles several flags maps to ``{cap: flag}`` instead, and
+#: only the flags actually given are refused.
+REFUSED_FLAG_BY_PARAM: dict[str, str | dict[str, str]] = {
     "deck_name": "--deck",
     "pdk_variant": "--pdk",
     "pdk_root": "--pdk-root",
@@ -153,6 +156,7 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "parasitics_top_cell_only": "--parasitics-top-cell-only",
     "resistance_graph": "--resistance-graph",
     "resistance_graph_r_cut_ohm": "--resistance-graph-r-cut",
+    "resistance_graph_caps": RESISTANCE_GRAPH_CAP_FLAGS,
     "emit_selected_resistance": "--emit-selected-resistance",
     "emit_resistance_network": "--resistance-network",
     "distributed_rc": "--distributed-rc",
@@ -193,6 +197,15 @@ def _is_unset(value: Any) -> bool:
     return value is None or any(value == unset for unset in _UNSET_VALUES)
 
 
+def _flag_spellings(flags: str | Mapping[str, str], value: Any) -> list[str]:
+    """The flag spellings a given value names: ``flags`` itself, or -- for the
+    one parameter that bundles several flags (``resistance_graph_caps``) --
+    the spelling of each cap the mapping sets."""
+    if isinstance(flags, Mapping):
+        return [spelling for key, spelling in flags.items() if key in value]
+    return [flags]
+
+
 def refused_flags(given: Mapping[str, Any]) -> list[str]:
     """Flag spellings in ``given`` this engine cannot honour, in a stable
     order. ``given`` maps ``run_extract`` keyword names to the caller's values;
@@ -210,14 +223,14 @@ def refused_flags(given: Mapping[str, Any]) -> list[str]:
         value = given[param]
         if param == "apply_resistor_fixed_offset":
             if value is False:
-                refused.append(flag)
+                refused.extend(_flag_spellings(flag, value))
             continue
         if param == "report_parasitics":
             if value != "full":
-                refused.append(flag)
+                refused.extend(_flag_spellings(flag, value))
             continue
         if not _is_unset(value):
-            refused.append(flag)
+            refused.extend(_flag_spellings(flag, value))
     return refused
 
 
@@ -301,3 +314,24 @@ def require_runset_engine_for_deck_vars(
             f"--deck-var is only used by engine '{RUNSET_ENGINE}' "
             f"(this run uses '{engine}')"
         )
+
+
+def refuse_batch_for_runset_engine(engine: str) -> None:
+    """``--backend batch`` cannot run the runset engine (issue #5481): it
+    needs the standalone ``klayout`` application and the PDK install on the
+    *executing* host, and the batch runner's request can ship neither -- so
+    refuse rather than submit a job that cannot honour the engine that was
+    asked for.
+
+    The CLI calls it with the argv ``--engine`` and again with a request
+    document's own ``engine`` -- a document carrying
+    ``"engine": "klayout-runset"`` never reaches the argv form, and must be
+    refused with this same message rather than failing later on a missing
+    ``deck`` or en route to a submit."""
+    if engine != RUNSET_ENGINE:
+        return
+    raise ExtractError(
+        f"--backend batch cannot run engine '{RUNSET_ENGINE}' -- the runset "
+        "needs the standalone klayout application and the PDK install on the "
+        "executing host. Run it locally (--backend local)"
+    )
