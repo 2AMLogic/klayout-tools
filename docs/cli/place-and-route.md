@@ -2405,13 +2405,13 @@ live re-measurement above.
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
 | `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library` (the `asap7sc7p5t` recipe accepts the ORFS key `asap7sc7p5t_28` plus the RVT keys `asap7sc7p5t_rvt` and `asap7sc7p5t_28_R`; both RVT keys also support post-route SPEF/SDF). An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
-| `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. |
+| `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. On gf180mcu the per-library default (100 µm) exceeds the bundled deck's 15 µm 5 V/6 V tap-distance reach, so an effective pitch above it adds a `warnings[]` entry (issue #7311). |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
 | `power.connects` | array\<object\> \| omitted | Additive field (issue #1133). With `power.preset` (issue #4348) it replaces the preset's connect entries entirely (no per-entry merge). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
 | `power.connects[].layers` | array\<string\> | Required, exactly 2 entries: `[lower_layer, upper_layer]`. Must name one of `power.straps`'s own consecutive pairs, in that pair's own order — an unmatched or duplicated pair is a validation error. |
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
-| `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. |
+| `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. On the gf180mcu libraries an applied `split_cuts` adds a `warnings[]` entry naming the rule ids it is measured to trip under `klt drc --deck gf180mcu` (issue #7311; `{Metal3 0.128}`, #4301). |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — no `create_clock` is emitted, the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
@@ -2966,7 +2966,16 @@ preset): with the ORFS `split_cuts` the 9t run had 2,624 hits on
 `metal2/3/4.ongrid.1`, `via2/via3.ongrid.1` and `via2/via3.width.1`; without
 it, the 7t run has none on those rules. The only hits left are
 `comp.tap_distance.{nwell,psub}.mv.1`, which come from the tapcell pitch, not
-the PDN. `split_cuts` remains a supported request field.
+the PDN. `split_cuts` remains a supported request field — a caller who wants
+the ORFS tuning keeps it — but on `gf180mcu_fd_sc_mcu9t5v0`/`7t5v0` a run
+that applies one (explicitly, or by overriding a preset's `connects`) now
+says so: `warnings[]` carries a `gf180mcu deck warning (issue #7311)` entry
+naming the applied `-split_cuts {layer width}` and its strap pair, the seven
+rule ids above and #4301. The measured evidence covers `{Metal3 0.128}` only;
+other values are reported as unverified, not clean. `status` stays `"ok"`
+and nothing is refused — the entry exists so that
+`route_drc_violation_count: 0` does not read as DRC-clean under this deck
+(see "Measured power delivery" below for both deck-known entries).
 
 ### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
 
@@ -3094,6 +3103,18 @@ a placement *input* — the pitch between tap columns — and is **not** evidenc
 of any diffusion-to-tap boundary distance (observed maxima are roughly half the
 pitch, and depend on the block). Callers checking a well/substrate tie-distance
 rule must measure the resulting stream.
+
+On gf180mcu the default is **not** deck-clean: 100 µm exceeds the 15 µm reach
+of `klt drc --deck gf180mcu`'s `comp.tap_distance.nwell.mv.1` /
+`comp.tap_distance.psub.mv.1` rules (5 V/6 V cells, issue #3793), so
+`warnings[]` carries a `gf180mcu deck warning (issue #7311)` entry whenever
+the effective pitch exceeds that limit — naming the pitch, whether it is the
+per-library default or a `request.power.tapcell.distance_um` override, and the
+two rule ids. It is worded as "may fail": the pitch is a placement input, and
+whether a given design actually violates the rule is `klt drc`'s measurement
+to make. An override at or under 15 µm silences it; the default itself is
+unchanged (it is ORFS's own `tapcell.tcl` value, and
+`power.tapcell.distance_um` is the documented way to override it).
 
 ### Supplying a KLayout layer map (issue #4481)
 
@@ -3512,7 +3533,36 @@ naming the row-rail fallback, or on `power.row_rail.emitted == true`, in
 addition to the `power.placed` gates above. It never fires alongside a
 real PDN — `emitted` is `false` whenever `request.power` was given — so a
 full-PDN run's `warnings` stays exactly what the measured audit alone
-produces (`[]` when that audit came back `complete`).
+produces (`[]` when that audit came back `complete`, apart from the static
+gf180mcu deck entries described next).
+
+**Deck-known gf180mcu configurations also warn (issue #7311).** Every entry
+above is *measured* — from the DEF, or from what the request omitted. Two
+accepted `request.power` shapes are instead *known* to trip the bundled
+`gf180mcu` deck, and a run using them used to report `status: "ok"` with
+`warnings: []`:
+
+- `power.connects[].split_cuts` applied on `gf180mcu_fd_sc_mcu9t5v0` or
+  `gf180mcu_fd_sc_mcu7t5v0` (explicitly, or by overriding a preset's
+  `connects`) — see "Strap spacing and via-stack tuning" above;
+- an effective `power.tapcell_distance_um` above 15 µm — the libraries' 100 µm
+  default included — see "Tapcell pitch" above.
+
+Each adds a `warnings[]` string beginning `gf180mcu deck warning (issue
+#7311)`, derived from the request alone (no DRC runs inside place-and-route):
+the first names the applied `-split_cuts`, the seven rule ids it was measured
+to trip and #4301; the second names the two
+`comp.tap_distance.{nwell,psub}.mv.1` rules, the effective pitch and whether
+it is the per-library default or a `power.tapcell.distance_um` override. The
+15 µm limit is read from the deck's own rule table, so the two cannot drift.
+They go to stderr like every other entry and change nothing else — `status`,
+the exit code and `route_drc_violation_count` keep their meanings — which is
+the point: a full-PDN gf180mcu run's `warnings` is no longer `[]` by default,
+and `status: "ok"` no longer reads as "DRC-clean under `klt drc --deck
+gf180mcu`". Run `klt drc` on `gds_path` for the verdict; whether the deck
+misfires on merged via arrays or `pdngen`'s output is genuinely off-grid is
+left open (#4348) — these entries only make the known-dirty configurations
+visible.
 
 **Design decision: the `klt power` `gcd` fixture.** `tests/corpus/
 place_and_route/gcd.gds.gz` is also `klt power`'s own "no PDN, fragmented

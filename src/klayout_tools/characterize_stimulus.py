@@ -11,12 +11,7 @@ the leg planner in :mod:`klayout_tools.characterize` consume this half.
 
 from __future__ import annotations
 
-from .characterize_cards import spice_number
-
-
-def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
-    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
-    return f"{name} {node} 0 PWL({body})"
+from .characterize_cards import _pwl
 
 
 def clock_pwl_line(
