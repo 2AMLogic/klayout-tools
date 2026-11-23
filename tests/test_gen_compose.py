@@ -15556,6 +15556,26 @@ def test_compose_source_digest_differs_when_the_input_geometry_differs(
     assert first_block["source_digest"] != second_block["source_digest"]
 
 
+def test_compose_source_digest_equals_klt_stats_geometry_digest(tmp_path, pdk_root):
+    # The public recompute path: `source_digest` is the same decoded-geometry
+    # digest `klt stats --geometry-digest` reports for the source stream, so
+    # a consumer holding the committed input re-verifies a committed compose
+    # response with that one command (a raw-byte `sha256sum` never matches).
+    # This pins the two public surfaces together -- they cannot silently
+    # diverge without this test failing.
+    lib = _write_boxed_gds(tmp_path / "lib.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+
+    block = _compose_one_cell_block(tmp_path, pdk_root, lib, "lib_inv", "eq")
+
+    from klayout_tools.stats import stats_report
+
+    assert block["source_digest"] is not None
+    assert (
+        block["source_digest"]
+        == stats_report(lib, geometry_digest=True)["geometry_digest"]
+    )
+
+
 def test_compose_source_digest_is_null_when_it_cannot_be_computed(
     tmp_path, pdk_root, monkeypatch
 ):
