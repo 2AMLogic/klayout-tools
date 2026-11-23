@@ -10335,18 +10335,8 @@ def _sd_implant_absence_note(family: str, flavor: str) -> str:
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
-def test_mos_array_sd_implant_absence_noted_on_sg13g2(
-    tmp_path, sg13g2_pdk_root, flavor
-):
-    """Issue #2580's own repro: ``mos_array`` on ``ihp-sg13g2`` draws no
-    source/drain implant (``nSD`` 7/0 for an nfet, ``pSD`` 14/0 for a pfet)
-    and nothing DRC-side flags the missing mask -- the family's curated deck
-    recognises a MOS from ``Activ``/``GatPoly``/well alone. The omission must
-    be *reported* via ``drc_hints.notes`` (mirroring the ``voltage_flavor``
-    contract) while the drawn geometry stays byte-for-byte unchanged: the
-    issue's own observed layer set, implant layers absent. The repro's
-    sub-default gate length additionally keeps its own pre-existing note
-    (``l_um`` 0.13), so the implant note is asserted by membership."""
+def test_mos_array_sg13g2_device_implant(tmp_path, sg13g2_pdk_root, flavor):
+    """The hint and streamed layers distinguish PFET pSD from NFET ring pSD."""
     import klayout.db as kdb
 
     output = tmp_path / f"mos_array_sg13g2_sd_implant_{flavor}.gds"
@@ -10368,8 +10358,11 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
             "options": {"output": str(output)},
         }
     )
-    assert report["drc_hints"]["sd_implant_present"] is False
-    assert _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+    pfet = flavor == "pfet"
+    assert report["drc_hints"]["sd_implant_present"] is pfet
+    assert (
+        _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+    ) is not pfet
 
     layout = kdb.Layout()
     layout.read(str(output))
@@ -10377,14 +10370,10 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
         (layout.get_info(i).layer, layout.get_info(i).datatype)
         for i in layout.layer_indexes()
     }
-    # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
-    # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
-    # implant shape on either `nSD` (7/0) or `pSD` (14/0). The curated
-    # dummy marker (99/50, issue #2590) joins it because this repro requests
-    # `dummy: 1`; it is a deck-local extraction marker, not an implant.
-    expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
-    # nfet: the guard ring's P-substrate tap carries its own pSD (issue #5231)
-    expected.add((31, 0) if flavor == "pfet" else (14, 0))
+    # The NFET guard ring carries pSD on the substrate tap (#5231).
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0), (14, 0), _SG13G2_DUMMY_LAYER}
+    if pfet:
+        expected.add((31, 0))
     assert present == expected
 
 

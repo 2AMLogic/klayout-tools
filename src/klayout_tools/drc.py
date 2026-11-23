@@ -104,6 +104,7 @@ from .drc_report_check import (
     report_checks,
     resolve_report_deck,
 )
+from .drc_sg13g2_implant import implant_coverage
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2007,11 +2008,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-wide scopes, independent of stream geometry (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+    voltage_domain_warnings = _voltage_domain_warnings(
+        setup, set(rules_skipped) | omitted_ids
+    )
 
     # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
@@ -2047,8 +2046,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "unchecked_rules": unchecked_rules,
+        **implant_coverage(setup),
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
-        "deck_scope": deck_scope,
+        "deck_scope": sorted({rule.scope for rule in deck if rule.scope}),
         "unmodeled_rules": get_unmodeled_rules(deck_name),
         # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(
@@ -2471,14 +2471,16 @@ def run_drc(
     tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
     control_result = None
     if negative_control is not None:
-        control_result = _run_curated_negative_control(
+        control = run_drc(
             negative_control,
-            negative_control_categories,
             deck_name=deck_name,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
             rules=rules,
+        )
+        control_result = _grade_negative_control(
+            control, negative_control, negative_control_categories
         )
     setup = _prepare_drc(
         path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
@@ -2498,17 +2500,12 @@ def run_drc(
     return report
 
 
-def _run_curated_negative_control(
+def _grade_negative_control(
+    control: dict[str, Any],
     control_path: str,
     categories: list[str] | None,
-    **run_kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the same curated deck over a known-bad fixture and require
-    findings (issue #4320), mirroring the native engine's control: proof the
-    deck can fail on this stream's own layers, so a clean verdict on the real
-    layout is not vacuous. Raises :class:`DrcError` (code
-    ``negative_control_failed``) on no violations or a missing category."""
-    control = run_drc(control_path, **run_kwargs)
+    """Require a known-bad fixture to trigger the specified categories on this deck."""
     found = sorted({v["rule"] for v in control["violations"]})
     missing = sorted(set(categories or []) - set(found))
     if control["violation_count"] < 1 or missing:

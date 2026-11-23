@@ -26,6 +26,11 @@ from helpers.ihp_sg13g2_root import (
 )
 
 
+@pytest.fixture(autouse=True)
+def clear_host_ihp_override(monkeypatch):
+    monkeypatch.delenv("KLT_IHP_SG13G2_ROOT", raising=False)
+
+
 def _git(cwd: Path, *args: str) -> None:
     identity = ["-c", "user.name=klt", "-c", "user.email=klt@example.invalid"]
     subprocess.run(["git", *identity, *args], cwd=cwd, check=True, capture_output=True)
@@ -103,7 +108,19 @@ def test_a_relative_override_resolves_against_the_cwd(main_checkout, monkeypatch
     assert found == shared
 
 
-def test_without_git_discovery_uses_the_active_checkout(tmp_path, monkeypatch):
+def test_without_git_discovery_uses_the_active_checkout(main_checkout, monkeypatch):
+    repo = main_checkout / ".loom/worktrees/worker"
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(repo))
+    shared = _install(main_checkout / VARIANT)
+    assert find_ihp_sg13g2(repo) == shared
+
+    monkeypatch.setenv("PATH", "")
+    assert find_ihp_sg13g2(repo) is None
+
+
+def test_without_git_discovery_finds_only_an_installed_local_variant(
+    tmp_path, monkeypatch
+):
     repo = tmp_path / "checkout"
     local = _install(repo / VARIANT)
     monkeypatch.setenv("PATH", "")  # no git: nothing names a shared checkout

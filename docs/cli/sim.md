@@ -106,12 +106,17 @@ this document (and the code) win.
   preflight" below.
 - `--dry-run` — validate the request and report its expansion without
   simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
-  Every pre-dispatch check a real run performs still runs (request shape,
-  Monte Carlo spec, measurement forms, model/OSDI resolution, the
-  `stage_model_inputs` closure, the off-host PDK check and, on `batch`, the
-  whole-job ceiling/split plan
-  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674))), and a failure
-  exits 1 with the same message a real run gives. It then returns before
+  It checks the request shape, Monte Carlo spec, measurement forms,
+  model/OSDI resolution, the `stage_model_inputs` closure and the off-host
+  PDK. On `batch`, malformed ceiling, split, concurrency, runner policy,
+  capacity and job timing settings produce the submit path's error and exit 1
+  even without fleet configuration.
+  Parsing `batch.poll_interval_s` and `batch.poll_timeout_s` requires a
+  provision script and bucket, so a dry run without them can report
+  `status: "valid"` with a malformed polling value. When the configuration
+  resolves, the dry run also checks the whole-job ceiling/split plan
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674),
+  [#6437](https://github.com/2AMLogic/klayout-tools/issues/6437)). It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
   ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
   way ([#4543](https://github.com/2AMLogic/klayout-tools/issues/4543)): deck,
@@ -2309,6 +2314,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_overrides` | 0.9.1 |
 | `analysis.op_check` | 0.9.2 |
+| `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 | `lossless supply_v corner_id spelling` | unreleased |
@@ -2612,8 +2618,16 @@ the packaged `data/` copy. See
   `batch_max_units_per_job_invalid` and an over-ceiling request behaves
   exactly as a submit would — refused under `"enforce"`, warned under the
   default `"warn"`, planned under `"split"` — and the assessment is
-  reported as `job_ceiling` (see the `--dry-run` flag above). A configless
-  host skips the plan too, staying dry-run clean.
+  reported as `job_ceiling` (see the `--dry-run` flag above). The dry run
+  checks `job_ceiling_check`, `max_concurrent_jobs`, `runner_version_check`,
+  `max_job_seconds`, `capacity_wait_s`, `capacity_retries`, `job_timeout_s`
+  and `interrupted_grace_s` before resolving fleet configuration. An invalid
+  value produces the submit path's error even without a bucket or provision
+  script (for example, `batch_max_concurrent_jobs_invalid`)
+  ([#6437](https://github.com/2AMLogic/klayout-tools/issues/6437)).
+  A host without fleet configuration skips the plan and can report
+  `status: "valid"` with malformed `poll_interval_s` or `poll_timeout_s`.
+  These two fields are parsed only after the provision script and bucket resolve.
   `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
   stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
@@ -9390,6 +9404,98 @@ a bad value is refused with an application error before any unit runs.
 - **Backends.** `local`/`local-parallel` apply it directly. `remote`/`batch`
   forward the request's `options` verbatim, so the runner applies it itself (the
   runner's `klt` must support the option). `engine: "xyce"` refuses it.
+
+## Tightened re-run of check-failing points (`--regrade`, issue #6778)
+
+A sim acceptance check can fail on a point where the simulator returned a
+poor transient solution rather than a property of the circuit (one of 504
+VCO tuning curves dipping ~11% at a single Vctrl point under the batch
+image's ngspice). The remedy is procedural, not statistical: re-run *only*
+the affected units with tightened solver settings, keep both observations,
+and let the tightened one carry the grade. No check definition is ever
+relaxed by this feature.
+
+Two halves, declared before acquisition — never ad hoc:
+
+**The manifest declaration.** The bench declares its tightened transient
+settings on the request itself, so they exist before the first pass ever
+runs (a typo is refused on every run, not discovered after a campaign):
+
+```json
+{
+  "netlist": "vco.spice",
+  "analysis": { "kind": "tran", "args": "1n 20u" },
+  "corners": { "supply_v": { "vdd": [1.8, 1.62] } },
+  "measurements": [
+    { "name": "kvco", "expr": "slope(v(freq))", "unit": "Hz/V",
+      "limits": { "min": "1.2x nominal" } }
+  ],
+  "options": { "tightened_rerun": { "tmax": "25p", "reltol": 1e-4 } }
+}
+```
+
+Keys: `tmax` (the transient's maximum internal timestep — a number of
+seconds or a SPICE time literal; requires a scalar `tran` analysis) plus any
+name from `options.ngspice_options`' allowlist (`reltol`, `abstol`, ...).
+At least one key must be declared; the resolved declaration is echoed as
+`environment.tightened_rerun` in *both* passes' reports. The declaration is
+inert in a normal run: nothing about the first pass changes.
+
+**The second pass.** After the first report, the checker (the chip repo's
+own curve check — it lives outside KLT) supplies the source report, the
+failed check's identifier and the affected corner ids; KLT owns selection,
+dispatch and the comparison record:
+
+```console
+$ klt sim request.json --regrade report.json \
+    --check-id vco_curve_dip --corner default/1.620V/27C
+```
+
+- **Selection.** `--corner` takes a `corners[].corner_id` from the source
+  report (repeatable; each unit is dispatched exactly once; zero `--corner`
+  flags submits zero jobs and records `status: "not_checked"`). Unknown,
+  duplicated or ambiguous ids are refused before anything is dispatched.
+  Seven Vctrl readings that share one transient select the one corner/band
+  curve; a brown-out checker can select individual PVT corners.
+- **What changes.** Only the declared smaller `tmax` and/or tighter solver
+  tolerances. The stimulus, time window, measurements, checker thresholds
+  and resolved inputs are preserved — the re-run rides the request's own
+  expansion unchanged, so corner ids and Monte Carlo seeds are identical by
+  construction. A batch baseline dispatches the subset on batch even when
+  it contains one unit (the fleet simulator is the evidence baseline); the
+  request's own timeout and refusal accounting apply as ever.
+- **The companion record.** Written beside the re-run's artifacts as
+  `regrade/<check-slug>/regrade.json` (both attempts' artifacts survive
+  side by side; the first pass's are never overwritten). Per selected unit:
+  the id, the triggering check, the effective solver settings, **both**
+  attempts' values or waveform references, execution status and batch job
+  provenance when available. The same checker then re-grades the tightened
+  observations — a failure that survives the tightened run stays a failure.
+- **Grades.** A completed tightened run grades `pass`/`fail` from its own
+  limits. A timeout, missing result or unusable solve grades `unresolved`
+  with an explicit reason (and the first observation still in the record) —
+  never a `pass`. Exit codes mirror the sweep's: 0 all passed, 3 a failure
+  survived, 4 unresolved (or nothing was selected), 1 the re-run could not
+  be attempted at all.
+- **Refusals.** A request that declares no `options.tightened_rerun`, a
+  netlist that drifted since the first pass (`expect_netlist_identity` is
+  pinned from the source report), a batch runner too old to apply the
+  selection, or a swept `corners.options` axis that already sets one of the
+  tightened names — each is a named error, never a silent fallback.
+
+Batch and remote jobs carrying a regrade selection require a worker whose
+`klt sim --help` includes `--regrade`. A worker without it refuses the selection
+before running any corners. This also distinguishes development builds that
+share a release number. Declaring `options.tightened_rerun` on an ordinary
+first pass does not require this feature.
+
+`--regrade` composes with `--backend` (an override away from the source
+report's backend adds a `warnings[]` note that the record is not
+evidence-grade parity), `--dry-run` (preview the selection without
+dispatching), and the usual `--timeout-s`/`--budget-s`/`--wait-for-capacity`.
+It cannot combine with `--check`, `--batch-set`, `--submit-only`,
+`--attach`, `--collect-partial`, `--job-status`, `--op-lint`, `--plot` or
+`--resume`.
 
 ## Monte Carlo statistics
 

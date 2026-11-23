@@ -3348,7 +3348,21 @@ M5_M4widePWR0p864`). `ongrid {M3 M4}` snaps the stub onto the tracks and
 checks were clean on the original seven-inverter block (24 µm core, reported
 origin 0.96 µm, PR #4499). The wide `V4` bar's zero `M4` enclosure left
 369 `V4.M4.EN.1` and 13 `V4.M5.EN.2` markers. The request exposes no control
-for that enclosure. That run also had two `M5.W.3` markers.
+for that enclosure. That run also had two `M5.W.3` markers, from the
+edge-pairing `W.3` check that #7339 has replaced. Its request and GDS were
+never committed, so those two remain unattributed. Re-measured 2026-11-23
+(issue #7526): a seven-inverter chain routed as above, with an explicit
+24 µm core at a 0.96 µm origin (ASAP7 cells `f970bd3`, klayout-tools
+`5634acd86`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12), reported
+**zero** `M5.W.3` from both the pre-#7339 deck and the current deck on the
+same GDS, with 445 `V4.M4.EN.1` and 20 `V4.M5.EN.2` markers, so it is not
+the original geometry. Its only minimum-width `M5` shapes are three pin
+stubs. The two next to a strap sit 384 nm and 480 nm from its edge, the
+distances the check pairs, but do not overlap it; the one strap a stub does
+overlap has its edge 912 nm away. Lengthening that nearer strap to reach
+the two stubs beside it (a hand edit of the routed GDS, not a route) made
+the pre-#7339 deck report two cross-polygon markers (issue #7226), 384 and
+480 nm from strap edge to stub edge, and the current deck none.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
 markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
 count that scales with block size, not a fixed number). They sit on
@@ -3841,8 +3855,11 @@ Each entry contains:
 | `retention_errors` | Secondary write failures, each with `artifact` and `error`; empty when all logs were written. |
 
 New path fields use the shared `{path, scope}` convention: `repo` paths are
-relative to the invoking repository root; `external` paths are withheld;
-`absent` means no successfully retained artifact at that field. For an
+relative to the repository containing the request file (#6764) — never the
+invoking directory, so one request yields one committed report from any cwd;
+`external` paths are withheld; `absent` means no successfully retained
+artifact at that field. An `outputs.dir` outside the request's repository
+(even one holding the invoking cwd) makes every log field `external`. For an
 external request, locate the directory beside its generated script using
 the invocation ID and the fixed `openroad-logs/<invocation_id>/` suffix.
 The transcripts themselves contain the engine's unredacted captured text.
