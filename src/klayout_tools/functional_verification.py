@@ -174,8 +174,8 @@ implemented deliberately rather than rediscovered:
     (:data:`SDF_ALIAS_PORT_DROPPED_CLASS`,
     :func:`_drop_sdf_zero_delay_alias_port_interconnects`). The exemption
     is bounded by the entry's own delay value, not by the diagnostic text:
-    an entry with a non-zero value at *any* corner is left in place and
-    still fails the gate loudly. See the module comment above
+    a nonzero delay at any corner on a separately assigned output bit
+    is refused before the build. See the module comment above
     :func:`_drop_sdf_zero_delay_alias_port_interconnects` for the full
     write-up, including why Icarus's ``<file>:<line>:`` locator cannot be
     mapped back to an entry (its line counter is cumulative across
@@ -2323,8 +2323,7 @@ def run_functional_verification(
         # be made annotatable by rewriting the endpoint either; a
         # zero-delay-at-every-corner entry is dropped up front and counted
         # in `environment.sdf.dropped` instead of failing the run (the
-        # helper carries the full write-up; non-zero entries stay in
-        # place and still fail the diagnostic gate loudly).
+        # helper refuses nonzero delays on separately assigned bits).
         annotate_source_path = _apply_sdf_alias_port_drop(
             annotate_source_path,
             output_dir,
