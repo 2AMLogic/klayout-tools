@@ -5572,6 +5572,26 @@ arity`); use the replacement:
 
 Spell comparisons `gt` / `lt` (see the runner-skew note on `<` / `>`).
 
+### Spread of three scalar measurements
+
+On local ngspice, three earlier scalar `expr` measurements named `a`, `b`,
+and `c` can feed another control-language expression:
+
+```json
+{"name": "spread", "expr": "max(max(a,b),c)-min(min(a,b),c)"}
+```
+
+When the inputs instead come from three preceding file-scope
+`.meas tran ...` cards, keep the calculation in the same scope:
+
+```json
+{"name": "spread", "spice": ".meas tran spread param='max(max(a,b),c)-min(min(a,b),c)'"}
+```
+
+Both forms yielded 4 for inputs of 2, 5, and 1 on local ngspice.
+The file-scope results are unavailable as sibling variables in the
+control-language `expr` on this path.
+
 ### Counting edges with `expr`
 
 There is no edge-count measurement in `expr`, but a signed first difference
