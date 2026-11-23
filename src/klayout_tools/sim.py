@@ -3888,6 +3888,7 @@ def _run_sim_corners(
 
     # Off-host workers resolve the engine, diagnostic policy and ngspice init
     # from their staged request. These local kwargs describe the client host.
+    # Forwarding the resolved fail_on_diagnostic policy would grade those corners twice.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
     # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
