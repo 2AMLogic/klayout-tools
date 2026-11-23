@@ -22,9 +22,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #7131**: Describe descriptor-backed names in post-route corner sweeps
 - **PR #7038**: feat: accept local operating-condition renames in Liberty list merge
 - **Issue #7484** (closed): klt pex: env-provenance lint-envelope flags the envelope's own remote worker observations because the #5133 skip is anchored at the envelope root
-- **Issue #7399** (closed): klt sta: I/O delays are primary-clock-only, so an input-delay-vs-secondary-clock check cannot be expressed
+- **Issue #7399** (closed): klt sta: I/O delays are primary-clock-only, so an input-delay-vs-secondary-clock check (e.g. data vs an edge-aligned strobe) cannot be expressed
 - **Issue #7125** (closed): place-and-route docs: two leftover `list_lib_corners` references describe sweep_corners validation that is now descriptor-driven
-- **Issue #7113** (closed): klt sim batch: measurements[].expr passes preflight but every dependent measurement errors on a runner that predates expr
+- **Issue #7113** (closed): klt sim batch: measurements[].expr passes preflight but every dependent measurement errors on a runner that predates expr (runner_compatibility reads match)
 - **Issue #7090** (closed): Share model resolution and sweep validation between klt size solvers
 - **Issue #7060** (closed): Use the discovered variant directory for unpinned batch PDK stamps
 - **Issue #7049** (closed): Move extract report canonicalization out of the layout engine
@@ -36,7 +36,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #6334** (closed): Reuse pdk.variant_dir_of() in bundle_expectation instead of re-deriving the variant dir
 - **Issue #6298** (closed): pdk_compat._sha_equal: byte-identical all-hex values shorter than 7 chars report mismatch
 - **Issue #6297** (closed): klt pdk check: bundle_expectation re-derives the variant dir instead of reading the one find_pdk resolved
-- **Issue #5632** (closed): abstract-cells + --abstract-cell-lef: merged substrate pin lands on the isolated 'vsubs' global, so a PG-pin gate-level reference cannot match
+- **Issue #5632** (closed): abstract-cells + --abstract-cell-lef: merged substrate pin lands on the isolated 'vsubs' global, so a PG-pin gate-level reference cannot match (topology, not power_connectivity)
 - **Issue #5520** (closed): klt characterize: async set/reset arcs (preset/clear propagation, recovery/removal) for sequential cells
 - **Issue #5517** (closed): klt characterize: no sequential-cell arcs (setup/hold/recovery/removal), so a standard-cell library cannot be re-characterized end to end
 - **PR #7489**: Preserve OSDI model paths in relocated PEX testbenches
