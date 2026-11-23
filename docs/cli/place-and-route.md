@@ -526,11 +526,12 @@ check — and every stage after it — runs normally. If every stage up to
 pass) and response assembly run.
 
 The input hash covers the previous stage's hash (so a change invalidates all
-later stages), the request document except `target_stage`, the stage's
+later stages), the request document except `target_stage` and `threads`, the stage's
 generated Tcl script text, and the content hashes of the netlist, tech/cell
 LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
 (it is written last, and any stale one is deleted before the stage re-runs),
-so a partial `.odb` is never reused.
+so a partial `.odb` is never reused. A reused stage retains the thread count
+that produced it. See [OpenROAD threads](#openroad-threads).
 
 * `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
   empty or missing directory it behaves as a normal run.
@@ -1314,10 +1315,11 @@ never operates at. Issue #1092 closes both gaps additively:
   mechanics rather than new, unverified Tcl surface.
 - **`pdk.sweep_corners`** — scopes both the combined sweep and the
   per-corner breakdown to a caller-named subset of the shipped corners
-  (see the request field table above). Every named corner must resolve
-  against the *unfiltered* `list_lib_corners` enumeration; an unresolvable
-  name raises `PlaceAndRouteError` before any OpenROAD invocation runs,
-  naming both the unresolvable name(s) and the full list of valid corners.
+  (see the request field table). For a library mapped by the PDK descriptor,
+  use the descriptor's corner keys. For an unmapped library, use the unfiltered
+  `list_lib_corners` enumeration. After routing, the tool validates the names
+  before starting the timing sweep. An unknown name raises `PlaceAndRouteError`
+  listing the unknown names and all available corners.
 
 **Wall-clock cost, updated.** A `sweep_corners`-scoped or naturally
 single-corner run pays exactly the original #949 cost above (one combined
@@ -3645,10 +3647,41 @@ used; if this host can resolve the same corner's deck and the hashes differ,
 the unit fails with `batch_deck_mismatch` (the fleet image's PDK does not match
 this host's).
 
+#### OpenROAD threads
+
+Set the top-level request field `"threads": 2`, or pass
+`klt place-and-route request.json --threads 2` to override it. The default
+is one thread. A positive integer requests that many threads per OpenROAD
+process, including detailed routing and timing sweeps. A shared engine launcher
+passes `-threads N` before any stage Tcl runs. OpenROAD can clamp N to its
+hardware limit. Every successful stage records the effective count from its
+`ORD-0030` startup message in `stages[].threads`. The unit's
+`environment.threads` is the count that produced its final stage.
+
+With `"threads": "max"` or `--threads max`, local execution uses the CPUs
+in the process affinity mask where available and falls back to the host CPU
+count. Affinity can be wider than a CPU-time quota. Choose an integer to
+bound load on a shared host. The supplied Docker wrapper adds no CPU cap.
+
+Each batch worker resolves `max` using its own `nproc`. If an explicit
+integer exceeds the worker's vCPUs, the job stops before OpenROAD and reports
+`batch_threads_exceed_vcpus` with the requested count, worker capacity and
+instance type. Provisioning still follows the fleet profile. Successful
+rebuilt corners each report their own effective count.
+
+On the synthesized 16-bit Sky130 GCD with pinned OpenROAD
+`26Q3-1510-g6cb3f2b704`, detailed routing and the surrounding route-stage
+steps took 67 s with one thread and 53 s with two. Both routed DEF and GDS
+were byte-identical. The cheap `--check` therefore keeps comparing netlist and
+Liberty digests. A full `--rerun` ignores thread metadata when comparing
+reports, including corner units, and `--resume` reuses stages across changes
+to the thread count. Older stage records imply one thread. The measured
+result ruled out making the count part of artifact identity for this build.
+
 #### Single-unit batch run (issue #5799)
 
 A request with no `pdk.rebuild_corners` (or a one-element list) and an explicit
-batch backend runs as one job — the way to move a long single-threaded route off
+batch backend runs as one job — the way to move a long route off
 the host. It uses the same upload, job contract, preflight and error codes as
 above, with these differences:
 

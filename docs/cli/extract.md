@@ -1422,6 +1422,16 @@ the deck does not read — reaches the `.SUBCKT`. A merged pin on a
 point (issue #4571: a routed signal over the LEF box centre cannot capture
 it), and the warning above is not emitted for that cell. No new flag or JSON field.
 
+**Isolated substrate global (issue #5632).** If the extracted netlist connects
+the substrate global only to LEF-merged substrate pins, `warnings[]` identifies
+the net and counts the affected instances and cell types. This can happen
+when a physical tap is abstracted and its LEF has only rail pins. The same
+warning can arise on a layout with no tap. If you have verified the physical
+tie, disclose it for comparison with `hints.layout_short_nets`
+(`{"nets": [["vsubs", "VGND"]]}`, see `docs/cli/lvs.md`). To represent a tie
+in extraction, draw and label it in the cells. A device terminal or another
+pin on the substrate net suppresses this warning.
+
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
 not — see "Abstraction never changes net identity outside the black box"

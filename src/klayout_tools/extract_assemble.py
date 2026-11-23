@@ -17,6 +17,7 @@ from ._provenance import build_provenance
 from .decks import deck_source_path
 from .extract_base import SCHEMA_VERSION, _build_metrics
 from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
 from .extract_resistance_network import RESISTANCE_NETWORK_MODEL_NOTE
 
 
@@ -70,8 +71,6 @@ def assemble_extract_report(
     warnings: Any,
 ) -> dict[str, Any]:
     """Build the ``run_extract`` result dict (byte-identical to the inline code)."""
-    from .extract import _normalized_netlist_sha256
-
     # Issue #2659: `file` -- the input layout `provenance.input.content_hash`
     # below covers -- is normalised against the repo root resolved from the
     # layout's own location, the same "walk up from the input" anchor

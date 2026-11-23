@@ -8,6 +8,21 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-23
 
+- **PR #7489**: Preserve OSDI model paths in relocated PEX testbenches
+- **PR #7477**: refactor(sim): isolate checkpoint persistence and fingerprinting
+- **PR #7473**: docs(lvs): show the sg13cmos5l plain-element reference migration
+- **PR #7452**: Preserve escaped scalar port names in gate-level LVS references
+- **PR #7437**: Exclude physically empty internal nets from SPEF design coverage
+- **PR #7432**: feat(place-and-route): disclose dont_use check result as cell_exclusions.validated
+- **PR #7425**: Decouple shared extraction interfaces from the extraction orchestrator
+- **PR #7393**: Grade measurement limits against each simulation corner’s supply
+- **PR #7382**: Qualify worker init evidence in ngspice batch reports
+- **PR #7364**: feat(layout-plan): derive MOS flavor from device_class, climb ring/self-net legs; LVS-clean mixed sky130 block
+- **PR #7166**: Avoid inferred SDC drift for unchecked command forms
+- **PR #7162**: Build only the SPICE decks submitted by split-grid characterization
+- **PR #7141**: Document saving an ngspice subcircuit resistor current
+- **PR #6141**: feat: read .pdk-store.json identity in pdk pins and add check --expect-bundle-sha256
+- **PR #6078**: Reject a diff_pair group whose declared devices share a gate or drain net
 - **PR #7444**: refactor: consolidate off-host echo checks into sim_echo_checks
 - **PR #7441**: test: gate plusargs tests on shared tool_probes cocotb/Icarus marks
 - **PR #7438**: refactor: drop unreachable expected_dupes branch in corner-matrix
@@ -74,6 +89,21 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #6246**: feat(extract): emit nets[].structural_id, a stable handle for anonymous nets
 - **PR #6215**: refactor(sta): share the OpenROAD mount-namespace hint with place-and-route
 - **PR #6187**: fix(array-check): check abutment per lane and derive the expected seam gap from --pitch
+- **Issue #7485** (closed): klt pex: the swapped testbench request resolves request-relative options.osdi_preload against the pex artifact root, so the extracted leg cannot find the OSDI module
+- **Issue #7474** (closed): Move simulation checkpoint persistence and fingerprinting out of sim.py
+- **Issue #7388** (closed): place-and-route cell_exclusions omits synthesize's `validated` disclosure
+- **Issue #7386** (closed): Break the extract.py import cycle across sibling, LVS, and netlist modules via extract_base
+- **Issue #7370** (closed): klt sim: measurements[].limits cannot be supply-relative, so a VDD-scaled bound cannot be tool-graded across a supply-sweeping corner set
+- **Issue #7368** (closed): klt sim batch: options.ngspice_init is accepted but the report retains no init identity or marker evidence
+- **Issue #7367** (closed): klt sta: design-side spef_annotation coverage still counts nets with no pins, so annotation_complete cannot reach true on a netlist with connection-less nets (#6970 residual)
+- **Issue #7067** (closed): Document how to save a device branch current for .meas FIND in klt sim
+- **Issue #7017** (closed): klt sta sdc_check: an unparseable-but-present SDC command is reported as a mismatch with sdc_value null, not as unchecked
+- **Issue #6912** (closed): layout-plan execute: 6-device mixed sky130 block (xhigh res_array + MIM cap_array + four hvi FETs) routes no net by default; make it a routed, LVS-clean regression fixture
+- **Issue #6858** (closed): Skip the unused full SPICE deck when characterize splits a grid
+- **Issue #5765** (closed): layout-plan execute cannot fully wire a diff_pair group (one port per declared device; subckt-call digest splits instances into per-finger devices)
+- **Issue #5693** (closed): klt lvs: gate-level-verilog reader rejects escaped/bracketed names in the module port list and direction declarations (follow-up to #1371, #4810)
+- **Issue #5624** (closed): klt pdk check: an install whose content does not match its recorded identity passes both legs (store stamp unread; materialized cross-variant symlinks undetected)
+- **Issue #4424** (closed): klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l)
 - **Issue #7478** (closed): Live sky130A verification: klt sta clock_sinks > latency-report pins on a >2-flop post-CTS DEF
 - **Issue #7416** (closed): klt lvs (0.9.2): the FinFET gate-level route defaults flatten_reference on but flatten_layout off, so the default request fails at circuit matching with no advisory
 - **Issue #7415** (closed): klt erc --check: a gzipped report tracebacks with UnicodeDecodeError instead of verifying (same class as #5717/#5452)
