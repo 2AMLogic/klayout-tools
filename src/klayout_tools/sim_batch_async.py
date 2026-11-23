@@ -53,6 +53,7 @@ from .sim_batch_shards import (  # noqa: F401
     shard_scoped_points,
 )
 from .sim_batch_unstarted import unstarted_fields
+from .sim_errors import SimError
 
 #: Schema version of the two payloads this module builds. They are new
 #: documents (not a field on the sim report), so they start at 1.
@@ -104,6 +105,12 @@ _STATUS_INSTANCE_FIELDS = (
 #: ``new_job_id``'s alphabet -- what ``batch-fleet-provision.sh launch``
 #: accepts, and therefore the only ids that can name a job.
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MISSING_HEAD_CODES = {"404", "404 Not Found", "Not Found", "NotFound", "NoSuchKey"}
+_MISSING_HEAD_ERROR = re.compile(
+    r"^(?:aws: \[ERROR\]: )?An error occurred \((?:404|NotFound|NoSuchKey)\)"
+    r"(?= when calling the HeadObject operation\b|:|$)",
+    re.MULTILINE,
+)
 
 
 def submit_only(
@@ -142,8 +149,6 @@ def submit_only(
     A client ``hosts`` > 1 (``--hosts`` / ``remote.hosts``, issue #5281) takes
     the same path with that many shards.
     """
-    from .sim import SimError
-
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
@@ -197,8 +202,6 @@ def submit_only(
 
 def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
     """Refuse more hosts than units (#5281): an idle member is still billed."""
-    from .sim import SimError
-
     if hosts > unit_count:
         raise SimError(
             f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
@@ -209,8 +212,6 @@ def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
 
 def refuse_sharded_deck_submit(hosts: int | None) -> None:
     """Deck lists stay one job; only corner requests shard (#5281)."""
-    from .sim import SimError
-
     if hosts not in (None, 1):
         raise SimError(
             "--submit-only submits one job; --hosts sharding is not "
@@ -236,8 +237,6 @@ def _submit_sharded(
     job_ceiling: dict[str, Any],
 ) -> dict[str, Any]:
     """The sharded ``--submit-only`` payload (issue #4620)."""
-    from .sim import SimError
-
     if artifacts_dir is None or shard_fingerprint is None:
         raise SimError(
             "--submit-only on a sharded request needs an artifacts dir and a "
@@ -294,8 +293,6 @@ def launch_prepared_job(
     ``status: "submitted"`` payload. Shared by the corner and deck-list
     paths (issue #3958); ``job_ceiling`` is ``None`` where the path does not
     assess one (the deck-list path today)."""
-    from .sim import SimError
-
     job_id = new_job_id()
     try:
         submit_job(config, job_id, spec, runner=runner)
@@ -340,13 +337,7 @@ def _job_head(
     ``None`` on a 404; any other failure is a transport error."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
-        config,
-        "s3api",
-        "head-object",
-        "--bucket",
-        config.bucket,
-        "--key",
-        bucket_key,
+        config, "s3api", "head-object", "--bucket", config.bucket, "--key", bucket_key
     )
     try:
         result = run(argv, 60.0)
@@ -359,7 +350,7 @@ def _job_head(
             return {}
         return head if isinstance(head, dict) else {}
     detail = (result.stderr or "").strip()
-    if "404" in detail or "Not Found" in detail or "NoSuchKey" in detail:
+    if detail in _MISSING_HEAD_CODES or _MISSING_HEAD_ERROR.search(detail):
         return None
     raise BatchError(
         f"aws s3api head-object (job.json) failed (exit {result.returncode}): {detail}"
@@ -433,8 +424,6 @@ def read_job_status(
     ``stale_seconds`` (the age of ``updated_at``); ``state`` stays the
     runner's own value. ``now`` is for tests.
     """
-    from .sim import SimError
-
     if not _JOB_ID_RE.match(job_id):
         raise SimError(
             f"invalid batch job id {job_id!r} "
@@ -485,8 +474,6 @@ def _read_status_and_head(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(status, job.json head)``; neither present is a not-found error."""
-    from .sim import SimError
-
     status = _read_status(config, job_id, run)
     if status is not None:
         return status, None

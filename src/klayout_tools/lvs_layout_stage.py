@@ -20,6 +20,7 @@ from .lvs_combine import (
     _unmatched_combine_devices_per_circuit_warnings,
 )
 from .lvs_finfet_flatten import flatten_layout_netlist
+from .lvs_known_limits import count_unsupported_asap7_instances
 from .lvs_layout_short_nets import apply_layout_short_nets
 from .lvs_mos_options import split_layout_mos_flavours
 from .lvs_supply import supply_fragmentation_findings
@@ -47,6 +48,7 @@ class _LayoutStage(NamedTuple):
     combine_per_circuit_warnings: list[dict[str, Any]]
     layout_circuit_names: set[str]
     finfet_bulk_records: Any
+    layout_known_limit_counts: dict[str, int]
     layout_short_nets_warnings: list[dict[str, Any]]
 
 
@@ -56,6 +58,7 @@ def _resolve_layout_stage(
     request_dir: str,
     opts: _LvsRunOptions,
     progress: bool | str,
+    coverage: dict[str, Any] | None = None,
 ) -> _LayoutStage:
     """Resolve the layout netlist and take the pre-flatten snapshots.
 
@@ -89,6 +92,7 @@ def _resolve_layout_stage(
         opts.def_net_names,
         opts.def_pins,
         progress,
+        coverage,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -218,6 +222,17 @@ def _resolve_layout_stage(
     finfet_bulk_records = _apply_finfet_bulk_policy(
         layout_netlist, layout_spec, opts.finfet_layout, opts.finfet_bulk
     )
+    # Issue #6931: census of pinned unsupported ASAP7 masters beneath the
+    # selected top, taken while the netlist still carries its hierarchy --
+    # the FinFET extractor names each circuit after its GDS cell (verified:
+    # `LayoutToNetlist` with a `RecursiveShapeIterator` keeps per-cell
+    # circuits and one subcircuit entry per placement), and the optional
+    # flatten right below is what discards it. Consumed by `note_known_limit`
+    # only on a mismatching FinFET compare; gathered unconditionally because
+    # the walk is O(circuits + subcircuit edges).
+    layout_known_limit_counts = count_unsupported_asap7_instances(
+        layout_netlist, layout_spec.get("top")
+    )
     if opts.flatten_layout:
         flatten_layout_netlist(layout_netlist, opts.finfet_layout, flatten_warnings)
     return _LayoutStage(
@@ -234,5 +249,6 @@ def _resolve_layout_stage(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
         layout_short_nets_warnings,
     )

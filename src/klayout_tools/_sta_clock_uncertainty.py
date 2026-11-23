@@ -7,14 +7,9 @@ from typing import Any
 
 from ._jsonnum import is_finite_number
 from ._tcl import tcl_literal
+from .post_route_sta_errors import PostRouteStaError
 
 CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
 
 
 def validate_clock_uncertainty(
@@ -28,8 +23,9 @@ def validate_clock_uncertainty(
 
     The value is either a finite number ``>= 0`` (applied to setup and hold)
     or an object with the optional keys ``setup_ns`` / ``hold_ns`` (each a
-    finite number ``>= 0``, at least one required). Booleans, non-finite or
-    negative numbers, unknown keys and any other type are request errors.
+    finite number ``>= 0`` or ``null``, at least one key required). Booleans,
+    non-finite or negative numbers, unknown keys and any other type are
+    request errors.
     """
     value = constraints.get("clock_uncertainty_ns")
     if value is None:
@@ -37,9 +33,9 @@ def validate_clock_uncertainty(
 
     def _number(number: Any, name: str) -> float:
         if not is_finite_number(number):
-            raise _error(f"{name} must be a finite number")
+            raise PostRouteStaError(f"{name} must be a finite number")
         if number < 0:
-            raise _error(f"{name} must be >= 0, got {number}")
+            raise PostRouteStaError(f"{name} must be >= 0, got {number}")
         return float(number)
 
     if not isinstance(value, dict):
@@ -47,13 +43,13 @@ def validate_clock_uncertainty(
         return {"setup_ns": scalar, "hold_ns": scalar}
     unknown = sorted(set(value) - set(CLOCK_UNCERTAINTY_KEYS))
     if unknown:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.clock_uncertainty_ns has unknown key(s): "
             + ", ".join(unknown)
             + " (allowed: setup_ns, hold_ns)"
         )
     if not value:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.clock_uncertainty_ns must give at least one of "
             "'setup_ns' and 'hold_ns'"
         )
@@ -89,7 +85,9 @@ def clock_uncertainty_block(
     """The ``clock_uncertainty`` response block (issue #4240): whether any
     uncertainty was applied. A side not given is ``null`` (unconstrained),
     never copied from the other."""
-    if not clock_uncertainty:
+    if not clock_uncertainty or all(
+        value is None for value in clock_uncertainty.values()
+    ):
         return {"applied": False}
     return {
         "applied": True,

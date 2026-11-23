@@ -118,3 +118,21 @@ def _parse_isolation_boxes(
     because nothing in the stream corroborates it. Omitted/``null`` -> ``[]``.
     """
     return _parse_um_boxes(entry, "isolation_boxes", spec_path, index)
+
+
+def validate_common_native_substrate(
+    spec: dict[str, Any], spec_path: str, ties: list[dict[str, Any]]
+) -> None:
+    """Reject wrong types and incompatible explicit isolation assertions."""
+    from .erc_spec import ErcError
+
+    common = spec.get("common_native_substrate", False)
+    if not isinstance(common, bool):
+        raise ErcError(f"spec '{spec_path}': common_native_substrate must be a boolean")
+    if common:
+        for i, tie in enumerate(ties):
+            if tie["isolation_boxes"]:
+                raise ErcError(
+                    f"spec '{spec_path}': common_native_substrate conflicts with "
+                    f"ties[{i}].isolation_boxes"
+                )

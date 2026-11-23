@@ -363,7 +363,7 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
             "recorded content_hash values, no extraction engine re-run. "
             "Combine with --rerun for full mode (re-run the extraction and "
             "diff verdict-bearing fields). Exits 0 if still consistent, 3 "
-            "if drifted -- see docs/cli/extract.md, '--check'"
+            "if drifted, or 4 if a recorded input is unavailable in cheap mode"
         ),
     )
     extract_parser.add_argument(
