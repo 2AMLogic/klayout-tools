@@ -311,8 +311,12 @@ The example uses a placeholder hash and shows selected device classes.
       ],
       "provides": ["curated_drc", "extraction"],
       "enforced_rule_count": 127,
-      "released": false,
-      "release": null,
+      "released": true,
+      "release": {
+        "git_tag": "v0.10.0",
+        "git_commit": null,
+        "package_version": "0.10.0"
+      },
       "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
     }
   ]
