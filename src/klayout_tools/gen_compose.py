@@ -3009,10 +3009,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     if not isinstance(routing, dict):
         raise GenComposeError("request.routing must be a JSON object")
     landing_pad_override_um = None
+    raw_minimal_ladder = routing.get("minimal_ladder")
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
             routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
         )
+        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
     blocks = _parse_blocks(
         request.get("blocks"),
         request_dir or os.getcwd(),
@@ -3129,7 +3145,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # sizing; True sizes a ladder's intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together below.
+    # rejected together before label-derived landings are searched.
     minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
@@ -3170,28 +3186,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        raw_minimal_ladder = routing.get("minimal_ladder")
         if raw_minimal_ladder is not None:
             if not isinstance(raw_minimal_ladder, bool):
                 raise GenComposeError(
                     "request.routing.minimal_ladder must be a boolean when given"
                 )
             minimal_ladder = raw_minimal_ladder
-        if minimal_ladder and landing_pad_override_um is not None:
-            # Issue #6058: the two fields are competing pad-sizing policies
-            # -- the override replaces the fixed baseline for *every* pad,
-            # the mode drops the baseline from *intermediate* pads only --
-            # so honouring both would silently pick one per hop. Name both
-            # fields and let the caller choose.
-            raise GenComposeError(
-                "request.routing.minimal_ladder and "
-                "request.routing.landing_pad_size_um select two different "
-                "pad-sizing policies and cannot be combined -- "
-                "minimal_ladder sizes a ladder's intermediate hop pads at "
-                "their own per-pair enclosure/area floors while keeping "
-                "the terminal pads, landing_pad_size_um replaces the fixed "
-                "baseline for every pad; set one or the other"
-            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um

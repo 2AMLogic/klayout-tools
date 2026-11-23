@@ -143,3 +143,18 @@ def test_no_connectivity_preserves_default_access_size(tmp_path, pdk_root, capsy
     report = json.loads(capsys.readouterr().out)
     landing = report["blocks"][0]["derived_ports"][0]["landing"]
     assert (landing["x_um"], landing["y_um"]) == pytest.approx((7.98, 0.315))
+
+
+@pytest.mark.parametrize("override", [0.1, 0.8])
+def test_conflicting_pad_policies_precede_label_access(
+    tmp_path, pdk_root, capsys, override
+):
+    path = _request(tmp_path, pdk_root, override, blocked=True)
+    req = json.loads(path.read_text())
+    req["routing"]["minimal_ladder"] = True
+    path.write_text(json.dumps(req))
+    assert main(["gen-compose", str(path), "--format", "json"]) == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert "minimal_ladder and request.routing.landing_pad_size_um" in message
+    assert "cannot be combined" in message
+    assert not (tmp_path / "top.gds").exists()
