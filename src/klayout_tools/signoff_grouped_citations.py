@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .signoff_base import _citation_label
-from .signoff_multi_member import with_member_coverage
+from .signoff_multi_member import graded_input_provenance, with_member_coverage
 from .signoff_unmet_reasons import _REASON_INVALID_EVIDENCE
 
 
@@ -113,7 +113,9 @@ def missing_parts_verdict(
     )
 
 
-def parts_citation_or_none(by_kind: dict[str, Any]) -> dict[str, Any]:
+def parts_citation_or_none(
+    by_kind: dict[str, Any], group_provenance: dict[str, Any] | None
+) -> dict[str, Any] | None:
     """``{"parts": [...]}`` covering every resolved part, in the canonical
     part order (issue #5597): the citation a failing *group* still owes the
     report of record. ``power_delivery`` states facts about a proven grid,
@@ -122,6 +124,10 @@ def parts_citation_or_none(by_kind: dict[str, Any]) -> dict[str, Any]:
     from .signoff import _citation
     from .signoff_power_delivery import _POWER_DELIVERY_PART_ORDER
 
+    if group_provenance is None:
+        return None
+    # Resolution indexes each distinct kind in manifest order before canonical sorting.
+    group_provenance.update(graded_input_provenance(next(iter(by_kind.values()))))
     return {
         "parts": [
             _citation(by_kind[kind])
@@ -158,27 +164,27 @@ def grade_power_delivery_groups(
     """
     from .signoff_power_delivery import _grade_power_delivery
 
-    graded = [
-        (group,)
-        + _grade_power_delivery(
+    graded = []
+    summaries = []
+    for group in groups:
+        provenance = graded_input_provenance(None)
+        grade = _grade_power_delivery(
             group,
             partition_kind=partition_kind,
             power_port_policy=power_port_policy,
             repo_root=repo_root,
-            failed_parts_citation=True,
+            group_provenance=provenance,
         )
-        for group in groups
-    ]
-    extra: dict[str, Any] = {
-        "citations_graded": [
+        graded.append((group, *grade))
+        summaries.append(
             {
                 "citation": _citation_label(group[0]),
-                "status": status,
-                "reason": reason,
+                "status": grade[0],
+                "reason": grade[1],
+                **provenance,
             }
-            for group, status, reason, _, _ in graded
-        ]
-    }
+        )
+    extra: dict[str, Any] = {"citations_graded": summaries}
     failed = [entry for entry in graded if entry[1] != "met"]
     if failed:
         detail = {

@@ -192,10 +192,6 @@
       "lines": 1004
     },
     {
-      "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 512
-    },
-    {
       "path": "src/klayout_tools/components.py",
       "lines": 532
     },
@@ -289,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 1942
+      "lines": 1938
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -333,7 +329,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2672
+      "lines": 2656
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -457,7 +453,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1799
+      "lines": 1798
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -489,7 +485,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3151
+      "lines": 3122
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,11 +505,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1347
+      "lines": 1344
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1172
+      "lines": 1151
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
@@ -573,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10827
+      "lines": 10779
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -641,7 +637,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4411
+      "lines": 4370
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -973,7 +969,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12398
+      "lines": 12396
     },
     {
       "path": "tests/test_place_and_route_batch.py",
@@ -1037,7 +1033,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15827
+      "lines": 15823
     },
     {
       "path": "tests/test_sim_batch.py",

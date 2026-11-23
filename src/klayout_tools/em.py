@@ -28,6 +28,7 @@ from ._geode import (
     parse_capacitance_report as parse_capacitance_report,
 )
 from ._paths import _load_request_json
+from .env_provenance import find_repo_root
 
 SCHEMA_VERSION = 1
 
@@ -365,6 +366,9 @@ def run_em(request_path: str) -> dict[str, Any]:
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #6764: every artifact envelope is relative to the *request's*
+    # repo, never the cwd's, so one request yields one committed report.
+    repo_root = find_repo_root(request_dir)
     options = request["_options"]
     terminals = request["_terminals"]
     names = [t["name"] for t in terminals]
@@ -414,11 +418,13 @@ def run_em(request_path: str) -> dict[str, Any]:
         mesh_digest = sha256_file(mesh)
         artifacts: dict[str, Any] = {}
         if keep or geometry is None:
-            artifacts["mesh"] = hashed_path_envelope(mesh)
+            artifacts["mesh"] = hashed_path_envelope(mesh, repo_root=repo_root)
         if keep:
             artifacts.update(
                 {
-                    k: hashed_path_envelope(os.path.join(outdir, v))
+                    k: hashed_path_envelope(
+                        os.path.join(outdir, v), repo_root=repo_root
+                    )
                     for k, v in files.items()
                 }
             )

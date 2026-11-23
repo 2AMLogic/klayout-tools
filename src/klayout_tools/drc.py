@@ -98,7 +98,13 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
+from .drc_report_check import (
+    drc_rerun_result,
+    recorded_negative_control_kwargs,
+    report_checks,
+    resolve_report_deck,
+)
+from .drc_sg13g2_implant import implant_coverage
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2002,11 +2008,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-wide scopes, independent of stream geometry (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+    voltage_domain_warnings = _voltage_domain_warnings(
+        setup, set(rules_skipped) | omitted_ids
+    )
 
     # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
@@ -2042,8 +2046,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "unchecked_rules": unchecked_rules,
+        **implant_coverage(setup),
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
-        "deck_scope": deck_scope,
+        "deck_scope": sorted({rule.scope for rule in deck if rule.scope}),
         "unmodeled_rules": get_unmodeled_rules(deck_name),
         # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(
@@ -2599,6 +2604,7 @@ def rerun_drc_report(
     replay the recorded ``top`` cell. Reports without it use each engine's
     default (all tops for curated, a single top required for KLayout).
     Curated reruns also replay the recorded rule selectors and tile dimensions.
+    Native reruns replay the negative control and its expected categories.
 
     Diffs the fresh report against the committed one via
     :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
@@ -2616,18 +2622,11 @@ def rerun_drc_report(
     report missing ``file``/``deck`` to rerun, or any error the rerun itself
     raises (bad file, unknown deck, engine error) -- never a traceback.
 
-    ``pdk_variant``/``pdk_root`` (the rerun invocation's own
-    ``--pdk``/``--pdk-root`` flags, issue #6986) select the PDK the fresh
-    run resolves into ``provenance.pdk``, so a report produced with a
-    resolved PDK can re-verify in full mode instead of always drifting
-    ``provenance.pdk`` with ``fresh: null``. Priority: the explicit flags,
-    then the variant name the committed report itself recorded, never
-    ``$PDK`` (:func:`klayout_tools.drc_rerun_replay._rerun_pdk_selection`);
-    the root keeps the existing ``--pdk-root``/``$PDK_ROOT``/search-order
-    machinery a fresh run uses. A report that records no PDK re-runs with
-    none -- ``fresh`` ``provenance.pdk`` stays ``null`` even on a host with
-    ``$PDK`` set -- and an unresolvable selection raises the fresh run's
-    own :class:`DrcError`.
+    Explicit ``--pdk`` and ``--pdk-root`` flags select the fresh run's PDK.
+    Without them, replay uses the recorded variant. For a native 3LM run
+    originally given an explicit root, replay recovers that install from
+    the deck path. Other runs use the usual root search. A report with no
+    recorded PDK or override keeps null PDK provenance, even with ``$PDK`` set.
     """
     # Replay helpers live in `.drc_rerun_replay` (this module's size
     # ceiling), function-level like the `drc_klayout_engine` import below.
@@ -2659,10 +2658,6 @@ def rerun_drc_report(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
     top = _recorded_top(committed)
-    # Issue #6986: the fresh run resolves `provenance.pdk` too -- explicit
-    # flags first, then the variant the committed report itself recorded
-    # (never `$PDK`) -- so a PDK-resolved report re-verifies instead of
-    # always drifting `fresh: null`; a null-PDK report re-runs with none.
     eff_variant, eff_root = _rerun_pdk_selection(committed, pdk_variant, pdk_root)
     if committed.get("engine") == "klayout":
         # Issue #5709: same resolver as --check (override, recorded, packaged).
@@ -2676,12 +2671,12 @@ def rerun_drc_report(
             raise DrcError(
                 f"committed report has no resolvable deck to rerun: {report_path}"
             )
+        from ._drc_gf180_3lm import recorded_pdk_root, replay_prelude_kwargs
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
-        # A committed report carrying `engine_deck_errors` was produced with
-        # `--allow-deck-errors` (issue #1941); re-running it strictly would
-        # fail the verification outright rather than diffing it, so the
-        # rerun reproduces the original invocation's own error tolerance.
+        prelude_kwargs = replay_prelude_kwargs(committed, deck)
+        if prelude_kwargs and pdk_variant is None and pdk_root is None:
+            eff_root = recorded_pdk_root(committed, deck, eff_variant)
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
@@ -2689,11 +2684,9 @@ def rerun_drc_report(
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             pdk_variant=eff_variant,
             pdk_root=eff_root,
-            # Issue #2697: reproduce the original coverage assertion too,
-            # or a committed `clean` would always drift to `coverage_unknown`.
-            # Issue #2806: dispatched on its `kind`; a set assertion replays
-            # its embedded names, never the original manifest file.
             **_rerun_assertion_kwargs(committed),
+            **prelude_kwargs,
+            **recorded_negative_control_kwargs(committed),
         )
     else:
         # Issue #2768: a committed `--rules` subset replays its own recorded

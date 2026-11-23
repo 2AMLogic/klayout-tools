@@ -229,3 +229,127 @@ def test_pad_and_wire_can_extend_in_opposite_directions():
     assert (after - before).interacting(cuts).is_empty()
     assert after.interacting(kdb.Region(wire)).bbox().top > wire.top
     assert (after - after.interacting(kdb.Region(wire))).bbox().bottom < -44
+
+
+def _side_pair(gap_nm, *, library=False, rotation=0):
+    """A cut-flush V1 landing's short face against a long library-style edge.
+
+    The pad is the ``_pair`` fixture's 18 x 22 nm ``VIA_VIA12`` landing; the
+    neighbour's facing edge is a 100 nm side, so the pair is ``M1.S.2``
+    (short vs long) rather than the ``S.4``/``S.5`` tip pairs.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top, via = layout.create_cell("top"), layout.create_cell("VIA_VIA12")
+    m1, v1 = layout.layer(19, 0), layout.layer(21, 0)
+    via.shapes(m1).insert(kdb.Box(-9, -11, 9, 11))
+    via.shapes(v1).insert(kdb.Box(-9, -9, 9, 9))
+    transform = kdb.Trans(rotation, False, 0, 0)
+    top.insert(kdb.CellInstArray(via.cell_index(), transform))
+    x = 9 + gap_nm
+    side = kdb.Box(x, -50, x + 80, 50)
+    if library:
+        cell = layout.create_cell("STANDARD_CELL")
+        cell.shapes(m1).insert(side)
+        top.insert(kdb.CellInstArray(cell.cell_index(), transform))
+    else:
+        top.shapes(m1).insert(side.transformed(transform))
+    return layout, top, via, side.transformed(transform)
+
+
+@pytest.mark.parametrize(
+    ("gap", "library", "rotation"),
+    [(18, False, 0), (24, False, 0), (18, True, 0), (18, False, 1)],
+)
+def test_pad_side_repair(gap, library, rotation):
+    layout, top, via, side = _side_pair(gap, library=library, rotation=rotation)
+    before, cuts = _region(layout, top, 19), _region(layout, top, 21)
+    master = _region(layout, via, 19)
+    check = check_via_pad_tips(
+        kdb, layout=layout, top_cell=top, variant="asap7A", lef_to_gds={"M1": (19, 0)}
+    )
+    assert [(row["rule"], row["violations"]) for row in check["rules"]] == [
+        ("M1.S.2", 1)
+    ]
+    report = _repair(layout, top)
+    after = _region(layout, top, 19)
+    assert report["tip_check"]["violations"] == 0
+    assert report["m1_landing_pad_wire_pairs_extended"] == 1
+    assert report["m1_landing_pairs_extended"] == 0
+    assert after.count() == before.count() == 2
+    assert (before - after).is_empty()
+    assert (after - before).interacting(cuts).is_empty()
+    assert (cuts ^ _region(layout, top, 21)).is_empty()
+    assert (master ^ _region(layout, via, 19)).is_empty()
+    if library:
+        local_side = side.transformed(kdb.Trans(rotation, False, 0, 0).inverted())
+        original = _region(layout, layout.cell("STANDARD_CELL"), 19)
+        assert (original ^ kdb.Region(local_side)).is_empty()
+    assert _repair(layout, top)["m1_landing_pad_wire_pairs_extended"] == 0
+
+
+@pytest.mark.parametrize("side", [-1, 1])
+def test_side_growth_avoids_contact_on_one_side(side):
+    layout, top, _, _ = _side_pair(18)
+    # A V0 just outside the original M1 cannot be connected by the edit.
+    y = side * 14
+    top.shapes(layout.layer(18, 0)).insert(kdb.Box(-4, y - 1, 4, y + 1))
+    before = _region(layout, top, 19)
+    assert _repair(layout, top)["m1_landing_pad_wire_pairs_extended"] == 1
+    added = _region(layout, top, 19) - before
+    assert added.interacting(_region(layout, top, 18)).is_empty()
+    assert (added.bbox().top if side > 0 else -added.bbox().bottom) == -11
+
+
+def test_unrepairable_side_keeps_diagnostic():
+    layout, top, _, _ = _side_pair(18)
+    for y in (-14, 14):
+        top.shapes(layout.layer(18, 0)).insert(kdb.Box(-4, y - 1, 4, y + 1))
+    before = _region(layout, top, 19)
+    report = _repair(layout, top)
+    assert report["m1_landing_pad_wire_pairs_extended"] == 0
+    assert report["tip_check"]["rules"][0]["rule"] == "M1.S.2"
+    assert (_region(layout, top, 19) ^ before).is_empty()
+
+
+def test_side_pair_on_a_pad_also_in_an_s4_pair_repairs_once():
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top, via = layout.create_cell("top"), layout.create_cell("VIA_VIA12")
+    m1, v1 = layout.layer(19, 0), layout.layer(21, 0)
+    via.shapes(m1).insert(kdb.Box(-9, -11, 9, 11))
+    via.shapes(v1).insert(kdb.Box(-9, -9, 9, 9))
+    for x in (0, 36):
+        top.insert(kdb.CellInstArray(via.cell_index(), kdb.Trans(x, 0)))
+    # The second pad's right edge is both an S.4 face to the first pad and an
+    # S.2 face to the long side; the S.4 repair must resolve both at once.
+    top.shapes(m1).insert(kdb.Box(63, -50, 143, 50))
+    check = check_via_pad_tips(
+        kdb, layout=layout, top_cell=top, variant="asap7A", lef_to_gds={"M1": (19, 0)}
+    )
+    assert {(row["rule"], row["violations"]) for row in check["rules"]} == {
+        ("M1.S.4", 1),
+        ("M1.S.2", 1),
+    }
+    report = _repair(layout, top)
+    assert report["m1_landing_pairs_extended"] == 1
+    assert report["m1_landing_pad_wire_pairs_extended"] == 0
+    assert report["tip_check"]["violations"] == 0
+    pad2 = _region(layout, top, 19).interacting(kdb.Region(kdb.Box(27, -11, 45, 11)))
+    assert pad2.bbox().height() == 37
+
+
+def test_successive_local_merges_preserve_whole_conductors():
+    from klayout_tools.place_and_route_via_tip_repair import _merge_repair
+
+    # Edits at opposite ends of a long wire must see each other's full conductor.
+    metal = kdb.Region(kdb.Box(0, 0, 500, 10)) + kdb.Region(kdb.Box(0, 20, 10, 30))
+    indexed = kdb.Shapes()
+    indexed.insert(metal)
+    for edit in (kdb.Box(0, 10, 10, 20), kdb.Box(490, 10, 500, 20)):
+        extra = kdb.Region(edit)
+        _merge_repair(kdb, indexed, extra)
+        metal = (metal + extra).merged()
+        actual = kdb.Region(indexed)
+        assert actual.count() == metal.count()
+        assert (actual ^ metal).is_empty()
