@@ -2305,6 +2305,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.nodeset` | 0.8.0 |
 | `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
+| `options.osdi_preload[].pdk_relative` | unreleased |
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_overrides` | 0.9.1 |
 | `analysis.op_check` | 0.9.2 |
@@ -2453,6 +2454,7 @@ release segment:
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
+| `osdi_pdk_relative` | The worker receives a PDK-relative preload object. The mandatory preflight checks the installed CLI. | `0.9.3` release segment |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
 The rows from `measurements[].expr` down are the released entries of
@@ -8094,6 +8096,29 @@ fails with `Unable to find definition of model …` and every corner errors.
 }
 ```
 
+To load a library from the selected PDK variant, use an object in the same
+list. The variant directory follows the same flat or nested install lookup as
+a corner section library. This request selects the IHP resistor model.
+
+```json
+{
+  "models": {"pdk": "ihp-sg13g2"},
+  "options": {
+    "osdi_preload": [{"pdk_relative": "libs.tech/ngspice/osdi/r3_cmc.osdi"}]
+  }
+}
+```
+
+On local and local-parallel runs, including local fallback, the simulator
+reads the selected variant on this host and honors `models.pdk_root`. On batch
+and remote runs with staging off, the worker needs a version of klt that
+supports `pdk_relative`. It receives the object and resolves its own install.
+The submitter records the declared object, its index and reason
+`pdk_relative`. Batch can fill its SHA-256 from the corresponding worker
+entry when its filename agrees. With `options.stage_model_inputs: true`, the
+submitter resolves and stages the selected variant's binary and the worker
+loads the staged filename. Lists preserve order and repeated entries.
+
 - **Deck shape.** Each entry becomes one `pre_osdi <absolute path>` line,
   in declared order, at the top of the `.control` block `klt sim` already
   generates — ahead of every `alter` and the analysis command. The netlist
@@ -8102,7 +8127,7 @@ fails with `Unable to find definition of model …` and every corner errors.
   needed. The same lines reach the `fail_fast_probe` calibration deck and
   the `--op-lint` operating-point deck, so every deck a request produces
   sees the same devices.
-- **Resolution.** Same rule as `models.lib`'s literal-path shape: `$VAR`
+- **String resolution.** Same rule as `models.lib`'s literal-path shape: `$VAR`
   and `~` expand, a relative path joins the request file's own directory.
   On a run that reads the file locally, a leading `$PDK_ROOT/` or
   `${PDK_ROOT}/` is first replaced by the pinned PDK root
@@ -8180,9 +8205,11 @@ fails with `Unable to find definition of model …` and every corner errors.
   list keeps today's behavior for its host-local entries (refused, or staged
   under `stage_model_inputs`).
   `local`/`local-parallel` are unchanged: every entry is expanded and
-  existence-checked on this host. No new runner-version row is needed: a
+  existence-checked on this host. For string entries, a
   runner that predates this loads the same image-baked file through
-  `options.osdi_preload`'s existing 0.7.0 support.
+  `options.osdi_preload`'s existing 0.7.0 support. An unstaged object requires
+  a worker with the `osdi_pdk_relative` capability. Staging sends ordinary
+  filenames and retains the string form's minimum.
 - **Client-side ABI preflight (local backends).** On `local`/`local-parallel`
   with ngspice, klt reads each host-local `.osdi`'s exported
   `OSDI_VERSION_MAJOR`/`OSDI_VERSION_MINOR` before any corner runs. A module
@@ -10617,7 +10644,7 @@ the *response* echoes back.
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
-| `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true` — except runner-resolved entries (literal `$PDK_ROOT/<rel>` or under `models.pdk_root`, issue #3819), which are forwarded unchecked — and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
+| `options.osdi_preload`   | array\<string or {pdk_relative}\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true` — except runner-resolved entries (literal `$PDK_ROOT/<rel>` or under `models.pdk_root`, issue #3819), which are forwarded unchecked — and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.pdk_revision`   | string            | Issue #5325. Caller-asserted PDK revision/stamp for a run with `options.stage_model_inputs` on an off-host backend; echoed as `environment.pdk_revision_asserted` (`{value, scope: "caller-asserted"}`), separate from the worker-observed `worker_environment.pdk`. The value is **validated on every run** — a non-string, empty or whitespace-only value is an application error (exit 1) whatever the backend and whether or not staging is on — but it is only *echoed* by a run that actually stages model inputs off-host; on any other run (staging off, or a `local`/`local-parallel` backend) a valid value is **accepted and ignored**, exactly as `options.stage_model_inputs` itself is a no-op on-host, and the report carries no `pdk_revision_asserted` field. Unset: no field. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
