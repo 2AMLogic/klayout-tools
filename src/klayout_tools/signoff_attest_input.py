@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ._provenance import sha256_file
-from .signoff import input_set_digest
+from .signoff_base import input_set_digest
 
 
 def normalized_description(source: Mapping[str, Any]) -> str | None:

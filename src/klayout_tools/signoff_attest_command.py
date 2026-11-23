@@ -27,8 +27,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .signoff import _COMMAND_EVIDENCE_TIMEOUT_S
 from .signoff_attest_env import command_env
+from .signoff_base import _COMMAND_EVIDENCE_TIMEOUT_S
 
 # Bounded tail of a failing command's captured output (issue #4698). Held out
 # of band (never in a check dict built by an attestation builder) because it

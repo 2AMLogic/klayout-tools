@@ -546,11 +546,17 @@ python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HE
 ```
 
 To explicitly regenerate the proposed baseline, use `--update-baseline`.
-It records exact candidate sizes and carries forward vendor pins whose
-bytes still match. Run check mode afterward to validate the result.
+It carries forward vendor pins whose bytes still match, keeps a recorded
+entry whose ceiling still covers the measured file (so a shrinking PR
+leaves the ledger byte-identical and cannot conflict with main, #7414),
+and records exact sizes only for new or grown paths. Do not edit a
+ledger entry just because a file shrank. On a ledger conflict in a
+long-lived PR, take main's version of the line, then validate:
 
 ```
 python scripts/check_file_size_baseline.py --update-baseline
+python scripts/check_file_size_baseline.py \
+  --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
 CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the

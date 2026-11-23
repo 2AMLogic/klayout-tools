@@ -45,6 +45,7 @@ from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
+from ._dont_use import cell_exclusion_fields
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1717,12 +1718,10 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
-    # Issue #2635: which of each macro's per-corner liberties applies to
-    # *this* run, resolvable only now that `_resolve_liberty` has named the
-    # corner. A macro that declared a `lib` map with no entry for this
-    # corner (and no `"default"`) is rejected here with a named error rather
-    # than silently timed at some other corner -- see
-    # `klayout_tools.macros.macro_lib_for_corner`.
+    exclusions = cell_exclusion_fields(
+        cell_library, library, liberty_path, error_cls=PlaceAndRouteError
+    )
+    # Select hard-macro Liberties for the resolved corner.
     macro_liberty_paths = [
         path
         for path in (
@@ -1789,6 +1788,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
+            instance_groups=instance_groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -2204,7 +2204,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
-            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
+            "tapless": tap_master is None,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
@@ -2303,6 +2303,7 @@ def _run_single_corner(
     )
 
     response: dict[str, Any] = {
+        **exclusions,
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -2375,9 +2376,7 @@ def _run_single_corner(
             if audited_def_path
             else None
         ),
-        # Additive field (issue #4344): placed-origin bbox of each requested
-        # `instance_groups` entry, read from the same DEF (`null` at
-        # "floorplan"; `[]` when none were requested).
+        # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
             read_def_instance_groups(audited_def_path, instance_groups)
             if audited_def_path
