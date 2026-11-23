@@ -252,6 +252,7 @@ from .gen_compose_landing_pads import (
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
+from .gen_compose_pad_ports import endpoint_pad_ports
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -3521,6 +3522,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         notes,
     )
 
+    endpoint_ports = endpoint_pad_ports(connectivity, blocks, offsets_um)
     for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
         pins = entry["pins"]
@@ -3659,12 +3661,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
-            _net_pin_blocks: frozenset[str] = frozenset(
-                {block for block, _port in net_pin_set}
-            ),
             _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
+            _endpoint_ports=endpoint_ports[net_index],
         ) -> RouteConflict | None:
             """Route-vs-route collision check (#1057, spacing-aware since
             #1386) for one candidate leg.
@@ -3833,9 +3833,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             contact_reason = _pad_other_block_contact_reason(
                 pad_boxes,
                 _net_label,
-                sorted(
-                    block_id for block_id in blocks if block_id not in _net_pin_blocks
-                ),
+                sorted(blocks),
+                _endpoint_ports,
                 _own_block_layer_geometry,
                 drawing_dbu,
             )
