@@ -1,7 +1,6 @@
 {
   "engine_version": "26Q3-1510-g6cb3f2b704",
   "pdk": "sky130_fd_sc_hd tt_025C_1v80",
-  "netlist": "divider.v",
   "source_period_ns": 10,
   "sessions": [
     {
@@ -14,7 +13,13 @@
       "unconstrained": [
         "slow_q",
         "sink_ff/D"
-      ]
+      ],
+      "design": "divider.v",
+      "design_sha256": "46bc14665498fbcf4eeade53e940d53551444192e75411fbb0637df16265bd15",
+      "probe_tcl": [
+        "puts \"SOURCE [get_property [get_clocks clk] period] [llength [all_registers -clock [get_clocks clk]]]\""
+      ],
+      "probe_stdout": "SOURCE 10.000000 2"
     },
     {
       "name": "divide",
@@ -25,9 +30,16 @@
           "divide_by": 2
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "divider.v",
+      "design_sha256": "46bc14665498fbcf4eeade53e940d53551444192e75411fbb0637df16265bd15",
+      "probe_tcl": [
+        "puts \"SOURCE [get_property [get_clocks clk] period] [llength [all_registers -clock [get_clocks clk]]]\"",
+        "report_checks -from [get_clocks clk] -to [get_clocks klt_gen_clk_0] -format full_clock_expanded -digits 5"
+      ],
+      "probe_stdout": "SOURCE 10.000000 2\nStartpoint: source_ff (rising edge-triggered flip-flop clocked by clk)\nEndpoint: sink_ff (rising edge-triggered flip-flop clocked by klt_gen_clk_0)\nPath Group: klt_gen_clk_0\nPath Type: max\n\n     Delay       Time   Description\n---------------------------------------------------------------\n  10.00000   10.00000   clock clk (rise edge)\n   0.00000   10.00000   clock network delay (ideal)\n   0.00000   10.00000 ^ source_ff/CLK (sky130_fd_sc_hd__dfxtp_1)\n   0.26882   10.26882 v source_ff/Q (sky130_fd_sc_hd__dfxtp_1)\n   0.00000   10.26882 v sink_ff/D (sky130_fd_sc_hd__dfxtp_1)\n             10.26882   data arrival time\n\n  20.00000   20.00000   clock klt_gen_clk_0 (rise edge)\n   0.00000   20.00000   clock network delay (ideal)\n   0.00000   20.00000   clock reconvergence pessimism\n             20.00000 ^ sink_ff/CLK (sky130_fd_sc_hd__dfxtp_1)\n  -0.11120   19.88880   library setup time\n             19.88880   data required time\n---------------------------------------------------------------\n             19.88880   data required time\n            -10.26882   data arrival time\n---------------------------------------------------------------\n              9.61998   slack (MET)\n\n"
     },
     {
       "name": "edges",
@@ -42,16 +54,20 @@
           ]
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "divider.v",
+      "design_sha256": "46bc14665498fbcf4eeade53e940d53551444192e75411fbb0637df16265bd15"
     },
     {
       "name": "source-only",
       "generated_clocks": [],
       "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "source_only.v",
+      "design_sha256": "f3f027ac013d712096776db9095b875e4e0fe79dc32e822187a1a285a507149f"
     },
     {
       "name": "mixed",
@@ -62,14 +78,16 @@
           "divide_by": 2
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t2\nITEM\tunconstrained_endpoints\torphan\nITEM\tunconstrained_endpoints\torphan_ff/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\torphan_ff/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t2\nITEM\tunconstrained_endpoints\torphan\nITEM\tunconstrained_endpoints\torphan_ff/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\torphan_ff/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [
         "orphan_ff/CLK"
       ],
       "unconstrained": [
         "orphan",
         "orphan_ff/D"
-      ]
+      ],
+      "design": "mixed.v",
+      "design_sha256": "6a6239801f07e49d3a852ec7560dd69751117015fe08beae106494bb25dfe6a4"
     },
     {
       "name": "bracket-target",
@@ -80,9 +98,15 @@
           "divide_by": 2
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "bracket_target.v",
+      "design_sha256": "53f1c2692def5c55a72b998a785b5a69b24129b94c455ca24d19a9649c439a13",
+      "probe_tcl": [
+        "puts \"LINKED [get_full_name [get_pins -quiet [list div_ff\\[0\\]/Q]]]\""
+      ],
+      "probe_stdout": "LINKED div_ff[0]/Q"
     },
     {
       "name": "control-def",
@@ -94,7 +118,9 @@
       "unconstrained": [
         "slow_q",
         "sink_ff/D"
-      ]
+      ],
+      "design": "divider.def",
+      "design_sha256": "d5a3b285a3e33d649621926ad4db3c17bdf15f4c5857613ca9cc2aaed179dbad"
     },
     {
       "name": "def",
@@ -105,9 +131,15 @@
           "divide_by": 2
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "divider.def",
+      "design_sha256": "d5a3b285a3e33d649621926ad4db3c17bdf15f4c5857613ca9cc2aaed179dbad",
+      "probe_tcl": [
+        "foreach name {clk klt_gen_clk_0} { puts \"PROPAGATED $name [get_property [get_clocks $name] is_propagated]\" }"
+      ],
+      "probe_stdout": "PROPAGATED clk 0\nPROPAGATED klt_gen_clk_0 0"
     },
     {
       "name": "propagated",
@@ -118,23 +150,15 @@
           "divide_by": 2
         }
       ],
-      "stdout": "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===",
+      "stdout": "===KLT_STA_GENERATED_CLOCKS_BEGIN===\nklt_gen_clk_0\t20.000000\t1\n===KLT_STA_GENERATED_CLOCKS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===",
       "unclocked": [],
-      "unconstrained": []
+      "unconstrained": [],
+      "design": "divider.def",
+      "design_sha256": "d5a3b285a3e33d649621926ad4db3c17bdf15f4c5857613ca9cc2aaed179dbad",
+      "probe_tcl": [
+        "foreach name {clk klt_gen_clk_0} { puts \"PROPAGATED $name [get_property [get_clocks $name] is_propagated]\" }"
+      ],
+      "probe_stdout": "PROPAGATED clk 1\nPROPAGATED klt_gen_clk_0 1"
     }
-  ],
-  "source_clock_probes": {
-    "queries": [
-      "get_property [get_clocks clk] period",
-      "llength [all_registers -clock [get_clocks clk]]"
-    ],
-    "omitted": [
-      "10.000000",
-      "2"
-    ],
-    "divide": [
-      "10.000000",
-      "2"
-    ]
-  }
+  ]
 }

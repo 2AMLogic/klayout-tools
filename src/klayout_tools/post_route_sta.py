@@ -3716,8 +3716,8 @@ def _sta_script_lines(
     # Before the completeness query, which must stay the script's last
     # statements (issue #2780): it can take the session down.
     lines += _electrical_check_lines()
-    lines += _constraint_completeness_lines()
     lines += _generated.evidence_lines(clock_extras)
+    lines += _constraint_completeness_lines()
     return lines
 
 
@@ -3831,8 +3831,8 @@ def _sta_netlist_script_lines(
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
-    lines += _constraint_completeness_lines()
     lines += _generated.evidence_lines(clock_extras)
+    lines += _constraint_completeness_lines()
     return lines
 
 

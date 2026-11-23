@@ -1,5 +1,6 @@
 """Generated clock validation, linkage, engine evidence and legacy control."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -161,10 +162,23 @@ def test_unavailable_measurement_is_distinct_from_a_measured_zero():
 
 def test_captured_divider_sessions():
     capture = json.loads((_FIXTURE / "openroad_26Q3-1510.json").read_text())
-    assert (_FIXTURE / capture["netlist"]).is_file()
-    source = capture["source_clock_probes"]
-    assert source["omitted"] == source["divide"] == ["10.000000", "2"]
-    for case in capture["sessions"]:
+    cases = {case["name"]: case for case in capture["sessions"]}
+    designs = {
+        "omitted": "divider.v",
+        "divide": "divider.v",
+        "edges": "divider.v",
+        "source-only": "source_only.v",
+        "mixed": "mixed.v",
+        "bracket-target": "bracket_target.v",
+        "control-def": "divider.def",
+        "def": "divider.def",
+        "propagated": "divider.def",
+    }
+    assert cases.keys() == designs.keys()
+    for name, case in cases.items():
+        assert case["design"] == designs[name]
+        design = (_FIXTURE / case["design"]).read_bytes()
+        assert hashlib.sha256(design).hexdigest() == case["design_sha256"]
         stdout = case["stdout"]
         completeness = sta._parse_constraint_completeness(stdout)
         assert completeness["unclocked_registers"]["sample"] == case["unclocked"]
@@ -178,3 +192,41 @@ def test_captured_divider_sessions():
             assert row["period_ns"] == 20 and row["clocked_registers"] == 1
         else:
             assert "generated_clocks" not in response
+
+
+def test_native_clock_probes():
+    capture = json.loads((_FIXTURE / "openroad_26Q3-1510.json").read_text())
+    probes = {
+        case["name"]: case["probe_stdout"].splitlines()
+        for case in capture["sessions"]
+        if "probe_stdout" in case
+    }
+    assert probes["omitted"] == ["SOURCE 10.000000 2"]
+    assert probes["divide"][0] == probes["omitted"][0]
+    path = [line.split() for line in probes["divide"]]
+    assert any(row[:2] == ["Startpoint:", "source_ff"] for row in path)
+    assert any(row[:2] == ["Endpoint:", "sink_ff"] for row in path)
+    assert ["10.00000", "10.00000", "clock", "clk", "(rise", "edge)"] in path
+    assert ["20.00000", "20.00000", "clock", "klt_gen_clk_0", "(rise", "edge)"] in path
+    assert probes["bracket-target"] == ["LINKED div_ff[0]/Q"]
+    assert probes["def"] == ["PROPAGATED clk 0", "PROPAGATED klt_gen_clk_0 0"]
+    assert probes["propagated"] == ["PROPAGATED clk 1", "PROPAGATED klt_gen_clk_0 1"]
+
+
+@pytest.mark.usefixtures("real_build_identity_git")
+@pytest.mark.parametrize("setup", [_setup_success_env, _setup_verilog_success_env])
+def test_clock_measurements_precede_final_completeness_query(
+    tmp_path, monkeypatch, setup
+):
+    path = Path(setup(tmp_path, monkeypatch))
+    request = json.loads(path.read_text())
+    request["constraints"]["generated_clocks"] = [
+        {**_ENTRY, "source": request["constraints"]["clock_port"]}
+    ]
+    path.write_text(json.dumps(request))
+    _stub_openroad_success(monkeypatch)
+    sta.run_sta(str(path))
+    lines = next(tmp_path.rglob("sta_*.tcl")).read_text().splitlines()
+    tail = sta._constraint_completeness_lines()
+    assert lines[-len(tail) :] == tail
+    assert f'puts "{generated._END}"' in lines[: -len(tail)]
