@@ -11563,7 +11563,7 @@ def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_p
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": {
             "scope": "connectivity",
-            "checked": [],
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
             "skipped": [],
             "inapplicable": [
                 {
