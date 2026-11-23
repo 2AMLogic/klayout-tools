@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/equiv_sequential.py",
-      "lines": 1527
+      "lines": 1413
     },
     {
       "path": "src/klayout_tools/erc.py",
