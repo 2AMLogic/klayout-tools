@@ -177,7 +177,7 @@ def test_rerun_of_a_scoped_report_with_an_unknown_cell_raises(tmp_path, monkeypa
         rerun_drc_report(str(report_path))
 
 
-@pytest.mark.parametrize("top", ["", "   ", 7, [], {}])
+@pytest.mark.parametrize("top", [None, "", "   ", 7, [], {}])
 def test_rerun_rejects_a_malformed_recorded_top(top, tmp_path, monkeypatch):
     """A present but unusable `top` is an error, never a silent whole-stream
     replay -- the same discipline `rule_selection` follows."""

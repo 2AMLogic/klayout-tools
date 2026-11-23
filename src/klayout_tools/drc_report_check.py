@@ -96,9 +96,9 @@ def recorded_top(committed: dict[str, Any], error_cls: type[Exception]) -> str |
     graph. Split out of ``drc.py`` with :func:`recorded_tile`` to keep that
     module under its per-file size ceiling.
     """
-    top = committed.get("top")
-    if top is None:
+    if "top" not in committed:
         return None
+    top = committed["top"]
     if not isinstance(top, str) or not top.strip():
         raise error_cls(
             "committed report's 'top' must be a non-empty cell name string "
