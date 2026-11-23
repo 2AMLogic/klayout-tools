@@ -827,6 +827,19 @@ as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
 
+When a collected corner-mode ngspice batch request declares
+`options.ngspice_init`, top-level `diagnostics[]` includes a warning with
+`code: "batch_ngspice_init_unverified"`, `feature: "options.ngspice_init"`
+and `simulator_application: "unverified"`. Its `jobs[]` contains one record
+per job, in fleet order. Each record has `job_id` (string or null),
+`fleet_index` (zero-based integer for a fleet, null for a single job) and
+`request_identity`. The two identity values are `"digest_reported"` when
+the worker reports the requested lines and their matching digest, including
+any worker thread pin, and `"unverified"` otherwise. The digest identifies
+the reported contents. Application by ngspice remains unverified for every
+job. This warning preserves the simulation grade and is absent when the
+request omits the init lines.
+
 The same worker block carries `threads_per_worker`, the positive integer pin
 from the worker report's `environment.threads_per_worker`. Each shard,
 including a recovered failed job, reports its own value. An unpinned run or

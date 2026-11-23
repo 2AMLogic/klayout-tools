@@ -350,19 +350,19 @@ def _bjt_bus_request(tmp_path, pdk_root, routing: dict) -> dict:
     }
 
 
-def test_execute_self_net_crossing_leg_is_unrouted_without_cross_block_layer_role(
+def test_execute_self_net_crossing_leg_routes_via_the_automatic_climb(
     tmp_path, pdk_root
 ):
+    # #1502's fixture: the climb (#6912) lifts the #433 self-net class, so
+    # default routing succeeds (same-plane pins: self_net_climb tests).
     request = _bjt_bus_request(
         tmp_path, pdk_root, {"layer_role": "metal", "width_um": 0.17}
     )
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
-
-    assert "EBUS" in response["unrouted_nets"]
-    assert partial_success(response) is True
-    assert exit_code_for(response) == 3
+    assert response["unrouted_nets"] == []
     nets_by_name = {net["net"]: net for net in response["nets"]}
-    assert nets_by_name["EBUS"]["routed"] is False
+    assert nets_by_name["EBUS"]["routed"] is True
+    assert all(leg["routed"] for leg in nets_by_name["EBUS"]["legs"])
 
 
 def test_execute_cross_block_layer_role_routes_the_self_net_crossing_leg(
