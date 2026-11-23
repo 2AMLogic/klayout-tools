@@ -1939,8 +1939,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
     post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
     a caller-named subset of the library's available corners. The full set
-    comes from the PDK descriptor's corner keys for a mapped library and from
-    the unfiltered :func:`klayout_tools.pdk.list_lib_corners` enumeration otherwise.
+    comes from the PDK descriptor's corner keys for a mapped library, otherwise
+    from the unfiltered :func:`klayout_tools.pdk_cells.list_lib_corners` enumeration.
 
     A design has exactly one operating supply -- for a cell library shipping
     several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
