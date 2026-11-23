@@ -2986,12 +2986,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.routing must be a JSON object")
     # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
-    raw_minimal_ladder = routing.get("minimal_ladder")
+    minimal_ladder = False
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
             routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
         )
-        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+        raw_minimal_ladder = routing.get("minimal_ladder")
+        if raw_minimal_ladder is not None:
+            if not isinstance(raw_minimal_ladder, bool):
+                raise GenComposeError(
+                    "request.routing.minimal_ladder must be a boolean when given"
+                )
+            minimal_ladder = raw_minimal_ladder
+        if minimal_ladder and landing_pad_override_um is not None:
             # Issue #6058: the two fields are competing pad-sizing policies
             # -- the override replaces the fixed baseline for *every* pad,
             # the mode drops the baseline from *intermediate* pads only --
@@ -3128,7 +3135,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
     # rejected together before label-derived landings are searched.
-    minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
@@ -3176,12 +3182,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        if raw_minimal_ladder is not None:
-            if not isinstance(raw_minimal_ladder, bool):
-                raise GenComposeError(
-                    "request.routing.minimal_ladder must be a boolean when given"
-                )
-            minimal_ladder = raw_minimal_ladder
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
