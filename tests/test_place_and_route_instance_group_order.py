@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import place_and_route
-from klayout_tools.place_and_route_groups import fixed_group_lines
+from klayout_tools.place_and_route_groups import fixed_group_commands
 from klayout_tools.place_and_route_pins import read_def_instance_groups
 from klayout_tools.place_and_route_request import PlaceAndRouteError
 from test_place_and_route import _setup_success_env, _stub_openroad_success
@@ -250,12 +250,13 @@ END DESIGN
             "fixed_origin_um": origin,
         },
     }
+    declarations, place, verify = fixed_group_commands(_groups(group))
     lines = [
         "read_lef cells.lef",
         "read_def design.def",
-        *fixed_group_lines(_groups(group)),
-        "klt_fixed_groups 0",
-        "klt_fixed_groups 1",
+        *declarations,
+        *place,
+        *verify,
         "write_def final.def",
     ]
     (tmp_path / "place.tcl").write_text("\n".join(lines) + "\n")

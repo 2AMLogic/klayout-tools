@@ -17,7 +17,7 @@ from typing import Any
 from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
 from ._tcl import tcl_literal as _tcl_literal
-from .place_and_route_groups import fixed_group_lines
+from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
@@ -1072,12 +1072,11 @@ def _stage_script_lines(
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
 
-    fixed_groups = fixed_group_lines(instance_groups or [])
-    lines += fixed_groups
+    declarations, place_fixed, check_fixed = fixed_group_commands(instance_groups or [])
+    lines += declarations
     if stage == "place":
         assert io_spec is not None
-        if fixed_groups:
-            lines.append("klt_fixed_groups 0")
+        lines += place_fixed
         lines += pin_constraint_lines(io_spec.get("pin_constraints", []))
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
@@ -1228,8 +1227,7 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
-    if fixed_groups:
-        lines.append("klt_fixed_groups 1")
+    lines += check_fixed
 
     # Apply any requested switching activity before reporting power (#4914).
     lines += power_activity_lines(power_activity)

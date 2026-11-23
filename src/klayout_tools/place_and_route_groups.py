@@ -208,8 +208,10 @@ proc klt_fixed_groups {verify} {
 """.strip()
 
 
-def fixed_group_lines(groups: list[dict[str, Any]]) -> list[str]:
-    """Emit exact fixed placements in positive axis order."""
+def fixed_group_commands(
+    groups: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    """Return Tcl declarations, pre-placement commands and post-stage checks."""
     calls = []
     for group in groups:
         order = group.get("order", {})
@@ -227,4 +229,7 @@ def fixed_group_lines(groups: list[dict[str, Any]]) -> list[str]:
                 x += pitch
             else:
                 y += pitch
-    return [*_FIXED_PLACEMENT_TCL.splitlines(), *calls, "}"] if calls else []
+    if not calls:
+        return [], [], []
+    declarations = [*_FIXED_PLACEMENT_TCL.splitlines(), *calls, "}"]
+    return declarations, ["klt_fixed_groups 0"], ["klt_fixed_groups 1"]
