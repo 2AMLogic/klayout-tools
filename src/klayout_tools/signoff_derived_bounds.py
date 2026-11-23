@@ -5,16 +5,42 @@ corners, so its report's checked-work record carries one
 ``derived_limit:[name, group_id, key]`` identity per group and bound -- never
 the per-corner ``limit`` identities the failed-envelope row credit of issue
 #6027 looks for (:func:`klayout_tools.signoff_derived_rows._bounds_checked`).
-:func:`derived_bounds_checked` is that check's ``derive`` counterpart. It
-lives in its own module to keep ``signoff_derived_rows`` under the per-file
-size ratchet.
+:func:`derived_bounds_checked` is that check's ``derive`` counterpart, and
+:func:`limit_work_names` reads the measurement names back out of both kinds of
+bound-check work id. They live in their own module to keep
+``signoff_derived_rows`` under the per-file size ratchet.
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
 from typing import Any
 
 from .coverage import work_id
+
+
+def limit_work_names(ids: Iterable[Any]) -> set[str]:
+    """Measurement names behind the bound-check work ids in ``ids`` -- the
+    identities :func:`~.coverage.work_id` gives `klt sim`'s per-corner checks
+    (``limit:[corner_index, corner_id, name, key]``) and its per-group
+    ``derive`` checks (``derived_limit:[name, group_id, key]``, issue #7184)."""
+    names: set[str] = set()
+    for raw in ids:
+        if not (isinstance(raw, str) and raw.startswith(("limit:", "derived_limit:"))):
+            continue
+        try:
+            parts = json.loads(raw.partition(":")[2])
+        except ValueError:
+            continue
+        index = 2 if raw.startswith("limit:") else 1
+        if (
+            isinstance(parts, list)
+            and len(parts) == 4
+            and isinstance(parts[index], str)
+        ):
+            names.add(parts[index])
+    return names
 
 
 def derived_bounds_checked(
