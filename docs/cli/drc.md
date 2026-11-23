@@ -3051,7 +3051,9 @@ lengths, and the minimum is the gap between those edges.
 
 | Rule on each layer | Edge condition | Minimum |
 | --- | --- | --- |
+| S.1 | Both edges > 36 nm | 18 nm projected |
 | S.2 | One edge ≤ 36 nm and the other > 36 nm | 25 nm projected |
+| S.3 | Both edges 24–36 nm inclusive | 27 nm projected |
 | S.4 | Both edges < 24 nm | 31 nm projected |
 | S.5 | One edge < 24 nm and the other 24–36 nm inclusive | 31 nm projected |
 | S.6 | Less than one database unit of projected overlap (0.25 nm) | 20 nm Euclidean corner distance |
@@ -3069,7 +3071,10 @@ in **µm**, as written in the LEF. [Pinned platform configuration](https://githu
 
 To assess router legality, apply the full LEF clauses to the particular
 geometry, including the end-width threshold, extensions and parallel-edge
-conditions. For example, in the rectangle fixture two wire ends have an
+conditions. S.1 is the case where the two numbers coincide — its 18 nm
+minimum equals the LEF's plain `SPACING 0.018` — and that coincidence does
+not establish router legality; the end-of-line and corner clauses still
+apply. For example, in the rectangle fixture two wire ends have an
 18 nm lateral gap and a 7 nm longitudinal offset. Their corner distance is
 √(18² + 7²) ≈ 19.31 nm, which triggers S.6. KLayout reported 15 markers
 on the fixture across M1–M3. OpenROAD routing acceptance requires a separate
