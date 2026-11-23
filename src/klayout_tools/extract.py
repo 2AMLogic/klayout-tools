@@ -2260,11 +2260,10 @@ def run_extract(
                     "name": str, "pin": bool, "device_count": int,
                     # Issue #1540: unique across every net *object* in this
                     # circuit, unlike "name" (several distinct nets can
-                    # collide on one name -- see the "nets[]" schema note
-                    # below).
+                    # collide on one name -- see the "nets[]" schema note below).
                     "net_id": int,
-                    # 0-based `.SUBCKT` port position (`None` if not a
-                    # promoted pin) -- issue #1540.
+                    "structural_id": str | None,  # issue #5735 (see below/docs)
+                    # 0-based `.SUBCKT` port position (`None` if not a promoted pin)
                     "pin_index": int | None,
                     # Drawn-label geometry naming this net -- issue #1540.
                     "label_positions_um": [
@@ -2451,8 +2450,8 @@ def run_extract(
     collisions from internally-repeated sub-cells" section for a worked
     example (a small ring fixture) and :func:`_net_label_positions`'s own
     docstring for the full rationale. Purely additive -- every existing
-    ``nets[]`` consumer that reads only ``name``/``pin``/``device_count`` is
-    unaffected.
+    ``nets[]`` consumer reading only ``name``/``pin``/``device_count`` is unaffected.
+    (``nets[].structural_id`` #5735: docs/cli/extract.md carries the contract.)
 
     ``device_classes`` is what the *deck* is structurally capable of
     recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
@@ -3874,12 +3873,9 @@ def _canonicalize_extract_report_for_rerun_diff(
     ``klt extract --check <report> --rerun`` stops reporting bookkeeping-only
     differences as ``status: "drifted"``:
 
-    - every ``net_id`` (``Net.cluster_id``, KLayout's own internal counter)
-      is stripped wherever it appears, at any nesting depth -- it is never
-      itself part of the extracted *content*, only a same-run handle onto a
-      net object (see this module's own many "resolved by net_id, not by
-      name" docstrings, e.g. :func:`_net_identity_name`,
-      :func:`_mom_ground_entry_for_crosscheck`);
+    - every ``net_id`` (KLayout's per-run cluster counter) is stripped
+      recursively. Only top-level net rows lose ``structural_id``, so
+      pre-field committed reports stay comparable (#5735);
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
       (that net's own sorted ``<device>.<terminal>`` attachment list), so
@@ -3916,6 +3912,10 @@ def _canonicalize_extract_report_for_rerun_diff(
     normalized = _strip_net_id_and_rewrite_names(report, name_map)
 
     nets = normalized.get("nets")
+    if isinstance(nets, list):
+        for entry in nets:
+            if isinstance(entry, dict):
+                entry.pop("structural_id", None)
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
         index = _net_attachment_index(devices)
@@ -3953,8 +3953,8 @@ def _canonicalize_extract_report_for_rerun_diff(
 def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
     """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
     ``nets[]`` connectivity with KLayout's anonymous-net numbering
-    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
-    rewrite and ``(name, attachment key)`` re-sort
+    normalized away -- the same ``net_id``/``structural_id`` strip,
+    ``\\$<n>`` structural rewrite and ``(name, attachment key)`` re-sort
     :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
     as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
     ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
@@ -3990,13 +3990,7 @@ def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
 
 
 def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> Any:
-    """Recursively rebuild ``value`` (a JSON-decoded report, or any nested
-    piece of one), dropping every ``net_id`` key and passing every string
-    leaf through :func:`_rewrite_net_name` -- the two bookkeeping
-    normalizations :func:`_canonicalize_extract_report_for_rerun_diff`
-    applies report-wide rather than at a fixed set of paths, so a new report
-    field carrying a net name or a ``net_id`` needs no separate registration
-    here to be covered."""
+    """Strip per-run net IDs and rewrite anonymous names throughout the report."""
     if isinstance(value, dict):
         return {
             key: _strip_net_id_and_rewrite_names(val, name_map)
@@ -7256,14 +7250,13 @@ def _extract_netlist(
     metal_labels = [_label_texts(layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
 
-    # `--def-net-names` (issue #951). Collected here, before
-    # `_resolve_black_box_regions` below can mask `metals[]`: this reads
-    # raw-shape properties straight off `layout`/`top_cell`, independently of
-    # any Region built from them, and is only *applied* (via
-    # `l2n.probe_net`) once extraction has run -- see the
-    # `_apply_def_net_name_overrides` call site further down.
+    # Keep every island’s DEF identity for the abstract-pin short check.
     def_net_name_probes = (
-        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+        _def_net_name_probes(
+            layout, top_cell, deck.metals, all_islands=bool(abstract_instances)
+        )
+        if def_net_names
+        else {}
     )
 
     # Black-box/abstract regions (#293), resolved *before* everything else
@@ -8735,6 +8728,7 @@ def _extract_netlist(
             abstract_cell_local_candidates,
             abstract_cell_global_net_ports,
             abstract_cell_lef_layer_roles,
+            def_net_name_probes,
         )
         warnings = warnings + abstract_cell_warnings
 
