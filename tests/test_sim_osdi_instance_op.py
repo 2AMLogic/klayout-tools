@@ -92,11 +92,19 @@ def test_psp103_discovery_in_a_loom_worktree(main_checkout, monkeypatch, layout)
     assert _psp103_files(repo, str(VARIANT)) == (shared / CARD, shared / MODEL)
 
 
-def test_psp103_discovery_without_git_uses_the_active_checkout(tmp_path, monkeypatch):
-    repo = tmp_path / "checkout"
-    _touch(repo / VARIANT, CARD, MODEL)
-    monkeypatch.setenv("PATH", "")  # no git: nothing names a shared checkout
-    assert _psp103_files(repo, None) == (repo / VARIANT / CARD, repo / VARIANT / MODEL)
+def test_psp103_discovery_without_git_uses_the_active_checkout(
+    main_checkout, monkeypatch
+):
+    repo = main_checkout / ".loom/worktrees/worker"
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(repo))
+    _touch(main_checkout / VARIANT, CARD, MODEL)  # shared checkout only
+    assert _psp103_files(repo, None) is not None  # git available: found via fallback
+    monkeypatch.setenv("PATH", "")  # no git at all
+    assert _psp103_files(repo, None) is None  # active checkout only
+
+
+def test_psp103_discovery_with_no_install_anywhere(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
     assert _psp103_files(tmp_path / "elsewhere", None) is None
 
 

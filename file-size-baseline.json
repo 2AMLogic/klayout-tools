@@ -401,7 +401,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5993
+      "lines": 5990
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
