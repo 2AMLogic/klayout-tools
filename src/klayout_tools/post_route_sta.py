@@ -251,6 +251,7 @@ import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
@@ -658,13 +659,25 @@ def run_sta(
     input_transition_ns, input_transitions = _validate_input_transitions(
         request["constraints"], clock_port
     )
-    boundary = _validate_boundary(
-        request["constraints"], clock_port, input_transition_ns, input_transitions
+    # Issue #7023: the eleven validated port/path constraint values below
+    # travel together unchanged into every corner session -- one typed
+    # record carries them through dispatch instead of eleven parallel
+    # keyword arguments at each hop.
+    constraints = _StaConstraints(
+        input_delay_ns=input_delay_ns,
+        output_delay_ns=output_delay_ns,
+        input_delays=input_delays,
+        output_delays=output_delays,
+        input_transition_ns=input_transition_ns,
+        input_transitions=input_transitions,
+        boundary=_validate_boundary(
+            request["constraints"], clock_port, input_transition_ns, input_transitions
+        ),
+        report_ports=_validate_report_ports(request["constraints"], clock_port),
+        report_path_stages=_validate_report_path_stages(request["constraints"]),
+        false_path_from=_validate_false_path_from(request["constraints"], clock_port),
+        report_instances=_validate_report_instances(request["constraints"]),
     )
-    report_ports = _validate_report_ports(request["constraints"], clock_port)
-    report_path_stages = _validate_report_path_stages(request["constraints"])
-    false_path_from = _validate_false_path_from(request["constraints"], clock_port)
-    report_instances = _validate_report_instances(request["constraints"])
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
@@ -747,17 +760,7 @@ def run_sta(
             geometry_source=geometry_source,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
-            input_delays=input_delays,
-            output_delays=output_delays,
-            input_transition_ns=input_transition_ns,
-            input_transitions=input_transitions,
-            boundary=boundary,
-            report_ports=report_ports,
-            report_path_stages=report_path_stages,
-            false_path_from=false_path_from,
-            report_instances=report_instances,
+            constraints=constraints,
             spef_path=spef_path,
             spef_map=spef_map,
             wire_load_model=wire_load_model,
@@ -774,18 +777,18 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
-        if boundary and "clock_driving_cell" in boundary:
-            response["clock_driving_cell"] = boundary["clock_driving_cell"]
+        if constraints.boundary and "clock_driving_cell" in constraints.boundary:
+            response["clock_driving_cell"] = constraints.boundary["clock_driving_cell"]
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
             request_dir=request_dir,
             clocks=clock_targets(clock_port, clock_period_ns, clock_extras)["clocks"],
             clock_port=clock_port,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
-            input_delays=input_delays,
-            output_delays=output_delays,
+            input_delay_ns=constraints.input_delay_ns,
+            output_delay_ns=constraints.output_delay_ns,
+            input_delays=constraints.input_delays,
+            output_delays=constraints.output_delays,
             clock_uncertainty=clock_uncertainty,
         )
         return response
@@ -917,6 +920,35 @@ def _identity(text: str) -> str:
     return text
 
 
+@dataclass(frozen=True)
+class _StaConstraints:
+    """Issue #7023: the eleven validated port/path constraint values that
+    travel together unchanged from :func:`run_sta` into every corner
+    session -- the scalar and per-port input/output delays, the scalar and
+    per-port input transitions, the boundary settings, the report ports,
+    the path-stage flag, the false-path sources, and the report instances.
+
+    Built once after request validation and passed as this one value
+    through :func:`_dispatch_sta`, :func:`_run_multi_corner`, and
+    :func:`_run_corner_session`; the named fields are read where the Tcl
+    script and the response are assembled. Deliberately excluded: the
+    clock-period resolution and the SPEF choice, both of which are resolved
+    per corner and stay explicit arguments.
+    """
+
+    input_delay_ns: float | None
+    output_delay_ns: float | None
+    input_delays: dict[str, dict[str, float]] | None
+    output_delays: dict[str, dict[str, float]] | None
+    input_transition_ns: float | None
+    input_transitions: dict[str, float] | None
+    boundary: dict[str, Any] | None
+    report_ports: list[str] | None
+    report_path_stages: bool
+    false_path_from: list[str] | None
+    report_instances: list[str] | None
+
+
 def _dispatch_sta(
     *,
     requested_corner: str | None,
@@ -932,16 +964,7 @@ def _dispatch_sta(
     geometry_source: str,
     clock_port: str,
     clock_period_ns: float | dict[str, float],
-    input_delay_ns: float | None,
-    output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
-    input_transition_ns: float | None,
-    input_transitions: dict[str, float] | None,
-    boundary: dict[str, Any] | None,
-    report_ports: list[str] | None,
-    false_path_from: list[str] | None,
-    report_instances: list[str] | None,
+    constraints: _StaConstraints,
     spef_path: str | None,
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
@@ -956,7 +979,6 @@ def _dispatch_sta(
     output_dir: str,
     input_path: str,
     basename: str,
-    report_path_stages: bool = False,
     write_sdf: bool = False,
 ) -> dict[str, Any]:
     """Run the single- or multi-corner analysis :func:`run_sta` resolved,
@@ -982,17 +1004,7 @@ def _dispatch_sta(
             geometry_source=geometry_source,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
-            input_delays=input_delays,
-            output_delays=output_delays,
-            input_transition_ns=input_transition_ns,
-            input_transitions=input_transitions,
-            boundary=boundary,
-            report_ports=report_ports,
-            report_path_stages=report_path_stages,
-            false_path_from=false_path_from,
-            report_instances=report_instances,
+            constraints=constraints,
             spef_path=spef_path,
             spef_map=spef_map,
             wire_load_model=wire_load_model,
@@ -1023,17 +1035,7 @@ def _dispatch_sta(
         hdl_toplevel=hdl_toplevel,
         clock_port=clock_port,
         clock_period_ns=clock_period_ns,
-        input_delay_ns=input_delay_ns,
-        output_delay_ns=output_delay_ns,
-        input_delays=input_delays,
-        output_delays=output_delays,
-        input_transition_ns=input_transition_ns,
-        input_transitions=input_transitions,
-        boundary=boundary,
-        report_ports=report_ports,
-        report_path_stages=report_path_stages,
-        false_path_from=false_path_from,
-        report_instances=report_instances,
+        constraints=constraints,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
@@ -1160,8 +1162,8 @@ def _dispatch_sta(
         response["instance_paths"] = corner_fields["instance_paths"]
     # Additive field (issue #2968): the applied exclusion list, present only
     # when the request named `constraints.false_path_from`.
-    if false_path_from:
-        response["false_path_from"] = list(false_path_from)
+    if constraints.false_path_from:
+        response["false_path_from"] = list(constraints.false_path_from)
     response["spef_annotation"] = corner_fields["spef_annotation"]
     # Additive field (issue #2739): the propagated-clock evidence block --
     # what propagation actually reached -- `null` unless the request asked
@@ -1189,17 +1191,7 @@ def _run_corner_session(
     hdl_toplevel: str | None,
     clock_port: str,
     clock_period_ns: float,
-    input_delay_ns: float | None,
-    output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
-    input_transition_ns: float | None,
-    input_transitions: dict[str, float] | None,
-    boundary: dict[str, Any] | None,
-    report_ports: list[str] | None,
-    report_path_stages: bool,
-    false_path_from: list[str] | None,
-    report_instances: list[str] | None,
+    constraints: _StaConstraints,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
@@ -1307,19 +1299,19 @@ def _run_corner_session(
             clock_period_ns=clock_period_ns,
             spef_path=spef_path,
             spef_net_names=spef_net_names,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
+            input_delay_ns=constraints.input_delay_ns,
+            output_delay_ns=constraints.output_delay_ns,
             macro_lefs=macro_lefs,
             macro_liberty_paths=macro_liberty_paths,
-            input_delays=input_delays,
-            output_delays=output_delays,
-            input_transition_ns=input_transition_ns,
-            input_transitions=input_transitions,
-            boundary=boundary,
-            report_ports=report_ports,
-            report_path_stages=report_path_stages,
-            false_path_from=false_path_from,
-            report_instances=report_instances,
+            input_delays=constraints.input_delays,
+            output_delays=constraints.output_delays,
+            input_transition_ns=constraints.input_transition_ns,
+            input_transitions=constraints.input_transitions,
+            boundary=constraints.boundary,
+            report_ports=constraints.report_ports,
+            report_path_stages=constraints.report_path_stages,
+            false_path_from=constraints.false_path_from,
+            report_instances=constraints.report_instances,
             propagated_clock=propagated_clock,
             clock_extras=clock_extras,
             power_activity=power_activity,
@@ -1341,19 +1333,19 @@ def _run_corner_session(
             clock_period_ns=clock_period_ns,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
+            input_delay_ns=constraints.input_delay_ns,
+            output_delay_ns=constraints.output_delay_ns,
             macro_lefs=macro_lefs,
             macro_liberty_paths=macro_liberty_paths,
-            input_delays=input_delays,
-            output_delays=output_delays,
-            input_transition_ns=input_transition_ns,
-            input_transitions=input_transitions,
-            boundary=boundary,
-            report_ports=report_ports,
-            report_path_stages=report_path_stages,
-            false_path_from=false_path_from,
-            report_instances=report_instances,
+            input_delays=constraints.input_delays,
+            output_delays=constraints.output_delays,
+            input_transition_ns=constraints.input_transition_ns,
+            input_transitions=constraints.input_transitions,
+            boundary=constraints.boundary,
+            report_ports=constraints.report_ports,
+            report_path_stages=constraints.report_path_stages,
+            false_path_from=constraints.false_path_from,
+            report_instances=constraints.report_instances,
             power_activity=power_activity,
             clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
@@ -1395,7 +1387,10 @@ def _run_corner_session(
     )
     stdout = completed.stdout or ""
     worst_setup_path, worst_hold_path = _attach_worst_path_stages(  # issue #5783
-        stdout, worst_setup_path, worst_hold_path, enabled=report_path_stages
+        stdout,
+        worst_setup_path,
+        worst_hold_path,
+        enabled=constraints.report_path_stages,
     )
 
     corner_fields: dict[str, Any] = {
@@ -1441,12 +1436,16 @@ def _run_corner_session(
     )
     # Additive field (issue #3042): only present when the request named
     # `constraints.report_ports`, so an unrequested response is unchanged.
-    if report_ports:
-        corner_fields["port_paths"] = _port_paths(completed.stdout or "", report_ports)
+    if constraints.report_ports:
+        corner_fields["port_paths"] = _port_paths(
+            completed.stdout or "", constraints.report_ports
+        )
     # Additive field (issue #5754): only present when the request named
     # `constraints.report_instances`, so an unrequested response is unchanged.
     corner_fields.update(
-        _instance_paths_corner_field(completed.stdout or "", report_instances)
+        _instance_paths_corner_field(
+            completed.stdout or "", constraints.report_instances
+        )
     )
     if spef_path is not None:
         spef_annotation = _spef_annotation_block(completed, spef_net_names)
@@ -1500,17 +1499,7 @@ def _run_multi_corner(
     geometry_source: str,
     clock_port: str,
     clock_period_ns: float | dict[str, float],
-    input_delay_ns: float | None,
-    output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
-    input_transition_ns: float | None,
-    input_transitions: dict[str, float] | None,
-    boundary: dict[str, Any] | None,
-    report_ports: list[str] | None,
-    report_path_stages: bool,
-    false_path_from: list[str] | None,
-    report_instances: list[str] | None,
+    constraints: _StaConstraints,
     spef_path: str | None,
     spef_map: dict[str, str] | None,
     wire_load_model: str | None,
@@ -1593,17 +1582,7 @@ def _run_multi_corner(
             hdl_toplevel=hdl_toplevel,
             clock_port=clock_port,
             clock_period_ns=corner_period,
-            input_delay_ns=input_delay_ns,
-            output_delay_ns=output_delay_ns,
-            input_delays=input_delays,
-            output_delays=output_delays,
-            input_transition_ns=input_transition_ns,
-            input_transitions=input_transitions,
-            boundary=boundary,
-            report_ports=report_ports,
-            report_path_stages=report_path_stages,
-            false_path_from=false_path_from,
-            report_instances=report_instances,
+            constraints=constraints,
             spef_path=pair_spef,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
@@ -1710,8 +1689,8 @@ def _run_multi_corner(
     }
     # Additive field (issue #2968): corner-invariant request echo, present only
     # when the request named `constraints.false_path_from`.
-    if false_path_from:
-        response["false_path_from"] = list(false_path_from)
+    if constraints.false_path_from:
+        response["false_path_from"] = list(constraints.false_path_from)
     return response
 
 
