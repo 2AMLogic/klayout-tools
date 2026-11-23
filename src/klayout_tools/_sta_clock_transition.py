@@ -6,12 +6,7 @@ from typing import Any
 
 from ._jsonnum import is_finite_number
 from ._tcl import tcl_literal
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
+from .post_route_sta_errors import PostRouteStaError
 
 
 def validate_clock_transition(constraints: dict[str, Any]) -> float | None:
@@ -19,9 +14,11 @@ def validate_clock_transition(constraints: dict[str, Any]) -> float | None:
     if value is None:
         return None
     if not is_finite_number(value) or value < 0:
-        raise _error("constraints.clock_transition_ns must be a finite number >= 0")
+        raise PostRouteStaError(
+            "constraints.clock_transition_ns must be a finite number >= 0"
+        )
     if constraints.get("propagated_clock") is True:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.clock_transition_ns conflicts with propagated_clock: "
             "OpenSTA ignores set_clock_transition on a propagated clock"
         )
@@ -64,13 +61,13 @@ def validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> boo
     if value is None:
         return False
     if not isinstance(value, bool):
-        raise _error(
+        raise PostRouteStaError(
             "constraints.propagated_clock must be a boolean (true enables "
             "propagated-clock timing in def mode; omit or false keeps the "
             "ideal-clock default)"
         )
     if value and not has_def:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.propagated_clock is only valid in def mode -- a "
             "verilog-mode request links a netlist with no placed clock tree "
             "to propagate through"

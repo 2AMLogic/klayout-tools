@@ -4546,18 +4546,15 @@ def route_bundle(
             )
             conflict = _leg_conflict_reason(result, leg_conflict)
             if conflict is not None:
-                retry = climb_ctx.retry_rejected_leg(
+                result, conflict = climb_ctx.retry_rejected_leg(
                     i,
                     j,
                     leg_spec.get("waypoints_um"),
                     leg_effective_width_um,
                     cross_geometry,
                     result,
-                    conflict.reason,
+                    conflict,
                 )
-                if retry is not None:
-                    result = retry
-                    conflict = None
         reason = conflict.reason if conflict is not None else None
         blocking_net = conflict.blocking_net if conflict is not None else None
         if reason is None and result["routed"]:
@@ -4630,12 +4627,9 @@ def route_bundle(
         )
         conflict = _leg_conflict_reason(result, leg_conflict)
         if conflict is not None:
-            retry = climb_ctx.retry_rejected_leg(
-                i, j, waypoints_um, width_um, cross_geometry, result, conflict.reason
+            result, conflict = climb_ctx.retry_rejected_leg(
+                i, j, waypoints_um, width_um, cross_geometry, result, conflict
             )
-            if retry is not None:
-                result = retry
-                conflict = None
         reason = conflict.reason if conflict is not None else None
         blocking_net = conflict.blocking_net if conflict is not None else None
 

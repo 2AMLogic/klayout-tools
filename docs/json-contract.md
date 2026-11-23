@@ -115,7 +115,8 @@ byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
 failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
 (issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
-on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+on both sides, `"pass"`. For a schematic-only observation, `delta[].status`
+is `"skipped"` unless the schematic measurement errored. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
@@ -245,7 +246,10 @@ request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
 member, `"not_reached"` (with `value: null`), an `info` diagnostic
 `measurement_not_reached`, and a top-level `not_reached` count present only
-for a request that declared the field. Consumers that switch on measurement
+for a request that declared the field. The same opt-in on a step-scoped
+`analysis_steps[].measurements[].spice` card (issue #7072) reports the
+identical members under the qualified `<step>.<name>` result, which also
+carries its `step` provenance field. Consumers that switch on measurement
 `status` already must tolerate unknown members per the rule above. No
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
 `.meas` targets (`measurements[].on_unreached`)".
@@ -376,6 +380,14 @@ Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
 scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
 `resistance_source_reason`). Output without the flag is unchanged; no
 `schema_version` bump.
+Issue #6964 likewise adds `caps` (`{max_terminals, max_cells, max_nodes,
+max_edges}`, integers) to `extraction.resistance_graph` of `klt pex
+--resistance-graph`: present only when a `--resistance-graph-max-*` flag was
+given, holding all four effective caps (the builder's default for any flag
+omitted), and absent otherwise -- so an existing graph-enabled envelope is
+unchanged. `klt extract` adds no field for the caps: its per-net
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+applied. No `schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -859,8 +871,13 @@ file per instantiated hard macro — so `provenance.pdk` alone cannot answer
 "where did this cell's pin order come from". Like `klt erc`'s `spec`, it is a
 verb-local field rather than a `build_provenance()` parameter, and it is
 omitted entirely (never an empty list) for every reference form that reads no
-pin-order source. See [`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level
-LVS".
+pin-order source. A file under the resolved PDK root is recorded as the
+string `"$PDK_ROOT/<relative>"` (issue #5812) rather than an absolute host
+path, so a committed report does not leak where the PDK is installed (the PDK
+identity is in `provenance.pdk`); a `reference.pin_order_files` entry outside
+the PDK root stays absolute unless the request sets `portable_paths: true`.
+Same field and type, no `schema_version` bump. See
+[`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level LVS".
 
 `klt signoff` emits **no** `provenance` block of its own — it resolves no
 PDK, applies no deck, and reads no single input stream; the evidence it
@@ -1809,7 +1826,12 @@ GF180 main script carries the same selection as its target.
 
 When the parallel runner names failed workers, `error.abort.decks` lists their
 distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
-A single identified failure also supplies `abort.deck`. The parallel runner
+A single identified failure also supplies `abort.deck`. For the recognized GF180
+3LM abort (`deck: "mslot1"`, `symbol: "metal4_drawn"`), the optional
+`error.abort.hint` points to the [deck selectors and their coverage](cli/drc.md#gf180-3lm-deck-selection).
+A tolerated report carries that hint at `engine_deck_errors.abort.hint`.
+
+The parallel runner
 can start several decks before reporting a failure.
 
 | Field | Meaning |
@@ -1886,7 +1908,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
-| `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
+| `synthesize` | `partial.netlist_path`, `partial.stats_path`, `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
@@ -1900,7 +1922,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 3 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762). Version 4 adds `coverage.info_path` in the same hashed envelope, anchored to the request repo | 4 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1918,7 +1940,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `options.trace.path` | 3 (`log_path` moved to the envelope table; the echoed inputs joined them in #5784) |
+| `functional-verification` | `trace.path` (absolute waveform filename, which can trigger a provenance lint finding) | 4 (`coverage.info_path` moved to the envelope table in #6005) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 
@@ -2424,6 +2446,14 @@ and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
 
+For `--engine klayout`, optional `violations[].values` contains the
+verbatim XML character data of each non-geometry RDB value in document
+order, including any tag such as `[#RATIO]`. Only findings with such
+values carry the field. `--engine both` retains it in
+`reports.native.violations[]`. `--check --rerun` compares the strings.
+They provide evidence only and do not affect the coverage verdict,
+`coverage_unknown`, or `--expect-rule-categories`.
+
 **Deck stdout as additive evidence** (issue #6613): every `--engine
 klayout` DRC report carries a top-level `deck_output` object —
 `{"stdout": <str>, "truncated": <bool>, "line_count": <int>}` — holding
@@ -2773,6 +2803,10 @@ tool failure, documented in its own `docs/cli/<verb>.md` — e.g. `klt drc`
 exits `3` when the deck ran successfully but found violations (a successful
 run, so the documented success payload is still on stdout). Extensions never
 redefine `0`/`1`/`2`.
+
+`klt synthesize` exits `4` with `status: "inconclusive"` and
+`reason: "abc_timeout"` when its optional generic ABC budget expires.
+The `partial` block identifies the retained generic netlist and statistics.
 
 **The exit-code contract is additive, and a consumer must treat it that way.**
 A command may ship a new code above `2` in a later release for an outcome

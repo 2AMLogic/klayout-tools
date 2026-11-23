@@ -71,6 +71,7 @@ BATCH_JOB_COMMAND_FAILED_CODE = "batch_job_command_failed"
 #: Top-level report diagnostic under ``runner_version_check: "warn"`` naming
 #: the request features the runner predates (issue #2901).
 BATCH_RUNNER_FEATURE_PREDATED_CODE = "batch_runner_request_feature_predated"
+BATCH_RUNNER_FEATURE_UNVERIFIED_CODE = "batch_runner_request_feature_unverified"
 #: A deck-list (``decks[]``, #2804) request needs a runner ``klt`` that knows
 #: the deck-list contract; the major.minor gate cannot see that (issue #3303).
 BATCH_RUNNER_LACKS_DECKS_CODE = "batch_runner_lacks_decks"

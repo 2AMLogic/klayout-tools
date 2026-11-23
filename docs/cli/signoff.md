@@ -869,7 +869,14 @@ grades `input_verified: null` **by design**, identically on the host that
 happens to have the file and in a fresh clone; for the artifact-anchored
 generic items (T1 1/2/9/10) that means the `unverifiable_provenance`
 refusal renders the same everywhere too, instead of the block grading T1
-on the producing host and not-T1 in CI. The `.git`-less fallback: a tree
+on the producing host and not-T1 in CI. The index also covers *how* the
+candidate is reached (issue #7195, the input side of #6139's yield
+contract): every symlink in the chain and every directory a `dir/..`
+step traverses must itself be tracked by its checkout's index, so a
+purely local link to committed bytes grades exactly like a local copy of
+them, and a name no filesystem call can represent (an embedded NUL byte)
+grades unresolvable instead of aborting the render. The `.git`-less
+fallback: a tree
 with no functioning checkout above the candidate — a
 `/archive/<sha>.tar.gz` unpack, a vendored copy, a `--repo-root` tree
 without VCS metadata — keeps the filesystem-presence behaviour, since
@@ -1342,6 +1349,48 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   the bare key, so the qualified form never borrows the other partition's
   evidence: `"7.analog"` on a `"digital"` manifest matches nothing and the
   item falls through to `"7"` (and, absent that, to `unmet`/`no_evidence`).
+- `disclosed_evidence` — optional (default absent, issue #6953), a map from
+  item key to a **local file path**, disclosing evidence produced *outside*
+  `klt` that this grader cannot read but the maintainer attests exists:
+
+  ```json
+  {
+    "block": "demo",
+    "kind": "digital",
+    "disclosed_evidence": {
+      "1": "netlist/demo.v",
+      "5.digital": "reports/sta.json"
+    }
+  }
+  ```
+
+  A block whose flow legitimately ran through external scripts — OpenROAD
+  STA results, a synthesized netlist from RTL pinned in another repository —
+  has no `evidence` form for those artifacts (citing a foreign document
+  renders `unreadable_evidence`/`unrecognized_envelope`), so its rows read
+  `unmet`/`no_evidence`: a reason asserting *no evidence exists*, which a
+  fleet reader mistakes for "the work was never done". A disclosure fixes
+  the *record*, not the verdict: the grader's only statement about a
+  disclosed path is that it names a readable local file — the contents are
+  never parsed, classified, executed, or interpreted as a grading envelope —
+  and the row stays `unmet` with `reason: "evidence_not_klt_native"` and the
+  declared path in `detail.disclosed_evidence`. No T1 credit, no
+  `citation`, no exit-code change; a disclosure is identification, never a
+  verdict, so a valid native envelope at a disclosed path still cannot
+  confer credit. Paths resolve against the process working directory, the
+  same convention as a local file-backed `evidence` citation; a path that
+  is missing, a directory, or unreadable renders
+  `unmet`/`unreadable_evidence` instead, still naming the path. Keys use
+  the `evidence` map's grammar (`"<item id>"` or
+  `"<item id>.<analog|digital>"`) and its precedence — the qualifier for
+  the partition being graded first, then the bare key — so a disclosure
+  keyed only to `5.digital` on a mixed-signal block affects only the
+  digital row. A disclosure applies only to a row this build graded whose
+  verdict would otherwise be `unmet`/`no_evidence`; a native pass, a native
+  citation failure, or a spec-row verdict keeps its original status and
+  reason. A malformed declaration (a non-object map, a key that is not an
+  item key, a value that is not a non-empty string path) is a validation
+  error, not a silent no-op.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
@@ -1389,10 +1438,10 @@ manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
 regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
-statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way — the one
-bound verb that is not reachable from a published release (see "Item 6's
-evidence needs a from-source toolchain" below). **Phase 2b
+statistical-evidence item, by binding a [`klt yield` campaign report](yield.md)
+(epic #710). For installation instructions, see
+[Item 6's evidence needs the `[yield]` extra (issue #2466)](#item-6s-evidence-needs-the-yield-extra-issue-2466).
+**Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
@@ -2613,6 +2662,7 @@ an inventory the author did not write.
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
+| | `unmeasured_metrics`: list of `{"corner": "<declared corner>", "metric": "area\|"fmax\|"power", "reason": "<non-blank text>"}` | no (digital partitions only) | one `unmeasured_metric` check per entry (role `digital`), **passing**, in the corner/metric position its `metric` check would have held: the gap is disclosed to the grader with its corner, metric and reason instead of failing the attestation or being hidden by dropping the `corners`/`metrics` block (issue #7259). A **declared** gap is a passing disclosure; an *undeclared* missing binding is still a **failed check**. Refused (exit `1`): a non-list value, an entry that is not exactly `{corner, metric, reason}`, a `corner` not in `corners`, a `metric` other than `area`/`fmax`/`power`, a blank or non-string `reason`, the same pair declared twice, a pair that `metrics` also binds (measured and unmeasured is a contradiction), and the field on an inventory with no `corners`/`metrics` block (even an empty list). An empty list on a digital inventory is accepted and adds no check. An invalid bound value and a failed citation or freshness command still fail. *First ships in the first release after `v0.9.2`; earlier builds refuse `unmeasured_metrics` as an unknown field.* See "A declared gap" below. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
@@ -2767,6 +2817,64 @@ record binds `fmax` in MHz. The disclosure is the claimant's, not klt's:
 **klt recorded the record's hash and ran the freshness command; it did not
 produce or verify the numbers** — an external record's content is the
 claimant's word, visible as `kind: "external"` in `attestation.checks[]`.
+
+**A declared gap is not a failed measurement (issue #7259).** The
+`corners`/`metrics` block is all-or-nothing per pair: one `metric` check is
+emitted for every corner × required metric, and a missing binding fails its
+check. A characterization with partial coverage — power analysis not run, an
+area figure living in a log no binding can read — declares each gap in
+`unmeasured_metrics`, so the measured metrics are bound and the unmeasured
+ones are disclosed rather than hidden by dropping the block:
+
+```json
+{
+  "corners": ["tt", "ss"],
+  "metrics": {
+    "tt": {
+      "area": {"envelope": "sim/tt.json", "field": "result.area"},
+      "fmax": {"envelope": "sim/tt.json", "field": "result.fmax"},
+      "power": {"envelope": "sim/tt.json", "field": "result.power"}
+    },
+    "ss": {
+      "area": {"envelope": "sim/ss.json", "field": "result.area"},
+      "power": {"envelope": "sim/ss.json", "field": "result.power"}
+    }
+  },
+  "unmeasured_metrics": [
+    {"corner": "ss", "metric": "fmax", "reason": "Frequency sweep was not run at ss"}
+  ]
+}
+```
+
+`ss/fmax` then holds its usual slot in `attestation.checks[]` with a
+**passing** disclosure in place of the `metric` check that would have
+failed, and the other five `metric` checks record their measured values
+exactly as before. The disclosure carries `corner`, `metric` and `reason`
+and no numeric `value`:
+
+```json
+{"check": "unmeasured_metric", "role": "digital", "corner": "ss", "metric": "fmax",
+ "reason": "Frequency sweep was not run at ss", "passed": true}
+```
+
+`--format text` names the gap and its reason on the check's line:
+
+```text
+[PASS] digital ss area: 5
+[PASS] digital ss fmax: unmeasured (Frequency sweep was not run at ss)
+[PASS] digital ss power: 2
+```
+
+A declaration excuses exactly the pair it names. The same metric missing at
+another corner, a different metric missing at the same corner, a bound field
+that is not a number, and a failed citation or freshness command each still
+**fail** the attestation, and `--check` reports an edited `reason` as drift
+on the `unmeasured_metric` check it names by corner and metric. Declaring a
+pair that `metrics` also binds is refused (exit `1`), as is the list on an
+inventory with no `corners`/`metrics` block. An inventory that declares
+every pair unmeasured passes with nothing measured — each gap visible, with
+its reason, among the checks a reviewer reads. Whether a declared gap should
+fail the tier is a grading-policy decision this producer does not make.
 
 #### Envelope
 
@@ -4956,13 +5064,8 @@ checkout with a Rust toolchain. A bare
 `pip install klayout-tools` and the git-pinned (`@git+…`) form do not
 include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
-callout for the full statement and the build steps). Every *other* T1
-item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
-`functional-verification`, `erc`, `place-and-route` — is reachable from a
-published release, so item 6 is the one row that additionally needs the
-from-source build (the `[yield]` extra once published) to produce evidence for, or to
-re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
-campaign around it.
+callout for the full statement and the build steps). Install the yield extension on the host that will produce or
+re-derive item 6 evidence before scheduling the campaign.
 
 This changes nothing about how the item grades: a `klt yield` report cites,
 hashes, and grades exactly as described here and in "Worked example:
@@ -5834,6 +5937,7 @@ actually ran and failed):
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
+| `"evidence_not_klt_native"` | yes | **(issue #6953)** The item has no `evidence` entry, but the manifest's `disclosed_evidence` map named a local artifact for it that this grader cannot read — evidence produced outside `klt` (an OpenROAD STA report, a netlist synthesized from foreign RTL) which no T1 item accepts as a citation. The grader's only claim is that the disclosed path names a readable file (`detail.disclosed_evidence`); its contents are never parsed or interpreted as a grading envelope, and the item still grades `unmet` with no `citation` and no credit — a disclosure is identification, never a verdict. Distinct from `"no_evidence"` (whose meaning, "the manifest has no entry for the item", would otherwise read as "the work was never done"); an unreadable disclosed path renders `"unreadable_evidence"` instead. See the `disclosed_evidence` manifest field above. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
 | `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |
