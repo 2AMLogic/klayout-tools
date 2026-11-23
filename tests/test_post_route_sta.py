@@ -481,7 +481,7 @@ def test_resolve_liberty_ihp_single_underscore_fallback(tmp_path, monkeypatch):
     resolve via the single-underscore fallback rather than raising "liberty
     not found" (issue #1790, missed in `post_route_sta.py`'s own copy of
     `_resolve_liberty` until issue #1652 folded it into the shared
-    `klayout_tools.pdk.resolve_liberty_for_cell_library` implementation
+    `klayout_tools.pdk_cells.resolve_liberty_for_cell_library` implementation
     `synthesize.py`/`place_and_route.py` already carried this fallback in)."""
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"

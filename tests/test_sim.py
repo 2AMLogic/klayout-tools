@@ -10844,8 +10844,8 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
     # probe's own abort diagnostic already carries as a literal (rule 3).
-    ("klayout_tools.sim", "_run_local", "stop_reason"),
-    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
 
 
