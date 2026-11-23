@@ -7893,7 +7893,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
