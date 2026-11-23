@@ -15,8 +15,9 @@ Four tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
   one descriptor) is `@_SKIP_NO_NGSPICE`-gated, mirroring `tests/test_sim.py`'s
   own real-`ngspice` integration tier.
 - A **digital-flow tier** (Epic #391 Phase 5, issue #437) exercises the
-  `synthesize`/`place-and-route` checks -- both need a `threshold` (same rule
-  as `layout-metrics`, since neither has gate semantics of its own) and
+  `synthesize`/`place-and-route` checks -- `synthesize` needs a `threshold`
+  (as `layout-metrics` does; `place-and-route` grades its own `status`, see
+  `test_eval_place_and_route_status.py`) and both
   resolve `request` as a path only, never inline JSON/`-` -- plus one
   end-to-end test chaining `synthesize` -> `functional-verification` ->
   `place-and-route` -> `drc`/`layout-metrics` into a single scored verdict,
@@ -1084,31 +1085,6 @@ def test_synthesize_gate_exceeding_threshold_is_invalid(tmp_path, monkeypatch):
     (gate,) = report["gates"]
     assert gate["status"] == "fail"
     assert gate["count"] == 2010
-
-
-def test_place_and_route_gate_requires_threshold(tmp_path, monkeypatch):
-    import klayout_tools.eval as eval_module
-
-    monkeypatch.setattr(
-        eval_module,
-        "run_place_and_route",
-        lambda request_path: dict(_PLACE_AND_ROUTE_REPORT, gds_path=None),
-    )
-    (tmp_path / "pnr_request.json").write_text("{}")
-    descriptor = {
-        "gates": [
-            {"check": "place-and-route", "args": {"request": "pnr_request.json"}}
-        ],
-        "objective": {
-            "check": "place-and-route",
-            "metric": "wirelength_um",
-            "args": {"request": "pnr_request.json"},
-        },
-    }
-    path = _write_descriptor(tmp_path, descriptor)
-
-    with pytest.raises(EvalError, match="threshold"):
-        run_eval(path)
 
 
 def test_place_and_route_gate_with_threshold_on_timing_closure(tmp_path, monkeypatch):

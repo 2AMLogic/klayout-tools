@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1593
+      "lines": 1586
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -337,11 +337,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2820
+      "lines": 2686
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2530
+      "lines": 2488
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4882
+      "lines": 4835
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -401,35 +401,35 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6315
+      "lines": 5990
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1568
+      "lines": 1557
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
-      "lines": 538
+      "lines": 534
     },
     {
       "path": "src/klayout_tools/lvs_gate_level.py",
-      "lines": 960
+      "lines": 957
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2207
+      "lines": 2194
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
-      "lines": 910
+      "lines": 896
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
-      "lines": 734
+      "lines": 725
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 774
+      "lines": 759
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3314
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4535
+      "lines": 4532
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -577,23 +577,23 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11784
+      "lines": 11622
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4314
+      "lines": 4251
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 912
+      "lines": 909
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2264
+      "lines": 2246
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
-      "lines": 1146
+      "lines": 1145
     },
     {
       "path": "src/klayout_tools/sim_search.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1230
+      "lines": 1227
     },
     {
       "path": "src/klayout_tools/sim_steps.py",

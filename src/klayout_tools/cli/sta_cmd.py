@@ -12,9 +12,9 @@ Exit codes (see ``docs/cli/sta.md`` for the full table):
     3 - ``--check`` only: the committed report no longer reproduces
         (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. A *fresh* run never exits 3 -- like ``klt place-and-route``, this
-command has no pass/fail concept of its own; timing slack/violation counts
-are data, not a built-in gate.)
+subcommand. A *fresh* run never exits 3 -- this command has no pass/fail
+concept of its own; timing slack/violation counts are data, not a built-in
+gate.)
 
 ``--check <report>`` (issue #5841) verifies a previously committed report
 still reproduces from the request given positionally -- see
