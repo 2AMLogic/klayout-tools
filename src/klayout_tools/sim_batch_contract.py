@@ -291,6 +291,12 @@ BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
 #: ``request.batch.max_concurrent_jobs`` (issue #3914).
 BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 
+#: Machine-readable ``error.code`` of an invalid
+#: ``request.batch.poll_interval_s`` / ``request.batch.poll_timeout_s``
+#: (issue #7543); coded so the dry-run runner check re-raises it instead
+#: of swallowing it as an unconfigured-host error.
+BATCH_POLL_KNOB_CODE = "batch_poll_knob_invalid"
+
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"

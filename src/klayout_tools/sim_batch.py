@@ -179,6 +179,7 @@ from .sim_batch_contract import (  # noqa: F401
     BATCH_MAX_UNITS_CODE,
     BATCH_NETLIST_FILENAME,
     BATCH_NO_CAPACITY_CODE,
+    BATCH_POLL_KNOB_CODE,
     BATCH_RECEIPT_FILENAME,
     BATCH_REPORT_FILENAME,
     BATCH_REQUEST_FILENAME,
@@ -196,7 +197,6 @@ from .sim_batch_contract import (  # noqa: F401
     DEFAULT_BATCH_MAX_JOB_SECONDS,
     DEFAULT_BATCH_PROFILE,
     DEFAULT_INTERRUPTED_GRACE_S,
-    DEFAULT_POLL_INTERVAL_S,
     FLEET_CONFIG_FILENAME,
     FLEET_MAX_JOB_SECONDS_KEY,
     JOB_CEILING_BASIS,
@@ -259,6 +259,8 @@ from .sim_batch_job_timeout import (
     _resolve_max_units_per_job,
     assess_caller_job_timeout,
     resolve_job_timeout_s,
+    resolve_poll_interval_s,
+    resolve_poll_timeout_s,
 )
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +655,9 @@ def _resolve_batch_config(
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
     job_timeout_s = resolve_job_timeout_s(batch_spec)
+    default_poll_timeout_s = _default_batch_poll_timeout_s(
+        corner_count, timeout_s, job_timeout_s=job_timeout_s
+    )
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -673,17 +678,8 @@ def _resolve_batch_config(
             or fleet.get("BATCH_REGION")
             or None
         ),
-        poll_interval_s=float(
-            batch_spec.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S)
-        ),
-        poll_timeout_s=float(
-            batch_spec.get(
-                "poll_timeout_s",
-                _default_batch_poll_timeout_s(
-                    corner_count, timeout_s, job_timeout_s=job_timeout_s
-                ),
-            )
-        ),
+        poll_interval_s=resolve_poll_interval_s(batch_spec),
+        poll_timeout_s=resolve_poll_timeout_s(batch_spec, default_poll_timeout_s),
         capacity_wait_s=capacity_wait_s,
         capacity_retries=resolve_capacity_retries(batch_spec),
         runner_version_check=runner_version_check,
@@ -736,6 +732,9 @@ def dry_run_runner_check(
             BATCH_RUNNER_MISMATCH_CODE,
             BATCH_MAX_UNITS_CODE,
             ENGINE_VERSION_UNMET_CODE,
+            # Issue #7543: a malformed poll knob is the request author's,
+            # never the host's, so the dry run refuses it like the submit.
+            BATCH_POLL_KNOB_CODE,
         ):
             raise
         return None
