@@ -6243,11 +6243,10 @@ def _grade_multi_citation(
 
     Issue #6969: a ``joint_grid`` row is covered only when every named
     member graded ``met`` and proved the declared grid plus a condition
-    probe (:func:`.signoff_joint_rows.evaluate_joint_rows`); an uncovered
-    one lands in ``uncovered_rows`` with per-member shortfalls under
-    ``detail.joint_rows``, a member no citation names or a Monte Carlo
-    member is ``invalid_evidence`` (decided with the other post-member
-    outcomes).
+    probe (:func:`.signoff_joint_rows.evaluate_joint_rows`); otherwise it
+    lands in ``uncovered_rows`` with per-member shortfalls under
+    ``detail.joint_rows``. A member no citation names, or a Monte Carlo
+    member, is ``invalid_evidence`` (see ``_post_member_outcome``).
     """
 
     def invalid(
