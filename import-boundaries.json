@@ -182,6 +182,7 @@
         "klayout_tools.drc_klayout_launch",
         "klayout_tools.drc_klayout_selection",
         "klayout_tools.drc_klayout_list",
+        "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
@@ -195,6 +196,7 @@
         "klayout_tools.economy",
         "klayout_tools.economy_bands",
         "klayout_tools.economy_footprint",
+        "klayout_tools.economy_gaps",
         "klayout_tools.economy_leaves",
         "klayout_tools.economy_pnr",
         "klayout_tools.economy_whatif"
@@ -246,6 +248,7 @@
         "klayout_tools.erc_antenna_names",
         "klayout_tools.erc_disclosure",
         "klayout_tools.erc_keepouts",
+        "klayout_tools.erc_pnr",
         "klayout_tools.erc_spec",
         "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
@@ -342,6 +345,7 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_base",
         "klayout_tools.functional_verification_check",
         "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
@@ -528,6 +532,7 @@
         "klayout_tools.cli._lvs_parser_args",
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_base",
         "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
@@ -704,10 +709,12 @@
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",
+        "klayout_tools.place_and_route_pin_connectivity",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_rerun",
         "klayout_tools.place_and_route_power_audit",
+        "klayout_tools.place_and_route_power_pins",
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
@@ -806,6 +813,7 @@
         "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
+        "klayout_tools._openroad_mount_hint",
         "klayout_tools._paths",
         "klayout_tools._power_activity",
         "klayout_tools._request_fields",
@@ -950,6 +958,7 @@
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_reattach",
+        "klayout_tools.sim_ac_waveform",
         "klayout_tools.sim_batch_resume",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
@@ -973,6 +982,7 @@
         "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_corner_point",
+        "klayout_tools.sim_corner_rules",
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
@@ -993,6 +1003,7 @@
         "klayout_tools.sim_expr_hint",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
+        "klayout_tools.sim_homotopy",
         "klayout_tools.sim_form_signals",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
@@ -1135,6 +1146,7 @@
         "klayout_tools.sta",
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc",
+        "klayout_tools.synthesize_abc_stages",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_driving_cell",
@@ -1183,6 +1195,7 @@
       "modules": [
         "klayout_tools.cli.yield_cmd",
         "klayout_tools.yield_analysis",
+        "klayout_tools.yield_csv_control",
         "klayout_tools.yield_csv_reader",
         "klayout_tools.yield_provenance",
         "klayout_tools.yield_sampling_fields"
@@ -1978,6 +1991,11 @@
       "consumer": "place_and_route",
       "exporter": "sim",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "sta",
+      "reason": "Issue #7267: the in-flow P&R timing report splices the same public SPEF_SKIP_DRIVER_ONLY Tcl fragment (_sta_request_diag) into its design-side SPEF correlation loop as standalone `klt sta`, rather than a second hand-maintained copy the two verbs' annotation_complete verdicts could drift apart on."
     },
     {
       "consumer": "sim",

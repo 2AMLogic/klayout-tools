@@ -20,15 +20,9 @@ grown past the point one module should hold request/response orchestration
 ``klayout`` engine branch) is deliberately **not** part of this split -- it
 stays in ``lvs.py``.
 
-Dependency surface mirrors ``lvs_mismatch.py``'s discipline: this module
-calls out to ``lvs.py``'s ``LvsError`` and ``CATEGORY_*`` constants, imported
-*inside* the handful of functions that use them (never at module scope), so
-this module has no load-time dependency back on ``lvs.py``.
-The engine branch in ``lvs_netgen_branch.py`` imports the Netgen helpers
-and the default timeout directly from this module.
-:func:`_mismatch` is imported from ``lvs_mismatch.py`` at module scope
-instead, since that module carries no load-time dependency on either this
-module or ``lvs.py``.
+The Netgen helpers use ``lvs_base`` for errors and finding categories and
+``lvs_mismatch`` to build findings. The engine branch in ``lvs_netgen_branch``
+imports these helpers and the default timeout directly.
 """
 
 from __future__ import annotations
@@ -42,6 +36,14 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _resolve_relative
+from .lvs_base import (
+    CATEGORY_DEVICE_PROPERTY,
+    CATEGORY_DEVICE_UNMATCHED,
+    CATEGORY_NET_UNMATCHED,
+    CATEGORY_PIN_UNMATCHED,
+    CATEGORY_TOPOLOGY,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -198,11 +200,7 @@ _NETGEN_PROPERTY_ERROR_MARKERS: tuple[str, ...] = (
 #: pipe-delimited table with filler cells like ``"(no matching net)"`` is
 #: brittle to parse precisely across netgen versions, so the raw block is
 #: preserved in ``details.raw`` instead of guessing at a per-net/per-device
-#: split that could be wrong in an unbounded way). Built inside
-#: :func:`_parse_netgen_section_blocks` itself (rather than as a module-level
-#: constant) since its category values are ``lvs.py`` constants, imported
-#: with the same deferred discipline as everything else this module needs
-#: from ``lvs.py``.
+#: split that could be wrong in an unbounded way).
 _NETGEN_SECTION_HEADER_TEXT: tuple[tuple[str, str], ...] = (
     ("NET mismatches:", "net mismatch(es)"),
     ("DEVICE mismatches:", "device mismatch(es)"),
@@ -280,7 +278,6 @@ def _resolve_netgen_binary(options: dict[str, Any], request_dir: str) -> str:
     needed the message (Debian/Ubuntu, with ``netgen-lvs`` already installed)
     was told to install what it already had.
     """
-    from .lvs import LvsError
 
     for value, source in (
         (options.get("netgen_binary"), "options.netgen_binary"),
@@ -330,7 +327,6 @@ def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | No
     setup" -- device/net comparison still works, but PDK-specific device-class
     merging/property tolerances from the setup script do not apply).
     """
-    from .lvs import LvsError
 
     value = options.get("netgen_setup")
     if value is None:
@@ -377,7 +373,6 @@ def _write_exclusion_setup(
     then deletes each proven placeholder property from *both* circuits' device
     class -- netgen reports a property present on only one side as an error,
     so a one-sided delete would not suppress anything. Returns its path."""
-    from .lvs import LvsError
 
     lines = ["# klt lvs -- generated placeholder-value exclusions (issue #2673)"]
     if caller_setup:
@@ -453,7 +448,6 @@ def _run_netgen_lvs(
     import klayout.db as kdb
 
     from .extract_netlist_write import write_spice_netlist
-    from .lvs import LvsError
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-netgen-")
     try:
@@ -625,12 +619,6 @@ def _parse_netgen_report(
     on some other version is distinguishable at a glance from a genuinely
     malformed netlist, without re-running netgen by hand.
     """
-    from .lvs import (
-        CATEGORY_DEVICE_PROPERTY,
-        CATEGORY_PIN_UNMATCHED,
-        CATEGORY_TOPOLOGY,
-        LvsError,
-    )
 
     # Issue #1969: strip ANSI escapes from *both* netgen text sources before
     # anything is parsed out of them, so every field this function can
@@ -808,7 +796,6 @@ def _parse_netgen_property_errors(log_text: str) -> list[dict[str, Any]]:
     (issue #343 review); the caller's marker-based guard is the backstop, and
     this is the per-line half of the same rule.
     """
-    from .lvs import CATEGORY_DEVICE_PROPERTY
 
     entries: list[dict[str, Any]] = []
     for block_match in _NETGEN_PROPERTY_BLOCK_RE.finditer(log_text):
@@ -879,7 +866,6 @@ def _parse_netgen_section_blocks(log_text: str) -> list[dict[str, Any]]:
     don't map cleanly onto that shape go into a mismatch-level `details`
     object, not a schema fork"), this module buckets instead of guessing.
     """
-    from .lvs import CATEGORY_DEVICE_UNMATCHED, CATEGORY_NET_UNMATCHED
 
     headers = (
         ("NET mismatches:", CATEGORY_NET_UNMATCHED, "net mismatch(es)"),

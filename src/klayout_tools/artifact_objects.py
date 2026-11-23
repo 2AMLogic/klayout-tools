@@ -45,32 +45,9 @@ Two invariants hold everywhere in this module (as in :mod:`.artifact_verify`):
    recomputed sha256 matches both the digest that was asked for (the
    manifest's) and the digest the broker's object key names.
 
-Manifest format (``schema_version`` 1) -- written by ``put`` here, validated
-and verified by :mod:`.artifact_verify`::
-
-    {
-      "schema_version": 1,
-      "entries": [
-        {
-          "sha256": "<64 lowercase hex>",
-          "size": 1234,
-          "kind": "evidence",
-          "producer": {"tool": "klt", "version": "0.4.2",
-                       "loom.repo": "owner/name", "commit": "<git sha>"},
-          "uri": "artifact:<key>",
-          "name": "sim/run1/report.json",      # optional
-          "media_type": "application/json"     # optional
-        }
-      ]
-    }
-
-An entry carries exactly those fields. ``uri`` is a **logical** URI,
-``artifact:<key>``, that only the artifact broker resolves (operator ruling
-H1, 2AMLogic/2am#5553): ``<key>`` is the broker's own answer, verbatim, never
-assembled here, and nothing about the storage location (no bucket, no
-endpoint) is written, so a manifest stays safe to commit to a public repo.
-``get`` accepts that scheme only; any other ``uri`` is an
-``invalid_manifest``.
+``put`` writes the manifest documented in ``docs/cli/artifact.md#manifest``.
+Each ``artifact:<key>`` URI records the broker's key verbatim.
+Manifest validation and verification live in :mod:`.artifact_verify`.
 """
 
 from __future__ import annotations
@@ -88,6 +65,7 @@ from typing import IO, Any
 from . import build_identity
 from .artifact_verify import (
     _CHUNK,
+    _SHA256_RE,
     CLIENT_KINDS,
     MANIFEST_SCHEMA_VERSION,
     ArtifactError,
@@ -97,8 +75,11 @@ from .artifact_verify import (
     _integrity_problem,
     _transfer,
     check_repo,
+    key_digest,
     load_manifest,
+    repo_from_key,
     uri_for_key,
+    uri_key,
 )
 
 # Re-exported (`X as X`) because importers reach them through this module:
@@ -113,6 +94,7 @@ from .artifact_verify import PRODUCER_FIELDS as PRODUCER_FIELDS
 from .artifact_verify import RATE_LIMIT_ATTEMPTS as RATE_LIMIT_ATTEMPTS
 from .artifact_verify import RATE_LIMIT_MAX_SLEEP_S as RATE_LIMIT_MAX_SLEEP_S
 from .artifact_verify import RATE_LIMIT_TOTAL_WAIT_S as RATE_LIMIT_TOTAL_WAIT_S
+from .artifact_verify import URI_SCHEME as URI_SCHEME
 from .artifact_verify import Presigned as Presigned
 from .artifact_verify import entry_problems as entry_problems
 from .artifact_verify import resolve_broker as resolve_broker
@@ -191,6 +173,28 @@ def resolve_repo(explicit: str | None, cwd: str | None = None) -> str:
             )
         repo = f"{match.group(1)}/{match.group(2)}"
     return check_repo(repo)
+
+
+def target_for_uri(uri: str, repo: str | None) -> FetchTarget:
+    """Fetch target for an ``artifact:<key>`` REF, the form a manifest entry's
+    ``uri`` takes. The digest, and the repo of an ``evidence/<owner>__<name>/``
+    key, come from the key; ``repo`` is only the fallback for any other shape.
+    A URI carries no size, so ``size`` stays unset: the fetch is still re-hashed
+    against the digest and checked against the key."""
+    key = uri_key(uri)
+    sha256 = key_digest(key)
+    if not _SHA256_RE.match(sha256):
+        raise ArtifactError(
+            f"uri {uri!r} key does not end in a sha256 (64 lowercase hex digits)",
+            "invalid_manifest",
+        )
+    in_key = repo_from_key(key)
+    return FetchTarget(
+        kind="evidence",
+        repo=check_repo(in_key) if in_key else resolve_repo(repo),
+        sha256=sha256,
+        key=key,
+    )
 
 
 def producer_block(
@@ -429,11 +433,10 @@ def delete_objects(
 ) -> dict[str, Any]:
     """Delete the named objects through the broker's ``delete`` op.
 
-    Without ``yes`` only ``stat`` is called (a dry run). Every target is
-    checked against the ``keep_manifests`` before the first delete call; one
-    referenced target refuses the whole batch with ``still_referenced``
-    unless ``force_referenced``. An absent object is success. The client
-    cannot enumerate the store, so only objects the caller names are touched.
+    Without ``yes`` only ``stat`` is called (a dry run). Before any deletion,
+    each supplied key must match the broker's stat. A target referenced by a
+    keep manifest refuses the batch with ``still_referenced`` unless
+    ``force_referenced``. An absent object is success.
 
     A route-level 404/405/501 refusal on the ``delete`` call (no
     ``/v1/delete`` route; ``stat`` had already confirmed the object present)
@@ -441,15 +444,10 @@ def delete_objects(
     authorization, 5xx) stay ``broker_refused``. A stat→delete race would be
     misreported as it -- acceptable, since such a race deletes nothing anyway.
     """
-    unique: dict[tuple[str, str, str], FetchTarget] = {}
-    for target in targets:
-        unique.setdefault((target.kind, target.repo, target.sha256), target)
     referenced = referenced_digests(keep_manifests)
     if not force_referenced:
         hits = {
-            t.sha256: referenced[t.sha256]
-            for t in unique.values()
-            if t.sha256 in referenced
+            t.sha256: referenced[t.sha256] for t in targets if t.sha256 in referenced
         }
         if hits:
             first = next(iter(hits))
@@ -460,12 +458,15 @@ def delete_objects(
                 "still_referenced",
                 {"referenced": [{"sha256": s, "manifest": m} for s, m in hits.items()]},
             )
-    stats = [
-        (t, client.presign("stat", t.kind, t.repo, t.sha256)) for t in unique.values()
-    ]
+    stats: dict[tuple[str, str, str], Presigned] = {}
+    for target in targets:
+        identity = (target.kind, target.repo, target.sha256)
+        if identity not in stats:
+            stats[identity] = client.presign("stat", *identity)
+        _check_key(stats[identity].key, target.sha256, target.key)
     objects: list[dict[str, Any]] = []
-    for target, stat in stats:
-        item: dict[str, Any] = {"sha256": target.sha256, "key": stat.key}
+    for (kind, repo, sha256), stat in stats.items():
+        item: dict[str, Any] = {"sha256": sha256, "key": stat.key}
         if not yes:
             objects.append(
                 {
@@ -478,7 +479,7 @@ def delete_objects(
             )
             continue
         if stat.exists:
-            body = {"kind": target.kind, "repo": target.repo, "sha256": target.sha256}
+            body = {"kind": kind, "repo": repo, "sha256": sha256}
             try:
                 client.call("delete", body)
             except ArtifactError as exc:

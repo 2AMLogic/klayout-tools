@@ -291,7 +291,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. Versioned independently of `klt place-and-route`'s own `schema_version` (each command owns its own). |
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
-| `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
+| `status` | string | Always `"ok"` — this command has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
 | `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
@@ -2199,6 +2199,20 @@ stays the primary diagnosis, and a genuine OpenROAD/Tcl analysis failure gets
 no such clause. Seeing it in a CI log means the request was never analyzed, so
 starting the runtime and retrying the *same* request is the right response
 rather than changing the design.
+
+A related mount gap gets its own appended clause (issue #5753, shared with
+place-and-route): when OpenROAD reports it cannot open or read an absolute
+path that this process can itself still read — e.g. a request directory
+outside the invocation directory, which the documented wrapper does not
+bind-mount — `error.message` appends a
+` -- 'openroad' could not read '<path>', but this process can read it ...`
+clause naming the path and the wrapper mounts, including the klt cache
+root and `/tmp` when it differs from `$TMPDIR`. For inputs elsewhere, run
+from a common ancestor of the request and its inputs. For a cached Liberty
+file, regenerate the wrapper or set `KLT_CACHE_DIR` under a mounted
+directory. See place-and-route’s “Installing OpenROAD” section. This is
+likewise a wording addition only: a genuinely missing or unreadable file
+gets no such clause, and no response field or `schema_version` changes.
 Both captured streams remain separate and unabridged; the raw transcripts
 may contain engine-emitted absolute paths. Log retention does not make a
 partial output into successful timing evidence or isolate other STA artifacts.

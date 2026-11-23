@@ -231,7 +231,9 @@ from typing import Any
 
 from . import env_provenance, synthesize_abc
 from . import macros as macro_spec
+from . import synthesize_abc_stages as abc_stages
 from . import synthesize_timeout as ytimeout
+from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
@@ -279,6 +281,7 @@ from .sta import StaError, compute_critical_path
 # `ADDER_ARCHITECTURES`, which moved there with its only callers.
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
+from .synthesize_abc_stages import AbcTimeout, SynthesizeError
 from .synthesize_abc_timing import parse_abc_regions
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
@@ -771,24 +774,6 @@ _LEAKAGE_UNIT_TO_NW: dict[str, float] = {
     "mw": 1e6,
     "w": 1e9,
 }
-
-
-class SynthesizeError(Exception):
-    """Raised when a synthesis run cannot even be attempted: a missing/
-    malformed request file, an unresolvable/unreadable RTL source, an
-    unresolvable ``pdk.cell_library``/``corner`` (no matching liberty via
-    ``find_pdk()``), an elaboration/hierarchy error, or a Yosys/ABC engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- either a netlist is produced, or this is raised; there is
-    no third "ran but the request itself was unusable" outcome. This is
-    unaffected by issue #1588's additive ``structural`` verdict: a run that
-    *does* produce a netlist but finds an inferred latch, a combinational
-    loop, or a multiply-driven net still returns normally (``status: "ok"``)
-    with ``structural.has_critical: true`` and exit code ``3`` -- never this
-    exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
-    """
 
 
 _rpath = RequestPaths(SynthesizeError)
@@ -1317,13 +1302,11 @@ def run_synthesize(
         resolved=resolved_globs,
     )
 
+    abc = mapping or synthesize_abc.DEFAULT_MAPPING
     engine_options = _EngineOptions(
-        abc_fast=("native" if _abc_supports_option("-fast") else "inline")
-        if mapping and mapping.fast
-        else None,
-        abc_script_path=mapping.stage_script(output_dir, SynthesizeError)
-        if mapping
-        else None,
+        abc_fast=abc.fast_mode(_abc_supports_option),
+        abc_script_path=abc.stage_script(output_dir, SynthesizeError),
+        abc_timeout_s=abc.timeout_s,
         liberty_path=liberty_path,
         cell_library=cell_library,
         delay_target_ps=delay_target_ps,
@@ -1354,7 +1337,8 @@ def run_synthesize(
         )
 
     # Publish a repo-relative, PDK-tokenized script and run its rehydrated copy.
-    executed_script_path = _write_script(
+    scripts = _write_script(
+        abc_timeout_s=engine_options.abc_timeout_s,
         abc_fast=engine_options.abc_fast,
         abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
@@ -1378,17 +1362,19 @@ def run_synthesize(
         defines=defines,
     )
 
-    # `cwd=repo_root` is what makes the relative paths `_write_script` just
-    # embedded (when `repo_root` is not `None`) resolve correctly -- see
-    # `_write_script`'s docstring "Commit-safety vs. cwd-independence"
-    # section. When `repo_root` is `None` (no repo resolved for this
-    # request), `_write_script` wrote only absolute paths, so `cwd=None`
-    # (subprocess's own default: the invoking process's cwd) is exactly as
-    # correct as it always was. `executed_script_path` (issue #1870) is the
-    # rehydrated sibling whenever the liberty was tokenized -- Yosys would
-    # fail to open a literal `$PDK_ROOT/...` path, so the committed artifact
-    # is never the one executed.
-    yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
+    try:
+        executed_script_path, yosys_log = abc_stages.run_mapping(scripts, cwd=repo_root)
+    except AbcTimeout as exc:
+        _assert_inputs_unchanged(input_state)
+        return exc.report(
+            hdl_toplevel,
+            repo_root,
+            provenance,
+            mapping,
+            arithmetic=arithmetic,
+            verify_equivalence=verify_equivalence,
+            restructure_timing=restructure_timing,
+        )
 
     # Issues #1973, #4872, #5594: drop `signed` qualifiers and host source dirs
     # (absolute and repo-relative); rewritten only if changed (mtime kept).
@@ -1620,11 +1606,10 @@ def run_synthesize(
         "netlist_path": env_provenance.repo_relative_path(
             netlist_path, repo_root=repo_root
         ),
-        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
-        # refers to, taken from the internal absolute path (never the
-        # redacted `{path, scope}` object) after signed-qualifier stripping.
-        # Additive field; no `schema_version` bump.
-        "netlist_sha256": sha256_file(netlist_path),
+        # Issues #2452/#7277: the exact-file digest and its banner-normalised
+        # companion, both from the internal absolute path after final
+        # processing — see `_digest.netlist_digest_fields`.
+        **netlist_digest_fields(netlist_path),
         "script_path": env_provenance.repo_relative_path(
             script_path, repo_root=repo_root
         ),
@@ -1644,8 +1629,7 @@ def run_synthesize(
         "arithmetic": arithmetic,
         "baseline": None,
     }
-    if mapping is not None:
-        mapping.record(response, provenance)
+    synthesize_abc.record_mapping(mapping, response, provenance)
     _attach_latch_map_report(
         response, latch_map_report, latch_techmap_path, repo_root=repo_root
     )
@@ -2731,7 +2715,8 @@ def _write_script(
     defines: dict[str, str | None] | None = None,
     abc_fast: synthesize_abc.FastMode = None,
     abc_script_path: str | None = None,
-) -> str:
+    abc_timeout_s: float | None = None,
+) -> str | abc_stages.StagedMapping:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
     ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``setundef`` ->
@@ -2885,7 +2870,8 @@ def _write_script(
     outside ``pdk_root``, no token is written, no sibling is emitted, and the
     return value is ``script_path`` itself: the pre-#1870 behaviour exactly.
 
-    Returns the path of the script to execute (``script_path``, or its
+    With an ABC budget, return the three staged scripts and checkpoint paths.
+    Otherwise return the path of the script to execute (``script_path``, or its
     rehydrated sibling) -- never the artifact to commit, which is always
     ``script_path``.
     """
@@ -2927,8 +2913,8 @@ def _write_script(
     # Issue #4205: load the request's own cell library as cell definitions
     # first, so RTL may instantiate a library cell by name with no stub.
     # `read_verilog` of a legacy stub for the same cell still works.
-    lines = [f"read_liberty -lib {liberty_text}"]
-    lines += [
+    frontend = [f"read_liberty -lib {liberty_text}"]
+    frontend += [
         read_verilog_line(
             _script_path_text(path, repo_root=repo_root), defines, parameters
         )
@@ -2946,26 +2932,26 @@ def _write_script(
         macro_text = _script_input_text(
             macro_input["path"], repo_root=repo_root, pdk_root=pdk_root
         )
-        lines.append(f"{reader} {macro_text}")
+        frontend.append(f"{reader} {macro_text}")
     # Issue #3466: top-level parameter overrides apply between the reads and
     # `hierarchy`, so elaboration sees the overridden value.
-    lines += chparam_lines(parameters or {}, hdl_toplevel)
-    lines.append(f"hierarchy -check -top {hdl_toplevel}")
+    frontend += chparam_lines(parameters or {}, hdl_toplevel)
+    frontend.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
-        lines += ["proc", "opt_expr", "opt_clean"]
-        lines += [
+        frontend += ["proc", "opt_expr", "opt_clean"]
+        frontend += [
             f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
             for path in adder_sources
         ]
-        lines.append(
+        frontend.append(
             f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
         )
-    lines.extend(synthesize_abc.synth_lines(hdl_toplevel, abc_fast))
+    tail = []
     if latch_techmap_path is not None:
-        lines.append(
+        tail.append(
             f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
         )
-    lines += [
+    tail += [
         f"dfflibmap -liberty {liberty_text}",
         abc_command,
         "clean",
@@ -2977,13 +2963,26 @@ def _write_script(
         # onto a tie cell exactly like a literal `1'b0`/`1'b1` already is --
         # see this function's own docstring for why the ordering is
         # load-bearing.
-        lines.append("setundef -zero")
-        lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
-    lines += [
+        tail.append("setundef -zero")
+        tail.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
+    tail += [
         f"tee -q -o {stats_text} "
         f"stat -liberty {liberty_text} -json -top {hdl_toplevel}",
         f"write_verilog -noattr {netlist_text}",
     ]
+    return abc_stages.write_mapping(
+        script_path,
+        frontend,
+        tail,
+        hdl_toplevel,
+        abc_fast,
+        abc_timeout_s,
+        repo_root=repo_root,
+        pdk_root=pdk_root,
+    )
+
+
+def _publish_script(script_path: str, lines: list[str], pdk_root: str | None) -> str:
     script_text = "\n".join(lines) + "\n"
 
     if pdk_root is None or PDK_ROOT_TOKEN not in script_text:

@@ -131,6 +131,45 @@ def test_refuses_unsupported_selection_before_simulation(tmp_path):
         run_pex(layout, [str(request)], "sky130")
 
 
+@pytest.mark.parametrize("stepped", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_schematic_intermediate_refused_before_extraction(
+    tmp_path, monkeypatch, stepped, dry_run
+):
+    from klayout_tools import pex_runset
+    from klayout_tools.pex_dry_run import run_pex_dry_run
+
+    layout, request = _inputs(tmp_path)
+    content = json.loads(request.read_text())
+    measurements = [
+        {
+            "name": "raw",
+            "expr": "v(xres.vref)",
+            "intermediate": True,
+            "sides": "schematic",
+        },
+        {"name": "vout", "expr": "raw * 2"},
+    ]
+    content["measurements"] = measurements
+    if stepped:
+        content["analysis_steps"] = [
+            {
+                "name": "pulse",
+                "analysis": content.pop("analysis"),
+                "measurements": content.pop("measurements"),
+            }
+        ]
+    request.write_text(json.dumps(content))
+    monkeypatch.setattr(
+        pex_runset,
+        "run_extract_leg",
+        lambda *a, **kw: pytest.fail("extraction started"),
+    )
+    run = run_pex_dry_run if dry_run else run_pex
+    with pytest.raises(PexError, match=r"raw.*measurements\[0\].*intermediate.*sides"):
+        run(layout, [str(request)], "sky130")
+
+
 @pytest.mark.skipif(shutil.which("ngspice") is None, reason="needs ngspice")
 def test_limits_and_standalone_schematic_measurement(tmp_path, capsys):
     layout, request = _inputs(tmp_path, limits={"max": 0.01})

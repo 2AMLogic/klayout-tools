@@ -963,6 +963,17 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Measurements attached to a finding.** `violations[].values` lists the
+  non-geometry RDB item values in document order. For example, a deck that
+  runs `evaluate_nets` and calls `put('RATIO', ar)` can emit
+  `["[#RATIO] float: 16"]`. The strings preserve KLayout's tags and
+  formatting. A finding with only geometry omits the field. With
+  `--engine both`, look under `reports.native.violations[]`.
+  `--check --rerun` compares this ordered list. KLayout 0.30.12 can emit
+  multiple `put()` properties in different orders on repeated runs, so a
+  reorder alone can appear as drift. The deck supplies these strings
+  as evidence only. They have no effect on coverage, `coverage_unknown`,
+  or the meaning of `--expect-rule-categories`.
 - **Deck stdout as additive evidence (issue #6613).** Every `--engine
   klayout` run that produced a report carries the deck's own captured
   stdout in the additive top-level `deck_output` field:
@@ -4827,7 +4838,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. `error.decks_executed` lists observed starts. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. When the GF180 3LM `mslot1` deck aborts on `metal4_drawn`, `error.abort.hint` points to the [deck selectors and their coverage](#gf180-3lm-deck-selection). `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.
