@@ -156,6 +156,17 @@ def _print_path_record(label: str, path: dict | None) -> None:
         )
 
 
+#: Suffix qualifying every non-`None` `fmax_mhz` in text output (issue
+#: #7005): `timing__fmax`'s eligible clock paths exclude opposite-edge
+#: paths, so the figure can overstate achievable frequency. Shared with
+#: `place-and-route`'s text formatter (issue #7522) so the two commands
+#: cannot drift apart -- the same OpenROAD metric feeds both.
+FMAX_CAVEAT = (
+    " (clock estimate excludes opposite-edge paths"
+    " and can overstate achievable frequency)"
+)
+
+
 def _print_slack_fields(fields: dict, *, indent: str) -> None:
     print(f"{indent}worst_slack_ns: {fields['worst_slack_ns']}")
     print(f"{indent}total_negative_slack_ns: {fields['total_negative_slack_ns']}")
@@ -165,12 +176,7 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
         f"{fields['total_negative_hold_slack_ns']}"
     )
     fmax = fields["fmax_mhz"]
-    caveat = (
-        " (clock estimate excludes opposite-edge paths"
-        " and can overstate achievable frequency)"
-        if fmax is not None
-        else ""
-    )
+    caveat = "" if fmax is None else FMAX_CAVEAT
     print(f"{indent}fmax_mhz: {fmax}{caveat}")
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
