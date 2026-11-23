@@ -3762,6 +3762,9 @@ model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
 stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
 OpenROAD 26Q3-1510).
 
+Use retained logs for local debugging and determine stage success from the
+OpenROAD exit status and the stage's required outputs.
+
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
 
