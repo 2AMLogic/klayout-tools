@@ -250,7 +250,9 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. One exception (issue #6940): when each file
+  and both files' values. Repeated top-level groups with the same name and
+  arguments must match in body and occurrence count, in any declaration
+  order. One exception (issue #6940): when each file
   declares exactly one `operating_conditions` group selected by its own
   `default_operating_conditions` and the group bodies agree, the group's
   name alone may differ between files — the merged header keeps the first
@@ -280,11 +282,18 @@ directory itself, or a named subdirectory of it). When present it wins over
   `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) — the wrapper
   `scripts/install-openroad-docker.sh` writes does (issue #5626); see
   [`place-and-route.md`](place-and-route.md) § "Installing OpenROAD".
-  Top-level `lu_table_template` and
-  `power_lut_template` groups are unioned by name (same name with different
-  content is an error). A duplicate cell name is an error; the merged header
-  is the first file's plus any templates it lacks; a one-element list equals
-  the string form. The place-and-route timing sweep uses these corner keys in
+  The merged header keeps the first file's definitions and adds any
+  top-level `lu_table_template` or `power_lut_template` names it lacks.
+  Same-name templates may differ in their direct numeric `index_N` values
+  when every table using that template supplies its own values for every
+  template axis. In that case the first definition is kept, including when
+  the template is unused. Different template kinds, variables, axis names,
+  or other content prevent the merge.
+  An error such as `template 't' differs across members and a table in
+  'b.lib' inherits index_2` names the file and the missing local axis.
+  Use consistent template definitions or provide the intended grid on each
+  referencing table. A duplicate cell name is also an error.
+  A one-element list equals the string form. The place-and-route timing sweep uses these corner keys in
   descriptor order. Each list contributes one merged deck and a single report
   entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
@@ -948,6 +957,58 @@ $ echo $?
 `--format json` emits the exact same payload `find` does (`check` adds no new
 fields — it only changes the exit-code contract). A clean install prints
 `broken_symlinks: none` in text form and exits `0`.
+
+## `klt pdk osdi`
+
+Verify the ngspice OSDI libraries declared by the resolved install's
+`libs.tech/ngspice/.spiceinit`. The verifier reads its static `osdi` and
+`pre_osdi` lines in declaration order. It resolves `$PDK_ROOT/$PDK` against
+the variant selected by `klt pdk find`, including a flat install. It hashes
+each declared file, so a deleted model remains visible. A PDK without OSDI
+requirements returns an empty set. An SG13G2 install needs a readable setup
+with declarations.
+
+```sh
+klt pdk osdi --pdk ihp-sg13g2 --format json
+klt pdk osdi --pdk ihp-sg13g2 --expect sim/osdi-pins.json --load-probe --format json
+```
+
+The following fields describe the host running this command:
+
+| Field | Meaning |
+|---|---|
+| `identity.variant` | Resolved PDK variant. |
+| `identity.models[]` | One row per declared library with `name`, portable `path` and `scope`, `present`, and the SHA-256 hex digest of its bytes. External files have `path: null`; missing files have `present: false` and `sha256: null`. |
+| `expectation` | With `--expect`, differences in `missing_from_pins`, `extra_pins`, and `digest_mismatches`. All three arrays are empty on a match. Otherwise this field is null when no pins were requested. |
+| `load_probe` | With `--load-probe` and a nonempty set, the resolved ngspice's `engine_version`, `engine_build.binary_sha256`, and per-model `name`, `loaded`, new registered `devices` and failure `reason`. Otherwise null. |
+
+Digest-only verification works without ngspice. The optional probe starts
+ngspice with `-n -b` in a fresh directory and home. It compares each
+one-model `pre_osdi` and `devhelp` run against a no-model baseline.
+A zero simulator exit with a loader error or no newly registered device
+fails verification.
+
+**Migrate a chip preflight.** Keep `build-osdi.sh` as the explicit build
+recipe. Once the chip's pinned KLT includes this command, replace its
+`build-osdi.sh --check` invocation with the second command above and
+capture the resulting `identity` block. A prebuilt install needs no build
+manifest. To create a pin file, review a trusted installation's digests and
+export the complete basename-to-digest map:
+
+```sh
+klt pdk osdi --pdk ihp-sg13g2 --format json > approved-models.json
+jq '.identity.models | map({(.name): .sha256}) | add // {}' approved-models.json > sim/osdi-pins.json
+```
+
+Compare pins for the target platform since compiled model bytes can differ.
+A successful check exits 0. Failures exit nonzero and place a JSON error on
+stderr. `osdi_model_missing` retains the incomplete identity,
+`osdi_pin_mismatch` includes the differing names, and `osdi_load_failed`
+includes per-model probe results. `osdi_setup_unreadable`,
+`osdi_model_unreadable`, and `osdi_invalid_expectation` identify unreadable
+declarations, unreadable model bytes and malformed pins respectively.
+For evidence from the host that actually ran a simulation, see
+[simulation OSDI provenance](sim.md#local-osdi-preflight-and-runner-evidence).
 
 ## `klt pdk cells`
 

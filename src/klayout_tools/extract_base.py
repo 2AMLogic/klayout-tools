@@ -455,3 +455,26 @@ class ExtractError(Exception):
         self.code = code
         self.job_id = job_id
         self.details = details
+
+
+def instantiated_device_counts(circuit: Any) -> dict[str, int]:
+    """Count devices by class, once per instance reachable from the selected circuit."""
+    memo: dict[str, dict[str, int]] = {}
+
+    def count(node: Any, trail: tuple[str, ...]) -> dict[str, int]:
+        if node.name in memo:
+            return memo[node.name]
+        out: dict[str, int] = {}
+        for device in node.each_device():
+            name = device.device_class().name
+            out[name] = out.get(name, 0) + 1
+        for call in node.each_subcircuit():
+            called = call.circuit_ref()
+            if called is None or called.name in trail:
+                continue
+            for name, n in count(called, (*trail, called.name)).items():
+                out[name] = out.get(name, 0) + n
+        memo[node.name] = out
+        return out
+
+    return dict(sorted(count(circuit, (circuit.name,)).items()))

@@ -51,6 +51,12 @@ from .signoff_power_delivery_substrate import (
     erc_ties_checked_by_assertion,
     substrate_undecidable_gate,
 )
+from .signoff_power_delivery_tie_coverage import (
+    _REASON_TIE_COVERAGE_INCOMPLETE,
+    _erc_declared_ties_unchecked,
+    _erc_missing_tie_skipped,
+    _erc_ties_checked_by_well_assertion,
+)
 from .signoff_runset import check_runset, runset_disclosure
 from .signoff_store_pin import _resolve_relative_to_report, _resolve_relative_to_spec
 from .signoff_unmet_reasons import (
@@ -134,6 +140,16 @@ from .signoff_unmet_reasons import (
 #:   the build could not be trusted to grade it". Fix: re-run against a
 #:   `klt` build whose tie extraction is isolated (#2169) and declare the
 #:   tie, not a redrawn layout.
+#: - :data:`~klayout_tools.signoff_power_delivery_tie_coverage.\
+#:   _REASON_TIE_COVERAGE_INCOMPLETE`
+#:   -- a declared tie class with **no verdict in the cited envelope at
+#:   all**: its exact ``erc.missing_tie:["<name>"]`` work identity is
+#:   absent from ``erc_coverage.checked``, with no explicit skip record and
+#:   no finding (issue #6987 -- a zero finding count cannot tell "the rule
+#:   ran and found nothing" from "the rule never ran"; nothing weaker than
+#:   the exact identity stands in, and ``detail.ties_unchecked`` names the
+#:   verdictless classes; the full rule is documented at the constant, in
+#:   ``signoff_power_delivery_tie_coverage``).
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
 #:   (``erc.unconnected_net``), a declared supply's owned roles carry
@@ -400,7 +416,8 @@ def _erc_supply_spec(
     -- see :func:`_erc_supply_spec_hash_reason`, issue #2496).
 
     Returns ``({"supply_nets": [<name>, ...], "stackup": {<name/layer>,
-    ...}, "tie_count": <int>, "ties_disclosure_reason": <str> | None}, None)``
+    ...}, "tie_count": <int>, "tie_names": [<name>, ...],
+    "ties_disclosure_reason": <str> | None}, None)``
     on success:
 
     - ``supply_nets`` -- every ``nets[]`` entry declared ``"kind":
@@ -477,6 +494,7 @@ def _erc_supply_spec(
         if isinstance(disclosure, dict) and isinstance(disclosure.get("reason"), str)
         else None
     )
+    tie_entries = ties if isinstance(ties, list) else []
     return {
         "supply_nets": [
             entry["name"]
@@ -494,6 +512,18 @@ def _erc_supply_spec(
             if isinstance(entry.get(field), str) and entry[field]
         },
         "tie_count": len(ties) if isinstance(ties, list) else 0,
+        # Issue #6987: the declared ties' *names*, so item 11 can require
+        # each class's exact `erc.missing_tie` work identity in the cited
+        # run's own `erc_coverage.checked` -- `tie_count` above proves the
+        # spec asked the question; this proves every answer came back.
+        # Names only: everything else a `ties[]` entry states is already
+        # pinned by the hash check above, which is what makes the
+        # work-identity comparison trustworthy.
+        "tie_names": [
+            str(entry.get("name", f"tie{index}"))  # erc_spec._validate_ties
+            for index, entry in enumerate(tie_entries)
+            if isinstance(entry, dict)
+        ],
         # Issue #2234: the spec's own `ties_disclosure.reason`, read purely
         # for a human-readable `detail` when item 11 renders one of the
         # disclosed reasons -- see :func:`_resolve_erc_supply_spec`. The
@@ -750,50 +780,6 @@ def _pdn_branch_reason(
     return None
 
 
-def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
-    """Whether the cited `klt erc` run reports any ``erc.missing_tie`` work
-    it **declined to perform** (issue #2199).
-
-    `klt erc` records a ``ties[]`` entry whose declared tap region cannot
-    be told apart from an ordinary source/drain contact in
-    ``erc_coverage.skipped`` rather than ``checked``
-    (``docs/cli/erc.md`` → "Well/tap connectivity"). Item 11 requires zero
-    ``erc.missing_tie`` findings, and such a tie reports zero for a reason
-    that has nothing to do with taps -- the same "an uncomputed check is
-    not a clean one" rule that already rejects a spec declaring no
-    ``ties[]`` at all, applied to a declaration that was made but could not
-    be answered.
-
-    Matched on the work identity's ``erc.missing_tie:`` domain prefix
-    (:func:`~klayout_tools.coverage.work_id`) rather than on the skip
-    reason, so a future `klt erc` that declines this rule for some *other*
-    stated reason is caught by the same gate. Issue #2255 is the first such
-    reason to actually arrive -- ``degenerate_well_assertion``, a
-    caller-asserted substrate region indistinguishable from the whole
-    top-cell extent -- and needed no change here, which is the property this
-    prefix match was chosen for. Issue #2339's
-    ``degenerate_well_selection`` -- a declared well-side class selection
-    (``ties[].well_requires``/``well_excludes``) that kept every merged
-    shape of the drawn well layer, or none of them -- is the second, and
-    needed no change here either. Issue #2377's ``empty_well_region`` -- a
-    ``ties[]`` entry naming a *drawn* ``well_layer`` with no geometry at all
-    in the stream, the unselected form of the same absence-of-evidence state
-    -- is the third, and needed no change here either.
-    An envelope with no ``erc_coverage`` block
-    (every report before #2179) skips nothing and is graded exactly as it
-    was.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return False
-    return any(
-        isinstance(record, dict)
-        and isinstance(record.get("id"), str)
-        and record["id"].startswith("erc.missing_tie:")
-        for record in block.get("skipped") or []
-    )
-
-
 #: The item-11 reason each of `klt erc`'s *disclosed* ``erc.missing_tie``
 #: coverage reasons renders (issues #2234, #2247) -- consulted by
 #: :func:`_erc_missing_tie_disclosed` for its zero-ties entry
@@ -930,52 +916,6 @@ def _erc_disclosed_undeclared_tie_classes(
     return classes
 
 
-def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
-    """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
-    (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
-    **well side** rested on caller-named coordinates rather than purely on
-    drawn geometry -- ``[]`` for every run that named none, and for every
-    report produced before the field existed. Two spec forms land there:
-
-    - ``ties[].well_layer: null`` + ``ties[].well_boxes`` (issue #2255) -- the
-      **well region itself** asserted, because the block sits in a native
-      substrate that draws no well/tub layer at all;
-    - ``ties[].well_requires_boxes`` / ``ties[].well_excludes_boxes`` (issue
-      #2540) -- a *drawn* well whose **class selection** was named in boxes,
-      because no drawn layer separates the tub's two bias classes.
-
-    Carried into a ``"met"`` item 11 citation beside
-    :func:`erc_ties_checked_by_assertion`'s tap-side list, and deliberately
-    **not** merged into it, because the two state different things about the
-    same verdict. A ``tap_boxes`` assertion says which of the drawn tap
-    geometry counts as the tap; the well is still drawn, and still measured.
-    This list says the *well* side was the caller's word -- the weaker of the
-    two claims, and the one a grader is most likely to want to see stated
-    explicitly. A purely marker-layer selection
-    (``well_requires``/``well_excludes``) is not in it: the stream draws its
-    own partition, so that is an ordinary geometrically-derived pass.
-
-    It does not change the verdict: item 11 is ``"met"`` on either asserted
-    form exactly as on a drawn-well one. It can be, because both are
-    falsifiable and `klt erc` falsifies them where it can -- each asserted
-    polygon must independently contain a tap that reaches the declared net, an
-    assertion indistinguishable from the whole top-cell extent is rejected as
-    degenerate (``docs/cli/erc.md`` → "A block with no drawn well at all"),
-    and a box selection keeping every shape of the drawn layer or none of them
-    is rejected the same way (same doc → "A two-class tub with no marker layer
-    to separate them"). Both land in ``erc_coverage.skipped`` where
-    :func:`_erc_missing_tie_skipped` already renders them ``unmet``.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return []
-    return [
-        identity
-        for identity in block.get("checked_by_well_assertion") or []
-        if isinstance(identity, str)
-    ]
-
-
 def _erc_supply_unlabelled_islands(
     envelope: dict[str, Any], supply_nets: list[str]
 ) -> dict[str, int]:
@@ -1071,6 +1011,20 @@ def _resolve_erc_supply_spec(
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if _erc_missing_tie_skipped(erc["envelope"]):
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+
+    # Issue #6987: the explicit-skip gate above catches a class the run
+    # *declined* to answer; this one catches a class with no verdict in the
+    # envelope at all -- deleted from `checked` rather than reported
+    # skipped -- before either branch of the item can read zero findings
+    # for it as a clean tie. Checked before the findings gate so "a real
+    # tie finding with full coverage" keeps rendering
+    # `_REASON_SUPPLY_NOT_CONTINUOUS` while a verdictless class renders
+    # its own, distinct reason.
+    ties_unchecked = _erc_declared_ties_unchecked(
+        erc["envelope"], supply_spec["tie_names"]
+    )
+    if ties_unchecked:
+        return None, _REASON_TIE_COVERAGE_INCOMPLETE, {"ties_unchecked": ties_unchecked}
 
     if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
@@ -1665,13 +1619,10 @@ def _grade_power_delivery(
     partition_kind: str,
     power_port_policy: dict[str, Any] | None = None,
     repo_root: str | Path | None = None,
-    failed_parts_citation: bool = False,
+    group_provenance: dict[str, Any] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
-    """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
-    the **set** of evidence entries cited for it, and return ``(status,
-    reason, citation, failure_detail)`` in the same shape
-    :func:`~klayout_tools.signoff._grade_evidence`
-    returns.
+    """Grade T1 item 11's compound power-delivery evidence (issue #2025).
+    Return (status, reason, citation, failure_detail) as in _grade_evidence.
 
     Unlike every other T1 item, no single artifact proves this one. The
     cited set must contain:
@@ -1784,13 +1735,10 @@ def _grade_power_delivery(
     those unrelated findings
     newly fatal.
 
-    ``failed_parts_citation`` (issue #5597) is the multi-citation
-    aggregation's opt-in: on every ``"unmet"`` verdict reached *after* the
-    cited set resolved, the returned ``citation`` carries the resolved
-    ``parts`` (and nothing more -- ``power_delivery`` states facts about a
-    proven grid, and an unmet group has none), so a grouped report accounts
-    for every cited envelope even when a group's own rules failed. The
-    default keeps a failing single-group citation at ``citation: null``."""
+    In grouped mode, fill ``group_provenance`` with the first named part's
+    provenance once the group resolves. A subsequent grid failure still
+    discloses its resolved parts (#5597). A failing single group retains
+    its null citation."""
     from .signoff import _citation
     from .signoff_grouped_citations import (
         missing_parts_verdict as _missing_parts_verdict,
@@ -1803,7 +1751,7 @@ def _grade_power_delivery(
     if by_kind is None:
         return "unmet", reason, None, {}
 
-    parts_citation = parts_citation_or_none(by_kind) if failed_parts_citation else None
+    parts_citation = parts_citation_or_none(by_kind, group_provenance)
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")

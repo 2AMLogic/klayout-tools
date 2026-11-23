@@ -68,8 +68,9 @@ from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
-from .extract_base import SCHEMA_VERSION, _build_metrics
+from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
 
 # Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
@@ -124,7 +125,6 @@ from .extract_runset_spice import (
     _check_device_params,
     _device_params_echo,
     _dropped_parameter_warnings,
-    _instantiated_device_counts,
     _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
@@ -297,7 +297,6 @@ def run_extract_klayout_runset(
     database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
-    from .extract import _normalized_netlist_sha256
     from .extract_progress import stage
     from .extract_report import _describe_devices, _describe_nets
 
@@ -373,7 +372,7 @@ def run_extract_klayout_runset(
         )
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
-        instantiated = _instantiated_device_counts(circuit)
+        instantiated = instantiated_device_counts(circuit)
         nets = _staged(
             "describe_nets",
             _describe_nets,

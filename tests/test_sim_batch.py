@@ -36,6 +36,7 @@ from helpers.subprocess_fakes import (
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_contract_spec import _RELEASED_FEATURE_DETECTORS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "batch-job-spec.schema.json"
@@ -6196,9 +6197,8 @@ _PREDATED_REQUEST = {
 
 def test_released_registry_entries_all_have_detectors():
     for key, version in sb.REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
-        assert (key.split(" (")[0] in sb._RUNNER_REQUEST_FEATURES) == (
-            version is not None
-        ), key
+        name = key.split(" (")[0]
+        assert (name in _RELEASED_FEATURE_DETECTORS) == (version is not None), key
 
 
 def test_request_features_detect_the_released_fields():

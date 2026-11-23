@@ -99,6 +99,15 @@ _ATTRIBUTED_MARK = "ngspice card at expanded-deck line"
 _LEGACY_BIN_CARD_ADVICE = "compare this model's w/l against the library's bin cards"
 
 
+def is_model_selection_abort(diagnostic: dict[str, Any]) -> bool:
+    """Identify a model-selection failure from the classified engine evidence."""
+    code = diagnostic.get("code")
+    return code == "model_bin_range" or (
+        code == "ngspice_fatal"
+        and bool(_MODELNAME_RE.search(str(diagnostic.get("message", ""))))
+    )
+
+
 def _worker_stamp_sentence(pdk: dict[str, Any], staged: bool) -> str:
     """The fleet's observed PDK, as one sentence: variant plus stamp (and
     the ``SOURCES`` revision token when parseable), or the absence of a

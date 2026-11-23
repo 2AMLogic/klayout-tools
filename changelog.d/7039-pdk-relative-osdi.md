@@ -1,0 +1,1 @@
+Allow `klt sim` OSDI preload entries to select a compiled library relative to the request’s PDK variant on the executing or staging host.

@@ -60,8 +60,20 @@ def test_item_11_grouped_citation_met_when_every_group_passes(tmp_path):
     ]
     # Per-group grading, named.
     assert item["citations_graded"] == [
-        {"citation": clean[0], "status": "met", "reason": None},
-        {"citation": digital[0], "status": "met", "reason": None},
+        {
+            "citation": clean[0],
+            "status": "met",
+            "reason": None,
+            "content_hash": "sha256:layoutA",
+            "input_verified": None,
+        },
+        {
+            "citation": digital[0],
+            "status": "met",
+            "reason": None,
+            "content_hash": "sha256:layoutA",
+            "input_verified": None,
+        },
     ]
     assert item["members_covered"] == item["members_total"] == 2
 
@@ -90,8 +102,16 @@ def test_item_11_grouped_citation_failing_group_is_unmet_in_both_orders(tmp_path
             "citation": failing[0],
             "status": "unmet",
             "reason": "supply_not_continuous",
+            "content_hash": "sha256:layoutA",
+            "input_verified": None,
         }
-        clean_graded = {"citation": clean[0], "status": "met", "reason": None}
+        clean_graded = {
+            "citation": clean[0],
+            "status": "met",
+            "reason": None,
+            "content_hash": "sha256:layoutA",
+            "input_verified": None,
+        }
         expected_graded = (
             [failing_graded, clean_graded]
             if groups[0] is failing

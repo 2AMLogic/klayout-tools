@@ -48,11 +48,18 @@ def needs_parentheses(inner: str, prefix: str, after: str) -> bool:
     return bool(operators) and before == "/"
 
 
-# Vector names and scientific literals can contain signs of their own.
+#: The character positions a ``+`` is unary at: the start of the
+#: expression, right after an opening parenthesis, or after an argument
+#: comma (issue #7314).
+_UNARY_POSITIONS = ("", "(", ",")
+
+# Vector names and scientific literals can contain signs of their own; the
+# lone-plus alternative goes last so a sign chain consumes its ``+`` first.
 _CONTROL_TOKENS = re.compile(
     r"\b[vi]\s*\([^)]*\)|"
     + _MEAS_EXPONENT_NUMBER_RE.pattern
-    + r"|(?P<op>[-+*/])(?P<gap>\s*)(?P<signs>[+-](?:\s*[+-])*)",
+    + r"|(?P<op>[-+*/])(?P<gap>\s*)(?P<signs>[+-](?:\s*[+-])*)"
+    r"|(?P<lone>\+)",
     re.IGNORECASE,
 )
 
@@ -63,7 +70,11 @@ def control_expression(expression: str) -> str:
     def fold(match: re.Match[str]) -> str:
         op = match["op"]
         if op is None:
-            return match[0]
+            if match["lone"] is None:
+                return match[0]
+            # A `+` standing alone: unary in three positions, binary elsewhere.
+            previous = expression[: match.start()].rstrip()[-1:]
+            return "" if previous in _UNARY_POSITIONS else match[0]
         gap = match["gap"]
         minus_count = match["signs"].count("-")
         if op in ("*", "/"):
@@ -73,6 +84,6 @@ def control_expression(expression: str) -> str:
             return "-" + gap
         # Even parity needs a plus only between operands.
         previous = expression[: match.start()].rstrip()[-1:]
-        return ("" if previous in ("", "(", ",") else "+") + gap
+        return ("" if previous in _UNARY_POSITIONS else "+") + gap
 
     return _CONTROL_TOKENS.sub(fold, expression)

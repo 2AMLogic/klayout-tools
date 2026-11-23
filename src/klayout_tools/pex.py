@@ -230,7 +230,7 @@ from .coverage import (
     rollup_status,
     work_id,
 )
-from .extract import ExtractError, run_extract
+from .extract import SPICE_GLOBAL_GROUND_NODE, ExtractError, run_extract
 from .pex_asap7 import (
     adapt_leg_netlists,
     netlist_adaptation_for_deck,
@@ -411,6 +411,13 @@ def _tie_nets_in_legs(
     _apply_tie_nets(extracted_netlist_path, ties)
     if device_only_netlist_path is not None:
         _apply_tie_nets(device_only_netlist_path, ties)
+
+
+def _substrate_tie_fields(parasitics: Mapping[str, Any]) -> dict[str, Any]:
+    tie = parasitics.get("substrate_dc_tie")
+    if tie is None:
+        return {}
+    return {"substrate_dc_tie": {**tie, "reference_node": SPICE_GLOBAL_GROUND_NODE}}
 
 
 def _parasitic_integrity_report(
@@ -3433,19 +3440,10 @@ def run_pex(
             "net_count": extract_report["net_count"],
             "netlist_sha256": extracted_netlist_sha256,
             "model": parasitics.get("model"),
-            # Additive field (issue #976): echoes `--critical-net` back --
-            # `[]` when the flag was never given, byte-identical to before
-            # this feature existed.
+            # Preserve the extraction defaults for older reports (#976, #977).
             "critical_nets": parasitics.get("critical_nets") or [],
-            # Additive field (issue #977): echoes `--distributed-rc` back --
-            # `False` when the flag was never given, byte-identical to
-            # before this feature existed.
             "distributed_rc": bool(parasitics.get("distributed_rc")),
-            # Additive field (issue #988, Epic #709 Phase 3a): `None`
-            # unless `--mom-rlc-net` was given, in which case it is `klt
-            # extract`'s own substitution report (see
-            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
-            # byte-identical to before this feature existed otherwise.
+            # Echo the extractor's MOM substitution report when requested (#988).
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
             # Additive field (issue #2686): `klt extract`'s own
             # `label_layers` echo for this run's extraction -- the applied
@@ -3479,6 +3477,7 @@ def run_pex(
             # actually read -- `klt extract`'s own `pdk` block (`variant`,
             # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
             "pdk": extract_report.get("pdk"),
+            **_substrate_tie_fields(parasitics),
             # Additive fields (issue #6559): present only for a runset leg.
             **pex_runset.extraction_fields(extract_report),
             # Additive field (issue #2764): the extraction's own
