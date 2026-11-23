@@ -641,6 +641,8 @@
       "modules": [
         "klayout_tools.cli.pdk_cmd",
         "klayout_tools.cli.pdk_expect",
+        "klayout_tools.cli.pdk_osdi_cmd",
+        "klayout_tools.pdk_osdi",
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
@@ -851,6 +853,7 @@
         "klayout_tools._power_activity",
         "klayout_tools._request_fields",
         "klayout_tools._provenance",
+        "klayout_tools.ngspice_build",
         "klayout_tools._report_verify",
         "klayout_tools._report_verify_diff",
         "klayout_tools._report_verify_exclude",
@@ -1292,6 +1295,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "pdk",
+      "exporter": "env_provenance",
+      "reason": "PDK OSDI identity uses repo_root_for and repo_relative_path to emit the same portable path and scope as simulation model evidence (#6904)."
+    },
     {
       "consumer": "extract",
       "exporter": "lvs",

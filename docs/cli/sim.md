@@ -3264,6 +3264,16 @@ worker's solver).
 A difference in these fields is a lead, not a proof; only a reproducible
 difference justifies a simulator, model or runner-image change.
 
+### Local OSDI preflight and runner evidence
+
+`klt pdk osdi --load-probe` verifies the models declared by the local PDK
+and records their ordered digests. A harness can embed its `identity` block
+in a preflight record. A simulation records the files the request actually
+preloaded in `environment.osdi_preload[]`. For a batch run, compare the
+expected digests to `environment.remote.runner_osdi_preload` from the
+worker that performed the simulation. A client-machine preflight describes
+only that client's install. [Verification and pin-file format](pdk.md#klt-pdk-osdi)
+
 ## Pre-composed decks (`decks` requests)
 
 `klt sim`'s off-host backends are the sanctioned route to off-host
