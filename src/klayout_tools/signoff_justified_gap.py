@@ -48,6 +48,7 @@ from typing import Any
 from ._digest import sha256_file
 from ._jsonnum import is_number
 from .signoff_na import _na_spec_format
+from .signoff_row_extent import label_list
 
 #: T1 items whose manifest entry may be a **list** of citations with optional
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
@@ -266,10 +267,18 @@ def _read_spec_rows(
                     or not isinstance(margin, bool)
                     or (
                         joint_raw is not None
-                        and (gap is not None or raw_structural is not None)
+                        and (
+                            gap is not None
+                            or raw_structural is not None
+                            or "extent" in row
+                        )
                     )
                     or (joint_raw is not None and joint_grid is None)
                     or (joint_raw is not None and item_id != JOINT_GRID_ITEM_ID)
+                    or (
+                        "extent" in row
+                        and (not label_list(row["extent"]) or not row["extent"])
+                    )
                 ):
                     valid = []
                     break
@@ -283,6 +292,11 @@ def _read_spec_rows(
                         "ratified": ratified,
                         "timing_margin": margin,
                         "joint_grid": joint_grid,
+                        **(
+                            {"extent": list(dict.fromkeys(row["extent"]))}
+                            if "extent" in row
+                            else {}
+                        ),
                     }
                 )
             parsed = valid or None

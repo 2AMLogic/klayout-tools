@@ -328,6 +328,7 @@ def test_a_malformed_joint_grid_degrades_item5_alone(tmp_path, bad):
     "disposition",
     [
         {"gap": "why"},
+        {"extent": ["slow", "fast"]},
         {
             "structural": {
                 "claim": "constant",

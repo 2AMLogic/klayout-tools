@@ -367,8 +367,10 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
     return _unescape(name), [_port_name(port, context) for port in port_names]
 
 
-def _port_name(raw: str, context: str) -> str:
-    if _IDENT_RE.fullmatch(raw) or _ESCAPED_IDENT_RE.fullmatch(raw):
+def _port_name(raw: str, context: str, *, escape_terminated: bool = True) -> str:
+    if _IDENT_RE.fullmatch(raw) or (
+        escape_terminated and _ESCAPED_IDENT_RE.fullmatch(raw)
+    ):
         return _unescape(raw)
     if _DIRECTION_STMT_RE.match(raw):
         raise VerilogNetlistError(
@@ -544,19 +546,16 @@ def _parse_instance_statement(statement: str) -> _Instance:
                     f"instance '{inst_name}' ('{cell}') connection {item!r} "
                     "is not a well-formed '.PORT(NET)' entry"
                 )
-            port_name = item[1:port_open].strip()
-            if not _IDENT_RE.fullmatch(port_name):
-                raise VerilogNetlistError(
-                    f"instance '{inst_name}' ('{cell}') connection {item!r} "
-                    "names an invalid port"
-                )
+            port_name = _port_name(
+                item[1:port_open].strip(),
+                f"instance '{inst_name}' ('{cell}') pin",
+                escape_terminated=item[port_open - 1].isspace(),
+            )
             expr = item[port_open + 1 : port_close].strip()
             if not expr:
-                # `.PORT()` -- an explicit no-connect. Leave it unrecorded;
-                # `_convert_module` synthesizes a fresh disconnected net for
-                # any declared pin with no recorded connection.
+                # _convert_module supplies a fresh disconnected net for `.PORT()`.
                 continue
-            expressions[_unescape(port_name)] = expr
+            expressions[port_name] = expr
     return _Instance(cell=cell, name=inst_name, expressions=expressions)
 
 

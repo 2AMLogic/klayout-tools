@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import liberty_writer
-from .characterize_cards import spice_number
+from .characterize_cards import _pwl, spice_number
 
 #: Runs one probe deck: ``(netlist_text, measurements, label, stop_ns) ->
 #: {measurement name: value in seconds, or None when ngspice found no
@@ -86,11 +86,6 @@ ASYNC_KINDS = ("recovery", "removal")
 #: deck's own ``.options`` card is the narrowest place to say it; no other
 #: ``klt`` deck is affected.
 PROBE_ABSTOL = "1e-10"
-
-
-def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
-    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
-    return f"{name} {node} 0 PWL({body})"
 
 
 def _schedule(settle: float, max_ramp: float, window: tuple[float, float]):

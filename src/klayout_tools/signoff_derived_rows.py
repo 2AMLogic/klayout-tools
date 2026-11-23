@@ -73,6 +73,7 @@ from .signoff_evidence_pin import (
     content_hash_pin_state,
 )
 from .signoff_justified_gap import justified_gap_entries, structural_row_entries
+from .signoff_row_extent import row_credits
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
@@ -449,24 +450,11 @@ def multi_row_info(
     """
     if spec_rows is None:
         return {}
-    credited = credited or {}
-    covered: set[str] = set()
-    row_sources: dict[str, str] = {}
-    for spec, rows, g in graded:
-        member_rows, derived = credited.get(id(spec), (rows, False))
-        # Issue #6027: a failed citation credits only derived rows -- those
-        # its tagged, limited, passing measurements grade; never asserted
-        # ones, and never from a refused (uncaptured) envelope.
-        if g[0] != "met" and not derived:
-            continue
-        for r in member_rows or []:
-            covered.add(r)
-            # A row covered by any derived citation is machine-checked.
-            if derived or r not in row_sources:
-                row_sources[r] = "derived" if derived else "asserted"
-    covered.update(joint_covered)
+    row_sources, slices, partial = row_credits(graded, credited or {}, spec_rows)
     row_sources.update(dict.fromkeys(joint_covered, "derived"))
-    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    failed_rows = sorted(
+        {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
+    )
     justified = justified_gap_entries(spec_rows)
     structural = structural_row_entries(spec_rows)
     return {
@@ -477,7 +465,7 @@ def multi_row_info(
             if row["gap"] is None
             and row["justified_gap"] is None
             and row.get("structural") is None
-            and row["id"] not in covered
+            and row["id"] not in row_sources
             and row["id"] not in failed_rows
         ],
         "declared_gaps": [
@@ -495,6 +483,8 @@ def multi_row_info(
             and row.get("structural") is None
             and not row["ratified"]
         ],
+        **({"row_slices": slices} if slices else {}),
+        **({"partial_rows": partial} if partial else {}),
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
         **({"joint_rows": joint_rows} if joint_rows else {}),
     }
