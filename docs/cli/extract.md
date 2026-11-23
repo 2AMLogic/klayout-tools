@@ -3568,6 +3568,14 @@ reference CDL writes every transistor as
 
 ### Device contract
 
+When the selected ASAP7 circuit instantiates child circuits, `device_count_scope`
+is `"selected_circuit"`. The `devices` list, `device_count`, `device_counts` and
+`metrics.extract__device__count` describe devices drawn directly in that circuit.
+`instantiated_device_count` and `instantiated_device_counts` include those devices
+plus each reachable child's devices once per placement. For example, two instances
+of an inverter with one nFET and one pFET contribute four devices. The census
+precedes parasitic injection. Flat ASAP7 reports retain their existing count fields.
+
 | Field | Meaning |
 | --- | --- |
 | `devices[].class` | The compact-model name: `nmos_rvt`/`pmos_rvt` by default; `*_lvt`, `*_slvt` or `*_sram` where the channel touches the LVT (98/0), SLVT (97/0) or SRAMVT (110/0) marker; `nmos_io`/`pmos_io` under the predictive THICKOX (111/0) marker (declared gap: the card names are unconfirmed against 2AMLogic/pdks; VT + THICKOX is malformed geometry). A different VT is a different class, so a model mismatch is a class mismatch. |
@@ -6161,11 +6169,23 @@ names:
 | Variant | Effect |
 |---|---|
 | `drop-r:NET` / `drop-r:*` | Short the net's star legs into its hub: device terminals stay on the hub, no series resistor. The hub and its ground C are unchanged. A net with no device terminal (Gamma-shunt fallback) gets no series R either. |
+| `drop-r-body:NET` / `drop-r-body:*` | Keep only the net's **body/bulk** terminals on the hub — no leg net, no series R for them — and re-split the net's total R across the remaining signal terminals, so the leg sum is unchanged (issue #7317; see the known-issue note below). Class-aware: MOS4 `B`, ResistorWithBulk/CapacitorWithBulk `W`, BJT4 `S`; a BJT3's `B` is the *base* and is never treated as a body. A net whose terminals are all body-class keeps the full star. |
 | `drop-c-ground:NET` / `drop-c-ground:*` | Omit the net's ground capacitor (and the `--mom-rlc-inductance-nh` series inductor that sits in series with it). |
 | `drop-c-coupling` | Omit every `Ccc_*` coupling card. |
 
 "All C removed" is `drop-c-ground:*` + `drop-c-coupling`; "all R removed" is
 `drop-r:*`.
+
+**Known issue — near-floating body terminals (issue #7317).** Extracted
+decks whose devices have *near-floating* body terminals — OSDI compact
+models whose body node is driven only by internal capacitances, with no
+low-impedance path of its own — can make ngspice transient analysis fail
+(`timestep_too_small`, Newton non-convergence) when the body terminal sits
+on its own star leaf behind a many-ohm series resistor. Merging the body
+leaf onto the net hub makes the transient converge. Body terminals are not
+signal paths, so a quasi-static star gains nothing from separating them:
+use `--parasitic-variant drop-r-body:*` (opt-in; default output is
+byte-identical without it).
 
 ```
 klt extract cell.gds --deck sky130 --parasitics --parasitic-variant drop-r:VOUT --format json
@@ -6174,8 +6194,9 @@ klt extract cell.gds --deck sky130 --parasitics --parasitic-variant drop-r:VOUT 
 - **Closed grammar.** Anything else is a usage error (exit 2), as is the flag
   without `--parasitics`.
 - **Unmatched `NET` is a warning**, as for `--parasitics-net`.
-- **`--distributed-rc` nets** are left unchanged by `drop-r`/`drop-c-ground`
-  (with a warning) — no new modelling for the ladder.
+- **`--distributed-rc` nets** are left unchanged by
+  `drop-r`/`drop-r-body`/`drop-c-ground` (with a warning) — no new modelling
+  for the ladder.
 - **Accounting follows the netlist.** `r_count`, `c_count`, `cc_count` and
   the `total_*` fields count what was actually emitted; per-net
   `resistance_ohm`/`capacitance_ff` remain the computed values. A net left
@@ -8973,6 +8994,9 @@ numbering described in
 | `timing`           | object                     | Additive (issue #3181): wall-clock `stages` (seconds per stage), `total_seconds`, `unattributed_seconds`. A measurement, ignored by `--check --rerun`. |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
+| `device_count_scope` | string (optional) | `"selected_circuit"` for a curated ASAP7 circuit with child instances. |
+| `instantiated_device_count` | integer (optional) | Total direct and descendant devices for that ASAP7 circuit, weighted by its placements. |
+| `instantiated_device_counts` | object (optional) | Per-class instantiated counts for that ASAP7 circuit. The runset engine also emits its per-class census. |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |

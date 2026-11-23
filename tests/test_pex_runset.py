@@ -133,6 +133,7 @@ def test_extraction_fields_are_empty_for_any_other_engine():
 #: before this route existed (pinned from `run_pex`'s source at the time); the
 #: default engine must neither gain nor lose one.
 CURATED_EXTRACTION_KEYS = {
+    "substrate_dc_tie",
     "deck",
     "netlist_adaptation",
     "device_count",

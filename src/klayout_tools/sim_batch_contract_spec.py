@@ -247,6 +247,7 @@ def _uses_pdk_relative_osdi(request: dict[str, Any]) -> bool:
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
+    "_regrade": ((0, 9, 3), lambda r: r.get("_regrade") is not None),  # also CLI-probed
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
     "slope_band": (
@@ -345,6 +346,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: check is the gate.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
+        "_regrade",
         "transfer",
         "snm",
         "slope_band",

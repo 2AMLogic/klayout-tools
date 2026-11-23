@@ -1995,8 +1995,7 @@ def _run_single_corner(
     layer_map_info: dict[str, Any] | None = None
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
-    via_pad_trim_info: dict[str, Any] | None = None
-    pin_conductor_info: dict[str, Any] | None = None
+    merge_info: dict[str, Any] = {}
     gds_dbu_um: float | None = None
     route_open = False
     if target_stage == "route":
@@ -2029,11 +2028,7 @@ def _run_single_corner(
         }
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
-        via_pad_trim_info = merge_info.get("via_pad_trim")
-        pin_conductor_info = merge_info.get("pin_conductor")
-        # After DEF-to-GDS merge, extract SPEF from routed geometry (#948).
-        # A fresh OpenROAD session restores the route checkpoint and reads the
-        # SPEF before reporting timing. Surface any layer-map warning on failure.
+        # Extract SPEF from the merged GDS and read it in a fresh timing session.
         if post_route_spef:
             with explain_spef_layer_map(layer_map_info):
                 spef_sta = _post_route_spef_metrics(
@@ -2395,10 +2390,11 @@ def _run_single_corner(
         # or `"skipped"` (with a `reason`; every non-ASAP7 PDK reports
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
-        "via_pad_trim": via_pad_trim_info,
+        "via_pad_trim": merge_info.get("via_pad_trim"),
+        "power_stack_repair": merge_info.get("power_stack_repair"),
         # Derived-map pin coverage on conductor; null before route (#5700).
         # Status/layers/reason are documented in docs/cli/place-and-route.md.
-        "pin_conductor": pin_conductor_info,
+        "pin_conductor": merge_info.get("pin_conductor"),
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
         # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.

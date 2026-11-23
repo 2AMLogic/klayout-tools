@@ -6,7 +6,15 @@ from .. import decks
 def largest_plain_rule_um(
     family: str, layer: tuple[int, int] | None, check: str
 ) -> tuple[float, str] | None:
-    """Return the largest threshold in µm and its rule ID. Ties keep deck order."""
+    """Return the largest plain-rule threshold on ``layer`` for ``check``.
+
+    Considers only plain single-layer rules (``other_layer`` and
+    ``derived_layer`` unset) whose layer matches. Returns
+    ``(threshold_um, rule_id)`` for the largest matching threshold; ties
+    keep deck order. Returns ``None`` when ``layer`` is ``None``, when
+    ``family`` has no resolvable deck (``decks.UnknownDeckError``), or when
+    the deck holds no matching plain rule for the layer.
+    """
     if layer is None:
         return None
     try:

@@ -70,6 +70,10 @@ from pathlib import Path
 
 import pytest
 
+from helpers.place_and_route_merge import (
+    _skipped_power_stack_repair,
+    _skipped_via_pad_trim,
+)
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
@@ -7893,7 +7897,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
@@ -8696,25 +8700,13 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
             "layers": [],
         },
     }
-
-
-def _skipped_via_pad_trim(variant: str) -> dict:
-    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
-    s = {
-        "status": "skipped",
-        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
-    }
-    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
-    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
-    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8830,6 +8822,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
         # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
         "pin_conductor": {"status": "unchanged", "layers": []},
     }

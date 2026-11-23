@@ -192,10 +192,6 @@
       "lines": 1004
     },
     {
-      "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 512
-    },
-    {
       "path": "src/klayout_tools/components.py",
       "lines": 532
     },
@@ -333,7 +329,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2672
+      "lines": 2656
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -457,7 +453,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1799
+      "lines": 1798
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
