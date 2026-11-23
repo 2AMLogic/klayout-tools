@@ -14,10 +14,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 
 
@@ -30,18 +30,6 @@ def _request(tmp_path, doc):
 # --------------------------------------------------------------------------- #
 # end to end, gated on a real sky130A install + iverilog + cocotb
 # --------------------------------------------------------------------------- #
-
-
-def _have_cocotb():
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
-HAVE_ICARUS = shutil.which("iverilog") is not None
 
 
 def _real_sky130_install():
@@ -88,8 +76,8 @@ async def and2_matches_promote(dut):
 """
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 @pytest.mark.skipif(
     _REAL_SKY130 is None,
     reason="no sky130A install with a sky130_fd_sc_hd verilog/ view",
