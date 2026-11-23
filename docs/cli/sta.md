@@ -150,7 +150,8 @@ primary clock’s ideal slew during analysis.
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. Mutually exclusive with `pdk.corners` below (issue #1871) — a request giving both is a request error. |
 | `pdk.corners` | array of string \| omitted | Additive field (issue #1871). A **list** of corner names to characterize the *same* loaded geometry against, in one request/response round trip, instead of a caller hand-rolling an external loop of N single-corner requests (see "Multi-corner characterization" below). Mutually exclusive with the scalar `pdk.corner` above. Must be a non-empty list of non-empty, mutually-distinct strings — unlike `klt place-and-route`'s `pdk.sweep_corners` (which *narrows* an already-enumerated shipped-corner set, so `[]` meaningfully means "sweep zero of them"), `corners` here *is* the primary corner selection, so an empty list is a request error, not "characterize nothing". |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
-| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay, and per-clock I/O delays, generated clocks and uncertainty are not supported. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay, and I/O delays use the primary clock. See [Generated clocks](#generated-clocks) for derived domains and the clock uncertainty section for primary-clock uncertainty. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.generated_clocks` | array of objects | A source clock port, linked target pin and either a divider or three edge indices per derived clock. See [Generated clocks](#generated-clocks). |
 | `constraints.clock_groups` | array\<array\<string\>\> \| omitted | Additive field (issue #4241). Each inner array names declared clock ports that form one group; emits `set_clock_groups -asynchronous -group [get_clocks {a}] -group [get_clocks {b}]`. At least two groups; every port must be a declared clock (an undeclared name is an error). **Without it OpenSTA times cross-domain paths as synchronous** — this command never guesses a relationship. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
@@ -1079,6 +1080,50 @@ backslash-escaped in the SPEF text itself (SPEF's own IEEE 1481-1999
 identifier grammar) but un-escaped back to their real, design-side spelling
 before this correlation check runs — a caller-supplied SPEF with ordinary
 bus/hierarchy naming is not penalized for it.
+
+## Generated clocks
+
+Use `constraints.generated_clocks` when a cell output clocks other registers.
+For a flip-flop dividing a 10 ns clock by two, declare
+
+```json
+{
+  "clock_port": "clk",
+  "clock_period_ns": 10,
+  "generated_clocks": [
+    {"source": "clk", "pin": "div_ff/Q", "divide_by": 2}
+  ]
+}
+```
+
+`source` names the primary port or a port in `constraints.clocks`. Each
+`pin` names one literal linked pin, including numeric bus indices such as
+`divider[2]/Q`. Whitespace, wildcards, double quotes,
+backslashes, braces, semicolons, dollar signs and leading dashes are rejected. Each pin can appear once. Supply exactly one of
+`divide_by` (an integer of at least two) or `edges` (three strictly
+increasing positive integer edge numbers). For example, `"edges": [1, 3, 5]`
+selects source transitions 1, 3 and 5 for the generated rising, falling and
+next rising edges. A generated clock cannot be the source of another declaration.
+
+After linking and declaring the source clocks, the session resolves every
+source and target. A missing or ambiguous match fails the request with its
+entry index and name. In array order, OpenSTA creates `klt_gen_clk_0`,
+`klt_gen_clk_1`, and so on with `create_generated_clock`. These names must
+be available. DEF-mode `propagated_clock: true` propagates them as well.
+
+The flat response, or each entry of `corners[]`, echoes the definitions in
+`generated_clocks` with their `index`, generated `name`, measured `period_ns`
+and number of `clocked_registers` in that session. An unavailable measurement
+is null with a `reason`. Omitting the array or supplying `[]` emits no generated
+clock commands or response field.
+
+On the Sky130 divider fixture with OpenROAD 26Q3-1510, omitting the declaration
+left `sink_ff/CLK` unclocked and `sink_ff/D` and `slow_q` unconstrained.
+Both divider forms above produced a 20 ns clock with one downstream register
+and cleared those findings. The undivided domain retained its 10 ns clock and
+two registers. The setup path from `source_ff` to `sink_ff` launched at 10 ns
+and captured at 20 ns. An additional register on a separate, undeclared clock
+still appeared in the completeness report.
 
 ## Propagated-clock timing (`constraints.propagated_clock`, issue #2739)
 
