@@ -94,6 +94,7 @@ from .parsers.em import add_em_parser
 from .parsers.extract import add_extract_parser
 from .parsers.signoff import add_signoff_parser
 from .parsers.version import add_version_parser
+from .pdk_expect import add_expect_bundle_arg, add_expect_version_arg
 
 
 def _add_format_arg(
@@ -189,21 +190,6 @@ def _add_pdk_args(
     if include_pdk:
         parser.add_argument("--pdk", default=None, help=pdk_help)
     parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
-
-
-def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
-    """Register ``--expect-version`` on ``klt pdk find``/``check`` (issue #3810)."""
-    parser.add_argument(
-        "--expect-version",
-        dest="expect_version",
-        default=None,
-        metavar="STAMP_OR_SHA",
-        help=(
-            "assert the installed PDK identity: an open_pdks commit SHA "
-            "(>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 "
-            "(payload still emitted) on mismatch or unknown identity"
-        ),
-    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -377,48 +363,46 @@ def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
             "routed DEF, or of a bare gate-level netlist with no DEF"
         ),
         description=(
-            "Run a standalone OpenSTA timing/power analysis over one fixed "
-            "geometry source, independent of `klt place-and-route`'s own "
-            "in-flow STA (issue #1099). Exactly one geometry source is "
-            "required, and they are mutually exclusive: `def` -- an "
-            "already-routed (or pre-route) DEF -- or, DEF-free, `verilog` "
-            "-- a structural gate-level netlist (e.g. `klt synthesize`'s own "
-            "`netlist_path`) linked with `read_lef`/`read_verilog`/"
-            "`link_design` and timed against liberty + "
-            "`constraints.clock_port`/`clock_period_ns` alone, with no "
-            "placement or routing of any kind and OpenSTA's own ideal "
-            "wire-load estimate (optional `constraints.wire_load_model`/"
-            "`wire_load_mode`); its response is labelled "
-            '`geometry_source: "netlist_estimate"` rather than `def` '
-            'mode\'s `"routed"`, so an estimate is never mistaken for a '
-            "post-route number (issue #1825). Unlike `klt "
-            "place-and-route`, this command never places, routes, or runs "
-            "CTS -- there is no `target_stage`; the geometry handed "
-            "in is the one and only geometry analysed. This is what makes "
-            "correct corner characterization possible: analysing one fixed "
-            "piece of geometry at N corners, rather than re-running "
-            "`place-and-route` N times (which produces N different "
-            "placements/routings, since global placement and detailed "
-            "routing are not corner-invariant). `pdk.cell_library`/`corner` "
+            "Run a standalone OpenSTA timing/power analysis over one fixed geometry "
+            "source, independent of `klt place-and-route`'s own in-flow STA (issue "
+            "#1099). Exactly one geometry source is required, and they are mutually "
+            "exclusive: `def` -- an already-routed (or pre-route) DEF -- or, "
+            "DEF-free, `verilog` -- a structural gate-level netlist (e.g. `klt "
+            "synthesize`'s own `netlist_path`) linked with "
+            "`read_lef`/`read_verilog`/`link_design` and timed against liberty + "
+            "`constraints.clock_port`/`clock_period_ns` alone, with no placement or "
+            "routing of any kind and OpenSTA's own ideal wire-load estimate (optional "
+            "`constraints.wire_load_model`/`wire_load_mode`); its response is "
+            'labelled `geometry_source: "netlist_estimate"` rather than `def` mode\'s '
+            '`"routed"`, so an estimate is never mistaken for a post-route number '
+            "(issue #1825). Unlike `klt place-and-route`, this command never places, "
+            "routes, or runs CTS -- there is no `target_stage`; the geometry handed "
+            "in is the one and only geometry analysed. This is what makes correct "
+            "corner characterization possible: analysing one fixed piece of geometry "
+            "at N corners, rather than re-running `place-and-route` N times (which "
+            "produces N different placements/routings, since global placement and "
+            "detailed routing are not corner-invariant). `pdk.cell_library`/`corner` "
             "resolve via the same `find_pdk()`/`libs_ref` discovery `klt "
-            "place-and-route` uses; `pdk.corners` (a list, mutually "
-            "exclusive with the scalar `corner`) characterizes the same "
-            "loaded geometry at N corners in one request/response round "
-            "trip instead of N external invocations. "
+            "place-and-route` uses; `pdk.corners` (a list, mutually exclusive with "
+            "the scalar `corner`) characterizes the same loaded geometry at N corners "
+            "in one request/response round trip instead of N external invocations. "
             "`constraints.clock_port`/`clock_period_ns` are required (a standalone "
             "STA run has no meaning without a clock) -- or, for a multi-clock design, "
             "`constraints.clocks` (a list of {port, period_ns}; the first is primary) "
             "instead, with optional `constraints.clock_groups` declaring asynchronous "
             "clock groups (issue #4241). With `pdk.corners`, a "
             "`constraints.clocks[].period_ns` may be a {corner: period} map whose "
-            "keys equal `pdk.corners` exactly (issue #5240). An optional `spef` path "
-            "feeds a caller-supplied SPEF (e.g. from `klt extract --parasitics`) in "
-            "via `read_spef`, with the same net-name-correlation sanity check `klt "
-            "place-and-route`'s own `post_route_spef` pass runs. See docs/cli/sta.md "
-            "for the full request/response contract. Runs `openroad` as a subprocess "
-            "-- requires an `openroad` binary on `$PATH`. Takes a request-document "
-            "path (like `klt place-and-route`/`klt synthesize`), not positional file "
-            "args."
+            "keys equal `pdk.corners` exactly (issue #5240). A per-port "
+            "`constraints.input_delays`/`.output_delays` entry may name the declared "
+            "clock it is relative to via an optional `clock` key (issue #7399) -- "
+            "e.g. a data pin against a secondary strobe clock -- defaulting to the "
+            "primary clock. An optional `spef` path feeds a caller-supplied SPEF "
+            "(e.g. from `klt extract --parasitics`) in via `read_spef`, with the same "
+            "net-name-correlation sanity check `klt place-and-route`'s own "
+            "`post_route_spef` pass runs. See docs/cli/sta.md for the full "
+            "request/response contract. Runs `openroad` as a subprocess -- requires "
+            "an `openroad` binary on `$PATH`. Takes a request-document path (like "
+            "`klt place-and-route`/`klt synthesize`), not positional file args."
         ),
     )
     sta_parser.add_argument("request", help="path to a klt sta request JSON file")
@@ -1690,7 +1674,6 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     equiv_parser.add_argument(
         "--resume",
-        dest="resume",
         action="store_true",
         default=False,
         help=(
@@ -2102,6 +2085,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
     place_and_route_parser.add_argument(
         "request", help="path to a klt place-and-route request JSON file"
     )
+    place_and_route_cmd.add_threads_argument(place_and_route_parser)
     _add_pdk_args(place_and_route_parser)
     place_and_route_parser.add_argument(
         "--backend",
@@ -2363,7 +2347,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(find_parser)
+    add_expect_version_arg(find_parser)
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
@@ -2423,7 +2407,8 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(check_parser)
+    add_expect_version_arg(check_parser)
+    add_expect_bundle_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 

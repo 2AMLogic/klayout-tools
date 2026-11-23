@@ -2,6 +2,62 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-23
+
+- **PR #2418**: feat: grade erc net island count against a declared nets[].islands
+- **PR #2416**: feat(extract): make device-class drawn-layer predicates discoverable and warn on near misses (#2365)
+- **PR #2414**: fix(lvs): expand concatenation-RHS assigns in gate-level-verilog references
+- **PR #2413**: feat(functional-verification): add options.sdf.entries interconnect-only mode
+- **PR #2412**: feat(stats): add instance-resolved flattened_polygon_count/flattened_vertex_count
+- **PR #2411**: feat(erc): warn when a declared label_layer carries no text
+- **PR #2409**: test(gen-compose): golden coverage for blocks[].cell placement of a non-zero-origin library cell
+- **PR #2404**: fix(kb): defer jsonschema import so a broken install can't crash every klt command
+- **PR #2399**: fix(functional-verification): drop zero-delay SDF INTERCONNECT onto physical-only diode destinations
+- **PR #2393**: fix(signoff): honor the partition-qualified evidence key on a pure-kind manifest
+- **PR #2392**: fix(extract): count parasitic squares per conductor fragment, not per merged net
+- **PR #2387**: docs(golden-deck): refresh stale rule counts across all four decks
+- **PR #2381**: fix(extract): use SI-suffixed, PARAMS:-free SPICE cards for unbound MoM-cap devices
+- **PR #2379**: docs(golden-deck): re-derive sky130 cross-check counts from the manifest
+- **PR #2376**: feat(signoff): cite a nested envelope with an RFC 6901 manifest pointer
+- **PR #2375**: feat(erc): select which wells a ties[] entry grades by class marker
+- **PR #2361**: refactor(gen): split per-family validate/describe into gen_describe.py
+- **PR #2360**: test(drc): document tap.width.1's FEOL-gated native-deck disagreement
+- **PR #2353**: feat(power): shared provenance block + per-edge geometry in the report
+- **PR #2350**: refactor(site): dedupe getContext->makeFakeGL spy wiring
+- **PR #2346**: fix(drc): name the missing host utility before a PDK driver's deck aborts (#2333)
+- **PR #2344**: fix(lvs): carry sky130 fixed-geometry PNP emitter area onto the converted Q card
+- **PR #2336**: fix(extract): bare-mode 3-terminal resistor cards become X subckt calls (#1157); lock sky130 resistor bare-um geometry + vendor proof (#1159)
+- **PR #2267**: Adopt Renovate dependency security policy (14-day quarantine)
+- **PR #1828**: build(deps-dev): bump vitest from 4.1.10 to 5.0.1 in /site
+- **Issue #2401** (closed): Friction: a mis-transcribed stackup[].label_layer is silent — it reports as erc.unconnected_net on every declared net, indistinguishable from a real supply defect
+- **Issue #2400** (closed): Friction: klt erc nets[] cannot express a label string that legitimately names more than one electrical island, so erc.unconnected_net is unfalsifiable for multi-domain streams
+- **Issue #2395** (closed): klt CLI fails to start on macOS arm64 / Python 3.14: invalid code signature on rpds-py native extension
+- **Issue #2380** (closed): docs(golden-deck): gf180mcu rule count in tests/golden_deck/README.md is stale (44 vs 46)
+- **Issue #2372** (closed): Friction: klt lvs reference.form gate-level-verilog rejects any assign with a concatenation RHS, blocking Yosys-emitted netlists
+- **Issue #2368** (closed): klt lvs cannot use a PDK-shipped CDL/SPICE library netlist as a reference — .subckt-wrapped primitives arrive as X cards and contribute zero devices
+- **Issue #2367** (closed): gen-compose: no golden-test coverage for blocks[].cell placement of a non-zero-origin (bbox.x0 != 0) library cell
+- **Issue #2366** (closed): klt stats --per-layer: area_um2 is instance-resolved but polygon_count/vertex_count are not — silent undercount on hierarchical layouts
+- **Issue #2365** (closed): klt extract: a device class's drawn-layer predicates (marker + *_requires) are undiscoverable — a near-miss extracts device_count: 0 with warnings: []
+- **Issue #2364** (closed): options.sdf: IOPATH back-annotation on sky130 specify-branch models kills a timing-clean design on Icarus 13 — #1888's "genuine timing" attribution does not generalize
+- **Issue #2363** (closed): functional-verification options.sdf: zero-delay INTERCONNECT onto a physical-only antenna-diode load fails "Could not find intermodpath" — extend the #2304 counted drop
+- **Issue #2362** (closed): signoff --manifest: partition-qualified evidence key ("7.digital") silently ignored on a non-mixed-signal manifest
+- **Issue #2359** (closed): Friction: klt extract --parasitics lumped R fits one rectangle to a net's merged area/perimeter -- disjoint short, wide stubs (contacted resistor heads) read ~9x high
+- **Issue #2358** (closed): klt erc: ties[].tap_requires is accepted but ignored -- the tap region is the whole tap_layer
+- **Issue #2356** (closed): docs(golden-deck): refresh stale cross-check counts in tests/golden_deck/README.md
+- **Issue #2355** (closed): klt extract --parasitics: extracted MOM-cap device cards carry bare-micron geometry against PDK subckt interfaces that expect SI-meter params
+- **Issue #2354** (closed): klt erc: ties[] cannot grade well islands that tie to different supply nets — every declaration applies to every well_layer island
+- **Issue #2349** (closed): klt power emits no provenance block, so a committed IR/EM report cannot be tied to the GDS or the spec it was solved against (klt erc has had this since #1968/#2036)
+- **Issue #2347** (closed): Finish gen.py's per-family split: move validate/describe pairs out (last of the three-way split)
+- **Issue #2345** (closed): klt power drops the per-edge geometry (length_um/cross_um) it computed the resistance and EM limit from, so a role with no published limit has no derivable current density
+- **Issue #2343** (closed): test(drc): golden-deck native cross-check for tap.width.1 has been failing on main since #2330
+- **Issue #2342** (closed): klt signoff --manifest can only cite a whole file, so an envelope nested inside a composite report is uncitable
+- **Issue #2341** (closed): refactor(site): dedupe the getContext->makeFakeGL spy wiring left after #2338
+- **Issue #2339** (closed): klt erc: ties[] has no well-side selector, so a single tub layer holding two differently-biased well classes cannot declare either tie without a false erc.missing_tie
+- **Issue #2335** (closed): lvs: subckt-call conversion of sky130 fixed-geometry pnp_05v5 cells drops AE, so extracted PNPs never match without compare_parameters
+- **Issue #2333** (closed): klt drc --engine klayout inherits a PDK driver's host assumptions, so a missing host utility aborts the deck before any rule runs
+- **Issue #2007** (closed): Tracking: independent cross-validation oracles for klt verdicts (magic, FastCap2/Palace, Xyce, EQY) — complementary to #1988's coverage contract
+- **Issue #1159** (closed): Friction: klt extract --pdk's explicit-SI-unit-suffixed L=/W= on a sky130 resistor X-card produces NaN in the vendor model's own Efac term
+- **Issue #1157** (closed): Friction: klt extract's bare (non-`--pdk`) output for a 3-terminal drawn-resistor class is not ngspice-simulatable
 ### 2026-09-22
 
 - **PR #2338**: refactor(site): hoist makeFakeGL/mockFetchOk into a shared test module
