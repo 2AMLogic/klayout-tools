@@ -1642,12 +1642,12 @@ class TestBatchAsync:
             ),
             (
                 {"attach_job_id": "klt-sim-1", "backend": "local"},
-                "--attach requires backend 'batch'",
+                "backend 'local'.*--backend batch",
                 None,
             ),
             (
                 {"attach_job_id": "klt-sim-1", "hosts": 2},
-                "--attach requires backend 'batch'",
+                "single job .*hosts = 1.*batch-shards.json",
                 None,
             ),
             (
