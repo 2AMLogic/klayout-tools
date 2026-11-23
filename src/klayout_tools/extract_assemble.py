@@ -16,6 +16,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance
 from .decks import deck_source_path
+from .extract_report_canonicalize import _normalized_netlist_sha256
 
 
 def assemble_extract_report(
@@ -73,7 +74,6 @@ def assemble_extract_report(
         _describe_device_models,
         _describe_label_layers,
         _hierarchy_fields,
-        _normalized_netlist_sha256,
         _pin_ties_field,
         _staged,
     )
