@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 1942
+      "lines": 1938
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
