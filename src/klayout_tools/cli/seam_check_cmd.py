@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..seam_check import SeamCheckError, run_seam_check
-from ._parsing import parse_layer_spec
 from .output import emit_error, emit_success, render_table
 
 EXIT_PASS = 0

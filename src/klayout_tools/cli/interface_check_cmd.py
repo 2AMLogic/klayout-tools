@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..interface_check import (
     InterfaceCheckError,
     parse_pair,
     parse_place,
     run_interface_check,
 )
-from ._parsing import parse_layer_spec
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0

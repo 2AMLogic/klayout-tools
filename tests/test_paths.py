@@ -15,13 +15,13 @@ import re
 
 import pytest
 
+from klayout_tools._layer_spec import parse_layer_spec
 from klayout_tools._paths import (
     _load_request_json,
     looks_like_request_document,
     parse_layer_datatype,
     parse_layer_datatype_strict,
 )
-from klayout_tools.cli._parsing import parse_layer_spec
 
 
 def test_looks_like_request_document_stdin_sentinel():

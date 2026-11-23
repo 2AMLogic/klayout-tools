@@ -6,8 +6,8 @@ every other ``klt`` subcommand — see ``docs/json-contract.md``.
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..stats import StatsError, stats_report
-from ._parsing import parse_layer_spec
 from .output import emit_error, emit_success, render_table
 
 
