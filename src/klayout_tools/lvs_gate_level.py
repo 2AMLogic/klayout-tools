@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-from .extract import spice_safe_net_name
+from .extract_base import spice_safe_net_name
 from .lvs_base import (
     CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED,
     CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED,
