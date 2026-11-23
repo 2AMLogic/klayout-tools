@@ -182,13 +182,14 @@ def _validate_request_level(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    library = _validate_library(request.get("library"))
+    library = _validate_library(request.get("library"), cell_library)
     io_spec = _validate_io(request.get("io"), cell_library, library)
     # Issue #3885: a pattern naming no real port is an error, never a silent
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    instance_groups = _validate_instance_groups(request.get("instance_groups"))
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -204,7 +205,6 @@ def _validate_request_level(
         request.get("constraints") or {}, PlaceAndRouteError
     )
     seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
@@ -240,7 +240,7 @@ def _validate_request_level(
         library=library,
         io_spec=io_spec,
         macros=macros,
-        instance_groups=instance_groups,
+        instance_groups=groups,
         power=power,
         clock_port=clock_port,
         clock_period_ns=clock_period_ns,

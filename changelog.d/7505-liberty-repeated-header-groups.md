@@ -1,0 +1,1 @@
+- **Fixed** (#7505, 2026-11-23). A Liberty list merge now compares every occurrence of a repeated top-level header group. A later declaration can no longer conceal a different or missing earlier declaration.

@@ -38,6 +38,7 @@ from .netlist_construct_scan import (
 )
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
 from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
@@ -279,7 +280,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
-        "also_cell_libraries": ("asap7sc7p5t_rvt", "asap7sc7p5t_28_R"),
+        "also_cell_libraries": RVT_LIBRARIES,
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -658,7 +659,7 @@ def _validate_io(
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
@@ -669,7 +670,7 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
         _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
         for index, entry in enumerate(raw)
     ]
-    groups_spec.validate_fixed_members(groups, PlaceAndRouteError)
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
@@ -1798,33 +1799,22 @@ _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-def _validate_library(library: Any) -> dict[str, Any] | None:
-    """Optional ``request.library`` (issue #4086): per-library inputs for a
-    standard-cell library the built-in tables
-    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
-    override of a built-in entry. ``None`` (field omitted) leaves every
-    generated script byte-identical. Returns only the keys that were given:
-    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
-    primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
-    the library has no antenna diode, so no antenna repair; issue #4274),
-    ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells), ``filler`` (tuple of masters), and ``dont_use`` (tuple of globs).
-    """
-    if library is None:
+def _validate_library(library: Any, cell_library: str = "") -> dict[str, Any] | None:
+    """Normalize effective library inputs for stage Tcl, STA and the power audit."""
+    if library is None and cell_library not in RVT_LIBRARIES:
         return None
-    if not isinstance(library, dict):
-        raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - _LIBRARY_VALIDATORS.keys())
-    if unknown:
-        raise PlaceAndRouteError(
-            f"request.library has unknown key(s): {', '.join(unknown)}"
-        )
-    out: dict[str, Any] = {}
-    for key, validate in _LIBRARY_VALIDATORS.items():
-        if key in library:
-            out[key] = validate(library[key])
-    return out
+    raw = _library_object(
+        {} if library is None else library,
+        "request.library",
+        tuple(_LIBRARY_VALIDATORS),
+    )
+    if cell_library in RVT_LIBRARIES:
+        raw = RVT_LIBRARY_DEFAULTS | raw
+    return {
+        key: validate(raw[key])
+        for key, validate in _LIBRARY_VALIDATORS.items()
+        if key in raw
+    }
 
 
 def _validate_seed(seed: Any) -> int:

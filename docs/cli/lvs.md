@@ -4554,6 +4554,24 @@ mismatch is dangling-only on each side it appears on. A one-sided dangling net
 (connected on the other side), differing cell types, an unbalanced count, or
 any real mismatch beside them leaves the ordinary `error` findings in place.
 
+For a gate-level Verilog reference and pre-extracted abstract cells, trace
+both ends of each reported net through the routed Verilog, the extracted
+SPICE, and the routed DEF. A dangling net has zero declared pins and
+exactly one device terminal or instance pin. A net named `__NC_…` can
+meet that rule while a different finding names a connected clock, supply
+rail, or top-level output. A mismatch that names an instance on both sides
+also falls outside the one-sided instance groups this warning describes.
+
+Start with any `hints.rejected` entry naming a top-level pin. Compare the
+driver and loads on that pin on each side. Where the extracted net stops at
+a standard cell, check the cell's LEF pin shapes against the GDS, including
+connections between disjoint metal pads inside the abstracted cell.
+Correct the extracted connectivity or the routed design according to
+those measurements, then rerun LVS against the matching routed Verilog.
+For example, when a driver's fanout was split, reconnecting all its loads
+to that driver can restore `status: "match"` while a spare buffer's
+output stays open on both sides.
+
 `status` is still `NetlistComparer.compare()`'s own verdict, so such a run
 reports `status: "mismatch"` with no `error`-severity entries; gate on
 `error_count` to distinguish it from a real defect. This is a report-side
