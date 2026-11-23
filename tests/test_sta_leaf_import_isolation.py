@@ -28,6 +28,7 @@ CASES = {
         "validate_port_delay_maps",
         [{"input_delays": {"data": {"min_ns": 0.1, "clock": "missing"}}}, "clk"],
     ),
+    "_sta_multicycle": ("validate_multicycle_paths", [{"multicycle_paths": False}]),
     "_sta_period_maps": ("validate_period", [0, "clock"]),
     "_sta_request_diag": None,
     "_sta_sdc_check": ("resolve_sdc_check", [False, "."]),
@@ -39,6 +40,7 @@ CASES = {
         "_validate_report_instances",
         [{"report_instances": False}],
     ),
+    "post_route_sta_multicycle": None,
     "post_route_sta_path_groups": None,
     "post_route_sta_stages": None,
 }

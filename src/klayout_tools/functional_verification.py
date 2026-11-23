@@ -289,11 +289,11 @@ from .functional_verification_sdf_rename import (
 )
 from .functional_verification_sdf_steps import (
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
-    SDF_COND_EXPRESSION_REASONS,
+    SDF_IOPATH_SYNTAX_REASONS,
     _apply_sdf_alias_port_drop,
     _apply_sdf_bus_port_source_drop,
-    _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _apply_sdf_iopath_syntax_drops,
     _bus_input_port_names,
     _sdf_refusal_attribution,
     _sdf_refusal_error,
@@ -486,7 +486,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "scalar port, or a cell with no model is left in place and still "
         "fails loudly"
     ),
-    **SDF_COND_EXPRESSION_REASONS,
+    **SDF_IOPATH_SYNTAX_REASONS,
     **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
@@ -2300,8 +2300,8 @@ def run_functional_verification(
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )
-        # Issue #5296: drop operator-expression COND IOPATHs (Icarus parse error).
-        annotate_source_path = _apply_sdf_cond_expression_drop(
+        # Drop operator conditions and valueless IOPATHs before Icarus parses the SDF.
+        annotate_source_path = _apply_sdf_iopath_syntax_drops(
             annotate_source_path,
             output_dir,
             sdf_pre_dropped_counts,

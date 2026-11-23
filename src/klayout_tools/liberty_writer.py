@@ -164,10 +164,10 @@ class TimingArc:
 
     related_pin: str
     timing_sense: str
-    cell_rise: Table2D | None = None
-    cell_fall: Table2D | None = None
-    rise_transition: Table2D | None = None
-    fall_transition: Table2D | None = None
+    cell_rise: Table2D | None
+    cell_fall: Table2D | None
+    rise_transition: Table2D | None
+    fall_transition: Table2D | None
     timing_type: str = "combinational"
 
 

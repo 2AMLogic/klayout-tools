@@ -39,12 +39,27 @@ def _library(arcs, constraints=()):
     )
 
 
+_TABLE_FIELDS = ("cell_rise", "cell_fall", "rise_transition", "fall_transition")
+
+
+@pytest.mark.parametrize("missing", _TABLE_FIELDS)
+def test_timing_arc_requires_each_table_argument(missing):
+    table = liberty_writer.Table2D((0.02,), (0.005,), ((0.1,),))
+    tables = {field: table for field in _TABLE_FIELDS if field != missing}
+    with pytest.raises(TypeError, match=missing):
+        liberty_writer.TimingArc(
+            "CLK", "non_unate", **tables, timing_type="rising_edge"
+        )
+
+
 def test_liberty_writer_renders_a_one_direction_forced_arc():
     table = liberty_writer.Table2D((0.02,), (0.005,), ((0.1,),))
     clear = liberty_writer.TimingArc(
         "R",
         "positive_unate",
+        cell_rise=None,
         cell_fall=table,
+        rise_transition=None,
         fall_transition=table,
         timing_type="clear",
     )
@@ -57,7 +72,9 @@ def test_liberty_writer_renders_a_one_direction_forced_arc():
 
 
 def test_liberty_writer_refuses_a_timing_arc_with_no_table():
-    empty = liberty_writer.TimingArc("R", "positive_unate", timing_type="clear")
+    empty = liberty_writer.TimingArc(
+        "R", "positive_unate", None, None, None, None, timing_type="clear"
+    )
     with pytest.raises(
         liberty_writer.LibertyWriteError, match="needs at least one table"
     ):
@@ -84,7 +101,9 @@ def test_template_axes_skip_a_forced_arc_s_unmeasured_direction():
     clear = liberty_writer.TimingArc(
         "R",
         "positive_unate",
+        cell_rise=None,
         cell_fall=table,
+        rise_transition=None,
         fall_transition=table,
         timing_type="clear",
     )
@@ -97,7 +116,9 @@ def test_template_axes_skip_an_arc_with_no_tables_at_all():
     # An all-None arc ahead of a measured one only fails where it is
     # rendered; the axis derivation must walk past it to the next arc.
     table = liberty_writer.Table2D((0.02,), (0.005,), ((0.1,),))
-    empty = liberty_writer.TimingArc("R", "positive_unate", timing_type="clear")
+    empty = liberty_writer.TimingArc(
+        "R", "positive_unate", None, None, None, None, timing_type="clear"
+    )
     clk_to_q = liberty_writer.TimingArc(
         "CLK", "non_unate", table, table, table, table, timing_type="rising_edge"
     )
