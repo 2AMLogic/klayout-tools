@@ -166,6 +166,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
 from .coverage import (
@@ -309,6 +310,7 @@ from .sim_plot import render_waveform_svg
 #: without importing this runner; re-exported self-aliased for existing callers.
 from .sim_raw import _parse_and_persist_waveform as _parse_and_persist_waveform
 from .sim_raw import parse_ascii_rawfile as parse_ascii_rawfile
+from .sim_raw import persist_waveform_with_header
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -7092,7 +7094,7 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     top level, since a loaded section is."""
     decl = _NetlistDeclarations(set(), set(), {}, [])
     depth = 0
-    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+    for line in circuit_lines(_logical_netlist_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
         if word == ".subckt":
             depth += 1
@@ -7101,21 +7103,6 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
         elif not depth:
             _record_declaration(decl, line)
     return decl
-
-
-def _top_level_cards(lines: list[str]) -> list[str]:
-    """``lines`` without ``.control`` ... ``.endc`` blocks."""
-    kept: list[str] = []
-    in_control = False
-    for line in lines:
-        word = line.split(None, 1)[0].lower()
-        if word == ".control":
-            in_control = True
-        elif word == ".endc":
-            in_control = False
-        elif not in_control:
-            kept.append(line)
-    return kept
 
 
 def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
@@ -7768,10 +7755,8 @@ def _persist_waveform_artifact(
 ) -> str | None:
     """Convert ``raw_path`` to its ``waveform.raw.json`` artifact and return
     that path, or ``None`` when ``raw_size`` is over ``waveform_max_bytes``
-    (issue #3211): converting parses the whole ASCII rawfile into memory, so
-    past the cap a ``waveform_too_large`` warning is appended instead. For a
-    ``noise`` analysis the converted waveform also sets
-    ``noise_fields["noise_representation"]`` (issue #3006).
+    (issue #3211). Past the cap, append a ``waveform_too_large`` warning.
+    Otherwise stream the points and use the header to classify noise units.
     """
     if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
         # Keep the raw file and every measurement; only the JSON conversion
@@ -7793,10 +7778,9 @@ def _persist_waveform_artifact(
             }
         )
         return None
-    waveform_path = _parse_and_persist_waveform(raw_path, waveform_decimate)
+    waveform_path, header = persist_waveform_with_header(raw_path, waveform_decimate)
     if analysis.get("kind") == "noise":
-        with open(waveform_path, encoding="utf-8") as fh:
-            noise_fields["noise_representation"] = noise_representation(json.load(fh))
+        noise_fields["noise_representation"] = noise_representation(header)
     return waveform_path
 
 
