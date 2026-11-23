@@ -383,6 +383,15 @@ def sdc_drift_block(
         mismatches,
     )
     _compare_uncertainty(commands, clock_uncertainty, clock_port, mismatches)
+    # An unreadable command may supply a requested constraint. Only a
+    # missing SDC value relies on inferring absence from the parsed commands.
+    unchecked_commands = {entry["command"] for entry in unchecked}
+    mismatches = [
+        mismatch
+        for mismatch in mismatches
+        if mismatch["sdc_value"] is not None
+        or mismatch["command"] not in unchecked_commands
+    ]
     envelope = env_provenance.repo_relative_path(
         sdc_path, repo_root=env_provenance.find_repo_root(request_dir)
     )
