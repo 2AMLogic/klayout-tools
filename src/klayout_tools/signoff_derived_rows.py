@@ -67,6 +67,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .coverage import coverage_refusal_reason, work_id
+from .signoff_derived_bounds import derived_bounds_checked
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
@@ -137,19 +138,25 @@ def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
 
 
 def _limit_work_names(ids: Iterable[Any]) -> set[str]:
-    """Measurement names behind the ``limit`` work ids in ``ids`` -- the
-    identities :func:`~.coverage.work_id` gives `klt sim`'s per-corner bound
-    checks (``limit:[corner_index, corner_id, name, key]``)."""
+    """Measurement names behind the bound-check work ids in ``ids`` -- the
+    identities :func:`~.coverage.work_id` gives `klt sim`'s per-corner checks
+    (``limit:[corner_index, corner_id, name, key]``) and its per-group
+    ``derive`` checks (``derived_limit:[name, group_id, key]``, issue #7184)."""
     names: set[str] = set()
     for raw in ids:
-        if not (isinstance(raw, str) and raw.startswith("limit:")):
+        if not (isinstance(raw, str) and raw.startswith(("limit:", "derived_limit:"))):
             continue
         try:
-            parts = json.loads(raw[len("limit:") :])
+            parts = json.loads(raw.partition(":")[2])
         except ValueError:
             continue
-        if isinstance(parts, list) and len(parts) == 4 and isinstance(parts[2], str):
-            names.add(parts[2])
+        index = 2 if raw.startswith("limit:") else 1
+        if (
+            isinstance(parts, list)
+            and len(parts) == 4
+            and isinstance(parts[index], str)
+        ):
+            names.add(parts[index])
     return names
 
 
@@ -186,6 +193,8 @@ def _bounds_checked(
     keys = [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
     if not keys:
         return False
+    if isinstance(measurement.get("derive"), dict):
+        return derived_bounds_checked(measurement, record, keys)
     if record is None:
         return True
     checked, skipped = record

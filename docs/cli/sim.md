@@ -6371,6 +6371,109 @@ post-processing:
   estimator, differential or expression selectors for `x`/`y`,
   `analysis_steps[]` integration, and Xyce support.
 
+## Cross-corner derived measurement (`measurements[].derive`)
+
+Issue [#7184](https://github.com/2AMLogic/klayout-tools/issues/7184). A spec
+row whose bounded quantity is a deterministic figure **derived from several
+corners' values along one swept axis** -- a trim knob's range or step
+resolution, a box-method temperature spread -- has no per-corner form: a
+`.meas` card evaluates inside one corner's run and cannot see another
+corner's value. A `derive` entry names a per-corner source measurement, the
+axis to read it along, a closed reduction and the axes to group by, and `klt
+sim` reduces it in Python once every corner has reported:
+
+```json
+{"name": "code_range_rel",
+ "derive": {"from": "vout", "axis": "params.code", "reduce": "range_rel",
+            "reference": {"params.code": 128}, "group_by": ["process", "supply_v"]},
+ "unit": "ratio", "limits": {"min": 0.30}, "spec_row": "trim-range"}}
+```
+
+- **Form.** `derive` is an object with **all four** of `from`, `axis`,
+  `reduce`, `group_by`, exactly one of `reference`/`divisor` for
+  `range_rel`/`box_spread`, and neither for the other two:
+
+  | Key | Meaning |
+  |---|---|
+  | `from` | The `name` of another measurement of this request (not a `derive` entry, not itself): the per-corner value being reduced. |
+  | `axis` | The swept axis the values are read along: `temperature_c`, `process`, `variant`, `supply_v` (a single-rail request), `supply_v.<rail>`, `params.<key>` or `options.<key>` (keys case-insensitive). |
+  | `reduce` | One of `range`, `range_rel`, `box_spread`, `max_abs_step` (below). |
+  | `group_by` | The remaining swept axes, each named like `axis`: one reduced entry per combination of their values. `[]` when `axis` is the only swept axis. |
+  | `reference` | `{"<axis>": <value>}`: the group's value at that axis point is the denominator. |
+  | `divisor` | A positive finite constant denominator instead. |
+
+  Unknown or missing keys are refused up front (exit 1), as is declaring
+  `derive` beside any other form on the same entry, or with `optional`,
+  `on_unreached`, `k_sigma` or `intermediate` (which only mean something for
+  a per-corner result) or with `monte_carlo` (the reduction is over the
+  deterministic corner grid; sample statistics are the `monte_carlo` block).
+- **Reductions**, each computed in double precision over the group's trusted
+  values, then graded against `limits` like any other scalar:
+
+  | `reduce` | Value |
+  |---|---|
+  | `range` | `max(v) - min(v)` |
+  | `range_rel` | `(max(v) - min(v)) / denom` |
+  | `box_spread` | `(max(v) - min(v)) / ((axis_max - axis_min) * denom)` -- the box method, in `1/<axis unit>` |
+  | `max_abs_step` | `max(abs(v[i+1] - v[i]))` over consecutive axis settings, in ascending axis order whatever the request's declaration order |
+
+  `denom` is `abs(v)` at the `reference` point, or the `divisor`. `axis` needs
+  at least two declared values; `box_spread` and `max_abs_step` are refused on
+  an axis with no order (`process`, `variant`).
+- **Grid rules**, checked against the request's expanded corner grid before
+  any corner is dispatched (so `--dry-run` runs them too): every axis named
+  must exist, a bare `supply_v` needs a single-rail request, a `reference`
+  point must be a declared axis value, and no two corners may share one
+  `(group, axis_value)` coordinate -- a swept axis missing from `group_by`
+  is refused with the colliding corners named.
+- **Response.** The entry appears in `measurements[]` with the standard fields
+  (`unit`, `limits`, aggregate `status`, `worst_case`, `min`, `max`, optional
+  `spec_row`/`plausible_range`) plus an additive `derive` block echoing
+  `from`, `axis`, `reduce`, `group_by`, `reference`/`divisor`,
+  `expected_axis_values` (every value declared on the axis, before `exclude`)
+  and one `groups[]` record per group: `group_id`
+  (`process=a/supply_v=1.000V`, or `all`), `group` (the coordinates),
+  `status`, `value`, `margin` and `reason` (`null` once graded).
+  `worst_case.corner_id` repeats the binding group's `group_id`, so every
+  reader of a per-corner entry keeps working. No corner's own
+  `measurements[]` carries the entry, and `--format text` prints its head
+  line with no per-corner rows.
+- **A group that cannot be trusted to grade never passes.** Its `status` is
+  `error` with `value`/`margin` `null` and a `reason`: `missing_axis_points`
+  (a declared `(group, axis_value)` corner is absent -- `exclude`, a lost
+  shard, a corner that never ran; `missing_axis_values` lists them),
+  `source_unavailable` (a missing, errored, unreached, absent or non-finite
+  source value) or `zero_reference` (`range_rel`/`box_spread` whose
+  reference value is `0`). A group whose inputs are all finite but include an
+  `inconclusive` corner or source grades `inconclusive` (`reason`:
+  `source_inconclusive`), as does a derived value outside a declared
+  `plausible_range` (`implausible_value`). The entry's aggregate follows
+  `error > inconclusive > fail > pass` across groups and the report's
+  `status` follows it: a derived-only `fail` is `status: "fail"` (exit 3) and
+  a derived-only `error` or `inconclusive` is `status: "error"` /
+  `"inconclusive"` (exit 4), even when every corner passed and no source
+  measurement carries `limits`.
+- **Coverage.** The entry counts in `coverage.measurements_declared` and, with
+  `limits`, `measurements_with_limits` (so it satisfies `klt signoff`'s
+  `no_limits_checked` gate on its own). Its work is recorded per group --
+  `derived_measurement:[name, group_id]` observations and
+  `derived_limit:[name, group_id, key]` bounds, skipped with a reason for an
+  ungraded group -- never as per-corner rows.
+- **`klt signoff`.** A passing, `spec_row`-tagged, limited `derive` entry
+  credits its row as `derived` exactly as a per-corner measurement does, on a
+  `met` citation and -- row-scoped,
+  [#6027](https://github.com/2AMLogic/klayout-tools/issues/6027) -- on a
+  failing citation whose other measurements failed.
+- **Backends.** `derive` touches no deck: the per-corner measurements run
+  unchanged on `ngspice` and `xyce`, and the `remote`/`batch` worker request
+  carries no `derive` entry (a fleet shard holds only part of the grid, and
+  an older runner image does not know the form). The client reduces once the
+  corners are back, so no runner upgrade is needed.
+- **Out of scope.** Arbitrary cross-corner expressions, reductions across
+  separate requests or benches (#6969; `klt sim-merge` does not re-derive),
+  Monte Carlo statistics (#6968), and per-corner intra-waveform reductions
+  (#6913).
+
 ## Eye / phase-fold measurement (`measurements[].eye`)
 
 Issue [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292). Eye
@@ -7234,6 +7337,11 @@ error, exit 1).
     (a dependency chain).
   - A bare step-measurement name without its `<step>.` qualifier is refused
     with a hint.
+  - A `derive` entry (issue #7184) is accepted here and is no deck line: its
+    `from` names a `<step>.<name>` result -- see
+    [Cross-corner derived measurement](#cross-corner-derived-measurement-measurementsderive).
+    Inside a step's own `measurements[]` it is refused, as is a derived
+    `expr` that names a `derive` entry.
 - **Derived sweep windows.** A step's `analysis.args` may contain
   `${<expr>}` placeholders over earlier steps' scalar results, so a second
   sweep can be centred on a feature a first one located
@@ -10546,7 +10654,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `engine_host` (issue #3110 — `"local"` or `"worker"`; for off-host runs `ngspice_binary` and `engine_build` are the worker's observed path and build or `null`, and the submitter's are `client_ngspice_binary` and `client_engine_build` (issue #5566); see "Which machine ran it" above), `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256 plus `netlist_sha256_scope` (issue #5569 — `"staged"` when the digest was captured before this run dispatched any work, `"client-at-collection"` for `--attach` or a collection-only batch `--resume`; see "Netlist digest scope" below), and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `staged_model_inputs` (issue #2668 — only when `options.stage_model_inputs` staged model files for an off-host backend: one `{name, field, kind, sha256, source_sha256, rewritten[, transform]}` per file the worker received; `pdk_revision_asserted` (issue #5325 — `{value, scope: "caller-asserted"}`, only with `options.pdk_revision`); `models_lib_sha256_scope` (`"client"` off-host, `"local"` otherwise) qualifies `models_lib_sha256`; see "Staging the request's model inputs" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `seed_scope`/`seed_mode`/`quantiles`/`k_sigma`/`mismatch_scale`+`mismatch_param` when declared, `family_mismatch` when `vary` includes `"mismatch"`, and `unseeded_sources`/`unseeded_sources_note`/`unseeded_sources_not_scanned` when the netlist declares `trnoise`/`trrandom` sources the seed does not govern (issue #2963) — see "Monte Carlo sampling" above), `transient_noise` (`{engine, sources[{name, kind}], intrinsic_device_noise, intrinsic_resistor_noise}` plus `sources_not_scanned` when part of the include closure was unscannable, only when an ngspice transient's netlist declares `trnoise`/`trrandom` sources, issue #2985 — see "Transient noise coverage" above), `device_multiplier` (issues #5779/#6684 — the device-multiplier lint's `findings` for instance cards of the netlist and its scanned `.include` closure (warning-only, never a failing exit; a closure-file finding carries `file`), plus `note` when the netlist's own instances name a subcircuit absent from the scanned closure and `unevaluated` for their non-numeric `m=`/`mult=` values, and `not_scanned` when part of the closure was unscannable; only when there is something to disclose — see "Device multiplier warnings" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` (equal by construction since issue #5569: both cite the same pre-dispatch capture, so a mid-run file edit cannot make them disagree) so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` when an `optional` measurement had no value at every corner — issue #2925 — and `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). **For a measurement with no `limits`, `worst_case` is not an extreme** (every margin is `null`, so it names the first non-absent corner); use `min`/`max`. Additive (issue #5221): every entry carries `min` and `max`, each `{corner_id, value}` over the corners with a **finite** numeric value (absent/errored corners skipped, as are booleans, NaN and +/-infinity -- issue #5580; ties resolve to the first corner in expansion order), or `null` when no corner has one. `klt sim-merge` output carries them too (shared rollup). Additive/optional (issue #2482): the same `step`/`derived_from` provenance fields as the per-corner entries, for an `analysis_steps[]` request. Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. Additive/optional (issue #5731): the same `case` provenance field as the per-corner entries, for a measurement expanded from a `{case}` template (`options.measurement_cases`). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
+| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` when an `optional` measurement had no value at every corner — issue #2925 — and `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). **For a measurement with no `limits`, `worst_case` is not an extreme** (every margin is `null`, so it names the first non-absent corner); use `min`/`max`. Additive (issue #5221): every entry carries `min` and `max`, each `{corner_id, value}` over the corners with a **finite** numeric value (absent/errored corners skipped, as are booleans, NaN and +/-infinity -- issue #5580; ties resolve to the first corner in expansion order), or `null` when no corner has one. `klt sim-merge` output carries them too (shared rollup). Additive/optional (issue #2482): the same `step`/`derived_from` provenance fields as the per-corner entries, for an `analysis_steps[]` request. Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. Additive/optional (issue #5731): the same `case` provenance field as the per-corner entries, for a measurement expanded from a `{case}` template (`options.measurement_cases`). Additive/optional (issue #7184): an entry declared with `derive` is reduced across corners, carries a `derive` block (`{from, axis, reduce, group_by, reference?, divisor?, expected_axis_values, groups[]}`), and its `worst_case.corner_id` repeats the binding group's `group_id` — see "Cross-corner derived measurement" above. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
 

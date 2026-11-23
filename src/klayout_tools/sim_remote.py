@@ -62,7 +62,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport, sim_staging, sim_steps
+from . import remote_fleet, remote_transport, sim_derive, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
 
 if TYPE_CHECKING:
@@ -786,7 +786,7 @@ def _build_remote_request(
     """
     from .sim import _corner_points_to_wire
 
-    remote_request = dict(request)
+    remote_request = sim_derive.without_derive(dict(request))  # issue #7184
     remote_request.pop("remote", None)
     remote_request["backend"] = "local-parallel"
     remote_request["netlist"] = remote_transport.REMOTE_NETLIST_FILENAME

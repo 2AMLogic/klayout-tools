@@ -104,6 +104,8 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
+    sim_derive,
+    sim_derive_rollup,
     sim_energy,
     sim_eye,
     sim_form_signals,
@@ -240,6 +242,7 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
+from .sim_derive_rollup import attach_coverage as _attach_derive_coverage
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
     PARAMS_UNSUPPORTED_WORKER_CODE,
@@ -3276,6 +3279,7 @@ def _prepare_sim_request(
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
     monte_carlo_spec = request.get("monte_carlo")
+    sim_derive.validate_grid(measurements_spec, corner_points, request)
     sim_post_commands.refuse_xyce(engine, analysis)  # issue #6080
     _enforce_xyce_support_boundary(
         engine=engine,
@@ -3627,6 +3631,7 @@ def _run_sim_corners(
     keep_artifacts = resolved.keep_artifacts
     max_workers = resolved.max_workers
     measurements_spec = resolved.measurements_spec
+    per_corner_specs = sim_derive.per_corner_measurements(measurements_spec)
     models_lib = resolved.models_lib
     monte_carlo_info = resolved.monte_carlo_info
     monte_carlo_stats = resolved.monte_carlo_stats
@@ -3685,7 +3690,7 @@ def _run_sim_corners(
         "netlist_path": dispatch_netlist_path,
         "models_lib": models_lib,
         "analysis": analysis,
-        "measurements_spec": measurements_spec,
+        "measurements_spec": per_corner_specs,
         "corner_points": corner_points,
         "timeout_s": timeout_s,
         "engine": engine,
@@ -3722,7 +3727,7 @@ def _run_sim_corners(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        measurements_spec=measurements_spec,
+        measurements_spec=per_corner_specs,
         request_dir=request_dir,
         pre_completed=pre_completed,
     )
@@ -4008,7 +4013,7 @@ def _run_sim_corners(
             netlist_path=dispatch_netlist_path,
             models_lib=models_lib,
             analysis=analysis,
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
@@ -4064,7 +4069,7 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             request=request,
             hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
             request_dir=request_dir,
             **shard_kwargs,
         )
@@ -4078,7 +4083,7 @@ def _run_sim_corners(
                 netlist_path=dispatch_netlist_path,
                 models_lib=models_lib,
                 analysis=analysis,
-                measurements_spec=measurements_spec,
+                measurements_spec=per_corner_specs,
                 timeout_s=timeout_s,
                 keep_artifacts=keep_artifacts,
                 want_waveforms=want_waveforms,
@@ -4096,7 +4101,7 @@ def _run_sim_corners(
             shard_runner=_shard_runner,
             corner_points=dispatch_points,
             hosts=hosts,
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
         )
 
     _require_params_echo(
@@ -4144,7 +4149,7 @@ def _run_sim_corners(
         # `remote`, whose corners this process never reconciles against a
         # local `CornerPoint` list).
         corners = corners_new
-    _attach_meas_lint(corners, analysis, measurements_spec)
+    _attach_meas_lint(corners, analysis, per_corner_specs)
     engine_version = (
         backend_engine_version
         if backend_engine_version is not None
@@ -4232,7 +4237,7 @@ def _run_sim_corners(
                 corner=corner,
                 plot_dir=plot_dir,
                 analysis_kind=analysis.get("kind"),
-                measurements_spec=measurements_spec,
+                measurements_spec=per_corner_specs,
             )
             if corner_plots:
                 corner["artifacts"]["plots"] = corner_plots
@@ -4457,9 +4462,9 @@ def _run_sim_corners(
     diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
     if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
-    _attach_runner_hints(report, measurements_spec, corners, backend=backend)
+    _attach_runner_hints(report, per_corner_specs, corners, backend=backend)
     attach_process_leg_check(report, corners)
-    _attach_not_reached_count(report, measurements_spec, corners)
+    _attach_not_reached_count(report, per_corner_specs, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
         # requested -- the flat list of every SVG actually written, in
@@ -4538,9 +4543,9 @@ def _grade_corners(
     # design failure even when every individual sample passed -- it is only
     # reachable via a declared sigma window, since every other rollup `fail`
     # is already inherited from a corner that failed above -- so it feeds
-    # the same `failed` precedence input as a failed corner, rather than
-    # being reported and ignored.
-    measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
+    # the same `failed` precedence input as a failed corner rather than being
+    # reported and ignored -- as does a cross-corner `derive` entry (#7184).
+    rollup_statuses = {m["status"] for m in measurements_rollup}
     # Issue #2109: the common rollup rule is the single decision table for
     # real failures/errors, zero/partial/unknown/malformed coverage and full
     # success -- see `docs/coverage-contract.md`'s "The common rollup rule"
@@ -4555,8 +4560,8 @@ def _grade_corners(
     # nonempty skip list must never be reported as.
     rollup = coverage_rollup(
         {"coverage": coverage},
-        failed=bool(failed) or measurement_rollup_failed,
-        errored=bool(errored),
+        failed=bool(failed) or "fail" in rollup_statuses,
+        errored=bool(errored) or "error" in rollup_statuses,
     )
     status = rollup_status(rollup, success="pass", failure="fail", errored="error")
     # Issues #2492 + #2493: `inconclusive` outranks every non-`"error"`
@@ -4582,7 +4587,7 @@ def _grade_corners(
     # "I do not trust this solve" at the top level and not only in the
     # counts. Never fires unless the request opted in, so an unmodified
     # request's `status` is byte-identical to before either issue.
-    if status != "error" and inconclusive:
+    if status != "error" and (inconclusive or _INCONCLUSIVE_STATUS in rollup_statuses):
         status = _INCONCLUSIVE_STATUS
     return {
         "passed": passed,
@@ -10747,12 +10752,11 @@ def _measurement_coverage(
 ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
     """Count actual observations or applied bounds, never corner declarations.
 
-    ``corner_index`` (this corner's position in the report's own ``corners``
-    list) scopes every identity built here -- ``corner_id`` alone is a
-    *display* label (e.g. supply voltage rounded to 3 decimals) and distinct
-    corners can legitimately round to the same one, which would otherwise
-    collide as the same "unique" work identity and make
-    :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
+    ``corner_index`` (this corner's position in the report's own ``corners`` list)
+    scopes every identity built here -- ``corner_id`` alone is a *display* label (e.g.
+    supply voltage rounded to 3 decimals) and distinct corners can legitimately round to
+    the same one, which would otherwise collide as the same "unique" work identity and
+    make :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
     separate checks as a duplicate.
     """
     name = spec["name"]
@@ -10863,10 +10867,9 @@ def _corner_without_measurements(
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Coverage for one corner of a request that declares no measurements.
 
-    Returns ``(checked, skipped)``. Under ``capture_only`` (issue #3158) a
-    corner that ran clean counts its waveform capture as checked work; any
-    other corner is a ``no_requested_measurements`` skip.
-    """
+    Returns ``(checked, skipped)``. Under ``capture_only`` (issue #3158) a corner that
+    ran clean counts its waveform capture as checked work; any other corner is a
+    ``no_requested_measurements`` skip."""
     corner_work = work_id("corner", corner_index, corner["corner_id"])
     if capture_only and corner["status"] == "pass":
         return [corner_work + "/waveform_capture"], []
@@ -10877,9 +10880,7 @@ def _summarise_limits(
     measurements_spec: list[dict[str, Any]],
 ) -> tuple[int, int, list[dict[str, Any]]]:
     """Count declared limits and collect unrecognised limit keys per measurement.
-
-    Returns ``(limits_declared, measurements_with_limits, unrecognized)``.
-    """
+    Returns ``(limits_declared, measurements_with_limits, unrecognized)``."""
     unrecognized: list[dict[str, Any]] = []
     limits_declared = 0
     measurements_with_limits = 0
@@ -10905,11 +10906,10 @@ def _build_coverage(
 ) -> dict[str, Any]:
     """Common checked-work v1 plus the existing simulation coverage counters.
 
-    ``capture_only`` (issue #3158) is the request's declared intent to
-    capture waveforms with no measurements: each corner that ran clean then
-    counts its capture as the checked work, and ``capture_only: true`` is
-    recorded on the block. A corner that did not pass stays a skip, so a run
-    failure is never waived.
+    ``capture_only`` (issue #3158) is the request's declared intent to capture waveforms
+    with no measurements: each corner that ran clean then counts its capture as the
+    checked work, and ``capture_only: true`` is recorded on the block. A corner that did
+    not pass stays a skip, so a run failure is never waived.
     """
     limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
         measurements_spec
@@ -10925,13 +10925,14 @@ def _build_coverage(
             )
             checked.extend(corner_checked)
             skipped.extend(corner_skipped)
-        for spec in measurements_spec:
+        for spec in sim_derive.per_corner_measurements(measurements_spec):
             actual, missing, irrelevant = _measurement_coverage(
                 spec, corner, corner_index
             )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)
+    _attach_derive_coverage(measurements_spec, corners, checked, skipped, inapplicable)
     reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
@@ -11401,17 +11402,15 @@ def _rollup_measurements(
     both of which outrank it); without a declared ``k_sigma`` nothing about
     the existing rollup changes.
 
-    A corner graded ``inconclusive`` contributes ``inconclusive`` to the
-    aggregate regardless of what its own measurement-vs-``limits``
-    comparison said -- so one distrusted corner masks a concurrent clean
-    ``fail`` at *this* aggregate, exactly as one errored corner already
-    does. That is deliberate (the aggregate reports the strongest claim
-    about trustworthiness, not the union of every corner's verdict);
-    ``corners[]`` and the top-level ``failed``/``inconclusive`` counts retain
-    the per-corner detail. ``worst_case`` still scans every corner,
-    distrusted ones included: it is a pointer to the corner worth looking
-    at, and hiding the worst margin would make an inconclusive rollup harder
-    to debug, not easier.
+    A corner graded ``inconclusive`` contributes ``inconclusive`` to the aggregate
+    regardless of what its own measurement-vs-``limits`` comparison said -- so one
+    distrusted corner masks a concurrent clean ``fail`` at *this* aggregate, exactly as
+    one errored corner already does. That is deliberate (the aggregate reports the
+    strongest claim about trustworthiness, not the union of every corner's verdict);
+    ``corners[]`` and the top-level ``failed``/``inconclusive`` counts retain the
+    per-corner detail. ``worst_case`` still scans every corner, distrusted ones
+    included: it is a pointer to the corner worth looking at, and hiding the worst
+    margin would make an inconclusive rollup harder to debug, not easier.
     """
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
@@ -11445,6 +11444,7 @@ def _rollup_measurements(
             # Additive/optional (issue #2482): `step`/`derived_from` for an
             # `analysis_steps[]` measurement; nothing for any other one.
             **sim_steps.measurement_provenance(spec),
+            **sim_derive_rollup.rollup_fields(spec, corners),
         }
         plausible_range = spec.get("plausible_range")
         if plausible_range is not None:
