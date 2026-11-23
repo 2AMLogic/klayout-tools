@@ -25,6 +25,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   probe). Verbs hidden from `klt --help` are hidden here too; nested
   subcommands are not listed. `--format text`, `klt --version`, and
   `schema_version` are unchanged.
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
 
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
@@ -1277,7 +1279,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `foo.sim`, `sim_request.json` -> `sim_request`). `requests[].report` and
   `set-manifest.json`'s per-request `dir` are unchanged in shape and always
   name the directory actually written -- read them from the envelope rather
-  than re-deriving the path. **Migration:** a set started on 0.9.2 or
+  than re-deriving the path. Consumers spanning 0.9.2 and later can resolve
+  each member report through `set-manifest.json`’s `requests[].dir`, written
+  since 0.8.0. **Migration:** a set started on 0.9.2 or
   earlier and resumed with the new version finds no `batch-shards.json` in
   the renamed directory and re-runs every member from scratch; move the old
   directory first (`mv <outdir>/<stem>.request <outdir>/<stem>`) to resume
