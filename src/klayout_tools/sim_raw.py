@@ -281,14 +281,15 @@ def _open_ascii_rawfile(
 
 
 def _parse_and_persist_waveform(raw_path: str, decimate: int | None = None) -> str:
-    """Parse the rawfile at ``raw_path`` to the waveform JSON shape and write
-    it alongside as ``<raw_path>.json``, returning that path.
+    """Write the waveform JSON alongside the rawfile and return its path."""
+    path, _ = persist_waveform_with_header(raw_path, decimate)
+    return path
 
-    Kept as its own step (rather than inlining waveform data into the
-    response) so the JSON contract's own response never grows to
-    waveform-shaped size -- per the spike, waveform data is an optional
-    *artifact*, referenced by path, not inlined.
-    """
+
+def persist_waveform_with_header(
+    raw_path: str, decimate: int | None
+) -> tuple[str, dict[str, Any]]:
+    """Stream the waveform JSON and return its path and parsed header."""
     json_path = raw_path + ".json"
     # Streamed point by point (issue #3360) so peak memory does not scale with
     # the rawfile; the output is byte-identical to `json.dump` of the dict
@@ -306,4 +307,4 @@ def _parse_and_persist_waveform(raw_path: str, decimate: int | None = None) -> s
         with contextlib.suppress(OSError):
             os.remove(json_path)
         raise
-    return json_path
+    return json_path, {"plotname": plotname, "variables": variables}

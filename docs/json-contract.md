@@ -2433,6 +2433,14 @@ and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
 
+For `--engine klayout`, optional `violations[].values` contains the
+verbatim XML character data of each non-geometry RDB value in document
+order, including any tag such as `[#RATIO]`. Only findings with such
+values carry the field. `--engine both` retains it in
+`reports.native.violations[]`. `--check --rerun` compares the strings.
+They provide evidence only and do not affect the coverage verdict,
+`coverage_unknown`, or `--expect-rule-categories`.
+
 **Deck stdout as additive evidence** (issue #6613): every `--engine
 klayout` DRC report carries a top-level `deck_output` object —
 `{"stdout": <str>, "truncated": <bool>, "line_count": <int>}` — holding
