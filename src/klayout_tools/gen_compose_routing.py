@@ -3371,10 +3371,10 @@ def _same_block_cross_layer_retry(
         if lane_conflict is None:
             return retry
     return _unroutable(
-        conflict.reason + " -- a bounded same-block cross-layer detour "
-        f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
-        "looped clear of the block's own bbox) was tried first, and "
-        "each one still conflicted",
+        conflict.reason + f" -- a bounded same-block cross-layer detour ({len(lanes)}"
+        f" alternate lane{'' if len(lanes) == 1 else 's'} looped clear of the block's "
+        "own bbox) was tried first, and each one still conflicted; for a higher plane,"
+        " name connectivity[].legs[].layer_role or legs[].waypoints_um (issue #7003)",
         blocking_net=conflict.blocking_net,
     )
 
