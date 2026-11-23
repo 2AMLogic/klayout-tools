@@ -493,6 +493,30 @@ def test_repin_with_grading_pin_refuses_before_reading_manifest(tmp_path):
     assert not manifest.exists()
 
 
+@pytest.mark.parametrize("pin", ["current", "sha256:" + "0" * 64, "malformed"])
+def test_diff_reports_rejects_grading_pin_before_reading_reports(tmp_path, pin):
+    if pin == "current":
+        pin = grading_ruleset_id()
+    rc, out, err = _run(
+        [
+            "signoff",
+            "--diff-reports",
+            str(tmp_path / "old"),
+            str(tmp_path / "new"),
+            "--require-grading-ruleset",
+            pin,
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 2
+    assert out == ""
+    assert (
+        "--diff-reports cannot be combined with --require-grading-ruleset"
+        in _error_message(err)
+    )
+
+
 def test_flag_is_registered_on_the_parser(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["signoff", "--help"])
