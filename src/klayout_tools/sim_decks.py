@@ -62,11 +62,9 @@ or image selection) raises before any upload, SSH push, or fleet launch --
 the same "refuse before anything billable" discipline the corner backends
 apply.
 
-Dependency surface mirrors ``sim_remote.py``/``sim_batch.py``: ``sim.py``
-imports this module's entry point, while this module's need for
-``sim.SimError`` (and the couple of other ``sim`` helpers it reuses) is
-imported *inside* the functions that use them, so there is no load-time
-cycle. Tests patch ``RemoteLauncher`` and the ``remote_transport``/
+``sim.py`` imports this module's entry point. The shared ``SimError`` comes
+from ``sim_errors``. Functions import the remaining ``sim`` helpers when called.
+Tests patch ``RemoteLauncher`` and the ``remote_transport``/
 ``sim_batch`` call sites by this module's namespace, the same way
 ``tests/test_sim.py`` patches ``sim.RemoteLauncher``.
 """
@@ -97,6 +95,7 @@ from . import (
 )
 from ._jsonnum import is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
+from .sim_errors import SimError
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -212,8 +211,6 @@ def _validated_timeout(value: Any, where: str) -> float:
 
 
 def _deck_error(message: str):
-    from .sim import SimError
-
     return SimError(message)
 
 
@@ -592,8 +589,6 @@ def _scan_deck_closure(
     ngspice will on the worker. Bounded by ``sim_staging``'s per-closure
     file/byte caps.
     """
-    from .sim import SimError
-
     includes: list[dict[str, Any]] = []
     host_resolved: list[str] = []
     seen: set[tuple[str, str]] = set()
@@ -655,8 +650,6 @@ def _scan_deck_closure(
 
 
 def _read_closure_file(path: str, *, where: str) -> bytes:
-    from .sim import SimError
-
     try:
         with open(path, "rb") as handle:
             return handle.read()
@@ -680,8 +673,6 @@ def _classify_include_target(
     PDK-rooted). Anything that would need the deck rewritten -- an absolute
     local path, a ``..``-climbing relative, a file that resolves nowhere --
     raises ``SimError`` naming the directive site."""
-    from .sim import SimError
-
     if not target or "$" in target:
         return None, target
     expanded = os.path.expanduser(target)
@@ -1369,8 +1360,6 @@ def _require_remote_config(request: dict[str, Any]) -> tuple[Any, str]:
     (``models.pdk`` selects the baked AMI; ``remote.ssh_key_path`` pairs
     with ``remote.key_name``) -- same messages, so a deck request missing
     them fails exactly like a corner request would."""
-    from .sim import SimError
-
     remote_spec = request.get("remote") or {}
     pdk = (request.get("models") or {}).get("pdk")
     if not pdk:
@@ -1446,7 +1435,6 @@ def _run_decks_remote(
     ``RemoteLauncher``'s context-manager contract, exactly as for corners.
     """
     from .remote_launcher import RemoteLaunchError
-    from .sim import SimError
 
     remote_spec = request.get("remote") or {}
     pdk, ssh_key_path = _require_remote_config(request)
@@ -1939,8 +1927,6 @@ def _run_decks_batch(
     its report -- the batch analog of :func:`_run_decks_remote`, reusing
     the batch transport primitives (submit/launch/poll/collect and the
     runner-identity preflight) exactly as the corner backend does."""
-    from .sim import SimError
-
     config, spec = _prepare_decks_batch(request, files, worker_request)
     job_id = sim_batch.new_job_id()
     try:
@@ -1961,8 +1947,6 @@ def _submit_decks_batch_only(
     """``--submit-only`` for a deck list (issue #3958): upload and launch the
     one deck job and return its identity without polling or collecting.
     ``job_ceiling`` is ``None`` -- the deck path does not assess one."""
-    from .sim import SimError
-
     try:
         config, spec = _prepare_decks_batch(request, files, worker_request)
     except sim_batch.BatchError as exc:
@@ -2002,7 +1986,7 @@ def _deck_dry_run_report(
     a report of the planned units. Nothing is spawned, submitted or
     written. ``plan_deck_units`` (already run by the caller) covers deck,
     input and include existence on every backend."""
-    from .sim import SCHEMA_VERSION, SimError
+    from .sim import SCHEMA_VERSION
 
     staged: list[sim_staging.StagedFile] = []
     if backend in ("remote", "batch"):
@@ -2175,7 +2159,6 @@ def run_deck_request(
     """
     from . import sim_decks_resume
     from .sim import (
-        SimError,
         _resolve_max_workers,
         _resolve_ngspice_binary,
         _validate_ngspice_init,

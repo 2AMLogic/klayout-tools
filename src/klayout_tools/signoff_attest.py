@@ -30,7 +30,9 @@ and 10"):
   numeric field of a cited envelope for every declared corner. A committed
   record produced outside klt is citable through ``external_records``
   (issue #6939), and a metric binding may declare a ``reciprocal``
-  transform (a period binds its frequency). Item 8 stays
+  transform (a period binds its frequency). A required metric nobody
+  measured is declared in ``unmeasured_metrics`` (issue #7259) and
+  disclosed as a passing check, not hidden. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
 - **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
@@ -152,17 +154,7 @@ _ITEM_KEYS: dict[int, frozenset[str]] = {
     # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
     # generator's input files (``inputs``, #5724); the stream is the ``--input``.
     2: frozenset({"checks", "inputs"}),
-    8: frozenset(
-        {
-            "report",
-            "spec_rows",
-            "citations",
-            "envelope_checks",
-            "external_records",
-            "corners",
-            "metrics",
-        }
-    ),
+    8: item8.ITEM8_KEYS,
     9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
 }
@@ -444,9 +436,10 @@ def _validated_characterization(
 ) -> dict[str, Any]:
     """Item 8's structure (issue #4311): the report path, the declared spec
     rows, row -> cited-envelope paths, a freshness command per cited envelope,
-    and (digital) the corner set with the metric bindings. A row with no
-    citation, or a missing metric, is a *failed check*, not a malformed
-    inventory -- the inventory is well-formed, the evidence is incomplete."""
+    and (digital) the corner set with the metric bindings and any declared
+    unmeasured pairs (issue #7259). A row with no citation, or a missing
+    metric nobody declared, is a *failed check*, not a malformed inventory --
+    the inventory is well-formed, the evidence is incomplete."""
     if "report" not in inventory:
         raise AttestationError(
             "item 8 inventory must declare 'report' -- the aggregated "
@@ -465,6 +458,9 @@ def _validated_characterization(
     corners, metrics = item8.validated_metrics(
         inventory, root, AttestationError, _normalize_repo_path, _REQUIRED_METRICS
     )
+    unmeasured = item8.validated_unmeasured_metrics(
+        inventory, corners, metrics, AttestationError, _REQUIRED_METRICS
+    )
     external_records = item8.validated_external_records(
         inventory, cited, root, AttestationError, _normalize_repo_path
     )
@@ -476,6 +472,7 @@ def _validated_characterization(
         "external_records": external_records,
         "corners": corners,
         "metrics": metrics,
+        "unmeasured_metrics": unmeasured,
     }
 
 
