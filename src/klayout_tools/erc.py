@@ -53,6 +53,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
+from ._layout import ActiveIndex as _ActiveIndex
 from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -78,6 +79,7 @@ from .decks import (
     deck_source_path,
 )
 from .decks import get_extraction_deck as _get_extraction_deck
+from .erc_antenna_names import match_antenna_layers
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
     _disclosed_undeclared_classes,
@@ -87,6 +89,7 @@ from .erc_disclosure import (
     floating_gate_work,
     validate_floating_gate_allowed,
 )
+from .erc_keepouts import KeepoutOutcome, evaluate_keepouts, parse_keepouts
 from .erc_spec import (
     _SPEC_KEYS,
     ErcError,
@@ -568,6 +571,7 @@ def _connectivity_coverage(
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
     substrate: SubstrateOutcome | None = None,
+    keepouts: KeepoutOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -710,7 +714,9 @@ def _connectivity_coverage(
     well_asserted = well_asserted_ties or set()
     # (issues #2965, #4820) Excused gates are disclosed (`inapplicable`), not checked.
     checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
-    skipped: list[dict[str, str]] = []
+    if keepouts is not None:
+        checked.extend(keepouts.checked)
+    skipped: list[dict[str, str]] = list(keepouts.skipped) if keepouts else []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
@@ -897,15 +903,13 @@ def _merge_antenna_limits(
     pdk_limits: dict[str, tuple[float, str]] | None,
     pdk: str | None,
     spec_limits: list[dict[str, Any]],
+    stackup_names: list[str],
 ) -> dict[str, tuple[float, str]] | None:
-    """Layer name -> ``(limit, antenna_ratio_source)`` for every graded level
-    (issue #4090): the ``--pdk`` table's entries, each overridden by the
-    spec's caller-supplied ``antenna_limits`` entry for the same layer.
-    ``None`` when neither supplies a limit, so a spec-less run is unchanged.
-    """
+    """Resolve PDK limits by stackup name, then apply the spec's overrides."""
     merged: dict[str, tuple[float, str]] = {}
     if pdk_limits is not None and pdk is not None:
-        for layer, (value, rule_id) in pdk_limits.items():
+        rules = match_antenna_layers(pdk_limits, stackup_names[1:], pdk)
+        for layer, (value, rule_id) in rules.items():
             merged[layer] = (
                 value,
                 f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
@@ -2285,37 +2289,6 @@ def _register_label_layer(
     l2n.connect(conductor_region, label_texts)
 
 
-class _ActiveIndex:
-    """Bbox-indexed copy of the whole-layout active region (issue #2751).
-
-    ``(net_poly & whole_active).merged()`` visits every active polygon in the
-    chip once per candidate net -- candidates x active polygons, quadratic in
-    design size. Here the active polygons are loaded once into a scratch
-    cell, and :meth:`intersect` pulls only those whose bounding box touches
-    the net's own poly bbox through the shape tree's spatial query before
-    intersecting. Active polygons outside that window cannot intersect the
-    net's poly, so the result is geometrically identical to the whole-layout
-    boolean (same merged polygons, same area, same ``gates[]``).
-    """
-
-    def __init__(self, active_region: Any) -> None:
-        import klayout.db as kdb
-
-        self._kdb = kdb
-        self._layout = kdb.Layout()
-        self._cell = self._layout.create_cell("ACTIVE")
-        self._layer = self._layout.layer(0, 0)
-        self._cell.shapes(self._layer).insert(active_region)
-
-    def intersect(self, poly_region: Any) -> Any:
-        if poly_region.is_empty():
-            return poly_region
-        local = self._kdb.Region(
-            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
-        )
-        return (poly_region & local).merged()
-
-
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -2325,6 +2298,7 @@ def _extract_connectivity(
     device_cuts: dict[str, Any],
     verb: str | None,
     label_layers: list[dict[str, Any]] | None = None,
+    allow_empty: bool = False,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -2542,7 +2516,7 @@ def _extract_connectivity(
         raise ErcError(f"connectivity extraction failed: {exc}") from exc
 
     circuit = l2n.netlist().circuit_by_name(top_cell.name)
-    if circuit is None:
+    if circuit is None and not allow_empty:
         raise ErcError(
             f"no circuit named '{top_cell.name}' in the extracted connectivity graph"
         )
@@ -2555,7 +2529,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     the two entry points cannot drift.
 
     Returns ``(spec, stackup, stackup_names, vias, nets_decl, ties,
-    ties_disclosure, devices, spec_antenna_limits)``; raises :class:`ErcError`
+    ties_disclosure, devices, spec_antenna_limits, keepouts)``; raises :class:`ErcError`
     on any defect.
     """
     spec = _load_spec_json(spec_path, ErcError)
@@ -2595,6 +2569,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ties_disclosure,
         devices,
         spec_antenna_limits,
+        parse_keepouts(spec, spec_path, stackup_names),
     )
 
 
@@ -2608,7 +2583,9 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
     :class:`ErcError` (with the same field-path message ``run_erc`` gives)
     for a missing/unreadable file or any malformed declaration.
     """
-    _, stackup, _, vias, nets_decl, ties, _, devices, _ = _parse_erc_spec(spec_path)
+    _, stackup, _, vias, nets_decl, ties, _, devices, _, keepouts = _parse_erc_spec(
+        spec_path
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "validate_spec",
@@ -2620,6 +2597,7 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
             "nets": len(nets_decl),
             "ties": len(ties),
             "devices": len(devices),
+            **({"keepouts": len(keepouts)} if keepouts is not None else {}),
         },
     }
 
@@ -2833,7 +2811,7 @@ def run_erc(
             "pass --findings-only for the erc_findings-only read, or --pdk "
             "for the antenna verdict, but not both"
         )
-    antenna_limits = _resolve_antenna_limits(pdk)
+    pdk_limits = _resolve_antenna_limits(pdk)
     deck_obj = _resolve_deck(deck)
 
     (
@@ -2845,10 +2823,11 @@ def run_erc(
         ties,
         ties_disclosure,
         devices,
-        spec_antenna_limits,
+        spec_limits,
+        keepouts,
     ) = _parse_erc_spec(spec_path)
     fg_allowed = validate_floating_gate_allowed(spec, spec_path)
-    antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
+    antenna_limits = _merge_antenna_limits(pdk_limits, pdk, spec_limits, stackup_names)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
@@ -2860,24 +2839,8 @@ def run_erc(
     top_cell = top_cells[0]
     dbu = layout.dbu
 
-    # Two graphs, deliberately (issue #2169). The *primary* graph carries
-    # only what the caller declared as real routing -- `stackup` + `vias` --
-    # and is the sole source of `gates[]`, the antenna-ratio model, and the
-    # `nets[]`-driven findings. The `ties[]` declarations are extracted
-    # separately below, so a mis-declared well/tap layer can no longer
-    # silently collapse `gates[]` (and with it every antenna ratio in the
-    # same report) or invent an `erc.supply_short` between two rails that
-    # are not actually shorted: with `ties` omitted or declared, these
-    # outputs are identical by construction, not merely by convention.
-    # `devices[]` (issue #2183): the declared device bodies, resolved once
-    # and subtracted from their own role in *both* graphs below -- a drawn
-    # resistor body is not a wire in the tie graph either. Empty (and so a
-    # no-op) whenever the spec declares no `devices`.
-    # `role_layers` (role name -> its declared `(layer, datatype)`) is what
-    # lets `_device_body_cuts` report the area each declaration *actually*
-    # subtracted -- `marker ∩ that role's own drawn region` -- rather than
-    # the marker layer's own area (issue #2226). `--deck` reuses the same
-    # map below for its exact-layer-equality matching rule.
+    # The antenna/net graph and the separate tie graph both subtract device
+    # bodies from their own role. Geometry keepouts inspect the raw role layers.
     role_layers = _conductor_role_layers(stackup, vias)
     device_cuts, devices_applied = _device_body_cuts(
         layout, top_cell, devices, role_layers, verb="klt erc"
@@ -2921,6 +2884,7 @@ def run_erc(
         device_cuts,
         verb="klt erc",
         label_layers=label_layers,
+        allow_empty=keepouts is not None and not nets_decl and not ties,
     )
 
     gate_role = stackup[0]["name"]
@@ -2953,8 +2917,9 @@ def run_erc(
     # `power_nets`, no name match is needed to find "a gate": any net whose
     # geometry touches the declared gate role qualifies. Sorted by
     # `cluster_id` for deterministic, reproducible output.
+    nets = circuit.each_net() if circuit is not None else ()
     candidates = sorted(
-        (net for net in circuit.each_net() if net.cluster_id != 0),
+        (net for net in nets if net.cluster_id != 0),
         key=lambda net: net.cluster_id,
     )
 
@@ -2970,6 +2935,7 @@ def run_erc(
     # directly off the connectivity graph on the `findings_only` one (issue
     # #2219). Same answer either way; see `_gate_is_floating`.
     gate_floating: list[bool] = []
+    gf180_violations: list[tuple[dict[str, Any], Any]] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -2979,10 +2945,11 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if active_index is not None:
-            gate_area_region = active_index.intersect(gate_poly_region)
-        else:
-            gate_area_region = gate_poly_region
+        gate_area_region = (
+            active_index.intersect(gate_poly_region)
+            if active_index
+            else gate_poly_region
+        )
         gate_area_um2 = gate_area_region.area() * dbu2_um2
         if gate_area_um2 <= 0:
             continue
@@ -3021,12 +2988,18 @@ def run_erc(
         )
         gate_regions.append(gate_poly_region)
         gate_floating.append(is_floating)
+        if pdk == "gf180mcu" and gates[-1]["antenna_verdict"] == "violate":
+            gf180_violations.append((gates[-1], net))
+
+    _gf180.annotate_contacted_diffusion(
+        gf180_violations, layout, top_cell, stackup, vias, active_region, l2n
+    )
 
     # (issue #2896) A passive-only cell (poly resistors, MoM/MiM caps, no
     # transistor) has no gates by construction, but its declared supplies and
     # ties are still worth checking. Zero gates is an error only when the
     # spec asks for nothing but antenna work.
-    if not gates and not nets_decl and not ties:
+    if not gates and not nets_decl and not ties and keepouts is None:
         raise ErcError(
             f"no net in '{file}' has any geometry on the declared gate role "
             f"{gate_role!r} (stackup[0], layer {stackup[0]['layer'][0]}/"
@@ -3039,7 +3012,8 @@ def run_erc(
 
     # ERC finding checks (issue #861, Phase 1c) -- see this module's
     # docstring, "ERC finding checks", for what each rule detects.
-    erc_findings: list[dict[str, Any]] = []
+    keepout_outcome = evaluate_keepouts(layout, top_cell, role_layers, keepouts)
+    erc_findings = list(keepout_outcome.findings)
     floating = list(zip(gates, gate_regions, gate_floating, strict=True))
     excused, fg_echo = excuse_floating_gates(floating, fg_allowed, dbu, _bbox_dict)
     erc_findings.extend(_floating_gate_findings(floating, gate_role, excused))
@@ -3210,6 +3184,7 @@ def run_erc(
         compact,
         excused,
         substrate_outcome,
+        keepout_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)

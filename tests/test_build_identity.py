@@ -424,7 +424,7 @@ def test_version_report_shape():
 def test_cli_version_json(capsys):
     assert main(["version", "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload == build_identity.version_report()
+    assert payload.pop("commands") and payload == build_identity.version_report()
 
 
 def test_cli_version_text(capsys):

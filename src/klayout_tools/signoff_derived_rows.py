@@ -72,6 +72,7 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
 )
+from .signoff_justified_gap import justified_gap_entries, structural_row_entries
 from .signoff_row_extent import row_credits
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
@@ -175,17 +176,22 @@ def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] |
     )
 
 
+def _limit_keys(limits: Any) -> list[str]:
+    """Return the non-null bounds the simulation producer recognises."""
+    if not isinstance(limits, dict):
+        return []
+    return [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
+
+
 def _bounds_checked(
     measurement: dict[str, Any],
     corners: Any,
     record: tuple[set[str], set[str]] | None,
 ) -> bool:
     """Confirm each declared bound for each reported corner using its full work ID."""
-    name, limits = measurement.get("name"), measurement.get("limits")
-    if not isinstance(name, str) or not name or not isinstance(limits, dict):
-        return False
-    keys = [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
-    if not keys:
+    name = measurement.get("name")
+    keys = _limit_keys(measurement.get("limits"))
+    if not isinstance(name, str) or not name or not keys:
         return False
     if record is None:
         return True
@@ -242,8 +248,8 @@ def envelope_tagged_rows(
 ) -> tuple[bool, set[str]]:
     """Return whether the envelope has tagged measurements and which rows they cover.
 
-    A passing measurement with limits credits its tagged row. A failed sim
-    citation also needs evidence that every bound was checked at every corner
+    A passing measurement with a non-null min or max credits its tagged row.
+    A failed sim citation also needs evidence of checks for every bound and corner
     (#6027). Only a yield citation can credit a ``reported`` measurement,
     and only for an unratified row (#5490).
     """
@@ -257,14 +263,12 @@ def envelope_tagged_rows(
     covering = {
         m["spec_row"]
         for m in tagged
-        if m.get("limits")
-        and (
-            m.get("status") == "pass"
-            or (
-                kind == "yield"
-                and m.get("status") == "reported"
-                and m["spec_row"] in unratified
-            )
+        if (m.get("status") == "pass" and _limit_keys(m.get("limits")))
+        or (
+            kind == "yield"
+            and m.get("status") == "reported"
+            and m.get("limits")
+            and m["spec_row"] in unratified
         )
     }
     return bool(tagged), covering
@@ -434,6 +438,13 @@ def multi_row_info(
     justified row is declared, keeping a free-text-only report
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
+
+    Issue #6985: a row carrying the ``structural`` disposition is listed
+    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
+    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
+    covered nor a gap: its claim is evidenced by inspecting the pinned
+    artifact, not by a measurement). The key is omitted when no structural
+    row is declared, keeping a disposition-free report byte-identical.
     """
     if spec_rows is None:
         return {}
@@ -441,16 +452,8 @@ def multi_row_info(
     failed_rows = sorted(
         {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
     )
-    justified = [
-        {
-            "id": row["id"],
-            "reason": row["justified_gap"]["reason"],
-            "rationale": dict(row["justified_gap"]["rationale"]),
-            "issue": row["justified_gap"].get("issue"),
-        }
-        for row in spec_rows
-        if row["justified_gap"] is not None
-    ]
+    justified = justified_gap_entries(spec_rows)
+    structural = structural_row_entries(spec_rows)
     return {
         "failed_rows": failed_rows,
         "uncovered_rows": [
@@ -458,6 +461,7 @@ def multi_row_info(
             for row in spec_rows
             if row["gap"] is None
             and row["justified_gap"] is None
+            and row.get("structural") is None
             and row["id"] not in row_sources
             and row["id"] not in failed_rows
         ],
@@ -467,11 +471,13 @@ def multi_row_info(
             if row["gap"] is not None
         ],
         **({"justified_gaps": justified} if justified else {}),
+        **({"structural_rows": structural} if structural else {}),
         "unratified_rows": [
             row["id"]
             for row in spec_rows
             if row["gap"] is None
             and row["justified_gap"] is None
+            and row.get("structural") is None
             and not row["ratified"]
         ],
         **({"row_slices": slices} if slices else {}),

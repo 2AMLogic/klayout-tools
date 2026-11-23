@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_base import GenError
 from .gen_spec import _GeneratorSpec
 
 ASAP7_DBU_UM = 0.00025
@@ -186,8 +187,6 @@ def all_boxes(info: dict[str, Any]) -> list[tuple[str, Box]]:
 
 
 def asap7_finfet_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     problems = validate_finfet_params(
         params["device"], params["nfin"], params["nf"], params["vt"]
     )
@@ -200,7 +199,6 @@ def asap7_finfet_layer_params(
 ) -> dict[str, Any]:
     """No hidden layer params (ASAP7 layers are fixed in
     :data:`ASAP7_LAYERS`); only gates the PDK family."""
-    from .gen import GenError
     from .pdk_families import pdk_variant_family
 
     if pdk_variant_family(pdk_info["variant"]) != "asap7":
