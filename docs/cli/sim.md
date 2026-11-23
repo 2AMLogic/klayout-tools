@@ -5348,7 +5348,8 @@ combined supply current between 3 and 17 microseconds and grades it in amps.
 
 The supported reductions are `min`, `max`, `avg`, `rms`, and `pp`
 (peak-to-peak). Both bounds are required. Use seconds or SPICE literals and
-a start earlier than the end. The expression must fit on one line and cannot
+a start earlier than the end. Both bounds must fall within the transient analysis
+interval, including its endpoints. The expression must fit on one line and cannot
 contain quotes or braces. A windowed entry takes exactly one measurement form.
 Use it with a scalar transient analysis. Xyce and `analysis_steps[]` refuse it.
 

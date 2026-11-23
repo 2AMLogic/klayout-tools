@@ -8,7 +8,7 @@ from typing import Any
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_measurement_kind import require_analysis_kind
-from .sim_window import window_bound
+from .sim_window import validate_window_inside_tran, window_bound
 
 _KEYS = {"reduce", "of", "from", "to"}
 _REDUCTIONS = ("min", "max", "avg", "rms", "pp")
@@ -109,11 +109,14 @@ def expand_windowed(request: dict[str, Any]) -> dict[str, Any]:
             spec["spice"] = card
         measurements.append(spec)
     analysis = request.get("analysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
     require_analysis_kind(
         entries,
-        analysis if isinstance(analysis, dict) else {},
+        analysis,
         form="windowed",
         required="tran",
         explanation="reduces a transient expression",
     )
+    validate_window_inside_tran(entries, analysis, form="windowed")
     return {**request, "measurements": measurements}

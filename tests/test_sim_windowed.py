@@ -79,6 +79,21 @@ def test_numeric_seconds():
     assert card.endswith("FROM=0 TO=1e-05")
 
 
+@pytest.mark.parametrize(
+    "start,end,bound",
+    [("20u", "30u", "from"), ("7u", "11u", "to"), ("1u", "9u", "from")],
+)
+def test_refuse_window_outside_transient_before_dispatch(tmp_path, start, end, bound):
+    request = _request(**{"from": start, "to": end})
+    request["analysis"]["args"] = "10n 10u 2u"
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(request))
+    with pytest.raises(
+        sim.SimError, match=rf"windowed\.{bound} .*outside the transient"
+    ):
+        sim.load_request(str(path))
+
+
 @pytest.mark.parametrize("context", ["ac", "xyce", "steps", "inside_step", "spice"])
 def test_refusal_through_public_request_loader(tmp_path, context):
     request = _request()
@@ -106,8 +121,7 @@ def test_forwarded_batch_request_only_carries_the_plain_card(tmp_path, monkeypat
     tb._install_fake_batch_transport(monkeypatch, runner=runner)
     uploaded = tb._capture_uploads(monkeypatch, runner)
     (tmp_path / "body.spice").write_text("V1 in 0 1\nR1 in 0 1k\n")
-    request = tb._batch_request(tmp_path)
-    request["measurements"] = _request()["measurements"]
+    request = tb._batch_request(tmp_path, **_request())
     path = tmp_path / "request.json"
     path.write_text(json.dumps(request))
     sim.run_sim(str(path))
