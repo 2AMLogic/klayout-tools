@@ -300,6 +300,16 @@ from ._sta_clock_uncertainty import (
 from ._sta_clock_uncertainty import (
     validate_clock_uncertainty as _validate_clock_uncertainty,
 )
+from ._sta_io_delay_clock import IoDelayMap
+from ._sta_io_delay_clock import (
+    check_port_delay_key as _check_port_delay_key,
+)
+from ._sta_io_delay_clock import (
+    entry_clock as _entry_clock,
+)
+from ._sta_io_delay_clock import (
+    validate_port_delay_maps as _validate_delay_maps,
+)
 from ._sta_period_maps import (
     check_period_maps,
     clock_period_for_corner,
@@ -655,8 +665,14 @@ def run_sta(
     ) = _validate_constraints(request["constraints"])
     clock_extras = _validate_clock_extras(request["constraints"])
     check_period_maps(clock_period_ns, clock_extras, clock_port, requested_corners)
+    # Issue #7399: an entry-level `clock` may name any declared clock -- the
+    # primary plus every secondary `constraints.clocks` port.
+    declared_clocks = {clock_port}
+    declared_clocks.update(
+        clock["port"] for clock in (clock_extras or {}).get("clocks", [])
+    )
     input_delays, output_delays = _validate_port_delay_maps(
-        request["constraints"], clock_port
+        request["constraints"], clock_port, declared_clocks
     )
     input_transition_ns, input_transitions = _validate_input_transitions(
         request["constraints"], clock_port
@@ -940,8 +956,8 @@ class _StaConstraints:
 
     input_delay_ns: float | None
     output_delay_ns: float | None
-    input_delays: dict[str, dict[str, float]] | None
-    output_delays: dict[str, dict[str, float]] | None
+    input_delays: IoDelayMap | None
+    output_delays: IoDelayMap | None
     input_transition_ns: float | None
     input_transitions: dict[str, float] | None
     boundary: dict[str, Any] | None
@@ -2313,114 +2329,17 @@ def _validate_transition_value(value: Any, field: str) -> float | None:
 
 
 def _validate_port_delay_maps(
-    constraints: dict[str, Any], clock_port: str
-) -> tuple[dict[str, dict[str, float]] | None, dict[str, dict[str, float]] | None]:
+    constraints: dict[str, Any],
+    clock_port: str,
+    declared_clocks: set[str] | None = None,
+) -> tuple[IoDelayMap | None, IoDelayMap | None]:
     """``constraints.input_delays``/``.output_delays`` (issue #2740):
-    optional per-port, per-bound I/O delay maps. Returns ``(input_delays,
-    output_delays)``, each ``None`` when the field is omitted *or* empty
-    (an empty map constrains nothing, so it reproduces the scalar-only
-    generated Tcl byte-for-byte).
-
-    Each map is ``{"<literal port name>": {"min_ns": n, "max_ns": n}}``
-    with both bounds independently optional but at least one required. A
-    supplied bound is never copied to the other side: an entry with only
-    ``min_ns`` constrains only the min (hold-side) arrival of that port, and
-    its max side stays unconstrained -- the scalar default does **not**
-    fill it in, because an explicit entry replaces the scalar default for
-    that port entirely.
-
-    Unlike the legacy scalars (non-negative), per-port bounds may be
-    negative (a boundary reference point can legitimately sit after the
-    launching edge); they must still be finite, non-boolean numbers, and
-    ``min_ns <= max_ns`` when both are given.
-
-    Keys are literal port (or single bus-bit) names -- never Tcl, never a
-    wildcard pattern. Existence and direction can only be checked against
-    the loaded design, so they are verified inside the engine session
-    (:func:`_port_check_lines`); the clock port is rejected here, since
-    ``constraints.clock_port`` already names it.
-    """
-    return (
-        _validate_port_delay_map(constraints, "input", clock_port),
-        _validate_port_delay_map(constraints, "output", clock_port),
-    )
-
-
-def _validate_port_delay_map(
-    constraints: dict[str, Any], which: str, clock_port: str
-) -> dict[str, dict[str, float]] | None:
-    """Validate one of ``constraints.{input,output}_delays`` (see
-    :func:`_validate_port_delay_maps`)."""
-    field = f"request.constraints.{which}_delays"
-    value = constraints.get(f"{which}_delays")
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise PostRouteStaError(
-            f"{field} must be a JSON object mapping port names to "
-            '{"min_ns": ..., "max_ns": ...} entries'
-        )
-    parsed: dict[str, dict[str, float]] = {}
-    for port, entry in value.items():
-        _check_port_delay_key(field, which, port, clock_port)
-        parsed[port] = _parse_port_delay_entry(field, port, entry)
-    return parsed or None
-
-
-def _check_port_delay_key(field: str, which: str, port: str, clock_port: str) -> None:
-    """Reject a malformed port-name key of an I/O delay map."""
-    if not port or port != port.strip():
-        raise PostRouteStaError(
-            f"{field} keys must be non-empty port names without "
-            f"leading/trailing whitespace (got {port!r})"
-        )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-        raise PostRouteStaError(f"{field} key {port!r} contains a control character")
-    if which == "input" and port == clock_port:
-        raise PostRouteStaError(
-            f"{field} must not name the clock port {port!r} -- "
-            "clock inputs are excluded from input delays"
-        )
-
-
-def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, float]:
-    """Validate one ``{"min_ns": n, "max_ns": n}`` entry of an I/O delay map."""
-    if not isinstance(entry, dict):
-        raise PostRouteStaError(
-            f"{field}[{port!r}] must be a JSON object with 'min_ns' and/or 'max_ns'"
-        )
-    unknown = sorted(set(entry) - {"min_ns", "max_ns"})
-    if unknown:
-        raise PostRouteStaError(
-            f"{field}[{port!r}] has unknown key(s) "
-            + ", ".join(repr(k) for k in unknown)
-            + " -- only 'min_ns' and 'max_ns' are accepted"
-        )
-    if not entry:
-        raise PostRouteStaError(
-            f"{field}[{port!r}] is empty -- give 'min_ns', 'max_ns', or both"
-        )
-    bounds: dict[str, float] = {}
-    for bound in ("min_ns", "max_ns"):
-        if bound not in entry:
-            continue
-        bound_value = entry[bound]
-        if not is_finite_number(bound_value):
-            raise PostRouteStaError(
-                f"{field}[{port!r}].{bound} must be a finite number "
-                f"(got {bound_value!r})"
-            )
-        bounds[bound] = float(bound_value)
-    if (
-        "min_ns" in bounds
-        and "max_ns" in bounds
-        and bounds["min_ns"] > bounds["max_ns"]
-    ):
-        raise PostRouteStaError(
-            f"{field}[{port!r}].min_ns ({bounds['min_ns']}) must not "
-            f"exceed max_ns ({bounds['max_ns']})"
-        )
-    return bounds
+    optional per-port, per-bound I/O delay maps -- validated by
+    :mod:`._sta_io_delay_clock`, which owns the entry rules (bounds, key
+    form, and issue #7399's optional per-entry ``clock`` naming a declared
+    clock; the primary clock when omitted, so a ``clock``-free request
+    parses identically)."""
+    return _validate_delay_maps(constraints, clock_port, declared_clocks)
 
 
 def _validate_report_ports(
@@ -2936,8 +2855,8 @@ def _request_io_delay_lines(
     clock_port: str,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
@@ -3001,8 +2920,8 @@ def _false_path_lines(false_path_from: list[str] | None) -> list[str]:
 
 
 def _port_check_lines(
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
     input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
@@ -3091,8 +3010,8 @@ def _port_io_delay_lines(
     clock_port: str,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
 ) -> list[str]:
     """Per-port ``set_input_delay``/``set_output_delay`` (issue #2740).
 
@@ -3108,6 +3027,10 @@ def _port_io_delay_lines(
     bits keep it. Mapped ports are fetched from ``$klt_ports_by_name``
     (built by :func:`_port_check_lines`, always emitted first) -- never
     re-looked-up by name through ``get_ports``.
+
+    Issue #7399: an entry naming a declared ``clock`` is emitted
+    ``-clock`` that clock instead of the primary (the scalar default and
+    every clock-less entry keep the primary).
     """
     lines: list[str] = []
     sides = (
@@ -3142,11 +3065,14 @@ def _port_io_delay_lines(
                 "}",
             ]
         for port, bounds in mapping.items():
+            # Issue #7399: an entry that names a declared `clock` is emitted
+            # relative to that clock (e.g. a strobe), not the primary.
+            port_clock = _entry_clock(bounds, clock_port)
             for bound, flag in (("min_ns", "-min"), ("max_ns", "-max")):
                 if bound in bounds:
                     lines.append(
                         f"{command} {flag} {bounds[bound]!r} "
-                        f"-clock {_tcl_literal(clock_port)} "
+                        f"-clock {_tcl_literal(port_clock)} "
                         f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
     return lines
@@ -3372,7 +3298,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     ``net_names`` uses the unescaped design spelling returned by
     :func:`_spef_net_names` and OpenSTA's ``get_full_name`` (issue #1422).
     The SPEF side counts every listed name found in the design. The design
-    side skips only proven driver-only nets and samples missing names (#6970)."""
+    side skips empty or driver-only internal nets and samples missing names."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -3590,8 +3516,8 @@ def _sta_script_lines(
     output_delay_ns: float | None = None,
     macro_lefs: list[str] | None = None,
     macro_liberty_paths: list[str] | None = None,
-    input_delays: dict[str, dict[str, float]] | None = None,
-    output_delays: dict[str, dict[str, float]] | None = None,
+    input_delays: IoDelayMap | None = None,
+    output_delays: IoDelayMap | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
@@ -3737,8 +3663,8 @@ def _sta_netlist_script_lines(
     output_delay_ns: float | None = None,
     macro_lefs: list[str] | None = None,
     macro_liberty_paths: list[str] | None = None,
-    input_delays: dict[str, dict[str, float]] | None = None,
-    output_delays: dict[str, dict[str, float]] | None = None,
+    input_delays: IoDelayMap | None = None,
+    output_delays: IoDelayMap | None = None,
     input_transition_ns: float | None = None,
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,

@@ -204,8 +204,12 @@ def test_an_unroutable_body_tie_is_reported_not_dropped(tmp_path, gf180mcu_pdk_r
     """The behaviour change this issue ships: a plan that exited 0 with its
     bodies silently untied can now exit 3, because the tie it gained is a real
     net the router has to reach. It is never dropped silently -- the net is in
-    `unrouted_nets[]` with a parsed reason."""
+    `unrouted_nets[]` with a parsed reason. Since #6912 the automatic climb
+    may well rescue the tie (the self-net pad-crossing and ring classes are
+    climbable now), so the same-plane verdict is pinned by naming the net's
+    own plane (`routing.nets[<net>].layer_role`, #1655 -- never climbed)."""
     request = _gf180mcu_amp_request(tmp_path, gf180mcu_pdk_root, add_guard_ring=True)
+    request.setdefault("routing", {})["nets"] = {"VDD": {"layer_role": "metal"}}
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
     assert "VDD" in response["unrouted_nets"]
