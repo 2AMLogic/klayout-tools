@@ -345,3 +345,79 @@ def test_environment_block_is_dropped_only_when_the_exclusions_empty_it():
         {"field": "environment", "committed": None, "fresh": {"engine_flag": "x"}}
     ]
     assert result["fresh"] == fresh  # the embedded fresh report is verbatim
+
+
+# --------------------------------------------------------------------------- #
+# --top replay (issue #7000): a scoped native report on a multi-top stream.
+# --------------------------------------------------------------------------- #
+
+
+def _scoped_multi_top_report(tmp_path, monkeypatch, capsys) -> tuple[Path, dict]:
+    """Run ``klt drc --engine klayout --top LV`` on a two-top stream and
+    return the report written to disk (repo-scoped input, so ``--rerun``
+    can locate it)."""
+    _stub_klayout(monkeypatch)
+    (tmp_path / ".git").mkdir()
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    for name in ("LV", "MV"):
+        layout.create_cell(name).shapes(layout.layer(1, 0)).insert(
+            kdb.Box(0, 0, 100, 1000)
+        )
+    gds = str(tmp_path / "multi.gds")
+    layout.write(gds)
+    deck = tmp_path / "deck.lydrc"
+    deck.write_text("# stub deck\n", encoding="utf-8")
+
+    argv = [
+        *("drc", gds, "--engine", "klayout", "--deck-file", str(deck)),
+        *("--top", "LV", "--expect-rule-categories", "2"),
+    ]
+    assert main([*argv, "--format", "json"]) == 0
+    text = capsys.readouterr().out
+    report_path = tmp_path / "scoped.json"
+    report_path.write_text(text, encoding="utf-8")
+    return report_path, json.loads(text)
+
+
+def test_scoped_native_report_records_the_requested_top(tmp_path, monkeypatch, capsys):
+    _, report = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
+
+    assert report["top"] == "LV"
+
+
+def test_unscoped_native_report_omits_the_top_field(tmp_path, monkeypatch, capsys):
+    _, report = _committed_report(tmp_path, monkeypatch, capsys)
+
+    assert "top" not in report
+
+
+def test_rerun_of_a_scoped_native_report_matches_on_a_multi_top_stream(
+    tmp_path, monkeypatch, capsys
+):
+    """The issue #7000 native case: before the recorded cell, the replay
+    passed ``top=None`` and the engine refused the two-top stream outright
+    (exit 1, ``multiple_top_cells``); replaying the recorded scope matches."""
+    report_path, _ = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
+
+    code, result = _rerun(report_path, capsys)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert code == 0
+    assert result["fresh"]["top"] == "LV"
+
+
+def test_rerun_of_a_topless_native_report_keeps_the_engine_default(
+    tmp_path, monkeypatch, capsys
+):
+    """A native report predating the field has no scope to replay, so the
+    rerun keeps the engine's default: a two-top stream is refused with the
+    standard error envelope, exactly as a fresh unscoped run is."""
+    report_path, _ = _scoped_multi_top_report(tmp_path, monkeypatch, capsys)
+    _rewrite(report_path, lambda r: r.pop("top"))
+
+    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    assert code == 1
+    assert "2 top cells" in capsys.readouterr().err

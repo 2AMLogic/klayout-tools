@@ -43,7 +43,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import env_provenance
+from . import drc_report_check, env_provenance
 from ._drc_edge_pair_hull import _edge_pair_hull_points
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
@@ -1234,6 +1234,8 @@ class _DrcSetup:
     # for a default run.
     tile: tuple[int, int] | None = None
     tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    # Issue #7000 (`--top`): the requested cell, recorded verbatim for replay.
+    top: str | None = None
 
 
 @dataclass
@@ -1475,6 +1477,7 @@ def _prepare_drc(
         stream_layer_tuples=stream_layer_tuples,
         tile=tile,
         tile_windows=tile_windows,
+        top=top,
     )
 
 
@@ -2144,6 +2147,8 @@ def _assemble_report(
             if setup.tile is None
             else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
         ),
+        # Issue #7000: `--top` runs only -- the cell `--check --rerun` replays.
+        **({} if setup.top is None else {"top": setup.top}),
     }
     report["provenance"] = build_provenance(
         deck_name=setup.deck_name,
@@ -2181,6 +2186,7 @@ def run_drc(
             "schema_version": 3,
             "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
+            "top": <cell name>,  # only when `top` is given (issue #7000)
             "dbu_um": <database unit in micrometres, float>,
             "status": "clean" | "clean_partial" | "violations" | "not_checked",
             "violation_count": <int>,
@@ -2394,7 +2400,9 @@ def run_drc(
     ``layers_report(path, top=top)`` -- to one named top cell, instead of
     every top cell in the stream (today's default, unchanged when omitted).
     A named cell absent from the stream is a :class:`DrcError`, matching
-    ``klt ring-check --top``.
+    ``klt ring-check --top``. A given ``top`` is recorded verbatim as the
+    top-level ``top`` field (issue #7000) for :func:`rerun_drc_report` to
+    replay; an unscoped run omits the field.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) resolve no rule content -- this curated engine's rules come
@@ -2604,18 +2612,6 @@ def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
     return parse_rule_selectors(selectors)
 
 
-def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
-    """The ``(columns, rows)`` a committed report's ``tile`` echo records
-    (issue #4226), or ``None`` for a report that carries none."""
-    recorded = committed.get("tile")
-    if not isinstance(recorded, dict):
-        return None
-    cols, rows = recorded.get("columns"), recorded.get("rows")
-    if isinstance(cols, int) and isinstance(rows, int):
-        return cols, rows
-    return None
-
-
 def rerun_drc_report(
     report_path: str, *, input_path: str | None = None, deck_path: str | None = None
 ) -> dict[str, Any]:
@@ -2628,13 +2624,14 @@ def rerun_drc_report(
     report itself names -- :func:`run_drc_klayout_engine` when
     ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
     engine) otherwise -- replaying a curated ``--rules`` subset's recorded
-    ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`).
-    **Known limitation**: neither the curated nor the
-    ``klayout`` engine's report records which ``--top`` (if any) the
-    original run used, so ``--rerun`` always re-checks every top cell
-    (``top=None``) -- a report originally scoped to one top cell via
-    ``--top`` will legitimately drift under ``--rerun`` if the stream has
-    others. Use ``--check`` (cheap mode) to avoid this if that matters.
+    ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`),
+    the recorded ``tile`` echo (issue #4226) and the recorded ``top`` cell
+    (issue #7000, :func:`klayout_tools.drc_report_check.recorded_top`) for
+    either engine. **Legacy limitation**: a report that records no ``top``
+    -- every report predating #7000, every unscoped run since -- keeps the
+    engine's default (all tops curated; single-top required for
+    ``klayout``), so a legacy scoped report on a multi-top stream
+    legitimately drifts; regenerating it acquires the name.
 
     Diffs the fresh report against the committed one via
     :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
@@ -2672,6 +2669,8 @@ def rerun_drc_report(
         raise DrcError(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
+    # Issue #7000: the recorded `--top` cell, replayed for either engine.
+    top = drc_report_check.recorded_top(committed, DrcError)
     if committed.get("engine") == "klayout":
         # Issue #5709: same resolver as --check (override, recorded, packaged).
         deck, missing = resolve_report_deck(committed, deck_path)
@@ -2693,7 +2692,7 @@ def rerun_drc_report(
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
-            top=None,
+            top=top,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             # Issue #2697: reproduce the original coverage assertion too,
             # or a committed `clean` would always drift to `coverage_unknown`.
@@ -2709,12 +2708,12 @@ def rerun_drc_report(
         fresh = run_drc(
             file_path,
             deck,
-            top=None,
+            top=top,
             rules=_recorded_rule_selectors(committed),
             # Issue #3483: replay the waivers the committed report applied.
             waivers_file=get_path(committed, ("provenance", "waivers", "file")),
             # Issue #4226: replay the abutment context the report was run in.
-            tile=_recorded_tile(committed),
+            tile=drc_report_check.recorded_tile(committed),
         )
 
     return drc_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
