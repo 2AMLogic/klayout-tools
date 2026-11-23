@@ -1,9 +1,7 @@
 """Runtime guard: ``*_errors`` leaves keep their orchestrator unloaded (#7299).
 
-The ``*_errors`` leaf modules (``sim_errors``, ``components_errors``,
-``equiv_errors``, ``post_route_sta_errors``; ``pex_errors`` arrives with
-#7263) exist so sibling helpers can raise a verb's exception at module
-scope without loading that verb's orchestrator (#7181, #7185, #7210,
+The ``*_errors`` leaf modules let sibling helpers raise a verb's exception
+at module scope without loading its orchestrator (#7181, #7185, #7210,
 #7217, #7220, #7224, #7247). ``scripts/check_import_boundaries.py`` is a
 static group-edge lint: every module here may already import the
 orchestrator, so re-adding a module-scope ``from .sim import SimError``
@@ -43,6 +41,7 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -103,43 +102,98 @@ def _leaf_class_names(path: Path) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
 
 
-def _discover_consumers(leaf: str, orchestrator: str) -> set[str]:
-    """Modules to probe for ``(leaf, orchestrator)``: rules (a) union (b).
+def _runtime_imports(node: ast.AST) -> Iterator[ast.ImportFrom]:
+    """Yield imports in executable module statements, including try/if suites."""
+    if isinstance(node, ast.ImportFrom):
+        yield node
+        return
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return
+    if isinstance(node, ast.If):
+        test = node.test
+        runtime_branch = node.orelse
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            test = test.operand
+            runtime_branch = node.body
+        if (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+            isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+        ):
+            for statement in runtime_branch:
+                yield from _runtime_imports(statement)
+            return
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case)):
+            yield from _runtime_imports(child)
 
-    Rule (a) walks the whole tree (any scope). Rule (b) reads direct
-    module-body statements only, so ``if TYPE_CHECKING:`` blocks and
-    function bodies are excluded by construction.
-    """
-    leaf_classes = _leaf_class_names(SRC_DIR / f"{leaf}.py")
-    consumers: set[str] = set()
-    for path in SRC_DIR.glob("*.py"):
-        module = path.stem
-        if module in (leaf, orchestrator):
-            continue
+
+def _discover_consumers(
+    directory: Path, pairs: list[tuple[str, str]]
+) -> dict[str, set[str]]:
+    """Discover all pairs in one pass over the package's source files."""
+    classes = {leaf: _leaf_class_names(directory / f"{leaf}.py") for leaf, _ in pairs}
+    consumers: dict[str, set[str]] = {leaf: set() for leaf in classes}
+    for path in directory.glob("*.py"):
         tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.level == 1
-                and node.module == leaf
-            ):
-                consumers.add(module)
-        for node in tree.body:
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.level == 1
-                and node.module == orchestrator
-            ):
-                names = {alias.name for alias in node.names}
-                if names and names <= leaf_classes:
-                    consumers.add(module)
+        leaf_imports = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.level == 1
+        }
+        runtime_names: dict[str, set[str]] = {}
+        for node in _runtime_imports(tree):
+            if node.level == 1 and node.module:
+                runtime_names.setdefault(node.module, set()).update(
+                    alias.name for alias in node.names
+                )
+        for leaf, orchestrator in pairs:
+            if path.stem in (leaf, orchestrator):
+                continue
+            names = runtime_names.get(orchestrator, set())
+            if leaf in leaf_imports or (names and names <= classes[leaf]):
+                consumers[leaf].add(path.stem)
     return consumers
 
 
+def test_consumer_discovery_respects_runtime_scope_and_all_imported_names(
+    tmp_path: Path,
+) -> None:
+    sources = {
+        "sim_errors": "class SimError(Exception): pass",
+        "sim": "from .sim_errors import SimError",
+        "single": "from .sim import SimError as Error",
+        "separate": "from .sim import SimError\nfrom .sim import run_sim",
+        "combined": "from .sim import SimError, run_sim",
+        "optional": (
+            "try:\n    from .sim import SimError\nexcept ImportError:\n    pass"
+        ),
+        "handler": "try:\n    pass\nexcept ImportError:\n    from .sim import SimError",
+        "nested": (
+            "if enabled:\n    if TYPE_CHECKING:\n        from .sim import SimError"
+        ),
+        "conditional": (
+            "if typing.TYPE_CHECKING:\n    from .sim import run_sim\n"
+            "else:\n    from .sim import SimError"
+        ),
+        "runtime": "if not TYPE_CHECKING:\n    from .sim import SimError",
+        "function": "def run():\n    from .sim import SimError",
+        "leaf_in_function": "def run():\n    from .sim_errors import SimError",
+    }
+    for module, source in sources.items():
+        (tmp_path / f"{module}.py").write_text(source)
+    assert _discover_consumers(tmp_path, [("sim_errors", "sim")]) == {
+        "sim_errors": {
+            "single",
+            "optional",
+            "handler",
+            "conditional",
+            "runtime",
+            "leaf_in_function",
+        }
+    }
+
+
 _LEAF_PAIRS = _leaf_pairs()
-_LEAF_CONSUMERS = {
-    leaf: _discover_consumers(leaf, orchestrator) for leaf, orchestrator in _LEAF_PAIRS
-}
+_LEAF_CONSUMERS = _discover_consumers(SRC_DIR, _LEAF_PAIRS)
 _CONSUMER_CASES = [
     pytest.param(leaf, orchestrator, consumer, id=f"{consumer}-{leaf}")
     for leaf, orchestrator in _LEAF_PAIRS
