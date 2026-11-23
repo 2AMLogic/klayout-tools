@@ -47,10 +47,11 @@ from .gen_compose_layer_rules import (
     _port_own_layer,
     _route_spacing_rule,
 )
+from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 
 #: Rejection-reason fragments a higher plane can lift. The #1895 far-side
 #: ("from behind") family and the block-interior crossings come from
-#: ``gen_compose_routing._obstacle_rejection_reason``; the two
+#: ``gen_compose_routing._obstacle_rejection_reason``; the three
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
 #: route-vs-route gate ``route_bundle()`` itself runs. Every other class
 #: (a too-narrow channel, a closed guard ring, an unresolvable via drop) is
@@ -62,6 +63,8 @@ _CLIMBABLE_REASON_MARKERS = (
     "still crossed a placed block",
     "crosses already-routed net",
     "overlaps already-routed net",
+    "shares a conductive edge with already-routed net",
+    "shares a conductive corner with already-routed net",
 )
 
 
@@ -128,8 +131,8 @@ class PlaneClimbContext(NamedTuple):
         from ``route_bundle()``: re-run the identical pin pair with the
         primary/cross layer roles swapped so every ``route_two_pin()`` check
         runs exactly as it would for a leg drawn on
-        ``cross_block_route_layer`` from the start, then re-gate the result
-        with ``leg_conflict``. One level of retry, no further fallback."""
+        ``cross_block_route_layer`` from the start. The caller checks the
+        returned candidate for an electrical conflict."""
         from .gen_compose_routing import route_two_pin
 
         if self.cross_block_route_layer is None or self.leg_conflict is None:
@@ -154,17 +157,7 @@ class PlaneClimbContext(NamedTuple):
             block_geometry_for=self.cross_block_geometry_for,
             grid_um=self.grid_um,
         )
-        if not retry["routed"]:
-            return None
-        retry_reason = self.leg_conflict(
-            retry["points_um"],
-            retry.get("via_drops", []),
-            retry.get("stub_widen", []),
-            retry.get("route_layer"),
-        )
-        if retry_reason is not None:
-            return None
-        return retry
+        return retry if retry["routed"] else None
 
     def planes_above(self) -> tuple[tuple[int, int], ...]:
         """The deck's own metals-stack planes strictly above this net's
@@ -190,16 +183,25 @@ class PlaneClimbContext(NamedTuple):
         width_um: float,
         cross_geometry: Any,
         result: dict[str, Any],
-        reason: str,
-    ) -> dict[str, Any] | None:
-        """Try the configured collision fallback, then eligible higher metals."""
+        conflict: RouteConflict,
+    ) -> tuple[dict[str, Any], RouteConflict | None]:
+        """Try configured and automatic planes, preserving any fallback diagnostic."""
         tried_cross = self.cross_block_route_layer == result.get("route_layer")
         if result["routed"] and self.leg_conflict is not None and not tried_cross:
             retry = self.retry_leg_on_cross_layer(i, j, cross_geometry, waypoints)
             if retry is not None:
-                return retry
+                fallback = _leg_conflict_reason(retry, self.leg_conflict)
+                if fallback is None:
+                    return retry, None
+                conflict = RouteConflict(
+                    f"{conflict.reason}; cross-block fallback {fallback.reason}",
+                    conflict.blocking_net or fallback.blocking_net,
+                )
             tried_cross = True
-        return self.climb_leg(i, j, waypoints, width_um, reason, tried_cross)
+        climbed = self.climb_leg(
+            i, j, waypoints, width_um, conflict.reason, tried_cross
+        )
+        return (climbed, None) if climbed is not None else (result, conflict)
 
     def climb_leg(
         self,

@@ -210,15 +210,8 @@ def test_sg13g2_extraction_deck_curated_device_families():
         "res_metal2",
     }
     assert EXTRACTION_DECK.device_classes == (
-        "nfet",
-        "pfet",
-        "cap_cmim",
-        "rfcmim",
-        "cap_cmomi",
-        "cap_cmomf",
-        "resistor",
-        "dantenna",
-        "dpantenna",
+        *("nfet", "pfet", "cap_cmim", "rfcmim", "cap_cmomi", "cap_cmomf"),
+        *("resistor", "dantenna", "dpantenna", "inductor"),
     )
 
 

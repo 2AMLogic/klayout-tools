@@ -76,17 +76,14 @@ def replay_prelude_kwargs(committed: dict, deck_file: str) -> dict:
             "recorded prelude requires the native gf180mcu 3LM family script"
         )
 
-    variant = get_path(committed, ("provenance", "pdk", "name"))
     return {
         "native_deck": native,
         "deck_vars": options,
         "min_klayout_version": native.get("min_klayout_version"),
-        "pdk_variant": variant,
-        "pdk_root": _replay_pdk_root(committed, deck_file, variant),
     }
 
 
-def _replay_pdk_root(
+def recorded_pdk_root(
     committed: dict, deck_file: str, variant: str | None
 ) -> str | None:
     """Recover an explicitly selected install, including one sharing its deck."""

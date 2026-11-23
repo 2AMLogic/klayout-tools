@@ -70,6 +70,9 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   deck's family in the root is recorded (never an unrelated family's), and a
   `--pdk`/`$PDK` of a different family, or a root with no variant of the
   deck's family, fails with a `DrcError` naming both families.
+  With `--check --rerun`, these flags select the PDK the fresh re-run
+  resolves into `provenance.pdk` (issue #6986) — see "Full mode (`--rerun`)"
+  below.
 - `--timeout-s` — wall-clock budget in seconds for the `klayout` subprocess
   (`--engine klayout` only; default `300`).
 - `--allow-deck-errors` — accept a *partial* report from a deck run
@@ -991,6 +994,17 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Measurements attached to a finding.** `violations[].values` lists the
+  non-geometry RDB item values in document order. For example, a deck that
+  runs `evaluate_nets` and calls `put('RATIO', ar)` can emit
+  `["[#RATIO] float: 16"]`. The strings preserve KLayout's tags and
+  formatting. A finding with only geometry omits the field. With
+  `--engine both`, look under `reports.native.violations[]`.
+  `--check --rerun` compares this ordered list. KLayout 0.30.12 can emit
+  multiple `put()` properties in different orders on repeated runs, so a
+  reorder alone can appear as drift. The deck supplies these strings
+  as evidence only. They have no effect on coverage, `coverage_unknown`,
+  or the meaning of `--expect-rule-categories`.
 - **Deck stdout as additive evidence (issue #6613).** Every `--engine
   klayout` run that produced a report carries the deck's own captured
   stdout in the additive top-level `deck_output` field:
@@ -4532,8 +4546,9 @@ klt drc --check design.drc.json --rerun           # full mode
 always read from `<report.json>` itself, and so is the input path unless you
 pass the positional `<file>` (below). `-o/--output`, `--waivers`, `--tile` and
 `--rules` are clean exit-1 errors (the report's own recorded values are
-replayed). The two honoured overrides are the positional `<file>` (input) and
-`--deck-file` (deck).
+replayed). The honoured overrides are the positional `<file>` (input),
+`--deck-file` (deck) and — full mode only — `--pdk`/`--pdk-root` (PDK
+selection, below).
 
 **Deck resolution order (issue #5709)**, shared by `--check`, `--check
 --rerun` and both sides of an `--engine both` report: (1) `--deck-file
@@ -4719,6 +4734,40 @@ Response shape:
 complete report `--rerun` just produced, so a consumer can inspect the
 current state without a second invocation.
 
+**PDK selection on the rerun (issue #6986).** A fresh run resolves
+`provenance.pdk` when `--pdk`/`--pdk-root` is given; `--rerun` used to
+rebuild its request with no PDK selection at all, so a report produced
+*with* a resolved PDK always drifted `provenance.pdk` with
+`fresh: null` — the sole drift entry even when every verdict-bearing field
+agreed. The rerun now resolves the PDK for its fresh run with this
+priority: the rerun invocation's own `--pdk`/`--pdk-root` flags first, then
+the variant name the committed report itself recorded
+(`provenance.pdk.name`) — with `--pdk-root`, `$PDK_ROOT` and the standard
+search locations handled by the same resolver a fresh run uses. `$PDK` is
+deliberately not a tier: a fresh run never resolves a PDK from `$PDK`
+alone (`provenance.pdk` stays `null`), so honouring it on the rerun would
+drift or fail a report that reproduces exactly. So the round trip closes:
+
+```
+# produce with the PDK resolved ...
+klt drc design.gds --deck gf180mcu --pdk gf180mcuD --pdk-root ~/pdks \
+    --format json > design.drc.json
+# ... and re-verify in full mode with the same flags (exit 0, "match")
+klt drc --check design.drc.json --rerun \
+    --pdk gf180mcuD --pdk-root ~/pdks --format json
+```
+
+A rerun with no flags still re-resolves the recorded variant when the
+install is discoverable (`$PDK_ROOT`/standard search locations), whatever
+`$PDK` is set to. Two rules
+keep the replay honest: a report produced with `provenance.pdk: null`
+re-runs with no PDK at all — even on a host with `$PDK` set, it stays
+`null` exactly as it was produced — and an explicit selection that
+resolves to nothing, or names the *other* installed variant of the family,
+behaves exactly as on a fresh run: the former is the normal exit-1 error,
+the latter drifts on `provenance.pdk.name` (exit 3). Cheap mode
+(`--check` without `--rerun`) never resolves a PDK; it stays hash-only.
+
 **Known limitation**: neither engine's report records which `--top` (if
 any) the original run used, so `--rerun` always re-checks every top cell —
 a report originally scoped to one top cell via `--top` can legitimately
@@ -4855,7 +4904,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. `error.decks_executed` lists observed starts. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. When the GF180 3LM `mslot1` deck aborts on `metal4_drawn`, `error.abort.hint` points to the [deck selectors and their coverage](#gf180-3lm-deck-selection). `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.

@@ -231,7 +231,9 @@ from typing import Any
 
 from . import env_provenance, synthesize_abc
 from . import macros as macro_spec
+from . import synthesize_abc_stages as abc_stages
 from . import synthesize_timeout as ytimeout
+from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
@@ -279,6 +281,7 @@ from .sta import StaError, compute_critical_path
 # `ADDER_ARCHITECTURES`, which moved there with its only callers.
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
+from .synthesize_abc_stages import AbcTimeout, SynthesizeError
 from .synthesize_abc_timing import parse_abc_regions
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
@@ -295,7 +298,19 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
-from .synthesize_driving_cell import first_matching_glob, resolve_dont_use_globs
+from .synthesize_driving_cell import (
+    ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
+)
+from .synthesize_driving_cell import (
+    DONT_USE_PATTERN_RE as _DONT_USE_PATTERN_RE,
+)
+from .synthesize_driving_cell import (
+    first_matching_glob,
+    resolve_dont_use_globs,
+)
+from .synthesize_driving_cell import (
+    liberty_cell_names as _liberty_cell_names,
+)
 from .synthesize_library_hint import (
     library_capability_warnings as _library_capability_warnings,
 )
@@ -428,78 +443,6 @@ _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
     "sg13g2_stdcell": ("sg13g2_buf_4", 6.0),
 }
 
-#: Per-cell-library ``abc -dont_use`` glob list: the non-logic cell classes
-#: a real flow keeps out of a mapped netlist. Same sourcing discipline as
-#: :data:`_ABC_CONSTR_INPUTS` above -- each entry is ORFS's own
-#: ``DONT_USE_CELLS`` for that platform, cross-checked against the installed
-#: liberty's actual cell list (read 2026-08-12 from
-#: ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``):
-#:
-#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__lpflow_*`` (multi-power-domain
-#:   isolation/level-shifter/decap cells) and ``sky130_fd_sc_hd__probe*``
-#:   (test-probe cells with metal shapes on every layer).
-#:   ``platforms/sky130hd/config.mk`` spells its ``DONT_USE_CELLS`` out as
-#:   36 explicit cell names with exactly that intent (its own comment: "The
-#:   *probe* are for inserting probe points and have metal shapes on all
-#:   layers. *lpflow* cells are for multi-power domains"). Verified against
-#:   the installed ``sky130_fd_sc_hd__tt_025C_1v80.lib``: the two globs
-#:   above match **exactly** those 36 cells -- no cell ORFS excludes is
-#:   missed, and no additional cell is caught (set difference empty in both
-#:   directions). Globs are used rather than the 36 names because
-#:   ``abc -dont_use`` supports them ("supports simple glob patterns in the
-#:   cell name", ``help abc``) and because they stay correct if a future
-#:   open_pdks release adds another ``lpflow_``/``probe`` cell.
-#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> **deliberately absent**, and this is the
-#:   one place this table does not simply mirror ORFS. That platform's
-#:   ``DONT_USE_CELLS = *_1`` (``platforms/gf180/config.mk``) excludes every
-#:   *minimum-drive* cell in the library -- 62 of the installed
-#:   ``gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib``'s 229 cells -- which is a
-#:   drive-strength policy for P&R congestion ("Dont use cells to ease
-#:   congestion", that `config.mk`'s own comment), not the "keep non-logic
-#:   cells out of the netlist" exclusion this table exists for. The QoR
-#:   survey section 3.2 flags exactly this asymmetry and warns that the two
-#:   libraries must not be given the same treatment by analogy; measured
-#:   live here rather than assumed (issue #807, 8x8 multiplier, Yosys
-#:   0.68+48): applying it costs **+31% area** (9217.96 -> 12119.39 um^2)
-#:   and **+12% delay** (6150.64 -> 6887.58 ps) against the same run with
-#:   ``-constr`` and no exclusions. Every logic function does keep a
-#:   higher-drive variant (zero functions lost entirely, checked live), so
-#:   the exclusion is *safe* -- it is simply not a QoR win at this stage of
-#:   the flow, and a synthesis-time default that costs a third of the area
-#:   for a congestion benefit no step of this command can observe would be a
-#:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry
-#:   above; a caller wanting ORFS's P&R-oriented exclusion can be served
-#:   later by an explicit request field, measured on its own terms.
-#: - ``sg13g2_stdcell`` (issue #1784) -> the five literal cell names IHP's
-#:   own LibreLane platform config names as its
-#:   ``SYNTH_EXCLUDED_CELL_FILE``
-#:   (``libs.tech/librelane/sg13g2_stdcell/synth_exclude.cells``,
-#:   IHP-Open-PDK v0.3.0): ``sg13g2_lgcp_1``, ``sg13g2_sighold``,
-#:   ``sg13g2_slgcp_1``, ``sg13g2_sdfbbp_1``, ``sg13g2_dfrbp_2`` -- clock-
-#:   gate/scan/sign-hold sequential cells this PDK's own flow keeps out of
-#:   mapping, the same "keep non-logic/special-purpose cells out of the
-#:   netlist" intent as the sky130hd entry above (not a drive-strength
-#:   policy like gf180mcu's deliberately-omitted one). ``abc -dont_use``'s
-#:   glob support degrades gracefully to an exact match for a pattern with
-#:   no wildcard, so these plain cell names are passed through unchanged
-#:   rather than turned into an invented glob.
-#:
-#: A ``cell_library`` with no entry gets no ``-dont_use`` flags at all --
-#: this command's pre-#807 behaviour -- rather than a guessed exclusion.
-_ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
-    "sky130_fd_sc_hd": (
-        "sky130_fd_sc_hd__lpflow_*",
-        "sky130_fd_sc_hd__probe*",
-    ),
-    "sg13g2_stdcell": (
-        "sg13g2_lgcp_1",
-        "sg13g2_sighold",
-        "sg13g2_slgcp_1",
-        "sg13g2_sdfbbp_1",
-        "sg13g2_dfrbp_2",
-    ),
-}
-
 #: How a request's own ``constraints.dont_use`` list combines with the
 #: built-in per-library :data:`_ABC_DONT_USE_GLOBS` table (issue #2382).
 #:
@@ -528,27 +471,12 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:   "exclude nothing" can never be spelled the same way as "exclude only
 #:   these".
 #:
-#: Naming note (issue #2378): ``klt place-and-route`` has an analogous
-#: request-level exclusion gap of its own for OpenROAD's resizer/CTS. If it
-#: grows one, it should reuse this field's name and shape rather than drift
-#: into a ``dont_use`` vs. ``dont_use_cells`` split by accident of which
-#: issue landed first.
 _DONT_USE_MODES: tuple[str, ...] = ("additive", "replace", "none")
 
 #: The :data:`_DONT_USE_MODES` value used when a request supplies
 #: ``constraints.dont_use`` without an explicit ``constraints.dont_use_mode``
 #: (and, trivially, when it supplies neither).
 _DEFAULT_DONT_USE_MODE = "additive"
-
-#: Characters a ``constraints.dont_use`` entry may contain: Liberty cell-name
-#: characters (``[A-Za-z0-9_]``) plus the glob metacharacters ``abc -dont_use``
-#: itself documents ("supports simple glob patterns in the cell name") and the
-#: punctuation real library cell names use. Deliberately an allowlist, not a
-#: blocklist: each entry is interpolated verbatim into a generated ``.ys``
-#: script's own ``abc`` line, so an entry containing whitespace or a command
-#: separator would silently corrupt that line into a different Yosys command
-#: rather than being rejected.
-_DONT_USE_PATTERN_RE = re.compile(r"^[A-Za-z0-9_.*?!\[\]-]+$")
 
 #: Per-cell-library tie-high/tie-low cell for Yosys's ``hilomap`` pass,
 #: as ``((hi_cell, hi_port), (lo_cell, lo_port))`` -- issue #854.
@@ -771,24 +699,6 @@ _LEAKAGE_UNIT_TO_NW: dict[str, float] = {
     "mw": 1e6,
     "w": 1e9,
 }
-
-
-class SynthesizeError(Exception):
-    """Raised when a synthesis run cannot even be attempted: a missing/
-    malformed request file, an unresolvable/unreadable RTL source, an
-    unresolvable ``pdk.cell_library``/``corner`` (no matching liberty via
-    ``find_pdk()``), an elaboration/hierarchy error, or a Yosys/ABC engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- either a netlist is produced, or this is raised; there is
-    no third "ran but the request itself was unusable" outcome. This is
-    unaffected by issue #1588's additive ``structural`` verdict: a run that
-    *does* produce a netlist but finds an inferred latch, a combinational
-    loop, or a multiply-driven net still returns normally (``status: "ok"``)
-    with ``structural.has_critical: true`` and exit code ``3`` -- never this
-    exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
-    """
 
 
 _rpath = RequestPaths(SynthesizeError)
@@ -1317,13 +1227,11 @@ def run_synthesize(
         resolved=resolved_globs,
     )
 
+    abc = mapping or synthesize_abc.DEFAULT_MAPPING
     engine_options = _EngineOptions(
-        abc_fast=("native" if _abc_supports_option("-fast") else "inline")
-        if mapping and mapping.fast
-        else None,
-        abc_script_path=mapping.stage_script(output_dir, SynthesizeError)
-        if mapping
-        else None,
+        abc_fast=abc.fast_mode(_abc_supports_option),
+        abc_script_path=abc.stage_script(output_dir, SynthesizeError),
+        abc_timeout_s=abc.timeout_s,
         liberty_path=liberty_path,
         cell_library=cell_library,
         delay_target_ps=delay_target_ps,
@@ -1354,7 +1262,8 @@ def run_synthesize(
         )
 
     # Publish a repo-relative, PDK-tokenized script and run its rehydrated copy.
-    executed_script_path = _write_script(
+    scripts = _write_script(
+        abc_timeout_s=engine_options.abc_timeout_s,
         abc_fast=engine_options.abc_fast,
         abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
@@ -1378,17 +1287,19 @@ def run_synthesize(
         defines=defines,
     )
 
-    # `cwd=repo_root` is what makes the relative paths `_write_script` just
-    # embedded (when `repo_root` is not `None`) resolve correctly -- see
-    # `_write_script`'s docstring "Commit-safety vs. cwd-independence"
-    # section. When `repo_root` is `None` (no repo resolved for this
-    # request), `_write_script` wrote only absolute paths, so `cwd=None`
-    # (subprocess's own default: the invoking process's cwd) is exactly as
-    # correct as it always was. `executed_script_path` (issue #1870) is the
-    # rehydrated sibling whenever the liberty was tokenized -- Yosys would
-    # fail to open a literal `$PDK_ROOT/...` path, so the committed artifact
-    # is never the one executed.
-    yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
+    try:
+        executed_script_path, yosys_log = abc_stages.run_mapping(scripts, cwd=repo_root)
+    except AbcTimeout as exc:
+        _assert_inputs_unchanged(input_state)
+        return exc.report(
+            hdl_toplevel,
+            repo_root,
+            provenance,
+            mapping,
+            arithmetic=arithmetic,
+            verify_equivalence=verify_equivalence,
+            restructure_timing=restructure_timing,
+        )
 
     # Issues #1973, #4872, #5594: drop `signed` qualifiers and host source dirs
     # (absolute and repo-relative); rewritten only if changed (mtime kept).
@@ -1620,11 +1531,10 @@ def run_synthesize(
         "netlist_path": env_provenance.repo_relative_path(
             netlist_path, repo_root=repo_root
         ),
-        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
-        # refers to, taken from the internal absolute path (never the
-        # redacted `{path, scope}` object) after signed-qualifier stripping.
-        # Additive field; no `schema_version` bump.
-        "netlist_sha256": sha256_file(netlist_path),
+        # Issues #2452/#7277: the exact-file digest and its banner-normalised
+        # companion, both from the internal absolute path after final
+        # processing — see `_digest.netlist_digest_fields`.
+        **netlist_digest_fields(netlist_path),
         "script_path": env_provenance.repo_relative_path(
             script_path, repo_root=repo_root
         ),
@@ -1644,8 +1554,7 @@ def run_synthesize(
         "arithmetic": arithmetic,
         "baseline": None,
     }
-    if mapping is not None:
-        mapping.record(response, provenance)
+    synthesize_abc.record_mapping(mapping, response, provenance)
     _attach_latch_map_report(
         response, latch_map_report, latch_techmap_path, repo_root=repo_root
     )
@@ -2575,35 +2484,6 @@ def _resolve_dont_use_request(
     return patterns, mode
 
 
-def _liberty_cell_names(liberty_path: str) -> frozenset[str] | None:
-    """Every ``cell (<name>) { ... }`` group name in the resolved liberty, or
-    ``None`` when that set cannot be established (issue #2382).
-
-    This is the cell list :func:`_validate_dont_use_against_liberty` checks a
-    request's exclusion patterns against, so that a typo cannot silently
-    change the mapped netlist. Read via
-    :func:`~klayout_tools.liberty_compare.parse_liberty_text`, so quoted and
-    unquoted names alike are seen.
-
-    ``None`` -- meaning "not establishable", which the caller treats as "do
-    not validate" rather than "zero cells, reject everything" -- when the file
-    cannot be read, cannot be parsed as liberty, *or* when it contains no
-    ``cell (...)`` group at all: a liberty we cannot see any cell in is not
-    evidence that the caller's pattern is a typo, and concluding otherwise
-    would reject a perfectly good request. Never raises, matching
-    :func:`_abc_supports_dont_use`'s "never break a run over an optional
-    probe" posture.
-    """
-    try:
-        with open(liberty_path, encoding="utf-8") as handle:
-            liberty_text = handle.read()
-        library = parse_liberty_text(liberty_text, source=liberty_path)
-    except (OSError, UnicodeDecodeError, LibertyCompareError):
-        return None
-    names = frozenset(cell.args[0] for cell in library.children("cell") if cell.args)
-    return names or None
-
-
 def _validate_dont_use_against_liberty(
     patterns: tuple[str, ...], liberty_path: str
 ) -> bool | None:
@@ -2731,7 +2611,8 @@ def _write_script(
     defines: dict[str, str | None] | None = None,
     abc_fast: synthesize_abc.FastMode = None,
     abc_script_path: str | None = None,
-) -> str:
+    abc_timeout_s: float | None = None,
+) -> str | abc_stages.StagedMapping:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
     ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``setundef`` ->
@@ -2885,7 +2766,8 @@ def _write_script(
     outside ``pdk_root``, no token is written, no sibling is emitted, and the
     return value is ``script_path`` itself: the pre-#1870 behaviour exactly.
 
-    Returns the path of the script to execute (``script_path``, or its
+    With an ABC budget, return the three staged scripts and checkpoint paths.
+    Otherwise return the path of the script to execute (``script_path``, or its
     rehydrated sibling) -- never the artifact to commit, which is always
     ``script_path``.
     """
@@ -2927,8 +2809,8 @@ def _write_script(
     # Issue #4205: load the request's own cell library as cell definitions
     # first, so RTL may instantiate a library cell by name with no stub.
     # `read_verilog` of a legacy stub for the same cell still works.
-    lines = [f"read_liberty -lib {liberty_text}"]
-    lines += [
+    frontend = [f"read_liberty -lib {liberty_text}"]
+    frontend += [
         read_verilog_line(
             _script_path_text(path, repo_root=repo_root), defines, parameters
         )
@@ -2946,26 +2828,26 @@ def _write_script(
         macro_text = _script_input_text(
             macro_input["path"], repo_root=repo_root, pdk_root=pdk_root
         )
-        lines.append(f"{reader} {macro_text}")
+        frontend.append(f"{reader} {macro_text}")
     # Issue #3466: top-level parameter overrides apply between the reads and
     # `hierarchy`, so elaboration sees the overridden value.
-    lines += chparam_lines(parameters or {}, hdl_toplevel)
-    lines.append(f"hierarchy -check -top {hdl_toplevel}")
+    frontend += chparam_lines(parameters or {}, hdl_toplevel)
+    frontend.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
-        lines += ["proc", "opt_expr", "opt_clean"]
-        lines += [
+        frontend += ["proc", "opt_expr", "opt_clean"]
+        frontend += [
             f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
             for path in adder_sources
         ]
-        lines.append(
+        frontend.append(
             f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
         )
-    lines.extend(synthesize_abc.synth_lines(hdl_toplevel, abc_fast))
+    tail = []
     if latch_techmap_path is not None:
-        lines.append(
+        tail.append(
             f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
         )
-    lines += [
+    tail += [
         f"dfflibmap -liberty {liberty_text}",
         abc_command,
         "clean",
@@ -2977,13 +2859,26 @@ def _write_script(
         # onto a tie cell exactly like a literal `1'b0`/`1'b1` already is --
         # see this function's own docstring for why the ordering is
         # load-bearing.
-        lines.append("setundef -zero")
-        lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
-    lines += [
+        tail.append("setundef -zero")
+        tail.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
+    tail += [
         f"tee -q -o {stats_text} "
         f"stat -liberty {liberty_text} -json -top {hdl_toplevel}",
         f"write_verilog -noattr {netlist_text}",
     ]
+    return abc_stages.write_mapping(
+        script_path,
+        frontend,
+        tail,
+        hdl_toplevel,
+        abc_fast,
+        abc_timeout_s,
+        repo_root=repo_root,
+        pdk_root=pdk_root,
+    )
+
+
+def _publish_script(script_path: str, lines: list[str], pdk_root: str | None) -> str:
     script_text = "\n".join(lines) + "\n"
 
     if pdk_root is None or PDK_ROOT_TOKEN not in script_text:
@@ -4201,15 +4096,15 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
     {
         "run_id",
         "netlist_path",
+        "stats_path",
         "script_path",
         "run_script_path",
         "restructured_netlist_path",
         "log_path",
         "stage2_script_path",
         "stage2_log_path",
-        # Issue #2635: `macros[].blackbox_path` is inside the run directory
-        # whenever this run *generated* the stub from a LEF, so it carries
-        # the same per-run `run_id` every other key here does and would
+        # A stub generated from LEF (#2635) lives under the run directory.
+        # Its `macros[].blackbox_path` carries the run ID and would
         # otherwise make every rerun diff report a spurious difference.
         # `macros[].lef`/`.lib`/`.gds`/`.verilog_blackbox` are caller-
         # supplied inputs, stable across reruns, and deliberately stay in

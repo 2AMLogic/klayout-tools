@@ -1,0 +1,1 @@
+- **`klt gen-compose` rejects a fallback via landing that shares a conductive edge with another net** (#7024, 2026-11-21). The rejected leg identifies the conflicting net in the composition report.

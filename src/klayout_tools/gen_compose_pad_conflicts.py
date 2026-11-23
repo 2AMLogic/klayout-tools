@@ -15,8 +15,10 @@ sizing policy:
   (issue #6058);
 * ``_drawn_pad_side_um`` -- the side the composed GDS will really carry;
 * ``_pad_conflict_escape_note`` -- the named fix, per the pad's policy;
-* ``_leg_conflict_message`` -- the #1057 overlap / #1386 spacing verdict,
-  upgraded to consult the pad rejection first;
+* ``_conductive_contact_message`` -- the #7024/#7221 shared-edge or
+  shared-corner short between a candidate and an accepted net;
+* ``_leg_conflict_message`` -- the #1057 overlap, #7024/#7221 contact and
+  #1386 spacing verdicts, upgraded to consult the pad rejection first;
 * ``_landing_pad_conflict_reason`` -- the rejection itself;
 * ``_terminal_pitch_um`` -- centre-to-centre pitch of a pad vs a region.
 
@@ -27,16 +29,14 @@ path keeps resolving unchanged -- the same convention the earlier splits
 of this family (``gen_compose_layer_rules``, ``gen_compose_via_cuts``,
 ``gen_compose_landing_pads`` itself) established.
 
-Same conventions as the modules it was split from:
-``gen_compose.py``/``gen_compose_routing.py`` names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_drop_array_extra_um``) are imported *inside*
-the functions that use them, so this module never has a load-time
-dependency back on them.
+The resolver and conflict checks share the landing-pad and via-cut geometry.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .gen_compose_base import _VIA_LANDING_SIZE_UM, _drop_array_extra_um
 
 
 def _pad_is_intermediate(
@@ -55,6 +55,25 @@ def _pad_is_intermediate(
     return terminal_layers is not None and pad_layer not in terminal_layers
 
 
+def _conductive_contact_message(
+    cand_region: Any, other_region: Any, other_net: str
+) -> str | None:
+    """The short verdict for a shared edge or corner (#7024, #7221), or ``None``.
+
+    A shared edge -- or a single shared corner point -- conducts even when
+    the polygon intersection has no area. ``kdb.Region.interacting`` is
+    "shares at least one point": the rule ``kdb.LayoutToNetlist`` connects
+    on, so `klt extract` would read the two nets as one node. A positive
+    gap never interacts, and neither does a pair whose *bounding boxes*
+    merely meet. The caller has already ruled out a positive-area overlap.
+    """
+    if cand_region.interacting(other_region).is_empty():
+        return None
+    if (cand_region.edges() & other_region.edges()).is_empty():
+        return f"shares a conductive corner with already-routed net '{other_net}'"
+    return f"shares a conductive edge with already-routed net '{other_net}'"
+
+
 def _leg_conflict_message(
     variant: str,
     via_drops: list[dict[str, Any]],
@@ -71,15 +90,20 @@ def _leg_conflict_message(
 
     Relocated verbatim from ``compose()``'s ``_leg_conflict`` loop body
     (issue #5803, beside the pad-vs-pitch rejection it now folds in): the
-    #1057 overlap test, the #1386 spacing-aware test on the primary entry
-    only (``check_spacing`` -- the #1913 intermediate/far pad entries are
-    compared overlap-only, #1680), each upgraded to consult
+    #1057 overlap test; the electrical-contact test (#7024, #7221) -- a
+    shared edge or corner, on the primary entry and the #1913
+    intermediate/far pad entries alike, whatever the deck's space rules
+    say; then the #1386 spacing-aware test on the primary entry only
+    (``check_spacing``). The overlap and spacing tests consult
     :func:`_landing_pad_conflict_reason` first so a conflict at a landing
     pad names pad-vs-pitch instead of a generic backbone crossing. Returns
-    ``None`` when neither test fires -- the caller keeps looping.
+    ``None`` when no test fires -- the caller keeps looping.
 
-    Messages (and their thresholds) are byte-identical to the pre-#5803
-    wording; only the pad-involving conflicts can change what they say.
+    The overlap and spacing messages (and their thresholds) are
+    byte-identical to the pre-#5803 wording. What they say changes only
+    for a pad-involving conflict and -- #7221 -- for a touching pair on
+    the primary entry, which now reports the contact rather than the
+    spacing miss it used to be caught as.
     """
     if not (cand_region & other_region).is_empty():
         if not check_spacing:
@@ -96,6 +120,12 @@ def _leg_conflict_message(
             if reason is not None:
                 return reason
         return f"crosses already-routed net '{other_net}'"
+    # The contact test runs on both entries and ahead of the spacing branch:
+    # an electrical contact is a short whether or not the deck has a space
+    # rule for the layer.
+    contact = _conductive_contact_message(cand_region, other_region, other_net)
+    if contact is not None:
+        return contact
     if not check_spacing:
         return None
     cand_spacing = spacing_lookup(cand_layer)
@@ -255,10 +285,8 @@ def _drawn_pad_side_um(
     with the mode answers its per-pair floor directly, so report that
     rather than re-max-ing the baseline over it.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
     from .gen_compose_ladder_floors import _intermediate_landing_pad_floor_um
     from .gen_compose_layer_rules import _landing_pad_floor_um
-    from .gen_compose_routing import _drop_array_extra_um
     from .gen_compose_via_cuts import via_drop_cut_side_um
 
     if getattr(side_for_pair, "minimal_ladder", False) and _pad_is_intermediate(

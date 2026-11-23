@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from .lvs_base import (
+    CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED as REFERENCE_PORT_ALIAS_CATEGORY,
+)
 from .lvs_pin_anchors import _ANCHORED_PIN_SAMPLE_LIMIT
-
-REFERENCE_PORT_ALIAS_CATEGORY = "topology.reference_port_alias_joined"
 
 
 def _ports(circuit: Any, aliases: dict[str, str]) -> dict[str, str]:

@@ -874,7 +874,12 @@ convenience (issue #4605): an *unquoted* path is rewritten to a single-quoted
 absolute path before reading (a relative path resolves against the reference
 file's directory), because KLayout's SPICE reader would otherwise truncate it
 at a `-`. Already-quoted paths are untouched and the file on disk is never
-modified. `.include` targets are not followed for subcircuit-name detection.
+modified. With a deck, the KLayout engine follows nested `.include` and
+`.inc` directives in both the layout and reference netlists when resolving
+drawn-resistor and MoM-capacitor X cards. A matching `.SUBCKT` definition
+takes precedence over device recovery. An X card with no matching definition
+still recovers as a device of its deck class. The simulation-form and
+unresolved-call diagnostics scan the top-level text.
 
 The reference (and any pre-extracted layout) netlist must use the same
 **schematic-equivalent** device form `klt extract` writes: a plain element
@@ -1422,6 +1427,16 @@ class belongs to `reference.deck` is refused with an error (exit 1) naming
 `layout.deck`, rather than being compared as an undefined subcircuit and
 reported as a spurious `mismatch`. Add `layout.deck` to read it as a resistor
 device.
+
+**Inductor `X` cards (issue #6726).** `sg13g2`'s spiral inductor extracts as a
+three-terminal `inductor` device and writes `XD_$1 a b vsubs inductor PARAMS:`.
+With `layout.deck`/`reference.deck` set, such a card in a pre-extracted
+`layout.netlist` or a `reference.netlist` is read as a real device of that class
+(terminals `A`/`B`/`SUB`; `A`/`B` interchangeable) and compared in
+`counts.devices`; a card whose net count is not three is refused by the reader.
+IHP's own CDL writes the device as a model-bearing three-node `L` card, which
+KLayout's SPICE reader rejects before any recovery runs, so rewrite it as the
+`X` card above first. No parameters are compared.
 
 **`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
 `layout.netlist` gives `layout.deck`, or `reference.netlist` gives
@@ -2696,7 +2711,7 @@ each resolves relative paths inside the document.
 | ----- | ---- | ----------- |
 | `schema` | string | Request contract identifier (not required — `load_request` does not validate it, matching `klt sim`'s convention for user-authored input). |
 | `engine` | string | Engine selector: `"klayout"` (default) or `"netgen"` — see "Engine" above. |
-| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). Default `false`: the response is byte-identical to before this field existed. `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and `environment.klayout_binary` is the binary's basename string in default mode too (issue #5795; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report reports `unverifiable` for recorded digests whose rewritten input paths cannot be resolved; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
+| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). With the default `false`, paths retain their emitted form. Since #5812, `provenance.pin_order_sources[].path` for a file under the resolved PDK root is always the `"$PDK_ROOT/<relative>"` string, never an absolute host path (a `reference.pin_order_files` entry outside the PDK root stays absolute). `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and `environment.klayout_binary` is the binary's basename string in default mode too (issue #5795; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report reports `unverifiable` for recorded digests whose rewritten input paths cannot be resolved; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
 | `omit_mismatches` | boolean \| omitted | Additive field (issue #5610, the request-document counterpart of `klt lvs --omit-mismatches`, mirroring `klt erc --omit-antenna-tables`). Default `false`: the response is unchanged apart from the always-present `mismatches_omitted: false` echo. `true` emits the response's `mismatches[]` as `[]` (the key stays present; it is schema-required) beside `mismatches_omitted: true`, so a failing flat compare's report stays small enough to commit verbatim — while `status`, `mismatch_count`, `error_count`, `category_counts`, `category_error_counts` and the exit code keep their full-run values: the compare still runs in full and the per-category tally still runs over the full list, only the per-entry echo is dropped. Applied for every engine (`"klayout"`, `"netgen"`, `"klayout-runset"`). The `--omit-mismatches` flag wins over this field when both name it; a non-boolean value is an application error (exit 1). `klt lvs --check` verifies such a report as-is (cheap mode never reads `mismatches[]`), and `--check --rerun` replays the omission from the report's own `mismatches_omitted` echo. No `schema_version` bump. |
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
 | `layout.deck_options` | object\<string, string\> | Optional `{"<key>": "<value>"}` pairs, the JSON-request-document counterpart of `klt extract --deck-option <key>=<value>` (issue #600/#595) — selects a caller-visible sheet-rho flavour of a shared-geometry resistor family (e.g. gf180mcu's `poly_res`, one of `1k`/`2k`/`3k`). Honored for both `layout` shapes wherever `layout.deck` is given — inline extraction (`layout.file`) and the pre-extracted `layout.netlist` shape (issue #585). Omitting it (or giving `{}`) resolves every deck exactly as before this field existed. An unrecognised key or value is an application error (exit 1), not a silent no-op or a silently-kept default; giving it without `layout.deck` is likewise an application error (there is no deck to apply it to). The fully resolved mapping — every option key the deck declares, including those it applied by default because `deck_options` did not name them (issue #2394) — is recorded under `provenance.deck.options`, alongside `provenance.deck.options_explicit`/`options_hash`; see "`layout` shapes" below and the `provenance` row further down. |

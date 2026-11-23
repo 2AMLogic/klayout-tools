@@ -182,18 +182,17 @@ def test_rerun_preserves_install_with_symlinked_decks(tmp_path, monkeypatch, cap
     assert main(args) == 4
     saved = tmp_path / "native.json"
     saved.write_text(capsys.readouterr().out)
-    assert (
-        main(["drc", layout, "--check", str(saved), "--rerun", "--format", "json"]) == 0
-    )
+    check = ["drc", layout, "--check", str(saved), "--rerun", "--format", "json"]
+    assert main(check) == 0
     replay = json.loads(capsys.readouterr().out)
     assert replay["fresh"]["provenance"]["pdk"]["source"] == "--pdk-root flag"
 
     # An explicit deck override outside the install can still use its provenance.
     original = json.loads(saved.read_text())
-    kwargs = _drc_gf180_3lm.replay_prelude_kwargs(
-        original, str(shared / "gf180mcu.drc")
-    )
-    assert kwargs["pdk_root"] == root
+    external_deck = ["--deck-file", str(shared / "gf180mcu.drc")]
+    assert main([*check, *external_deck]) == 3  # the explicit deck path changed
+    fresh = json.loads(capsys.readouterr().out)["fresh"]
+    assert fresh["provenance"]["pdk"] == original["provenance"]["pdk"]
 
     # A verified alias to the same family script also retains the recorded macro.
     for name in ("options.rb", "rule_framework.rb"):
@@ -202,6 +201,21 @@ def test_rerun_preserves_install_with_symlinked_decks(tmp_path, monkeypatch, cap
     alias.symlink_to(shared / "gf180mcu.drc")
     aliased = _drc_gf180_3lm.replay_prelude_kwargs(original, str(alias))
     assert aliased["native_deck"]["preludes"] == original["native_deck"]["preludes"]
+
+    # After relocation the original root cannot be recovered. Explicit flags
+    # must still work with the external deck and replay the recorded stack.
+    Path(root).rename(tmp_path / "moved")
+    _install(tmp_path / "other", "gf180mcuB", ("gf180mcu.drc",))
+    for flags, expected_variant, source in [
+        (["--pdk-root", other], variant, "--pdk-root flag"),
+        (["--pdk", "gf180mcuB"], "gf180mcuB", "PDK_ROOT environment variable"),
+        (["--pdk", "gf180mcuB", "--pdk-root", other], "gf180mcuB", "--pdk-root flag"),
+    ]:
+        assert main([*check, *external_deck, *flags]) == 3
+        fresh = json.loads(capsys.readouterr().out)["fresh"]
+        assert fresh["provenance"]["pdk"]["name"] == expected_variant
+        assert fresh["provenance"]["pdk"]["source"] == source
+        assert fresh["native_deck"]["preludes"] == original["native_deck"]["preludes"]
 
 
 def test_extracted_native_report_replays(tmp_path, monkeypatch, capsys):

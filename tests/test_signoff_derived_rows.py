@@ -78,6 +78,26 @@ def _item5(evidence, spec_rows=None, **overrides) -> dict:
     return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
 
 
+def test_passing_measurements_credit_only_rows_with_recognised_bounds(tmp_path):
+    limits = {
+        "typo": {"maximum": 1.0},
+        "null": {"min": None, "max": None},
+        "zero": {"max": 0},
+        "lower": {"min": 1.0, "extra": 3},
+    }
+    measurements = [_meas(row, row, limits=bounds) for row, bounds in limits.items()]
+    envelope = _write(tmp_path, "bounds.json", _tagged_sim(measurements))
+    item = _item5(
+        {"5": [{"file": envelope, "rows": list(limits)}]},
+        [{"id": row} for row in limits],
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["row_sources"] == {"zero": "derived", "lower": "derived"}
+    assert set(item["detail"]["uncovered_rows"]) == {"typo", "null"}
+
+
 def test_item5_require_derived_rows_fails_an_asserted_row(tmp_path):
     a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
 
