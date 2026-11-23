@@ -216,7 +216,7 @@ from .extract_assemble import _hierarchy_fields as _hierarchy_fields
 from .extract_assemble import _pin_ties_field as _pin_ties_field
 
 # Final report assembly moved out of `run_extract` (issue #5196).
-from .extract_assemble import assemble_extract_report
+from .extract_assemble import assemble_extract_report, finfet_device_census
 from .extract_base import _METRIC_NAME_BY_FIELD as _METRIC_NAME_BY_FIELD
 from .extract_base import _MIN_PARASITIC_R_OHM as _MIN_PARASITIC_R_OHM
 from .extract_base import _PARAM_PRECISION_FARAD as _PARAM_PRECISION_FARAD
@@ -2578,18 +2578,13 @@ def run_extract(
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
-        # The deck's two-term device-parameter corrections
-        # (`CapacitorDevice.perim_cap_f_um`, issue #512;
-        # `ResistorDevice.fixed_offset_ohm`, issue #518) were already applied
-        # to the `kdb.Device` objects by `_apply_device_parameter_corrections`
-        # inside `_extract_netlist` (issue #521), so `_describe_devices` just
-        # reads them back -- and the `netlist.write(...)` below therefore
-        # writes the *same* corrected values into the SPICE file that
-        # `devices[].params` reports.
+        # The extractor already applied the capacitor perimeter and resistor offset
+        # corrections (#512, #518). Both JSON and SPICE read those same devices.
         devices, device_counts = _describe_devices(circuit, device_instance_paths)
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
+    device_census = finfet_device_census(deck, circuit)  # before parasitic injection
     refuse_case_fold_nets(nets, parasitics and not no_netlist)
 
     # Snapshotted *here* -- before `_inject_parasitics` below can add a single
@@ -2791,6 +2786,7 @@ def run_extract(
         warnings=warnings,
     )
 
+    result.update(device_census)
     return result
 
 
