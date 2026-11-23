@@ -97,6 +97,8 @@ from .place_and_route_gds_merge import (
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_hints import grt_hint, null_unconstrained_fmax
+from .place_and_route_layer_map import explain_spef_layer_map
+from .place_and_route_layer_map import layer_map_warnings as _layer_map_warnings
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -1187,19 +1189,6 @@ def _antenna_repair_warnings(
     ]
 
 
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
-    ]
-
-
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -2055,26 +2044,27 @@ def _run_single_corner(
         # at the pipeline-step level instead). Off by default -- see
         # `_validate_post_route_spef`'s own docstring for why.
         if post_route_spef:
-            spef_sta = _post_route_spef_metrics(
-                engine_logs=engine_logs,
-                output_dir=output_dir,
-                hdl_toplevel=hdl_toplevel,
-                gds_path=gds_path,
-                def_path=def_path,
-                cell_library=cell_library,
-                liberty_path=liberty_path,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
-                max_transition_ns=max_transition_ns,
-                max_capacitance_pf=max_capacitance_pf,
-                max_fanout=max_fanout,
-                input_delay_ns=input_delay_ns,
-                output_delay_ns=output_delay_ns,
-                checkpoint_in=checkpoint_path,
-                # Issue #1002: `write_sdf` inside that same session, right
-                # after its `read_spef` -- see `_validate_post_route_sdf`.
-                write_sdf=post_route_sdf,
-            )
+            with explain_spef_layer_map(layer_map_info):
+                spef_sta = _post_route_spef_metrics(
+                    engine_logs=engine_logs,
+                    output_dir=output_dir,
+                    hdl_toplevel=hdl_toplevel,
+                    gds_path=gds_path,
+                    def_path=def_path,
+                    cell_library=cell_library,
+                    liberty_path=liberty_path,
+                    clock_port=clock_port,
+                    clock_period_ns=clock_period_ns,
+                    max_transition_ns=max_transition_ns,
+                    max_capacitance_pf=max_capacitance_pf,
+                    max_fanout=max_fanout,
+                    input_delay_ns=input_delay_ns,
+                    output_delay_ns=output_delay_ns,
+                    checkpoint_in=checkpoint_path,
+                    # Issue #1002: `write_sdf` inside that same session, right
+                    # after its `read_spef` -- see `_validate_post_route_sdf`.
+                    write_sdf=post_route_sdf,
+                )
     else:
         def_path = None
 
