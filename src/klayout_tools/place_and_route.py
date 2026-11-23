@@ -1174,7 +1174,7 @@ def _antenna_repair_warnings(
     if target_stage != "route" or not _antenna_diode_absent(library):
         return []
     return [
-        "antenna repair did not run: request.library.antenna_diode is "
+        "antenna repair did not run: the effective request.library.antenna_diode is "
         "null (the library has no antenna diode), so repair_antennas "
         "was not called; the antenna check still ran"
     ]
@@ -1652,7 +1652,7 @@ def _run_single_corner(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    library = _validate_library(request.get("library"))
+    library = _validate_library(request.get("library"), cell_library)
     io_spec = _validate_io(request.get("io"), cell_library, library)
     # Issue #3885: a pattern naming no real port is an error, never a silent
     # no-op.

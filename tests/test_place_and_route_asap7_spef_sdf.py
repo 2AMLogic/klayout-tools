@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -215,3 +216,50 @@ def test_asap7_route_with_post_route_spef_and_sdf(
     sdf_instances = re.findall(r"\(INSTANCE\s+(\S+?)\)", sdf_text)
     assert sdf_instances, "SDF has no (INSTANCE ...) entries"
     assert {"u1", "u2"} & set(sdf_instances), sdf_instances
+
+
+def test_powered_asap7_route_uses_builtin_library(tmp_path, monkeypatch):
+    pdk_root = tmp_path / "pdkroot"
+    _make_asap7_install(pdk_root, descriptor=False)
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    monkeypatch.setenv("PDK", "asap7A")
+    monkeypatch.setenv("KLT_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    fixture = Path(__file__).parent / "fixtures/place_and_route_drcfill/request.json"
+    request = json.loads(fixture.read_text())
+    request["pdk"]["cell_library"] = _CELL_LIBRARY
+    del request["library"]
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+
+    # The fixture's 97 inverters give the M5 power straps room to cross the core.
+    wires = [f"n{i}" for i in range(96)]
+    nodes = ["a", *wires, "y"]
+    cells = [
+        f"{_INV} u{i} (.A({source}), .Y({sink}));"
+        for i, (source, sink) in enumerate(pairwise(nodes))
+    ]
+    (tmp_path / "top.v").write_text(
+        "\n".join(
+            [
+                "module top(input clk, input a, output y);",
+                f"wire {', '.join(wires)};",
+                *cells,
+                "endmodule",
+                "",
+            ]
+        )
+    )
+    report = run_place_and_route(str(request_path))
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["applied"]["signal_layers"] == "M2-M7"
+    placed = report["power"]["placed"]
+    nets = {net["name"]: net for net in placed["special_nets"]}
+    for name in ("VDD", "VSS"):
+        assert nets[name]["followpin_segments"] > 0
+        assert nets[name]["stripe_segments"] > 0
+        assert nets[name]["vias"] > 0
+    assert any(
+        "antenna repair did not run" in message for message in report["warnings"]
+    )
