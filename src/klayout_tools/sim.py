@@ -1595,29 +1595,27 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
-    # Deck-list requests (issue #2804) carry `decks` instead of a corner
-    # request's netlist/analysis; their shape is validated by the deck
-    # subsystem (sim_decks.plan_deck_units), so the corner request's
-    # required fields do not apply here.
+    # Command and deck lists have their own validators and no corner matrix.
     if sim_commands.COMMANDS_FIELD in request:
-        # Command-list requests (issue #4443): shape is validated by
-        # sim_commands.plan_command_units.
         return request
     if "decks" in request:
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
     request = validate_request_shape(
-        request,
-        "request file",
-        error_cls=SimError,
-        required_fields=("netlist",),
+        request, "request file", error_cls=SimError, required_fields=("netlist",)
     )
     if "analysis" not in request and "analysis_steps" not in request:
         raise SimError(
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
+    for field in ("options", "monte_carlo"):
+        value = request.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise SimError(
+                f"request.{field} must be an object (got {type(value).__name__})"
+            )
     return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
