@@ -112,3 +112,75 @@ def test_pad_covered_by_longer_wire_edge_keeps_diagnostic():
     assert report["tip_check"]["rules"][0]["rule"] == "M1.S.4"
     assert report["tip_check"]["rules"][0]["via_pads"] == 1
     assert (_region(layout, top, 19) ^ before).is_empty()
+
+
+def _mixed_pair(gap_nm, wire_nm, *, library=False, rotation=0, cut_inset=0):
+    layout = kdb.Layout()
+    layout.dbu = 0.00025
+    top, via = layout.create_cell("top"), layout.create_cell("VIA_VIA12")
+    m1, v1 = layout.layer(19, 0), layout.layer(21, 0)
+    via.shapes(m1).insert(kdb.Box(-36, -44, 36, 44))
+    via.shapes(v1).insert(kdb.Box(-36 + cut_inset, -36, 36 - cut_inset, 36))
+    transform = kdb.Trans(rotation, False, 0, 0)
+    top.insert(kdb.CellInstArray(via.cell_index(), transform))
+    x = 36 + 4 * gap_nm
+    wire = kdb.Box(x, -2 * wire_nm, x + 400, 2 * wire_nm)
+    if library:
+        cell = layout.create_cell("STANDARD_CELL")
+        cell.shapes(m1).insert(wire)
+        top.insert(kdb.CellInstArray(cell.cell_index(), transform))
+    else:
+        top.shapes(m1).insert(wire.transformed(transform))
+    return layout, top, via, wire.transformed(transform)
+
+
+@pytest.mark.parametrize(
+    ("gap", "width", "library", "rotation", "rule", "wire_grows"),
+    [
+        (22, 18, False, 0, "M1.S.4", True),
+        (27, 18, False, 1, "M1.S.4", False),
+        (22, 30, True, 0, "M1.S.5", True),
+        (27, 30, True, 1, "M1.S.5", False),
+    ],
+)
+def test_pad_wire_repair(gap, width, library, rotation, rule, wire_grows):
+    layout, top, via, wire = _mixed_pair(gap, width, library=library, rotation=rotation)
+    before, cuts = _region(layout, top, 19), _region(layout, top, 21)
+    master = _region(layout, via, 19)
+    check = check_via_pad_tips(
+        kdb, layout=layout, top_cell=top, variant="asap7A", lef_to_gds={"M1": (19, 0)}
+    )
+    assert any(row["rule"] == rule for row in check["rules"])
+    report = _repair(layout, top)
+    after = _region(layout, top, 19)
+    assert report["tip_check"]["violations"] == 0
+    assert report["m1_landing_pad_wire_pairs_extended"] == 1
+    assert report["m1_landing_pairs_extended"] == 0
+    assert after.count() == before.count() == 2
+    assert (before - after).is_empty()
+    assert (after - before).interacting(cuts).is_empty()
+    assert (cuts ^ _region(layout, top, 21)).is_empty()
+    assert (master ^ _region(layout, via, 19)).is_empty()
+    wire_growth = after.interacting(kdb.Region(wire)) - kdb.Region(wire)
+    assert (not wire_growth.is_empty()) is wire_grows
+    if library:
+        local_wire = wire.transformed(kdb.Trans(rotation, False, 0, 0).inverted())
+        original = _region(layout, layout.cell("STANDARD_CELL"), 19)
+        assert (original ^ kdb.Region(local_wire)).is_empty()
+    assert _repair(layout, top)["m1_landing_pad_wire_pairs_extended"] == 0
+
+
+@pytest.mark.parametrize("obstruction", ["cuts", "conductors", "inset_cut"])
+def test_unrepairable_pad_wire_keeps_geometry(obstruction):
+    layout, top, _, _ = _mixed_pair(
+        22, 18, cut_inset=4 if obstruction == "inset_cut" else 0
+    )
+    if obstruction != "inset_cut":
+        layer = layout.layer(18 if obstruction == "cuts" else 19, 0)
+        for y in (-48, 48):
+            top.shapes(layer).insert(kdb.Box(-8, y - 2, 8, y + 2))
+    before = _region(layout, top, 19)
+    report = _repair(layout, top)
+    assert report["tip_check"]["violations"] > 0
+    assert report["m1_landing_pad_wire_pairs_extended"] == 0
+    assert (before ^ _region(layout, top, 19)).is_empty()

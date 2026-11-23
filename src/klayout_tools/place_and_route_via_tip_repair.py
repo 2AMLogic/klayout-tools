@@ -1,4 +1,4 @@
-"""Lengthen instance-local ASAP7 M1 landings facing another landing (#7122)."""
+"""Repair ASAP7 M1 tip spacing at placed V1 landings."""
 
 from __future__ import annotations
 
@@ -13,21 +13,27 @@ from .place_and_route_via_tip import (
 def _landing_edges(kdb, top, metal, cut):
     """Index complete sides of rectangular VIA_* pads enclosing a V1 cut."""
     edges = {}
+    pad_sides = kdb.Edges()
     for inst in top.each_inst():
         via = inst.cell
         if not via.name.startswith("VIA_") or via.shapes(cut).is_empty():
             continue
         cuts = kdb.Region(via.shapes(cut))
         for pad in kdb.Region(via.shapes(metal)).merged().each():
-            if not pad.is_box() or cuts.inside(kdb.Region(pad)).count() != 1:
+            enclosed = cuts.inside(kdb.Region(pad))
+            if not pad.is_box() or enclosed.count() != 1:
                 continue
+            cut_polygon = next(enclosed.each())
             for trans in inst.cell_inst.each_cplx_trans():
                 placed = pad.transformed(trans)
                 if not placed.is_box():
                     continue
+                cut_sides = kdb.Region(cut_polygon.transformed(trans)).edges()
                 for edge in placed.each_edge():
-                    edges[edge.bbox()] = placed.bbox()
-    return edges
+                    pad_sides.insert(edge)
+                    flush = not (kdb.Edges(edge) & cut_sides).is_empty()
+                    edges[edge.bbox()] = (placed.bbox(), flush)
+    return edges, pad_sides
 
 
 def _extend(kdb, box, vertical, target, bias):
@@ -67,24 +73,45 @@ def _m1_spacing_clear(kdb, region, dbu, around):
     return True
 
 
-def _repair_pair(kdb, pair, edges, metal, cuts, dbu):
-    source = [edges.get(edge.bbox()) for edge in (pair.first, pair.second)]
-    if any(box is None for box in source):
-        return None
-    vertical = pair.first.p1.x == pair.first.p2.x
-    target = _nm_to_dbu_ceil(_SHORT_MAX_NM, dbu)
-    # Each trial lengthens both facing edges. Preserve nearby polygons in full
-    # so clipping cannot create an artificial tip at the window boundary.
-    window = kdb.Region(pair.bbox().enlarged(2 * target))
-    nearby = metal.interacting(kdb.Region(window.bbox().enlarged(target)))
-    boundary = set(nearby.edges().each())
-    if pair.first not in boundary or pair.second not in boundary:
-        return None
+def _wire_end(kdb, edge, depth):
+    """The minimum-width strip inside a Manhattan polygon's facing edge.
+
+    KLayout orients polygon boundaries with metal to their right.
+    """
+    dx, dy = edge.p2.x - edge.p1.x, edge.p2.y - edge.p1.y
+    across_x = depth if dy > 0 else -depth if dy < 0 else 0
+    across_y = -depth if dx > 0 else depth if dx < 0 else 0
+    face = edge.bbox()
+    return face + face.moved(across_x, across_y)
+
+
+def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair):
+    first, second = pair.first, pair.second
+    a, b = landings.get(first.bbox()), landings.get(second.bbox())
+    if a is not None and b is not None:
+        if allow_pad_pair:
+            yield (a[0], b[0]), False
+        return
+    landing, wire_edge = (a, second) if a is not None else (b, first)
+    if landing is None or not landing[1]:
+        return
+    # A partial or wire-covered pad edge is not an independent wire face.
+    if not (kdb.Edges(wire_edge) & pad_sides).is_empty():
+        return
+    yield (landing[0],), True
+    wire = _wire_end(kdb, wire_edge, _nm_to_dbu_ceil(18, dbu))
+    if (kdb.Region(wire) - nearby).is_empty():
+        yield (landing[0], wire), True
+
+
+def _try_extensions(kdb, source, vertical, target, nearby, cuts, dbu, window):
     for bias in range(3):
         boxes = [_extend(kdb, box, vertical, target, bias) for box in source]
         if any(nearby.interacting(kdb.Region(box)).count() != 1 for box in boxes):
             continue
-        extended = kdb.Region(boxes[0]) + kdb.Region(boxes[1])
+        extended = kdb.Region()
+        for box in boxes:
+            extended.insert(box)
         added = extended - nearby
         if added.is_empty() or not added.interacting(cuts).is_empty():
             continue
@@ -93,32 +120,70 @@ def _repair_pair(kdb, pair, edges, metal, cuts, dbu):
     return None
 
 
-def repair_m1_landing_pairs(kdb, layout, top, lef_to_gds) -> int:
-    """Repair only S.4 pairs with two actual V1 landing edges on ASAP7 M1."""
+def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, allow_pad_pair):
+    if pair.first.bbox() not in landings and pair.second.bbox() not in landings:
+        return None
+    if not pair.first.is_parallel(pair.second):
+        return None
+    target = _nm_to_dbu_ceil(_SHORT_MAX_NM, dbu)
+    window = kdb.Region(pair.bbox().enlarged(2 * target))
+    nearby = metal.interacting(kdb.Region(window.bbox().enlarged(target)))
+    boundary = set(nearby.edges().each())
+    if pair.first not in boundary or pair.second not in boundary:
+        return None
+    vertical = pair.first.p1.x == pair.first.p2.x
+    for source, mixed in _trial_sources(
+        kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair
+    ):
+        added = _try_extensions(
+            kdb, source, vertical, target, nearby, cuts, dbu, window
+        )
+        if added is not None:
+            return added, mixed
+    return None
+
+
+def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     # The merge supplies routing layers only. Require a physical ASAP7 V1
     # layer and respect an explicit cut mapping when the caller supplies one.
     if lef_to_gds.get("M1") != (19, 0) or lef_to_gds.get("V1", (21, 0)) != (21, 0):
-        return 0
+        return 0, 0
     metal_index, cut_index = layout.find_layer(19, 0), layout.find_layer(21, 0)
     if metal_index is None or cut_index is None:
-        return 0
+        return 0, 0
     metal = kdb.Region(top.begin_shapes_rec(metal_index)).merged()
-    narrow = _edge_classes(metal.edges(), layout.dbu)["narrow"]
-    pairs = narrow.space_check(
-        _nm_to_dbu_ceil(31, layout.dbu), True, kdb.Edges.Projection
-    )
-    if pairs.is_empty():
-        return 0
-    edges = _landing_edges(kdb, top, metal_index, cut_index)
+    classes = _edge_classes(metal.edges(), layout.dbu)
+    narrow, tip = classes["narrow"], classes["tip"]
+    spacing = _nm_to_dbu_ceil(31, layout.dbu)
+    narrow_pairs = narrow.space_check(spacing, True, kdb.Edges.Projection)
+    tip_pairs = tip.separation_check(narrow, spacing, True, kdb.Edges.Projection)
+    if narrow_pairs.is_empty() and tip_pairs.is_empty():
+        return 0, 0
+    landings, pad_sides = _landing_edges(kdb, top, metal_index, cut_index)
     cuts = kdb.Region(top.begin_shapes_rec(cut_index))
     v0 = layout.find_layer(18, 0)
     if v0 is not None:
         cuts += kdb.Region(top.begin_shapes_rec(v0))
-    repaired = 0
-    for pair in sorted(pairs.each(), key=lambda item: item.bbox()):
-        extra = _repair_pair(kdb, pair, edges, metal, cuts, layout.dbu)
-        if extra is not None:
-            top.shapes(metal_index).insert(extra)
-            metal = (metal + extra).merged()
-            repaired += 1
-    return repaired
+    pad_count = wire_count = 0
+    for pairs, allow_pad_pair in ((narrow_pairs, True), (tip_pairs, False)):
+        for pair in sorted(pairs.each(), key=lambda item: item.bbox()):
+            result = _repair_pair(
+                kdb, pair, landings, pad_sides, metal, cuts, layout.dbu, allow_pad_pair
+            )
+            if result is not None:
+                extra, mixed = result
+                top.shapes(metal_index).insert(extra)
+                metal = (metal + extra).merged()
+                if mixed:
+                    wire_count += 1
+                else:
+                    pad_count += 1
+    return pad_count, wire_count
+
+
+def repair_m1_landing_pairs(kdb, layout, top, lef_to_gds, *, report=None) -> int:
+    """Return the pad–pad count and expose the separate pad–wire count in the report."""
+    pads, wires = _repair_m1_pairs(kdb, layout, top, lef_to_gds)
+    if report is not None:
+        report["m1_landing_pad_wire_pairs_extended"] = wires
+    return pads
