@@ -6,6 +6,8 @@ card and the cause line) reaches the message by position.
 
 from __future__ import annotations
 
+import pytest
+
 from klayout_tools import sim
 
 
@@ -75,3 +77,30 @@ def test_error_on_line_context_is_bounded_and_excludes_following_blocks():
     assert "could not find a valid modelname" in message
     assert "m.x2" not in message
     assert "another cause" not in message
+
+
+@pytest.mark.parametrize("warnings", [1, 2])
+def test_error_on_line_prioritizes_card_and_cause_over_startup_warnings(warnings):
+    card = "m.x1 d g s b nfet " + "x" * 500
+    cause = "could not find a valid modelname"
+    lines = [f"Warning: startup {n}" for n in range(warnings)]
+    lines.extend(["Error on line 5 or its substitute:", card, cause])
+    (diag,) = sim._classify_diagnostics("\n".join(lines))
+    assert diag["message"].endswith(f"[cause: {card[:200]} | {cause}]")
+
+
+@pytest.mark.parametrize("continuation", ["", "could not find a valid modelname"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "Simulation interrupted due to error!\nError: incomplete or empty netlist",
+        "Error on line 9 or its substitute:",
+        "Error in netlist line no. 9",
+    ],
+)
+def test_error_on_line_does_not_borrow_a_later_error(continuation, boundary):
+    header = "Error on line 5 : m.x1 d g s b nfet w=1u l=0.15u"
+    log = "\n".join([header, continuation, boundary, "unrelated cause"])
+    (diag,) = sim._classify_diagnostics(log)
+    expected = f"{header} [cause: {continuation}]" if continuation else header
+    assert diag["message"] == expected
