@@ -544,17 +544,17 @@ def _parse_instance_statement(statement: str) -> _Instance:
                     f"instance '{inst_name}' ('{cell}') connection {item!r} "
                     "is not a well-formed '.PORT(NET)' entry"
                 )
-            port_name = item[1:port_open].strip()
-            if not _IDENT_RE.fullmatch(port_name):
+            pin_token = item[1:port_open].lstrip()
+            port_name = pin_token.rstrip()
+            escaped = pin_token != port_name and _ESCAPED_IDENT_RE.fullmatch(port_name)
+            if not (_IDENT_RE.fullmatch(port_name) or escaped):
                 raise VerilogNetlistError(
-                    f"instance '{inst_name}' ('{cell}') connection {item!r} "
-                    "names an invalid port"
+                    f"instance '{inst_name}' ('{cell}') pin identifier {port_name!r} "
+                    "must be plain or backslash-escaped and terminated by whitespace"
                 )
             expr = item[port_open + 1 : port_close].strip()
             if not expr:
-                # `.PORT()` -- an explicit no-connect. Leave it unrecorded;
-                # `_convert_module` synthesizes a fresh disconnected net for
-                # any declared pin with no recorded connection.
+                # _convert_module supplies a fresh disconnected net for `.PORT()`.
                 continue
             expressions[_unescape(port_name)] = expr
     return _Instance(cell=cell, name=inst_name, expressions=expressions)
