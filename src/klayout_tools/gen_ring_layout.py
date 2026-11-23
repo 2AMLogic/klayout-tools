@@ -118,6 +118,7 @@ def _mos_array_ring_layout(
         params["pitch_x_um"],
         params["pitch_y_um"],
         top_endcap_um=layer["top_endcap_um"],
+        well_enclosure_um=layer["device_well_enclosure_um"],
         tap_reach_um=0.0,  # a ring is drawn, so no tap pads (#3648)
         share_sd=params["share_sd"],
         mirror=params["mirror"],

@@ -376,11 +376,11 @@ def test_testbench_search_path_relative_resolves_against_request_dir(tmp_path):
     shared = tmp_path / "shared-testbenches"
     shared.mkdir()
     _write(shared / "test_gcd.py", _TESTBENCH)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd", "search_path": "shared-testbenches"}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(shared.resolve())
+    assert module_dirs == [str(shared.resolve())]
 
 
 def test_testbench_search_path_absolute(tmp_path):
@@ -388,11 +388,11 @@ def test_testbench_search_path_absolute(tmp_path):
     shared = tmp_path / "elsewhere"
     shared.mkdir()
     _write(shared / "test_gcd.py", _TESTBENCH)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd", "search_path": str(shared)}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(shared.resolve())
+    assert module_dirs == [str(shared.resolve())]
 
 
 def test_testbench_search_path_missing_module_names_resolved_location(tmp_path):
@@ -418,11 +418,11 @@ def test_testbench_search_path_omitted_resolves_next_to_request(tmp_path):
     """Omitting `search_path` is fully additive -- behavior is byte-for-byte
     unchanged from before this key existed."""
     _setup_inputs(tmp_path)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd"}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(tmp_path.resolve())
+    assert module_dirs == [str(tmp_path.resolve())]
 
 
 @pytest.mark.parametrize("testcase", [7, [], [""], ""])
@@ -802,7 +802,7 @@ def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
         env={"X": "1"},
         build_log=str(tmp_path / "b.log"),
         module="m",
-        module_dir=str(tmp_path),
+        module_dirs=[str(tmp_path)],
         testcase=None,
         random_seed=None,
         test_dir=str(tmp_path),
