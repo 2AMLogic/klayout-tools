@@ -1,8 +1,6 @@
 """Own-block via-cut clearance check for ``klt gen-compose`` (#5398).
 
-Split out of ``gen_compose.py`` / ``gen_compose_routing.py`` (both under the
-per-file size ratchet). ``gen_compose`` imports this module, which imports
-``gen_compose`` names only inside functions (as ``gen_compose_port_request``).
+Via drawing and clearance checks use the same cut dimensions and landing geometry.
 """
 
 from __future__ import annotations
@@ -10,7 +8,47 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .gen import GenError, _cut_fixed_size_um, _fixed_cut_side_um
+from .gen_compose_base import _VIA_DROP_SIZE_UM, _drop_array_extra_um
+from .gen_compose_layer_rules import _min_width_um_for_layer, _pdk_family
 from .gen_compose_plane_change import RouteConflict
+
+
+def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
+    """The fixed drawn side (um) of a via-drop cut on ``via_layer`` for the
+    resolved PDK ``variant`` (issue #2585, see
+    :func:`klayout_tools.gen_layer_params._cut_fixed_size_um`), or ``0.0``
+    when the layer has no upper size bound or the family cannot be resolved
+    at all -- an unresolvable family degrades to the unclamped via size,
+    exactly like :func:`_min_width_um_for_layer`'s own floor lookup."""
+    try:
+        family = _pdk_family(variant)
+    except GenError:
+        return 0.0
+    return _cut_fixed_size_um(family, via_layer)
+
+
+def _insert_via_cuts(
+    shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
+) -> None:
+    """Draw a via-drop's cut(s) centred on ``(cx, cy)`` (dbu): one square, or
+    -- when ``drop["array"]`` is set by a label-derived port's
+    ``access.via_array`` (#2927) -- the rows x cols array at its deck pitch."""
+    import klayout.db as kdb
+
+    array = drop.get("array")
+    if not array:
+        shapes.insert(kdb.Box(cx - half, cy - half, cx + half, cy + half))
+        return
+    pitch = int(round(array["pitch_um"] / dbu))
+
+    def axis(count: int) -> list[int]:
+        return [int(round((i - (count - 1) / 2.0) * pitch)) for i in range(count)]
+
+    for dy in axis(array["rows"]):
+        for dx in axis(array["cols"]):
+            x, y = cx + dx, cy + dy
+            shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
 
 
 def landing_pad_half_dbu(landing_size_um: float, via_size_um: float, dbu: float) -> int:
@@ -39,8 +77,6 @@ def drawn_landing_box(
 ) -> Any:
     """Landing box on the output grid, including the full cut-array span."""
     import klayout.db as kdb
-
-    from .gen_compose_routing import _drop_array_extra_um
 
     cx, cy = round(drop["x_um"] / dbu), round(drop["y_um"] / dbu)
     half = landing_pad_half_dbu(side_um + _drop_array_extra_um(drop), via_size_um, dbu)
@@ -107,8 +143,6 @@ def own_via_cut_clearance_reason(
     blocker-less :class:`RouteConflict` since #6961 (this check names a
     block's own geometry, never an already-routed net) -- or ``None``.
     """
-    from .gen_compose import _insert_via_cuts
-
     for drop in via_drops:
         drop_block = drop.get("block_id")
         cut_layer = drop.get("via_layer")
@@ -153,13 +187,6 @@ def via_drop_cut_side_um(variant: str, via_pair: tuple[int, int]) -> float:
     0.19um, #2585) -- the generic 0.22um square is over that maximum. The one
     definition shared by the drawing side and the route-time own-block
     cut-clearance check (#5398), so the two cannot disagree."""
-    from .gen_compose import (
-        _VIA_DROP_SIZE_UM,
-        _fixed_cut_side_um,
-        _min_width_um_for_layer,
-        _via_fixed_size_um,
-    )
-
     floor = _min_width_um_for_layer(variant, via_pair)
     return _fixed_cut_side_um(
         max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
