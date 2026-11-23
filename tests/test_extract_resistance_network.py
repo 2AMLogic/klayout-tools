@@ -270,10 +270,8 @@ def _trunk_leg_positions(path: Path) -> dict[str, tuple[float, float]]:
 
 
 def test_pex_resistance_network_trunk_fixture(tmp_path):
-    """The emitted network reproduces every pair of the solved matrix (a
-    nodal DC solve of the written cards, no ngspice), the two live
-    terminals see less than the legacy series sum, and every net reports
-    which network was written."""
+    """At the five-terminal cap, the written resistor cards reproduce every
+    solved pair and the two live terminals see less than the legacy sum."""
     report, out = _run_pex_trunk(
         tmp_path,
         "trunk",
