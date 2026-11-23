@@ -1965,9 +1965,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     own empty-``corners``-list short-circuit), distinct from omitting the
     field entirely.
 
-    Each requested name is validated against the *unfiltered* shipped-corner
-    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
-    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    Once ``cell_library`` and ``pdk_info`` are resolved, the post-route sweep
+    checks each requested name against that corner set. An unknown name raises
     :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
     this module's existing unresolvable-request-field convention (e.g.
     :func:`_validate_route_critical_nets_percentage`'s sibling validators).
