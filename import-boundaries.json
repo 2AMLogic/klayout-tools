@@ -1188,6 +1188,7 @@
         "klayout_tools.synthesize_abc_stages",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_constrained_timing",
         "klayout_tools.synthesize_driving_cell",
         "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
@@ -1925,6 +1926,11 @@
       "consumer": "stats",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "synthesize",
+      "exporter": "sta",
+      "reason": "Issue #6924: validate synthesis multicycle entries with the shared STA grammar and run standalone Verilog-mode STA on the final mapped netlist."
     },
     {
       "consumer": "synthesize",
