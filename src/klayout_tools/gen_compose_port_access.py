@@ -1,30 +1,13 @@
 """Label-derived ports and via-stack landing search for ``klt gen-compose``
 ``blocks[].cell`` blocks (issue #2927).
 
-A hand-drawn macro names its ports only by text labels sitting on the block's
-own routing, usually interior to the cell. :func:`parse_ports_from_labels`
-validates the opt-in ``blocks[].cell.ports_from_labels`` option and
-:func:`derive_label_ports` turns it into ordinary ``ports[]`` entries:
-
-1. every named label is resolved to the net under it (``LayoutToNetlist``
-   connectivity over the resolved PDK deck's ``metals``/``vias`` stack -- the
-   same connectivity model ``klt extract`` and #2210's ``landed_on_block``
-   use), and
-2. when a port carries an ``access`` block, the port net's own shapes are
-   searched for a landing point where the via ladder up to ``access.up_to``
-   (the very ladder :func:`~.gen_compose_routing._resolve_via_drop_layer`
-   makes the router draw at a pin, sized by the same helpers) keeps rule
-   clearance from every other net, via spacing against the macro's existing
-   cuts, and avoids caller-named keep-out layers.
-
-The derived port is reported on the net's own layer, so the router's existing
-via-drop ladder draws the stack at the chosen point; the search only decides
-*where* that is legal. The search is grid-based, bounded and deterministic:
-candidates are ranked by distance to the label (ties by ``x`` then ``y``).
-
-Dependency direction mirrors ``gen_compose_routing.py``: ``gen_compose.py``
-imports this module, this module imports ``gen_compose`` names only inside
-functions.
+The opt-in ``ports_from_labels`` setting converts a macro's text labels
+to ports on the underlying PDK metal/via connectivity, as in extraction.
+For an access port, the search tests the router's actual via ladder,
+array pitches and drawn pad footprints against other nets, existing vias
+and keep-outs. Candidates belong to the port net and are ordered by
+distance to the label, then by x and y. The composer loads the source cell
+when geometry is needed.
 """
 
 from __future__ import annotations
@@ -35,6 +18,7 @@ from typing import Any
 from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
+from .gen_compose_base import GenComposeError
 from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 from .gen_compose_routing import (
     _pdk_family,
@@ -60,19 +44,13 @@ _MAX_ARRAY_SIDE = 16
 _LayerPair = tuple[int, int]
 
 
-def _err(message: str) -> Exception:
-    from .gen_compose import GenComposeError
-
-    return GenComposeError(message)
-
-
 def _parse_layer_pair(raw: Any, where: str) -> _LayerPair:
     if (
         not isinstance(raw, dict)
         or not is_int(raw.get("layer"))
         or not is_int(raw.get("datatype"))
     ):
-        raise _err(
+        raise GenComposeError(
             f"{where} must be a JSON object with integer 'layer'/'datatype' "
             "fields (the same shape `klt layers` reports)"
         )
@@ -83,7 +61,9 @@ def _parse_layer_list(raw: Any, where: str, *, required: bool) -> list[_LayerPai
     if raw is None and not required:
         return []
     if not isinstance(raw, list) or (required and not raw):
-        raise _err(f"{where} must be a{' non-empty' if required else 'n'} array")
+        raise GenComposeError(
+            f"{where} must be a{' non-empty' if required else 'n'} array"
+        )
     return [_parse_layer_pair(item, f"{where}[{i}]") for i, item in enumerate(raw)]
 
 
@@ -92,7 +72,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     ``via_array`` (``[rows, cols]`` cuts per via hop), ``keepout_layers``, and the
     optional search knobs ``grid_um`` / ``max_candidates``."""
     if not isinstance(raw, dict):
-        raise _err(f"{where} must be a JSON object")
+        raise GenComposeError(f"{where} must be a JSON object")
     unknown = set(raw) - {
         "up_to",
         "via_array",
@@ -101,10 +81,12 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         "max_candidates",
     }
     if unknown:
-        raise _err(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
+        raise GenComposeError(
+            f"{where} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     up_to = raw.get("up_to")
     if not isinstance(up_to, str) or not up_to:
-        raise _err(
+        raise GenComposeError(
             f"{where}.up_to is required (a routing layer role such as "
             "'metal4', the same names routing.layer_role accepts)"
         )
@@ -114,15 +96,17 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         or len(via_array) != 2
         or not all(is_int(n) and n >= 1 for n in via_array)
     ):
-        raise _err(f"{where}.via_array must be [rows, cols] of integers >= 1")
+        raise GenComposeError(
+            f"{where}.via_array must be [rows, cols] of integers >= 1"
+        )
     if max(via_array) > _MAX_ARRAY_SIDE:
-        raise _err(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
+        raise GenComposeError(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
     grid_um = raw.get("grid_um")
     if grid_um is not None and (not is_finite_number(grid_um) or grid_um <= 0):
-        raise _err(f"{where}.grid_um must be a number > 0")
+        raise GenComposeError(f"{where}.grid_um must be a number > 0")
     max_candidates = raw.get("max_candidates", DEFAULT_MAX_CANDIDATES)
     if not is_int(max_candidates) or max_candidates < 1:
-        raise _err(f"{where}.max_candidates must be an integer >= 1")
+        raise GenComposeError(f"{where}.max_candidates must be an integer >= 1")
     return {
         "up_to": up_to,
         "via_array": (int(via_array[0]), int(via_array[1])),
@@ -150,11 +134,13 @@ def _parse_label_names(
             if entry.get("access") is not None:
                 access = _parse_access(entry["access"], f"{at}.access")
         else:
-            raise _err(f"{at} must be a label string or an object with 'name'")
+            raise GenComposeError(
+                f"{at} must be a label string or an object with 'name'"
+            )
         if not isinstance(name, str) or not name:
-            raise _err(f"{at} needs a non-empty label name")
+            raise GenComposeError(f"{at} needs a non-empty label name")
         if name in seen:
-            raise _err(f"{where}.names contains duplicate name '{name}'")
+            raise GenComposeError(f"{where}.names contains duplicate name '{name}'")
         seen.add(name)
         names.append({"name": name, "access": access})
     return names
@@ -173,14 +159,16 @@ def parse_ports_from_labels(raw: Any, where: str) -> dict[str, Any] | None:
         return None
     where = f"{where}.ports_from_labels"
     if not isinstance(raw, dict):
-        raise _err(f"{where} must be a JSON object")
+        raise GenComposeError(f"{where} must be a JSON object")
     unknown = set(raw) - {"layers", "names", "access"}
     if unknown:
-        raise _err(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
+        raise GenComposeError(
+            f"{where} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     layers = _parse_layer_list(raw.get("layers"), f"{where}.layers", required=True)
     raw_names = raw.get("names")
     if not isinstance(raw_names, list) or not raw_names:
-        raise _err(f"{where}.names must be a non-empty array")
+        raise GenComposeError(f"{where}.names must be a non-empty array")
     shared = raw.get("access")
     shared_access = None if shared is None else _parse_access(shared, f"{where}.access")
 
@@ -226,7 +214,7 @@ class _MacroNets:
         try:
             self.deck = get_extraction_deck(_pdk_family(variant))
         except (GenError, UnknownDeckError) as exc:
-            raise _err(
+            raise GenComposeError(
                 f"ports_from_labels: no extraction deck for '{variant}': {exc}"
             ) from exc
         self.layout = src_layout
@@ -308,19 +296,19 @@ def _resolve_label(
         if not hits:
             continue
         if len({net.cluster_id for net, _ in hits}) > 1:
-            raise _err(
+            raise GenComposeError(
                 f"ports_from_labels: label '{name}' at ({x * nets.dbu}, "
                 f"{y * nets.dbu}) um touches several unconnected nets "
                 "(overlapping metals) -- cannot tell which one it names"
             )
         resolved.append((hits[0][0], hits[0][1], x, y))
     if not resolved:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: label '{name}' sits on no conductor of the "
             "PDK deck's metal stack (checked every text of that name)"
         )
     if len({r[0].cluster_id for r in resolved}) > 1:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: label '{name}' appears on more than one "
             "distinct net -- ambiguous"
         )
@@ -449,7 +437,7 @@ def _grid_candidates(
         ny = len(range(-(-box.bottom // step) * step, box.top + 1, step))
         total += nx * ny
     if total > _MAX_ENUMERATED_POINTS:
-        raise _err(
+        raise GenComposeError(
             "ports_from_labels: the port net spans too many grid points "
             f"({total}) -- raise access.grid_um to coarsen the search"
         )
@@ -532,7 +520,7 @@ def _search_landing(
     up_to_layer = _resolve_route_layer(variant, access["up_to"])
     ladder, ladder_error = _resolve_via_drop_layer(nets.deck, up_to_layer, net_layer)
     if ladder_error is not None:
-        raise _err(f"ports_from_labels: port '{name}': {ladder_error}")
+        raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
     hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
@@ -594,7 +582,7 @@ def _search_landing(
         if len(samples[category]) < _REJECTION_SAMPLES:
             samples[category].append(f"({x * dbu:g}, {y * dbu:g}) um: {detail}")
     if not candidates:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: no candidate landing point for port '{name}' on "
             f"layer {net_layer[0]}/{net_layer[1]}: no grid point at "
             f"grid_um={step * dbu:g} falls inside the net shapes and the net has "
@@ -603,7 +591,7 @@ def _search_landing(
         )
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     detail_lines = "; ".join(s for key in counts for s in samples[key])
-    raise _err(
+    raise GenComposeError(
         f"ports_from_labels: no legal landing for port '{name}' on layer "
         f"{net_layer[0]}/{net_layer[1]} up to '{access['up_to']}' -- "
         f"{len(candidates)} candidate(s) rejected ({summary})"
@@ -639,7 +627,7 @@ def derive_label_ports(
     for entry in spec["names"]:
         name = entry["name"]
         if name not in labels:
-            raise _err(
+            raise GenComposeError(
                 f"blocks '{block_id}': ports_from_labels name '{name}' matches "
                 "no text label on the listed layers"
             )

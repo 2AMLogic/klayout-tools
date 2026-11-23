@@ -85,7 +85,11 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   "reinstall_spec": "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2",
   "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
-  "klayout_version_expected": "0.30.10"
+  "klayout_version_expected": "0.30.10",
+  "commands": [
+    {"name": "arith-gen", "summary": "…"},
+    {"name": "…", "summary": "…"}
+  ]
 }
 ```
 
@@ -151,6 +155,26 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   build/commit was tested against, or `null` when unresolvable (a build made
   before this field existed, or a checkout with no reachable `uv.lock`). See
   "Pinning the KLayout engine version" below.
+- `commands` (issue #7324) — the top-level verbs this install provides, as
+  one `{"name", "summary"}` object per verb, sorted by `name` (`summary` is
+  the verb's one-line `klt --help` description). A version pin answers
+  *which release* is installed; this field answers the other half of a
+  toolchain pin check — *is it complete* (a partial/aborted install, a wheel
+  built without an optional extra, a locally patched checkout can all be the
+  right version yet miss commands). Read it instead of scraping `klt --help`,
+  which couples a probe to argparse's formatting and breaks silently toward
+  an empty command set on drift:
+
+  ```bash
+  klt version --format json | jq -e '.commands[].name | select(. == "drc")'
+  ```
+
+  Derived from the live parser's `<command>` choices, so the list cannot
+  drift from what `klt <cmd>` actually accepts; a verb hidden from
+  `klt --help` (`help=argparse.SUPPRESS`) is hidden here too. Top-level
+  verbs only — nested subcommands (`klt pdk find`, `klt deck …`) are not
+  listed. Additive; `schema_version` stays `1`, and `--format text` still
+  prints only the one-line version string.
 
 **`version`/`git_commit`/`git_tag`/`dirty`/`is_release` identify the
 *install*, not only the commit it came from** — two byte-legitimate installs
