@@ -248,6 +248,7 @@ from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
     _make_landing_pad_side_um,
+    _pad_other_block_contact_reason,
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
@@ -3658,6 +3659,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+            _net_pin_blocks: frozenset[str] = frozenset(
+                {block for block, _port in net_pin_set}
+            ),
+            _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
         ) -> RouteConflict | None:
@@ -3704,8 +3709,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad.
 
             Intermediate and far pads are checked on their own physical layers.
-            An area overlap, a shared edge or corner can connect distinct nets
-            through one pad even when their backbones lie on different metals.
+            Area, edge or corner contact can short a pad to another route or
+            a block hosting no pin of this net, even on a different backbone layer.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -3785,38 +3790,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     if message is not None:
                         return RouteConflict(message, other_net)  # #6961
 
-            # Own-block pad self-notch check (#1520): everything above
-            # compares this leg's drawn footprint against a *different*
-            # net's already-accepted geometry. Nothing yet checks a
-            # via-drop's landing pad or a stub-widen box -- both drawn
-            # independent of routing.width_um, at a fixed size sized from
-            # the PDK's own contact-enclosure convention -- against the
-            # *same* block's own other drawn shapes on the pad's own layer.
-            # A pad legitimately lands on (merges with) the wire at its own
-            # declared port; that touch is never a violation. But when that
-            # port was hand-declared on a pre-existing `blocks[].cell`
-            # stream's own internal wire (the only way to declare a port on
-            # a cell no `klt` verb generated -- see the module docstring's
-            # "blocks[].cell" note), the pad can still land close enough to
-            # a *different* part of that same wire (e.g. a perpendicular leg
-            # near a corner the port sits close to) to violate the resolved
-            # deck's own same-layer spacing rule -- a real `klt drc` finding
-            # even though both shapes are the same electrical node, since a
-            # rule-deck space check is net-agnostic.
-            # :func:`_pad_self_notch_violation_um` catches exactly this via
-            # ``kdb.Region.notch_check`` (a same-*polygon* self-space check),
-            # which the overlap/inflate comparisons above cannot see -- the
-            # pad and the wire it lands on merge into one polygon, so there
-            # is no *other* shape here to intersect against.
-            #
-            # The box collection lives in :func:`_landing_and_widen_pad_boxes`
-            # (issue #5803: shared with the pad-vs-pitch message path).
+            # A pad can merge with its port wire and leave a notch against
+            # another part of the same wire. Check that spacing first (#1520).
+            drawing_dbu = _drawing_dbu()
             pad_boxes = _landing_and_widen_pad_boxes(
                 via_drops,
                 stub_widen,
                 layer,
                 side_for_pair,
-                _drawing_dbu(),
+                drawing_dbu,
             )
 
             for pad_layer, block_id, box, drop in pad_boxes:
@@ -3825,7 +3807,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
                 pad_geometry = _own_block_layer_geometry(
-                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                    block_id, pad_layer, drawing_dbu if drop is not None else None
                 )
                 if pad_geometry is None:
                     continue
@@ -3847,6 +3829,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "sits close to; move the declared port further along "
                         "its own wire, away from the corner)"
                     )
+
+            contact_reason = _pad_other_block_contact_reason(
+                pad_boxes,
+                _net_label,
+                sorted(
+                    block_id for block_id in blocks if block_id not in _net_pin_blocks
+                ),
+                _own_block_layer_geometry,
+                drawing_dbu,
+            )
+            if contact_reason is not None:
+                return RouteConflict(contact_reason)
 
             # Own-block approach spacing check (#1904): everything above is
             # either a route-vs-route comparison or a *pad*-sized one. Nothing

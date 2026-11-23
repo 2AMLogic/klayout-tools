@@ -1256,12 +1256,11 @@ def _run_corner_session(
 
     ``propagated_clock`` (issue #2739) marks the request's created clock
     propagated in this session (:func:`_sta_script_lines` emits
-    ``set_propagated_clock`` for a ``def``-mode request; it is always
-    ``False`` for ``verilog`` mode -- :func:`_validate_propagated_clock`
-    rejects the option there) and adds the parsed ``clock_propagation``
-    evidence block to ``corner_fields``; ``False`` leaves the emitted Tcl
-    and every derived field byte-identical to the pre-#2739 session, with
-    ``clock_propagation: None``.
+    ``set_propagated_clock`` for a ``def``-mode request; it is always ``False``
+    for ``verilog`` mode -- :func:`_validate_propagated_clock` rejects the
+    option there) and adds the parsed ``clock_propagation`` evidence block to
+    ``corner_fields``; ``False`` leaves the emitted Tcl and every derived field
+    byte-identical to the pre-#2739 session, with ``clock_propagation: None``.
 
     Both the original scalar (``request.pdk.corner``) path and issue #1871's
     additive multi-corner (``request.pdk.corners``) path call this once per
@@ -1275,35 +1274,31 @@ def _run_corner_session(
       reported *per corner* (``worst_slack_ns``, ..., ``spef_annotation``) --
       the exact dict this module built inline before this refactor, now
       returned instead of assembled directly into ``response``.
-    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info":
-      dict}``, everything the caller needs to build its own
-      ``provenance``/``deck`` block(s); kept separate from ``corner_fields``
-      because the multi-corner caller hoists ``pdk_info`` to the top-level
-      response once (shared across every corner) while nesting only
-      ``deck`` per corner (see :func:`_run_multi_corner`).
+    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info": dict}``,
+      everything the caller needs to build its own ``provenance``/``deck`` block(s);
+      kept separate from ``corner_fields`` because the multi-corner caller hoists
+      ``pdk_info`` to the top-level response once (shared across every corner)
+      while nesting only ``deck`` per corner (see :func:`_run_multi_corner`).
 
     ``macros`` (issue #2635) adds one ``read_lef`` per declared hard macro
     -- which is what makes a macro-bearing ``def``/``verilog`` load at all
     instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
     not found`` -- plus one ``read_liberty`` per macro that declared a
-    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`). ``[]`` (the
-    default for every pre-#2635 request) emits neither and leaves the
-    generated script byte-identical.
+    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`).
+    ``[]`` (the default for pre-#2635 requests) emits neither, script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
-    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
-    this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
-    ``read_spef`` and adds its ``{path, scope, content_hash}`` identity to
-    ``corner_fields["sdf"]`` (``report_paths`` supplies the ``{path,
-    scope}`` resolution). Any previous file at that path is removed first,
-    so a missing or empty file after the run is this session's own failure
-    and is raised, never reported. ``None`` leaves the emitted Tcl
-    byte-identical to the pre-#2886 session, with ``sdf: None``.
+    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes this
+    session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after ``read_spef``
+    and adds its ``{path, scope, content_hash}`` identity to ``corner_fields["sdf"]``
+    (``report_paths`` supplies the ``{path, scope}`` resolution). Any previous file
+    at that path is removed first, so a missing or empty file after the run is
+    this session's own failure, raised, never reported. ``None`` leaves the
+    emitted Tcl byte-identical to the pre-#2886 session, with ``sdf: None``.
 
     Raises :class:`PostRouteStaError` for an unresolvable
     ``cell_library``/``corner_name``/LEF, a macro liberty with no entry for
     this corner, or an OpenROAD engine failure -- otherwise identical to
-    this command's pre-#1871 single-corner behaviour.
-    """
+    this command's pre-#1871 single-corner behaviour."""
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
@@ -1398,7 +1393,12 @@ def _run_corner_session(
         )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
+    completed = _run_openroad(
+        script_path,
+        metrics_path,
+        error_cls=PostRouteStaError,
+        repo_root=report_paths._repo_root if report_paths else None,
+    )
     with completed.diagnostics(PostRouteStaError):
         # Issue #2740: a rejected per-port map key stops the session before
         # any timing is reported -- surface that as the actionable request

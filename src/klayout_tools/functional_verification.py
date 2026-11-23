@@ -603,10 +603,10 @@ def load_request_arg(
 
 def _resolve_testbench(
     testbench: Any, request_dir: str, *, require_module: bool = True
-) -> tuple[str, str, str | list[str] | None]:
-    """Resolve a cocotb module name, search directory, and selected testcases.
+) -> tuple[str, list[str], str | list[str] | None]:
+    """Resolve a cocotb module name, ordered search directories, and selected testcases.
 
-    A run needs the module file under ``testbench.search_path`` (defaulting
+    A run needs the module in a directory on ``testbench.search_path`` (defaulting
     to the request directory). An offline check only validates the declaration.
     During execution this check catches a missing module before cocotb imports
     it inside the simulator. In that case cocotb can exit zero and write no
@@ -626,31 +626,9 @@ def _resolve_testbench(
             f"path: {module!r}"
         )
 
-    search_path = testbench.get("search_path")
-    if search_path is not None:
-        if not isinstance(search_path, str) or not search_path:
-            raise FunctionalVerificationError(
-                "request.testbench.search_path must be a non-empty string when given"
-            )
-        search_dir = (
-            _rpath(search_path, request_dir, "request.testbench.search_path")
-            if require_module
-            else search_path
-        )
-    else:
-        search_dir = request_dir
-
-    module_path = os.path.join(search_dir, f"{module}.py")
-    if require_module and not os.path.isfile(module_path):
-        location = (
-            "request.testbench.search_path"
-            if search_path is not None
-            else "next to the request"
-        )
-        raise FunctionalVerificationError(
-            f"testbench module not found: expected '{module_path}' "
-            f"(request.testbench.module names a Python module resolved via {location})"
-        )
+    module_dirs = resolve_testbench_search_dirs(
+        testbench.get("search_path"), request_dir, module, require_module=require_module
+    )
 
     testcase = testbench.get("testcase")
     if testcase is not None:
@@ -672,7 +650,7 @@ def _resolve_testbench(
                 "strings, or null"
             )
 
-    return module, os.path.dirname(os.path.abspath(module_path)), testcase
+    return module, module_dirs, testcase
 
 
 def _resolve_options(
@@ -1307,6 +1285,8 @@ def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
                 f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
+    _reject_env_pythonpath(env)
+
     if verilog_top and env:
         raise FunctionalVerificationError(
             "request.env cannot be combined with testbench.verilog_top -- "
@@ -1589,7 +1569,7 @@ def _run_test(
     *,
     engine: str,
     module: str,
-    module_dir: str,
+    module_dirs: list[str],
     hdl_toplevel: str,
     testcase: str | list[str] | None,
     random_seed: int | None,
@@ -1609,7 +1589,9 @@ def _run_test(
     from "one test failed" to "nothing ran". The verdict comes from
     :func:`parse_results_xml` instead, which the caller runs next.
 
-    ``module_dir`` is prepended to ``sys.path`` for the duration of the call
+    ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
+    entry 0 shadows entry 1) for the duration of the call. A single directory
+    already on the path keeps its legacy position. This is done
     because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
     to the simulator as ``PYTHONPATH`` (verified live) -- there is no
     ``test_module`` search-path parameter to use instead.
@@ -1639,9 +1621,12 @@ def _run_test(
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
     for where each engine writes it.
     """
-    inserted = module_dir not in sys.path
-    if inserted:
-        sys.path.insert(0, module_dir)
+    original_path = sys.path
+    if len(module_dirs) > 1 or (module_dirs and module_dirs[0] not in original_path):
+        sys.path = [
+            *module_dirs,
+            *(path for path in original_path if path not in module_dirs),
+        ]
     try:
         engine_runner.test(
             test_module=module,
@@ -1671,11 +1656,7 @@ def _run_test(
             f"{engine} simulation failed: {exc} ({_log_tail(log_path)})"
         ) from exc
     finally:
-        if inserted:
-            try:
-                sys.path.remove(module_dir)
-            except ValueError:  # pragma: no cover - defensive
-                pass
+        sys.path = original_path
 
 
 def _engine_version(engine: str) -> str | None:
@@ -2093,7 +2074,7 @@ def run_functional_verification(
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
     )
-    module, module_dir, testcase, plusargs = _resolve_testbench_target(
+    module, module_dirs, testcase, plusargs = _resolve_testbench_target(
         verilog_tb, request_doc["testbench"], request_dir
     )
     (
@@ -2480,7 +2461,7 @@ def run_functional_verification(
             spec,
             engine=engine,
             module=module,
-            module_dir=module_dir,
+            module_dirs=module_dirs,
             hdl_toplevel=build_hdl_toplevel,
             testcase=testcase,
             random_seed=random_seed,
@@ -2659,6 +2640,10 @@ from .functional_verification_mutation_variant import (  # noqa: E402, F401
 )
 from .functional_verification_run_results import (  # noqa: E402
     _collect_run_results,
+)
+from .functional_verification_search_path import (  # noqa: E402
+    _reject_env_pythonpath,
+    resolve_testbench_search_dirs,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
     _check_verilog_top_sdf,
