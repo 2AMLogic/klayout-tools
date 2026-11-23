@@ -152,7 +152,7 @@
   "additionalProperties": true,
   "$defs": {
     "path_value": {
-      "description": "A path string, or under request.portable_paths (issue #3798) a {path, scope} object (scope 'repo' or 'external'); PDK files become '$PDK_ROOT/...' strings.",
+      "description": "A path string, or when request.portable_paths is true (issue #3798), a {path, scope} object with scope 'repo' or 'external'. PDK-rooted paths use '$PDK_ROOT/...' strings when portable_paths is true. PDK-rooted provenance.pin_order_sources[].path entries use that form even when portable_paths is false or omitted (issue #5812).",
       "oneOf": [
         {"type": "string"},
         {
