@@ -233,7 +233,7 @@ def test_env_batch_with_one_element_list_runs_locally(tmp_path, monkeypatch):
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert "environment" not in report
+    assert report["corner_runs"][0]["environment"]["threads"] == 1
 
 
 def test_flag_local_beats_env_batch(fake, monkeypatch):

@@ -7,8 +7,8 @@ subsystem: parsing a DEF's own ``DIEAREA`` in real microns
 into the DEF-derived layout at a consistent DBU (:func:`_merge_gds_view`),
 measuring a merged cell library's own abutment-box overhang
 (:func:`_cell_library_max_overhang_um`), resolving a LEF layer name to its
-routed-net GDS ``(layer, datatype)`` pair (:func:`_lef_net_layer_gds_map`),
-a region-based drawn-geometry coverage test
+routed-net GDS ``(layer, datatype)`` pair (``_lef_net_layer_gds_map``, now in
+``place_and_route_pin_conductor``), a region-based drawn-geometry coverage test
 (:func:`_box_is_inside_drawn_geometry`), stamping unrouted single-pin DEF
 nets with a recoverable name marker (:func:`_stamp_single_pin_def_net_names`,
 issue #1488), and the merge's own top-level orchestration
@@ -62,10 +62,15 @@ import tempfile
 from collections.abc import Iterable
 from typing import Any
 
+from ._c_stdout import native_stdout_to_stderr
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
-from .place_and_route_pin_conductor import _stage_pin_conductor_layer_map
+from .place_and_route_pin_conductor import (
+    _lef_net_layer_gds_map,
+    _stage_pin_conductor_layer_map,
+)
+from .place_and_route_power_stack import repair_power_stack
 from .place_and_route_via_pad import trim_via_pads
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
@@ -222,45 +227,6 @@ def _cell_library_max_overhang_um(
         )
         max_overhang_um = max(max_overhang_um, overhang_um)
     return max_overhang_um
-
-
-def _lef_net_layer_gds_map(map_path: str | None) -> dict[str, tuple[int, int]]:
-    """``{<LEF layer name>: (<GDS layer>, <GDS datatype>)}`` for the ``NET``
-    purpose of every entry in the open_pdks KLayout LEF/DEF layer-map file at
-    ``map_path`` -- i.e. the exact ``(layer, datatype)`` KLayout's own DEF
-    reader draws that LEF layer's *routed net* geometry on, which is also the
-    ``(layer, datatype)`` an extraction deck lists in its own ``metals``
-    (sky130: ``li1`` -> ``67/20``, ``met1`` -> ``68/20``, ...).
-
-    File shape is the same whitespace-delimited
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
-    :func:`~klayout_tools.pdk.load_gds_to_lef_layer_map` parses -- this is
-    the same file read in the opposite direction (LEF name -> GDS pair,
-    restricted to the one purpose that names drawn routing).
-
-    Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
-    malformed file -- callers treat that as "cannot resolve", never as an
-    error, matching :func:`~klayout_tools.pdk.resolve_klayout_layer_map`'s
-    own degrade-gracefully posture.
-    """
-    if map_path is None:
-        return {}
-    mapping: dict[str, tuple[int, int]] = {}
-    try:
-        with open(map_path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                parts = line.split("#", 1)[0].split()
-                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
-                    continue
-                if "NET" not in parts[1].split(","):
-                    continue
-                try:
-                    mapping.setdefault(parts[0], (int(parts[-2]), int(parts[-1])))
-                except ValueError:
-                    continue
-    except OSError:
-        return {}
-    return mapping
 
 
 def _box_is_inside_drawn_geometry(
@@ -505,6 +471,10 @@ def _merge_def_to_gds(
     the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
     :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
     (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
+    ``power_stack_repair`` is
+    :func:`~klayout_tools.place_and_route_power_stack.repair_power_stack`'s
+    report (issue #6909), surfaced as the sibling ``power_stack_repair``
+    response field.
     ``pin_conductor`` reports derived-map staging (issue #5700).
     """
     # Deferred import: `place_and_route.py` imports this function back at
@@ -533,10 +503,8 @@ def _merge_def_to_gds(
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    # Match the tech LEF's DATABASE MICRONS to avoid lossy via geometry
-    # when KLayout's default DBU differs (e.g. gf180mcu uses 2000).
-    # A missing/malformed declaration keeps the reader default. Retain the
-    # full header for the DIEAREA guard's site-height check below (#1032).
+    # Match DATABASE MICRONS to preserve vias, defaulting to the reader DBU.
+    # Keep the full header for the DIEAREA site-height guard (#1032).
     tech_lef_header = read_lef_header(tech_lef)
     database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
@@ -556,7 +524,8 @@ def _merge_def_to_gds(
                     if pin_conductor_info["status"] == "staged"
                     else layer_map_path
                 )
-            main_layout.read(def_path, opts)
+            with native_stdout_to_stderr():
+                main_layout.read(def_path, opts)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise PlaceAndRouteError(
             f"could not read DEF '{def_path}' for GDS merge: {exc}"
@@ -744,6 +713,22 @@ def _merge_def_to_gds(
         die_area_um=die_area_um,
     )
 
+    # Issue #6909: repair the pdngen M2 -> M5 power stack's deck-measured
+    # V4 enclosure (V4.M4.EN.1 / V4.M5.EN.2) and M3 stub tip-to-side
+    # (M3.S.2) violations on the merged geometry -- ASAP7-only, a
+    # documented no-op everywhere else. Runs after the min-area pass (whose
+    # area floors these patches can only grow) and BEFORE the via-pad trim,
+    # so that trim's own tip_check measures the geometry this pass actually
+    # leaves behind -- the same "repair first, then measure" contract
+    # trim_via_pads itself documents for its tip_check.
+    power_stack_info = repair_power_stack(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        lef_to_gds=_lef_net_layer_gds_map(layer_map_path, ("NET", "VIA")),
+    )
+
     # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
     # documented no-op, GDS untouched, for every other PDK family). Runs
     # after the min-area pass; the dropped pads are wire-covered, so the
@@ -770,6 +755,7 @@ def _merge_def_to_gds(
         "resolution": layer_map_resolution,
         "def_net_names": def_net_names_info,
         "min_area_repair": min_area_info,
+        "power_stack_repair": power_stack_info,
         "via_pad_trim": via_pad_info,
         "pin_conductor": pin_conductor_info,
     }

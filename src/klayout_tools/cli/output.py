@@ -16,7 +16,12 @@ Design notes (additive envelope, not a wrapping one):
 - ``--format json`` output on success goes to **stdout only**; on error, the
   JSON error object goes to **stderr**, and stdout is left empty. This means
   a caller never has to inspect stdout content to distinguish success from
-  failure under ``--format json`` — check the exit code.
+  failure under ``--format json`` — check the exit code. That error stderr
+  carries the envelope *alone*: under ``--format json`` klt's human-readable
+  warnings are deferred for the invocation and dropped ahead of an
+  application error, so parsing the whole stream yields exactly one JSON
+  document, while report-producing runs still deliver them to stderr
+  (issue #6935, :mod:`klayout_tools._warn`).
 - ``--format text`` is a courtesy rendering, not the contract: success calls
   a command-supplied ``text_renderer`` callback, and errors print a plain
   ``klt <command>: <message>`` line to stderr, matching pre-existing
@@ -33,12 +38,15 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import io
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
+
+from .. import _warn
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -47,6 +55,29 @@ ERROR_EXIT_CODE = 1
 #: Pass it to :func:`emit_error` as ``exit_code`` when a command detects a
 #: usage error itself, inside ``run()``, after argparse has accepted the argv.
 EXIT_USAGE_ERROR = 2
+
+
+@contextlib.contextmanager
+def _printable_stdout() -> Iterator[None]:
+    """Let a text render survive characters stdout cannot encode (issue #5573).
+
+    A strict legacy stdout (``PYTHONIOENCODING=cp1252``, a Windows console)
+    raises ``UnicodeEncodeError`` on a claimant's free text such as the
+    ``--attest`` ``description`` -- after the envelope was written, turning a
+    passing result into a traceback and exit 1 with a partial report. For the
+    render, an unencodable character prints as a ``\\uXXXX`` escape instead
+    (the JSON, ASCII-escaped, keeps the original string). A handler the caller
+    or runtime already chose (``replace``, ``surrogateescape``) is left alone,
+    and the stream's own handler is restored afterwards."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None or getattr(sys.stdout, "errors", None) != "strict":
+        yield
+        return
+    reconfigure(errors="backslashreplace")
+    try:
+        yield
+    finally:
+        reconfigure(errors="strict")
 
 
 def emit_success(
@@ -59,13 +90,20 @@ def emit_success(
     ``format == "json"`` writes ``payload`` as indented JSON to stdout (plus a
     trailing newline). ``format == "text"`` delegates to ``text_renderer``,
     which is responsible for printing whatever human-readable rendering the
-    command defines; ``text_renderer`` is not part of the JSON contract.
+    command defines; ``text_renderer`` is not part of the JSON contract. A
+    character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
+    aborting the render (:func:`_printable_stdout`).
     """
+    # Issue #6935: this invocation produced a report, so any warning deferred
+    # for it is delivered now -- to stderr, ahead of the payload, leaving
+    # both streams exactly as documented (advisory visible, no envelope).
+    _warn.flush()
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
     else:
-        text_renderer(payload)
+        with _printable_stdout():
+            text_renderer(payload)
 
 
 def write_json_file(payload: dict, path: str) -> None:
@@ -136,12 +174,14 @@ def _drift_check_label(entry: dict) -> str:
 
     ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
     that points at one ``attestation.checks[<i>]`` entry with an additive
-    ``check`` object holding that check's identity -- its ``role`` plus
-    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
     ``corner``/``metric`` the check kind carries (see
     ``signoff_attest_drift.check_identity``, which owns both the key set and
-    the order). Rendering it is a plain join of those values in that order, so
-    this module -- a leaf that every ``klt`` verb and two library modules
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
     import -- stays free of a dependency on the signoff stack, and the
     producer stays the single place that decides what identifies a check.
 
@@ -242,6 +282,12 @@ def _print_build_skew(skew: dict | None) -> None:
         print(f"build_skew: {what} -- excluded from the verdict")
 
 
+def _hash_check_label(check: dict) -> str:
+    if check.get("status") == "unverifiable":
+        return "UNVERIFIABLE"
+    return "OK" if check["match"] else "DRIFTED"
+
+
 def render_check_text(result: dict) -> None:
     """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
 
@@ -252,7 +298,7 @@ def render_check_text(result: dict) -> None:
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
     for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
+        mark = _hash_check_label(check)
         print(f"  [{mark}] {check['field']}")
         if not check["match"]:
             print(f"      expected: {check['expected']}")
@@ -286,6 +332,11 @@ def render_check_text(result: dict) -> None:
                         "--check resolves relative paths against the current "
                         "working directory -- re-run from there"
                     )
+                # Issue #5845: a repo-scoped echo names the repo root --check
+                # anchored its recorded path on (absent for a cwd-anchored or
+                # absolute echo, so every other output is unchanged).
+                if missing.get("resolved_repo_root") is not None:
+                    print(f"      repo root: {missing['resolved_repo_root']}")
     for skipped in result.get("skipped", ()):
         print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
     # Issue #1373: engine-version drift is a non-fatal advisory, never folded
@@ -332,6 +383,9 @@ def emit_error(
     ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
+        # Issue #6935: stderr belongs to this one document -- warnings
+        # deferred for the invocation are dropped, never prefixed to it.
+        _warn.discard()
         error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
@@ -341,6 +395,9 @@ def emit_error(
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)
     else:
+        # Text is not the contract, but the advisory stays visible ahead of
+        # the plain-text error line (issue #6935).
+        _warn.flush()
         print(f"klt {command}: {message}", file=sys.stderr)
     return exit_code
 

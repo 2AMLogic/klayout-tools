@@ -1,8 +1,52 @@
-"""Derive a LEF/DEF map that also draws top-level pins on conductor (#5700)."""
+"""Resolve LEF/DEF layer mappings and stage conductor geometry for top-level pins."""
 
 from __future__ import annotations
 
 from typing import Any
+
+
+def _lef_net_layer_gds_map(
+    map_path: str | None, purposes: tuple[str, ...] = ("NET",)
+) -> dict[str, tuple[int, int]]:
+    """``{<LEF layer name>: (<GDS layer>, <GDS datatype>)}`` for the given
+    purposes of every entry in the open_pdks KLayout LEF/DEF layer-map file
+    at ``map_path`` -- by default the ``NET`` purpose, i.e. the exact
+    ``(layer, datatype)`` KLayout's own DEF reader draws that LEF layer's
+    *routed net* geometry on, which is also the ``(layer, datatype)`` an
+    extraction deck lists in its own ``metals`` (sky130: ``li1`` ->
+    ``67/20``, ``met1`` -> ``68/20``, ...). A caller that needs via cut
+    layers too (the ``power_stack_repair`` pass, issue #6909) passes
+    ``("NET", "VIA")``: cut layers carry no ``NET`` entry in these maps.
+
+    File shape is the same whitespace-delimited
+    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
+    :func:`~klayout_tools.pdk.load_gds_to_lef_layer_map` parses -- this is
+    the same file read in the opposite direction (LEF name -> GDS pair,
+    restricted to the purposes that name drawn geometry).
+
+    Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
+    malformed file -- callers treat that as "cannot resolve", never as an
+    error, matching :func:`~klayout_tools.pdk.resolve_klayout_layer_map`'s
+    own degrade-gracefully posture.
+    """
+    if map_path is None:
+        return {}
+    mapping: dict[str, tuple[int, int]] = {}
+    try:
+        with open(map_path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = line.split("#", 1)[0].split()
+                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
+                    continue
+                if not set(parts[1].split(",")) & set(purposes):
+                    continue
+                try:
+                    mapping.setdefault(parts[0], (int(parts[-2]), int(parts[-1])))
+                except ValueError:
+                    continue
+    except OSError:
+        return {}
+    return mapping
 
 
 def _pin_conductor_map_entries(map_path: str | None) -> list[tuple[str, int, int]]:
@@ -18,8 +62,7 @@ def _pin_conductor_map_entries(map_path: str | None) -> list[tuple[str, int, int
     20``), or that declares only one of them, needs nothing and is skipped.
 
     Returns ``[]`` for ``None`` or an unreadable/malformed file, matching
-    :func:`~klayout_tools.place_and_route_gds_merge._lef_net_layer_gds_map`'s
-    degrade-gracefully posture.
+    :func:`_lef_net_layer_gds_map`'s degrade-gracefully posture.
     """
     if map_path is None:
         return []

@@ -1,19 +1,10 @@
 """Reported ring ``ports[]`` entries for ``klt gen``'s describe side (#5656).
 
-Split out of ``gen_describe.py``: that file sits exactly at its per-file
-size ratchet ceiling, so the ring-opening strap-window reporting landed
-here instead of appending to it. ``_ring_ports`` moved over verbatim (its
-``GAP_*`` marker now also carries ``strap_window_um``), together with the
-``_min_spacing_um_for_layer`` deck lookup it insets by -- and, since #6425,
-the ``_min_width_um_for_layer`` sibling it floors the window by. Their only
-consumer is this reporting path, and keeping them in the ``gen`` group
-avoids a ``gen`` -> ``gen_compose`` module edge (``import-boundaries.json``
-allows ``gen_compose`` -> ``gen``, never the reverse, and
-:func:`klayout_tools.gen_compose_layer_rules._min_width_um_for_layer` is a
-private symbol of the ``gen_compose`` group): they mirror ``compose()``'s own
-``_min_spacing_um_for_layer`` closure (issue #1386) and the width/area
-siblings in :mod:`klayout_tools.gen_compose_layer_rules` rather than
-calling into them.
+Split out of ``gen_describe.py`` (#5656) because that file was at its
+per-file size ratchet ceiling.
+
+Ring openings use the shared plain-layer deck lookup for spacing insets
+and the minimum strap width, also used by the composition layer rules.
 
 Same conventions as ``gen_describe.py``: ``gen``/``gen_describe`` names are
 imported *inside* the functions that use them, so this module never has a
@@ -26,49 +17,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+from .decks.plain_rules import largest_plain_rule_um
+from .gen_base import RING_SIDE_DIRECTIONS, GenError
+from .gen_layer_params import _pdk_family
 
 
 def _min_rule_um_for_layer(
     variant: str, layer: tuple[int, int] | None, check: str
 ) -> tuple[float, str] | None:
-    """Resolve the largest plain same-layer ``check`` DRC rule for ``layer``
-    from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges generated and
-    composed geometry with, never a private, hard-coded threshold.
-
-    The shared body of :func:`_min_spacing_um_for_layer` (``"space"``) and
-    :func:`_min_width_um_for_layer` (``"width"``). A layer can carry more
-    than one such rule from different DRM sections; the largest is the true
-    floor. Rules that name an ``other_layer`` or a ``derived_layer`` are
-    cross-layer / derived-region checks, not a same-layer floor, and are
-    skipped. Returns ``(threshold_um, rule_id)``, or ``None`` when ``layer``
-    is ``None``, the layer has no such rule in the resolved deck, or the PDK
-    family/deck cannot be resolved at all -- an unresolvable family degrades
-    the lookup to a no-op, exactly like #1386's spacing lookup does.
-    """
-    from .gen import GenError, _pdk_family
-
+    """Resolve the variant before looking up its shared plain-layer rule."""
     if layer is None:
         return None
     try:
         family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
+    except GenError:
         return None
-    best: tuple[float, str] | None = None
-    for rule in deck_rules:
-        if (
-            rule.check == check
-            and rule.layer == layer
-            and rule.other_layer is None
-            and rule.derived_layer is None
-        ):
-            threshold_um = rule.threshold_dbu * nominal_dbu_um
-            if best is None or threshold_um > best[0]:
-                best = (threshold_um, rule.id)
-    return best
+    return largest_plain_rule_um(family, layer, check)
 
 
 def _min_spacing_um_for_layer(
@@ -77,15 +41,14 @@ def _min_spacing_um_for_layer(
     """Resolve the tightest applicable minimum same-*spacing* DRC rule for
     ``layer`` from the resolved PDK family's own curated deck.
 
-    Mirrors
-    :func:`klayout_tools.gen_compose_layer_rules._min_width_um_for_layer`,
-    generalised to ``"space"`` rules -- the exact lookup ``compose()`` runs
-    through its own ``_min_spacing_um_for_layer`` closure (issue #1386) for
-    the same deck, so ``klt gen``'s reported ring-opening strap window
-    (``_ring_ports`` below, issue #5656) can inset by the identical
-    threshold ``klt drc`` will judge a strap with. See
-    :func:`_min_rule_um_for_layer` for the ``(threshold_um, rule_id)`` /
-    ``None`` contract.
+    Resolves the variant, then delegates to the shared plain-rule helper
+    :func:`klayout_tools.decks.plain_rules.largest_plain_rule_um` with
+    ``"space"``: the exact lookup ``compose()`` runs through its own
+    ``_min_spacing_um_for_layer`` closure (issue #1386) for the same deck,
+    so ``klt gen``'s reported ring-opening strap window (``_ring_ports``
+    below, issue #5656) can inset by the identical threshold ``klt drc``
+    will judge a strap with. The ``(threshold_um, rule_id)`` / ``None``
+    return contract lives on :func:`largest_plain_rule_um`.
     """
     return _min_rule_um_for_layer(variant, layer, "space")
 
@@ -93,21 +56,7 @@ def _min_spacing_um_for_layer(
 def _min_width_um_for_layer(
     variant: str, layer: tuple[int, int] | None
 ) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum-*width* DRC rule for ``layer``
-    from the resolved PDK family's own curated deck (issue #6425).
-
-    The ``gen``-group twin of
-    :func:`klayout_tools.gen_compose_layer_rules._min_width_um_for_layer`
-    (same deck, same plain-same-layer ``"width"`` rule selection, same
-    widest-rule-wins tie-break), kept here so the ring-port reporting path
-    does not need a ``gen`` -> ``gen_compose`` import the package's import
-    boundaries do not allow. ``_ring_ports`` floors ``strap_window_um`` by
-    it: a strap filling the window is only as wide as the window's
-    along-side extent, so a window narrower than this width admits no
-    DRC-legal strap however much spacing slack it has. See
-    :func:`_min_rule_um_for_layer` for the ``(threshold_um, rule_id)`` /
-    ``None`` contract.
-    """
+    """Minimum DRC-legal width of a strap filling the ring opening."""
     return _min_rule_um_for_layer(variant, layer, "width")
 
 
@@ -176,7 +125,6 @@ def _ring_ports(
     ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
     no net by construction.
     """
-    from .gen import RING_SIDE_DIRECTIONS
     from .gen_describe import _box_um_field
 
     ox, oy = offset_um

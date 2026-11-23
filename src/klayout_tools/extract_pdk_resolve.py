@@ -4,14 +4,11 @@ Moved verbatim out of ``run_extract``: the FinFET option refusal, the
 ``--device-models`` precondition, the ``--pdk``/``--pdk-root`` lookup and the
 per-deck device-model binding resolution, in their original order with their
 original messages and error types.
-
-``_require_pdk_for_device_models`` still lives in ``extract.py``, which imports
-this module at its top level, so it is imported inside the function body (a
-module-level ``from .extract import ...`` would be a circular import).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .decks import (
@@ -33,7 +30,6 @@ def resolve_pdk_and_model_bindings(
     device_models: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, DeviceBinding] | None]:
     """Return ``(pdk_info, model_bindings)``; both ``None`` when no PDK resolves."""
-    from .extract import _require_pdk_for_device_models
 
     # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding; name that
     # before the PDK lookup below reports a less precise error. No-op for
@@ -74,3 +70,13 @@ def resolve_pdk_and_model_bindings(
         except ModelBindingError as exc:
             raise ExtractError(str(exc)) from exc
     return pdk_info, model_bindings
+
+
+def _require_pdk_for_device_models(
+    device_models: Mapping[str, str] | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+) -> None:
+    """``--device-model`` names a PDK subcircuit, so it needs a PDK (issue #4234)."""
+    if device_models and pdk_variant is None and pdk_root is None:
+        raise ExtractError("--device-model requires --pdk or --pdk-root")

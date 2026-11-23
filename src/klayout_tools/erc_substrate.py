@@ -20,8 +20,8 @@ Properties (each load-bearing, see the design note):
 
 Piece C (issue #5343) adds the *decidable-or-disclosed* rule (design section
 4). The pass is **evaluated** when isolation is derived (the deck declares
-``substrate_isolation``), asserted (``ties[].isolation_boxes``), or provably
-absent (a family whose isolation layers are known and none is drawn); otherwise
+``substrate_isolation``), asserted (isolation boxes or a common native substrate),
+or provably absent (no isolation islands on a known layer); otherwise
 ``erc.supply_short`` is disclosed ``inapplicable`` with reason
 ``substrate_isolation_undecidable`` and a ``missing`` list. A declared
 ``nets[].same_net_as`` pair suppresses the substrate-path short and satisfies
@@ -64,8 +64,7 @@ NO_TIES_MISSING = "ties[] entries declaring the substrate/well tap geometry"
 #: never had one (#5344); ``test_family_missing_has_no_deck_declared_family``
 #: fails if a stale entry comes back.
 _FAMILY_MISSING: dict[str, str] = {
-    "asap7": "no drawn substrate tap geometry to join through (asap7 cells draw "
-    "no substrate or well tie)",
+    "asap7": "the asap7 deck does not identify substrate isolation islands",
 }
 
 
@@ -78,37 +77,34 @@ class SubstrateOutcome(NamedTuple):
     asserted: bool = False
     assertions: list[dict[str, Any]] = []
     joins: list[dict[str, Any]] = []
-
-
-def _asserts_isolation(
-    tie_layers: list[dict[str, Any]], degenerate_ties: dict[str, str]
-) -> bool:
-    return any(
-        tie["isolation_boxes"] and tie["name"] not in degenerate_ties
-        for tie in tie_layers
-    )
+    common_native_substrate: bool = False
 
 
 def isolation_missing(
     *,
-    layout: Any,
-    top_cell: Any,
-    deck: Any,
+    deck_derives_isolation: bool,
     deck_name: str | None,
-    tie_layers: list[dict[str, Any]],
-    degenerate_ties: dict[str, str],
+    live_ties: list[dict[str, Any]],
+    asserts_boxes: bool,
+    common_native_substrate: bool,
 ) -> list[str]:
-    """The decidable-or-disclosed rule (design section 4): ``[]`` when the
-    substrate check can be evaluated, else the information still missing."""
-    if deck is not None and deck.substrate_isolation is not None:
-        return []  # derived from the deck's isolation layer
-    if _asserts_isolation(tie_layers, degenerate_ties):
-        return []  # asserted via ties[].isolation_boxes
-    if deck_name in _FAMILY_MISSING:
-        return [_FAMILY_MISSING[deck_name], "or assert ties[].isolation_boxes"]
-    return [
+    """Identify missing geometry separately from unknown substrate isolation."""
+    if not live_ties:
+        return ["a non-degenerate ties[] tap entry"]
+    if deck_derives_isolation or asserts_boxes:
+        return []
+    if not any(not tie["tap_region"].is_empty() for tie in live_ties):
+        return ["no qualifying drawn tap geometry in the non-degenerate ties[]"]
+    if common_native_substrate:
+        return []
+    family = _FAMILY_MISSING.get(
+        deck_name or "",
         "--deck naming the PDK family, so the isolation layers can be measured",
-        "or assert ties[].isolation_boxes",
+    )
+    return [
+        family,
+        "declare ties[].isolation_boxes for isolated regions, or "
+        "common_native_substrate: true for a shared native substrate",
     ]
 
 
@@ -262,6 +258,8 @@ def substrate_provenance(outcome: SubstrateOutcome) -> dict[str, Any]:
     if outcome.bodies is None:
         return {}
     extra: dict[str, Any] = {"substrate_bodies": outcome.bodies}
+    if outcome.common_native_substrate:
+        extra["common_native_substrate"] = True
     if outcome.assertions:
         extra["isolation_assertions"] = outcome.assertions
     if outcome.joins:
@@ -297,6 +295,7 @@ def run_substrate_pass(
     top_cell: Any,
     deck: Any,
     deck_name: str | None = None,
+    common_native_substrate: bool = False,
     tie_l2n: Any,
     tie_circuit: Any,
     tie_layers: list[dict[str, Any]],
@@ -307,15 +306,15 @@ def run_substrate_pass(
     """Gate and run the pass. Extends ``erc_findings`` in place and, for a
     ``same_net_as`` pair joined only through the substrate, drops the
     ``erc.expected_short_missing`` the primary graph raised for it."""
-    if not any(tie["name"] not in degenerate_ties for tie in tie_layers):
-        return SubstrateOutcome(missing=["a non-degenerate ties[] tap entry"])
+    live_ties = [tie for tie in tie_layers if tie["name"] not in degenerate_ties]
+    deck_derives_isolation = deck is not None and deck.substrate_isolation is not None
+    asserts_boxes = any(tie["isolation_boxes"] for tie in live_ties)
     missing = isolation_missing(
-        layout=layout,
-        top_cell=top_cell,
-        deck=deck,
+        deck_derives_isolation=deck_derives_isolation,
         deck_name=deck_name,
-        tie_layers=tie_layers,
-        degenerate_ties=degenerate_ties,
+        live_ties=live_ties,
+        asserts_boxes=asserts_boxes,
+        common_native_substrate=common_native_substrate,
     )
     if missing:
         return SubstrateOutcome(missing=missing)
@@ -335,7 +334,7 @@ def run_substrate_pass(
             if deck.substrate_isolation_needs_nwell_ring
             else None,
         )
-        if deck is not None and deck.substrate_isolation is not None
+        if deck_derives_isolation
         else []
     )
     findings, bodies, joined = substrate_supply_shorts(
@@ -363,9 +362,11 @@ def run_substrate_pass(
                 continue
         kept.append(finding)
     erc_findings[:] = kept
+    used_common = common_native_substrate and not deck_derives_isolation
     return SubstrateOutcome(
         bodies=bodies,
-        asserted=_asserts_isolation(tie_layers, degenerate_ties),
+        asserted=asserts_boxes or used_common,
+        common_native_substrate=used_common,
         assertions=_assertion_echo(tie_layers, degenerate_ties, bodies),
         joins=sorted(joins, key=lambda j: (j["net"], j["other_net"])),
     )

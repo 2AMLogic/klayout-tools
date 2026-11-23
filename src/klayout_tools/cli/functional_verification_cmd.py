@@ -5,8 +5,9 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
-    0 - every test passed (``status: "pass"``); under ``--mutations``, the
-        baseline passed and no valid proposal survived
+    0 - all input hashes matched under ``--check``, or every test passed in
+        a run (``status: "pass"``). Under ``--mutations``, the baseline passed
+        and no valid proposal survived
     1 - failed to run (bad request, unresolvable RTL source or testbench
         module, coverage requested on an engine that has none, missing
         cocotb/simulator install, build/elaboration error, simulator crash,
@@ -16,9 +17,9 @@ Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
         outside ``request.sources``, the baseline itself failing (the
         mutation-testing "baseline-must-pass gate"), or every proposal
         ending up ``"rejected"``
-    3 - ran successfully, at least one test failed (``status: "fail"``);
-        under ``--mutations``, the baseline passed but at least one valid
-        proposal ``"survived"``
+    3 - input hashes drifted under ``--check``, or at least one test failed
+        in a run (``status: "fail"``). Under ``--mutations``, the baseline
+        passed but at least one valid proposal ``"survived"``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. This is the same 0/1/2/3 trichotomy ``klt drc`` uses,
 not ``klt sim``'s 3/4 split -- a cocotb regression has no "ran but part of
@@ -39,13 +40,15 @@ reuses this exact 0/1/2/3 trichotomy: exit 3 means "ran fine, found
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..functional_verification import (
     FunctionalVerificationError,
     _log_tail,
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
-from .output import emit_error, emit_success
+from ..functional_verification_check import check_functional_verification_report
+from .output import emit_error, emit_success, render_check_text
 
 EXIT_PASS = 0
 EXIT_TESTS_FAILED = 3
@@ -58,6 +61,16 @@ def run(args: argparse.Namespace) -> int:
     pdk_variant = getattr(args, "pdk", None)
     pdk_root = getattr(args, "pdk_root", None)
     try:
+        if getattr(args, "check", None) is not None:
+            result = check_functional_verification_report(
+                args.check,
+                args.request,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+            )
+            emit_success(result, args.format, render_check_text)
+            return 0 if result["status"] == "match" else 3
         if mutations_path:
             report = run_functional_verification_with_mutations(
                 args.request,
@@ -168,11 +181,10 @@ def _print_text(report: dict) -> None:
         for key in ("line_pct", "toggle_pct", "branch_pct", "expr_pct"):
             value = coverage.get(key)
             print(f"  {key}: {'n/a' if value is None else value}")
-        print(f"  info_path: {coverage['info_path']}")
+        info_path = getattr(report, "local_paths", {}).get("coverage_info_path")
+        print(f"  info_path: {info_path or render_path_field(coverage['info_path'])}")
 
-    # Printed only when `options.trace` was requested (Epic #1585 Phase 3,
-    # issue #1845) -- the artifact `klt wave build`'s own `trace` field
-    # accepts unchanged (docs/cli/wave.md).
+    # wave build consumes the path and format. The size describes the response.
     trace = report.get("trace")
     if trace is not None:
         print()
@@ -201,7 +213,12 @@ def _print_text(report: dict) -> None:
         entries_note = (
             "" if sdf.get("entries", "all") == "all" else f"  entries: {sdf['entries']}"
         )
-        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}{entries_note}")
+        # `file` is the committable {path, scope} envelope (#5784), so the
+        # absolute path comes from the run's own `local_paths` side-channel,
+        # like `test_log`/`results_xml` above.
+        print(
+            f"sdf: {_local_path(report, 'sdf')}  corner: {sdf['corner']}{entries_note}"
+        )
         # Printed only when a benign diagnostic class was dropped (issue
         # #1102): `annotated: true` alone cannot distinguish "every check in
         # the SDF applied" from "every TIMINGCHECK section was dropped" --

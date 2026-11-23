@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import (
+    _sta_clock_transition,
     _sta_clock_uncertainty,
     corner_matrix,
     erc_spec,
@@ -42,6 +43,14 @@ HUGE = 10**400  # a 400-digit int literal: an int too large for a float
 #: ``(label, thunk, expected exception, message regex)`` -- one entry per
 #: fixed site; a thunk raising anything else fails the probe.
 CASES = [
+    (
+        "sta_clock_transition",
+        lambda: _sta_clock_transition.validate_clock_transition(
+            {"clock_transition_ns": HUGE}
+        ),
+        Exception,
+        "must be a finite number",
+    ),
     (
         "sta_clock_uncertainty",
         lambda: _sta_clock_uncertainty.validate_clock_uncertainty(
@@ -196,7 +205,9 @@ CASES = [
     (
         "synthesize_abc_constr",
         lambda: synthesize._resolve_abc_constr_request(
-            {"abc_constr": {"driving_cell": "X", "load_ff": HUGE}}, ""
+            {"abc_constr": {"driving_cell": "X", "load_ff": HUGE}},
+            "",
+            resolved_globs=(),
         ),
         synthesize.SynthesizeError,
         "load_ff",

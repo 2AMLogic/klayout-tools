@@ -1,0 +1,1 @@
+- **`klt lvs` preserves included subcircuits that share a deck's drawn-resistor or MoM-capacitor class name** (#6268, 2026-11-18).

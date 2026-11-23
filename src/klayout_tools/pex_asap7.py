@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import re
 
+from .pex_errors import PexError
+
 #: ``extraction.netlist_adaptation`` value for the asap7 deck.
 ASAP7_NETLIST_ADAPTATION = "asap7_bsimcmg.adapt_extracted_netlist"
 
@@ -71,7 +73,6 @@ def adapted_dut_netlist(
     if netlist_adaptation_for_deck(deck_name) is None:
         return netlist_path
     from .asap7_bsimcmg import adapt_extracted_netlist
-    from .pex import PexError
 
     with open(netlist_path, encoding="utf-8") as handle:
         text = handle.read()

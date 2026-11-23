@@ -66,6 +66,8 @@ def test_omitted_or_empty_uncited_rows_leave_the_checks_unchanged(tmp_path):
         "present",
         "present",
         "present",
+        "envelope",
+        "envelope",
         "citation",
         "citation",
         "command",

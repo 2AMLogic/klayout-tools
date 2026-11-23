@@ -15,16 +15,18 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
 from . import sim_batch
 from .sim_batch_shards import mismatch_error, shard_map_mismatch
+from .sim_errors import SimError
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
 #: while the job may still be running (``sim_batch._unrun_corner_report``).
-_UNRUN_BATCH_CODES = frozenset(
+UNRUN_BATCH_CODES = frozenset(
     {
         "lost_shard",
         "batch_job_failed",
@@ -35,9 +37,20 @@ _UNRUN_BATCH_CODES = frozenset(
 )
 
 
+#: Every code that marks a unit that never started: the synthesized batch ones
+#: above plus the budget, orphan and fail-fast-probe ones, i.e. the "Units that
+#: never ran" block of ``sim.DIAGNOSTIC_CODES``. Deliberately not folded into
+#: ``UNRUN_BATCH_CODES``, which also decides what a checkpoint records and what
+#: counts as an attempted corner. ``timeout_budget_unreachable`` can arrive in a
+#: worker report adopted verbatim (``_BATCH_SIM_SUCCESS_EXIT_CODES`` holds 4).
+NEVER_RAN_CODES = UNRUN_BATCH_CODES | frozenset(
+    {"budget_exceeded", "orphaned", "timeout_budget_unreachable"}
+)
+
+
 def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
     """True when a corner report is a synthesized batch one (never ran)."""
-    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
+    return any(diag["code"] in UNRUN_BATCH_CODES for diag in corner["diagnostics"])
 
 
 def _record_batch_checkpoint(
@@ -98,8 +111,6 @@ def _load_resume_shard_map(
     different fingerprint/request, refuses with
     :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
     stale results."""
-    from .sim import SimError
-
     if not os.path.isfile(path):
         return None
     try:
@@ -176,7 +187,7 @@ def _collect_resume_entry(
         return None
     points = [by_id[unit] for unit in unit_ids]
     try:
-        corners, engine_version, environment = sim_batch._run_batch_job(
+        result = sim_batch._run_batch_job(
             config=config,
             job_id=job_id,
             corner_points=points,
@@ -190,6 +201,9 @@ def _collect_resume_entry(
             explicit_points=points,
             request_dir=request_dir,
             attach=True,
+        )
+        corners, engine_version, environment = sim_batch._require_shard_environment(
+            result
         )
     except sim_batch.BatchError as exc:
         print(
@@ -411,6 +425,27 @@ def maybe_harvest_resume_shards(
     return harvest_resume_shard_map(checkpoint=checkpoint, **harvest_kwargs)
 
 
+def resume_hosts(
+    hosts: int, corner_points: Sequence[Any], dispatch_points: Sequence[Any]
+) -> int:
+    """The fleet size a resumed dispatch may ask for (issue #6685).
+
+    ``--resume`` reuses finished units, so ``dispatch_points`` (what is still
+    outstanding) can be shorter than ``corner_points`` (the whole request) and
+    fall below the requested ``hosts``. The "hosts exceeds the units to
+    dispatch" refusal guards a user asking for more hosts than units; on a
+    resume the user asked for nothing new, so refusing would strand a
+    half-finished sweep. Cap ``hosts`` at the outstanding unit count -- but
+    only when the resume actually reused something: a request whose own
+    ``hosts`` exceeds its own units is still refused, resume or not. Nothing
+    outstanding (everything reused) dispatches nothing, so there is nothing to
+    cap.
+    """
+    if 0 < len(dispatch_points) < len(corner_points):
+        return min(hosts, len(dispatch_points))
+    return hosts
+
+
 def merge_resume_environment(
     harvested: dict[str, Any] | None,
     dispatched: dict[str, Any] | None,
@@ -443,3 +478,21 @@ def merge_resume_environment(
         if not (isinstance(entry, dict) and entry.get("job_id") in dispatched_jobs)
     ] + dispatched_fleet
     return result
+
+
+def reassemble_corners(
+    resume: bool,
+    points: Sequence[Any],
+    fresh: list[dict[str, Any]],
+    completed: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """On resume, merge fresh and checkpointed reports in request order.
+
+    Lost batch shards supply a synthesized report per point. Every requested
+    point is therefore covered. A fresh run uses the backend's original order,
+    including remote reports that this process does not reconcile locally.
+    """
+    if not resume:
+        return fresh
+    by_id = {**completed, **{corner["corner_id"]: corner for corner in fresh}}
+    return [by_id[point.corner_id] for point in points]

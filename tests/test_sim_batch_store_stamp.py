@@ -70,6 +70,25 @@ def _searchable_home(monkeypatch, tmp_path):
     return home
 
 
+def test_search_resolved_flat_stamp_ignores_same_named_non_pdk_child(
+    _searchable_home, monkeypatch
+):
+    flat = _make_install(_searchable_home, "sg13g2", sources="flat side\n")
+    child = flat / "sg13g2"
+    child.mkdir()
+    (child / "SOURCES").write_text("nested side\n", encoding="utf-8")
+    monkeypatch.setattr(pdk, "STORE_DIRS", [str(flat)])
+
+    assert pdk.variant_dir_of(pdk.find_pdk(variant="sg13g2")) == str(flat)
+    expected = {
+        "variant": "sg13g2",
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(b"flat side").hexdigest(),
+    }
+    assert pdk_store.client_pdk_stamp("sg13g2", str(flat)) == expected
+    assert sb._client_pdk_stamp({"models": {"pdk": "sg13g2"}}) == expected
+
+
 def test_search_resolved_install_supplies_the_client_stamp(_searchable_home):
     """No ``models.pdk_root``, no ``$PDK_ROOT`` -- the default worker setup --
     still compares against the install `provenance.pdk` names, rather than
@@ -217,6 +236,63 @@ def test_pinned_root_non_variant_nested_dir_loses_to_the_root(tmp_path):
     client = pdk_store.client_pdk_stamp("gf180mcuD", str(root))
 
     assert client["stamp_sha256"] == hashlib.sha256(b"flat side").hexdigest()
+
+
+@pytest.mark.parametrize(
+    "layout,client_source,worker_source,status",
+    [
+        ("non_variant_nested", b"flat side", b"nested side", "mismatch"),
+        ("flat_only", b"flat side", None, "not_comparable"),
+        ("nested_variant", b"nested side", b"nested side", "match"),
+    ],
+    ids=["ambiguous-nested-stamp", "flat-only", "nested-variant-tree"],
+)
+def test_pinned_root_layout_stamp_comparison(
+    tmp_path, layout, client_source, worker_source, status
+):
+    """Characterize the accepted client/worker layout asymmetry (#6522).
+
+    These synthetic installs have no store metadata. Run the actual payload:
+    unlike the client, it reads root/<variant>/SOURCES without resolving the
+    variant tree, so a non-variant nested stamp can mislead the comparison.
+    """
+    root = tmp_path / "pdk"
+    (root / "libs.tech").mkdir(parents=True)
+    (root / "SOURCES").write_text("flat side\n", encoding="utf-8")
+    if layout != "flat_only":
+        nested = root / "gf180mcuD"
+        nested.mkdir()
+        (nested / "SOURCES").write_text("nested side\n", encoding="utf-8")
+        if layout == "nested_variant":
+            (nested / "libs.tech").mkdir()
+
+    client = pdk_store.client_pdk_stamp("gf180mcuD", str(root))
+    doc = _run_capture_program(
+        tmp_path,
+        ngspice_script=None,
+        args=("", "gf180mcuD", "0"),
+        env={"PDK_ROOT": str(root)},
+    )
+    worker = doc["pdk"]
+
+    assert client == {
+        "variant": "gf180mcuD",
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(client_source).hexdigest(),
+    }
+    assert worker["variant"] == "gf180mcuD"
+    comparison = sb._compare_pdk_stamps(worker, client)
+    assert comparison["status"] == status
+    if worker_source is None:
+        assert worker["stamp_scheme"] is None
+        assert worker["stamp_sha256"] is None
+        assert comparison["reason"] == "worker_stamp_unavailable"
+    else:
+        assert worker["stamp_scheme"] == "sources-sha256"
+        assert worker["stamp_sha256"] == hashlib.sha256(worker_source).hexdigest()
+        if status == "mismatch":
+            assert worker["stamp_sha256"] != client["stamp_sha256"]
+            assert comparison["warning"]
 
 
 def test_staged_model_comparison_carries_the_search_resolved_client_stamp(

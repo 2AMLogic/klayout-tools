@@ -18,8 +18,8 @@ from test_place_and_route import (
     _stub_openroad_success,
 )
 from test_post_route_sta import (
+    _LIVE_ONLY,
     _boundary_constraints,
-    _live_sky130_env,
     _write,
     _write_request,
 )
@@ -274,11 +274,7 @@ def test_stubbed_paramod_toplevel_reaches_link_design_literal(tmp_path, monkeypa
     assert f"{paramod_tcl}_floorplan.odb" in write_db_line
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_paramod_toplevel(tmp_path):
     """Issue #5708, real engine: a netlist whose top module is a Yosys
     `$paramod\\\\...` escaped identifier links and times when the request's
@@ -327,3 +323,34 @@ def test_live_engine_paramod_toplevel(tmp_path):
         "b_in",
         "ff_b/D",
     )
+
+
+def test_multicycle_selectors_are_literal_data():
+    """Issue #6921: every `constraints.multicycle_paths` selector is quoted
+    as one literal Tcl word -- a bus name's brackets are escaped (never a
+    command substitution, never a character class), and no selector
+    character can split the word or trigger `$` substitution."""
+    from klayout_tools._sta_multicycle import (
+        multicycle_lines,
+        validate_multicycle_paths,
+    )
+
+    entries = validate_multicycle_paths(
+        {
+            "multicycle_paths": [
+                {
+                    "from": "q[0]",
+                    "through": "u_mux/A1",
+                    "to": "ff_?/D",
+                    "setup": 4,
+                    "hold": 3,
+                },
+            ]
+        }
+    )
+    lines = multicycle_lines(entries)
+    resolved = next(line for line in lines if line.startswith("foreach {klt_i"))
+    assert " q\\[0\\] u_mux/A1 ff_?/D] {" in resolved
+    assert "$" not in resolved
+    for applied in (line for line in lines if line.startswith("set_multicycle_path")):
+        assert "$klt_mcp_" in applied  # objects, never re-parsed names
