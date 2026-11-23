@@ -328,7 +328,7 @@ def _design_rule_check_lines(
     """
 
     # `None` selects the module's original marker pair, resolved here rather
-    # than as a default argument (the constants are imported lazily above).
+    # than as a default argument (the constants are module-scope imports).
     if transition_begin is None:
         transition_begin = _MAX_TRANSITION_VIOLATIONS_BEGIN
     if transition_end is None:
