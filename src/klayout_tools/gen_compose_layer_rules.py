@@ -19,6 +19,7 @@ from typing import Any
 
 from . import gen_compose_top_metal_floors as _top_metal_floors
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+from .decks.plain_rules import largest_plain_rule_um
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
 
@@ -84,27 +85,14 @@ def _min_width_um_for_layer(
 def _min_rule_um_for_layer(
     variant: str, layer: tuple[int, int] | None, check: str
 ) -> tuple[float, str] | None:
-    """Largest plain same-layer width or spacing threshold from the curated deck."""
+    """Resolve the variant before looking up its shared plain-layer rule."""
     if layer is None:
         return None
     try:
         family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
+    except GenError:
         return None
-    best: tuple[float, str] | None = None
-    for rule in deck_rules:
-        if (
-            rule.check == check
-            and rule.layer == layer
-            and rule.other_layer is None
-            and rule.derived_layer is None
-        ):
-            threshold_um = rule.threshold_dbu * nominal_dbu_um
-            if best is None or threshold_um > best[0]:
-                best = (threshold_um, rule.id)
-    return best
+    return largest_plain_rule_um(family, layer, check)
 
 
 def _min_area_um2_for_layer(

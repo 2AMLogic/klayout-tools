@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ._jsonnum import is_finite_number, is_int
@@ -152,6 +153,34 @@ def orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
 
 
 _orient_port = orient_port
+
+
+def _nearest_grid_point_within(
+    composed: float, grid: float, limit: float | None
+) -> float | None:
+    """The grid point nearest ``composed`` that lies within ``limit`` of it
+    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
+    steps = composed / grid
+    base = math.floor(steps + 0.5 + 1e-9)
+    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
+    for cand in candidates:
+        value = cand * grid
+        if limit is None or abs(value - composed) <= limit + 1e-9:
+            return value
+    return None
+
+
+def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
+    """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
+    numeric position (the same "nothing to check" case the rest of the
+    landing-connectivity path tolerates rather than fails). ``bool`` is
+    rejected explicitly because it is a subclass of ``int``."""
+    x_um, y_um = port.get("x_um"), port.get("y_um")
+    if not is_finite_number(x_um):
+        return None
+    if not is_finite_number(y_um):
+        return None
+    return float(x_um), float(y_um)
 
 
 def _port_has_geometry(port: Any) -> bool:

@@ -47,7 +47,8 @@ def _net_attachment_key(
     read from this same report's already-built ``devices[]`` array -- the
     structural identity issue #1559 normalizes an anonymous net's unstable
     ``\\$<n>`` spelling to, mirroring the "resolve by structural identity,
-    not the raw counter" convention in :func:`klayout_tools.extract._net_identity_name`
+    not the raw counter" convention in
+    :func:`klayout_tools.extract_parasitics._net_identity_name`
     and the extraction driver's ``net_id``-keyed lookups
     for the *live* ``kdb.Net``/``kdb.Device`` objects, applied here instead
     to the already-serialized JSON report. Returns ``""`` for a net with no

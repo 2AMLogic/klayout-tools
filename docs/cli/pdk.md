@@ -250,7 +250,9 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. One exception (issue #6940): when each file
+  and both files' values. Repeated top-level groups with the same name and
+  arguments must match in body and occurrence count, in any declaration
+  order. One exception (issue #6940): when each file
   declares exactly one `operating_conditions` group selected by its own
   `default_operating_conditions` and the group bodies agree, the group's
   name alone may differ between files — the merged header keeps the first

@@ -26,6 +26,11 @@ from helpers.ihp_sg13g2_root import (
 )
 
 
+@pytest.fixture(autouse=True)
+def clear_host_ihp_override(monkeypatch):
+    monkeypatch.delenv("KLT_IHP_SG13G2_ROOT", raising=False)
+
+
 def _git(cwd: Path, *args: str) -> None:
     identity = ["-c", "user.name=klt", "-c", "user.email=klt@example.invalid"]
     subprocess.run(["git", *identity, *args], cwd=cwd, check=True, capture_output=True)

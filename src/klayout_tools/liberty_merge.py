@@ -103,7 +103,8 @@ def merge_liberty(paths: list[str]) -> str:
         return paths[0]
 
     texts = [_read(path) for path in paths]
-    digest = hashlib.sha256()
+    # Earlier cache entries may have missed differences between repeated groups.
+    digest = hashlib.sha256(b"liberty-merge-v2\0")
     for text in texts:
         digest.update(hashlib.sha256(text.encode("utf-8")).digest())
     out_path = os.path.join(cache_dir(), f"merged-{digest.hexdigest()[:24]}.lib")
@@ -219,6 +220,7 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
     the comparator has understood nothing and must refuse instead.
     """
     fields: dict[str, str] = {}
+    groups: dict[str, list[str]] = {}
     statements = 0
     cursor = depth = 0
     for kind, pos, end in _tokens(header):
@@ -236,10 +238,11 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
             continue
         if cursor < pos:
             _add_residue(header[cursor:pos], fields)
-        taken = _take_field(header, pos, end, cursor, fields)
+        taken = _take_field(header, pos, end, cursor, fields, groups)
         statements += taken != cursor
         cursor = taken
     _add_residue(header[cursor:], fields)
+    fields.update(_group_fields(groups))
     if statements and not fields:
         ignored = ", ".join(sorted(_IGNORED_HEADER_ATTRS))
         raise LibertyMergeError(
@@ -250,8 +253,24 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
     return fields
 
 
+def _group_fields(groups: dict[str, list[str]]) -> dict[str, str]:
+    """Compare all normalized bodies for a group without imposing declaration order."""
+    fields = {}
+    for key, bodies in groups.items():
+        first, *additional = sorted(bodies)
+        fields[key] = first
+        for occurrence, body in enumerate(additional, start=2):
+            fields[f"{key} [occurrence {occurrence}]"] = body
+    return fields
+
+
 def _take_field(
-    header: str, pos: int, end: int, cursor: int, fields: dict[str, str]
+    header: str,
+    pos: int,
+    end: int,
+    cursor: int,
+    fields: dict[str, str],
+    groups: dict[str, list[str]],
 ) -> int:
     """Consume the depth-1 statement starting at the identifier ``pos`` and
     return the new cursor (the old one when unrecognised, so the text rides
@@ -269,16 +288,16 @@ def _take_field(
     if ch == "(":
         close = _find_matching(header, nxt, "(", ")")
         args = _normalize_header(header[nxt + 1 : close])
-        p2, ch2 = _next_significant(header, close + 1)
-        if ch2 == "{":
-            bend = _find_matching(header, p2, "{", "}")
-            fields[f"{name}({args})"] = _normalize_header(header[p2 + 1 : min(bend, n)])
-            return min(bend + 1, n)
-        fields[f"{name}({args})"] = args  # complex attribute 'name (v1, v2) ;'
-        return min(p2 + 1, n)
+        name = f"{name}({args})"
+        nxt, ch = _next_significant(header, close + 1)
+        if ch != "{":
+            fields[name] = args  # complex attribute 'name (v1, v2) ;'
+            return min(nxt + 1, n)
     if ch == "{":
         bend = _find_matching(header, nxt, "{", "}")
-        fields[name] = _normalize_header(header[nxt + 1 : min(bend, n)])
+        body = _normalize_header(header[nxt + 1 : min(bend, n)])
+        fields[name] = body  # retain the field's source position in diagnostics
+        groups.setdefault(name, []).append(body)
         return min(bend + 1, n)
     return cursor
 

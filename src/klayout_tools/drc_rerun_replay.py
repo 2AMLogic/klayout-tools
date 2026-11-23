@@ -1,8 +1,8 @@
 """Replay of a committed DRC report's own recorded run choices, for
 ``klt drc --check --rerun``.
 
-The selectors a ``--rules`` subset ran (issue #2768), the abutment ``tile``
-context (issue #4226) and -- added for issue #6986 -- the PDK variant the
+The ``--top`` cell (issue #7000), selectors for a ``--rules`` subset (issue
+#2768), abutment ``tile`` context (issue #4226), and PDK variant the
 report resolved into ``provenance.pdk`` are all choices the *committed
 report itself* carries, replayed by
 :func:`klayout_tools.drc.rerun_drc_report` so the fresh run reproduces the
@@ -56,6 +56,19 @@ def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
     if isinstance(cols, int) and isinstance(rows, int):
         return cols, rows
     return None
+
+
+def _recorded_top(committed: dict[str, Any]) -> str | None:
+    """Read the requested cell scope. Only an omitted field uses the engine default."""
+    if "top" not in committed:
+        return None
+    top = committed["top"]
+    if not isinstance(top, str) or not top.strip():
+        raise DrcError(
+            "committed report's 'top' must be a non-empty cell name string "
+            "to replay the recorded scope"
+        )
+    return top
 
 
 def _rerun_pdk_selection(

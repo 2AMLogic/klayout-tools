@@ -57,17 +57,17 @@ utility modules, not verb modules, so importing their (underscore-prefixed)
 helpers by name does not violate the convention above. ``_resolve_liberty``
 (this module's own thin wrapper, below) follows the same precedent one level
 further: its body is a one-line call into
-:func:`klayout_tools.pdk.resolve_liberty_for_cell_library`, a *public* name
-in the ``pdk.py`` shared utility module (issue #1652) -- PDK-resolution
+:func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`, a *public* name
+in the ``pdk_cells.py`` shared utility module (issue #1652) -- PDK-resolution
 logic is the one part of the "self-contained" convention that must not
 drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
 bug, not just duplicated code.
 
-Scope deliberately excluded from the first version and landed since: a
-``propagated_clock`` request option (issue #2739, below). Still excluded
-(not required for this issue): a bisected (rather than
-``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+Propagated-clock timing is available through ``propagated_clock`` (issue #2739).
+``fmax_mhz`` comes from OpenROAD's ``report_fmax_metric``. Its clock estimate
+uses same-clock, same-edge, single-cycle paths and can overstate achievable
+frequency when an opposite-edge path limits the period.
 
 **Propagated-clock timing (issue #2739).** By default every analyzed corner
 is timed with an **ideal** clock: ``create_clock`` alone, no
@@ -311,6 +311,16 @@ from ._sta_io_delay_clock import (
 from ._sta_io_delay_clock import (
     validate_port_delay_maps as _validate_delay_maps,
 )
+from ._sta_multicycle import (
+    _false_path_lines,
+    _validate_false_path_from,
+)
+from ._sta_multicycle import (
+    multicycle_lines as _multicycle_lines,
+)
+from ._sta_multicycle import (
+    validate_multicycle_paths as _validate_multicycle_paths,
+)
 from ._sta_period_maps import (
     check_period_maps,
     clock_period_for_corner,
@@ -351,6 +361,12 @@ from .post_route_sta_instance_paths import (
     _instance_path_lines,
     _instance_paths_corner_field,
     _validate_report_instances,
+)
+from .post_route_sta_multicycle import (
+    check_multicycle_errors as _check_multicycle_errors,
+)
+from .post_route_sta_multicycle import (
+    multicycle_session_fields as _multicycle_session_fields,
 )
 from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _PORT_PATHS_BEGIN,
@@ -456,6 +472,9 @@ _STA_WARNING_RE = re.compile(r"\[WARNING STA-\d+\]")
 #: whether the logger writes to stdout or stderr, and stderr cannot be
 #: interleaved with the Tcl ``puts`` markers above.
 _SPEF_READER_WARNING_RE = re.compile(r"\[WARNING STA-(?:1648|1650)\]")
+_SPEF_MISSING_NET_RE = re.compile(
+    r"\[WARNING STA-1650\] (?:.*, )?net (.+) not found\.$"
+)
 #: Upper bound on how many verbatim reader-warning lines are echoed into the
 #: response -- a diagnostic sample, not an exhaustive log (a wholesale
 #: name-convention mismatch emits one per SPEF net).
@@ -704,6 +723,7 @@ def run_sta(
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
     power_activity = _validate_power_activity(request["constraints"])
     clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
+    multicycle = _validate_multicycle_paths(request["constraints"])
     timing_derate = _derate.validate_timing_derate(request["constraints"])
     sdc_path = resolve_sdc_check(request.get("sdc_check"), request_dir)
 
@@ -790,6 +810,7 @@ def run_sta(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             clock_transition=clock_transition,
+            multicycle=multicycle,
             timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -994,6 +1015,7 @@ def _dispatch_sta(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     clock_transition: float | None,
+    multicycle: list[dict[str, Any]] | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
@@ -1034,6 +1056,7 @@ def _dispatch_sta(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             clock_transition=clock_transition,
+            multicycle=multicycle,
             timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -1064,6 +1087,7 @@ def _dispatch_sta(
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
         clock_transition=clock_transition,
+        multicycle=multicycle,
         timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
@@ -1163,7 +1187,7 @@ def _dispatch_sta(
         "worst_hold_path": corner_fields["worst_hold_path"],
         # Additive field (issue #5424): the unreduced per-path-group rows
         # behind the two records above -- how a caller reads a data-setup
-        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        # WNS when an async recovery check determines `worst_slack_ns`.
         "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
@@ -1178,6 +1202,8 @@ def _dispatch_sta(
     # when the request named `constraints.false_path_from`.
     if constraints.false_path_from:
         response["false_path_from"] = list(constraints.false_path_from)
+    if multicycle:  # additive (issue #6921): only when entries named
+        response["multicycle_paths"] = corner_fields["multicycle_paths"]
     response["spef_annotation"] = corner_fields["spef_annotation"]
     # Additive field (issue #2739): the propagated-clock evidence block --
     # what propagation actually reached -- `null` unless the request asked
@@ -1215,6 +1241,7 @@ def _run_corner_session(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     clock_transition: float | None,
+    multicycle: list[dict[str, Any]] | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
@@ -1229,12 +1256,11 @@ def _run_corner_session(
 
     ``propagated_clock`` (issue #2739) marks the request's created clock
     propagated in this session (:func:`_sta_script_lines` emits
-    ``set_propagated_clock`` for a ``def``-mode request; it is always
-    ``False`` for ``verilog`` mode -- :func:`_validate_propagated_clock`
-    rejects the option there) and adds the parsed ``clock_propagation``
-    evidence block to ``corner_fields``; ``False`` leaves the emitted Tcl
-    and every derived field byte-identical to the pre-#2739 session, with
-    ``clock_propagation: None``.
+    ``set_propagated_clock`` for a ``def``-mode request; it is always ``False``
+    for ``verilog`` mode -- :func:`_validate_propagated_clock` rejects the
+    option there) and adds the parsed ``clock_propagation`` evidence block to
+    ``corner_fields``; ``False`` leaves the emitted Tcl and every derived field
+    byte-identical to the pre-#2739 session, with ``clock_propagation: None``.
 
     Both the original scalar (``request.pdk.corner``) path and issue #1871's
     additive multi-corner (``request.pdk.corners``) path call this once per
@@ -1248,35 +1274,31 @@ def _run_corner_session(
       reported *per corner* (``worst_slack_ns``, ..., ``spef_annotation``) --
       the exact dict this module built inline before this refactor, now
       returned instead of assembled directly into ``response``.
-    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info":
-      dict}``, everything the caller needs to build its own
-      ``provenance``/``deck`` block(s); kept separate from ``corner_fields``
-      because the multi-corner caller hoists ``pdk_info`` to the top-level
-      response once (shared across every corner) while nesting only
-      ``deck`` per corner (see :func:`_run_multi_corner`).
+    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info": dict}``,
+      everything the caller needs to build its own ``provenance``/``deck`` block(s);
+      kept separate from ``corner_fields`` because the multi-corner caller hoists
+      ``pdk_info`` to the top-level response once (shared across every corner)
+      while nesting only ``deck`` per corner (see :func:`_run_multi_corner`).
 
     ``macros`` (issue #2635) adds one ``read_lef`` per declared hard macro
     -- which is what makes a macro-bearing ``def``/``verilog`` load at all
     instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
     not found`` -- plus one ``read_liberty`` per macro that declared a
-    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`). ``[]`` (the
-    default for every pre-#2635 request) emits neither and leaves the
-    generated script byte-identical.
+    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`).
+    ``[]`` (the default for pre-#2635 requests) emits neither, script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
-    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
-    this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
-    ``read_spef`` and adds its ``{path, scope, content_hash}`` identity to
-    ``corner_fields["sdf"]`` (``report_paths`` supplies the ``{path,
-    scope}`` resolution). Any previous file at that path is removed first,
-    so a missing or empty file after the run is this session's own failure
-    and is raised, never reported. ``None`` leaves the emitted Tcl
-    byte-identical to the pre-#2886 session, with ``sdf: None``.
+    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes this
+    session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after ``read_spef``
+    and adds its ``{path, scope, content_hash}`` identity to ``corner_fields["sdf"]``
+    (``report_paths`` supplies the ``{path, scope}`` resolution). Any previous file
+    at that path is removed first, so a missing or empty file after the run is
+    this session's own failure, raised, never reported. ``None`` leaves the
+    emitted Tcl byte-identical to the pre-#2886 session, with ``sdf: None``.
 
     Raises :class:`PostRouteStaError` for an unresolvable
     ``cell_library``/``corner_name``/LEF, a macro liberty with no entry for
     this corner, or an OpenROAD engine failure -- otherwise identical to
-    this command's pre-#1871 single-corner behaviour.
-    """
+    this command's pre-#1871 single-corner behaviour."""
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
@@ -1289,6 +1311,7 @@ def _run_corner_session(
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
+    mcp_lines = _multicycle_lines(multicycle)
     sdf_path: str | None = None
     if sdf_stem is not None:
         sdf_path = os.path.join(output_dir, f"{sdf_stem}.{corner}.sdf")
@@ -1331,6 +1354,7 @@ def _run_corner_session(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             clock_transition=clock_transition,
+            multicycle_lines=mcp_lines,
             timing_derate=timing_derate,
             sdf_path=sdf_path,
         )
@@ -1364,11 +1388,17 @@ def _run_corner_session(
             clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
             clock_transition=clock_transition,
+            multicycle_lines=mcp_lines,
             timing_derate=timing_derate,
         )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
+    completed = _run_openroad(
+        script_path,
+        metrics_path,
+        error_cls=PostRouteStaError,
+        repo_root=report_paths._repo_root if report_paths else None,
+    )
     with completed.diagnostics(PostRouteStaError):
         # Issue #2740: a rejected per-port map key stops the session before
         # any timing is reported -- surface that as the actionable request
@@ -1379,6 +1409,7 @@ def _run_corner_session(
                 _generated.link_error(port_errors)
                 or _port_check_error_message(port_errors)
             )
+        _check_multicycle_errors(completed.stdout or "", multicycle)
         if completed.returncode != 0:
             raise PostRouteStaError(
                 _engine_error_message(completed, pdk_info, verilog_mode=not has_def)
@@ -1498,6 +1529,13 @@ def _run_corner_session(
         if sdf_path is not None
         else None
     )
+    # Issue #6921: per-entry with/without measurement (other entries
+    # stay applied in each "without" baseline).
+    corner_fields.update(
+        _multicycle_session_fields(
+            completed.stdout or "", multicycle, lines, output_dir, script_tag, has_def
+        )
+    )
 
     resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
     corner_fields.update(_generated.response(clock_extras, stdout))
@@ -1528,6 +1566,7 @@ def _run_multi_corner(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     clock_transition: float | None,
+    multicycle: list[dict[str, Any]] | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
@@ -1610,6 +1649,7 @@ def _run_multi_corner(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             clock_transition=clock_transition,
+            multicycle=multicycle,
             timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
@@ -1760,7 +1800,7 @@ def _spef_annotation_block(
     names_correlated = (
         design_nets_total > 0 and design_nets_annotated == design_nets_total
     )
-    reader_warning_count, reader_warning_sample = _spef_reader_warnings(stdout, stderr)
+    reader_warnings = _spef_reader_warnings(stdout, stderr)
     delay_changed = _parse_delay_changed(stdout)
     unannotated_drivers, partial_drivers = _parse_parasitic_annotation(stdout)
     unannotated_pins, partial_pins = _parse_parasitic_driver_pins(stdout)
@@ -1801,11 +1841,16 @@ def _spef_annotation_block(
         )
         reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
-    if reader_warning_count:
+    if reader_warnings:
+        discarded = {
+            m[1] for line in reader_warnings if (m := _SPEF_MISSING_NET_RE.search(line))
+        }
         reasons.append(
-            f"read_spef discarded annotation for {reader_warning_count} "
-            "SPEF record(s) it could not resolve against the linked design "
-            "(OpenSTA STA-1650/STA-1648 'not found' warnings)"
+            f"read_spef discarded annotation for {len(reader_warnings)} "
+            f"SPEF record(s). STA-1650 identified {len(discarded)} distinct "
+            "unresolved net name(s). "
+            "design_nets_annotated counts name matches before read_spef and does "
+            "not establish that the reader accepted their parasitics"
         )
     if delay_changed is False:
         reasons.append(
@@ -1838,8 +1883,8 @@ def _spef_annotation_block(
         "design_nets_annotated": design_nets_annotated,
         "design_nets_total": design_nets_total,
         "design_nets_missing_sample": design_nets_missing_sample,
-        "reader_warning_count": reader_warning_count,
-        "reader_warning_sample": reader_warning_sample,
+        "reader_warning_count": len(reader_warnings),
+        "reader_warning_sample": reader_warnings[:_SPEF_READER_WARNING_SAMPLE_LIMIT],
         "unannotated_driver_count": unannotated_drivers,
         "partially_unannotated_driver_count": partial_drivers,
         "floating_driver_count": (
@@ -2396,45 +2441,6 @@ def _validate_report_path_stages(constraints: dict[str, Any]) -> bool:
     return value
 
 
-def _validate_false_path_from(
-    constraints: dict[str, Any], clock_port: str
-) -> list[str] | None:
-    """``constraints.false_path_from`` (issue #2968): optional list of unique
-    literal input-port names (one scalar port or one bus bit, e.g.
-    ``cfg[3]`` -- the same key rules as :func:`_validate_report_ports`) whose
-    paths are excluded from timing with ``set_false_path -from``. Returns the
-    list, or ``None`` when the field is omitted *or* empty (nothing is
-    emitted, so the generated Tcl is byte-identical to a request without
-    it). Existence and direction are verified inside the engine session
-    (:func:`_port_check_lines`); the clock port is rejected here."""
-    field = "request.constraints.false_path_from"
-    value = constraints.get("false_path_from")
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise PostRouteStaError(f"{field} must be a list of input port names")
-    seen: set[str] = set()
-    for port in value:
-        if not isinstance(port, str) or not port or port != port.strip():
-            raise PostRouteStaError(
-                f"{field} entries must be non-empty port-name strings without "
-                f"leading/trailing whitespace (got {port!r})"
-            )
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-            raise PostRouteStaError(
-                f"{field} entry {port!r} contains a control character"
-            )
-        if port == clock_port:
-            raise PostRouteStaError(
-                f"{field} must not name the clock port {port!r} -- "
-                "a false path from the clock would untime every register"
-            )
-        if port in seen:
-            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
-        seen.add(port)
-    return list(value) or None
-
-
 def _resolve_pdk_selection(
     request: dict[str, Any],
 ) -> tuple[str, str | None, list[str] | None]:
@@ -2695,7 +2701,7 @@ def _resolve_liberty(
     Raises :class:`PostRouteStaError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``place_and_route.py``'s own ``_resolve_liberty``
@@ -2904,15 +2910,6 @@ def _request_io_delay_lines(
         + _boundary_lines(clock_port, boundary, input_transitions)
         + _false_path_lines(false_path_from)
     )
-
-
-def _false_path_lines(false_path_from: list[str] | None) -> list[str]:
-    """``set_false_path -from`` per ``constraints.false_path_from`` port
-    (issue #2968), emitted after the I/O-delay lines. Nothing when unset."""
-    return [
-        f"set_false_path -from [get_ports {_tcl_literal(port)}]"
-        for port in false_path_from or ()
-    ]
 
 
 def _port_check_lines(
@@ -3527,6 +3524,7 @@ def _sta_script_lines(
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
     clock_transition: float | None = None,
+    multicycle_lines: list[str] | None = None,
     timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
@@ -3610,6 +3608,9 @@ def _sta_script_lines(
         report_instances,
         boundary,
     )
+    # Issue #6921: after the I/O delays/false paths (the port check
+    # keeps its stop-the-session precedence), before every report.
+    lines += multicycle_lines or []
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
         lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
@@ -3675,6 +3676,7 @@ def _sta_netlist_script_lines(
     clock_extras: dict[str, Any] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
     clock_transition: float | None = None,
+    multicycle_lines: list[str] | None = None,
     timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
@@ -3734,6 +3736,7 @@ def _sta_netlist_script_lines(
         report_instances,
         boundary,
     )
+    lines += multicycle_lines or []  # issue #6921: same seam as def mode
     # Mode is enum-validated; model is a braced Tcl word (no substitution).
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
@@ -3917,43 +3920,22 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
     return data
 
 
-def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:
-    """``(count, capped_sample)`` of the diagnostics OpenSTA's *SPEF reader*
-    emitted while parsing the caller-supplied SPEF -- the conclusive signal
-    that ``read_spef`` parsed a record and then discarded it (issue #1624).
+def _spef_reader_warnings(stdout: str, stderr: str) -> list[str]:
+    """All diagnostics from the bracketed read_spef call, before sample capping.
 
-    Two matching strategies, because OpenROAD builds disagree about which
-    stream the logger writes to:
-
-    * **stdout** is bracketed by :data:`_SPEF_READ_BEGIN`/
-      :data:`_SPEF_READ_END` around the ``read_spef`` call itself, and the
-      SPEF reader is the only thing running inside that region -- so *any*
-      ``[WARNING STA-...]`` there is a reader warning, including codes this
-      module has never seen. (When the markers are absent -- an older
-      script, a truncated run -- it falls back to the narrow code match.)
-    * **stderr** cannot be interleaved with the Tcl ``puts`` markers, so it
-      is matched narrowly against :data:`_SPEF_READER_WARNING_RE`
-      (``STA-1650``/``STA-1648``) -- a liberty or clock warning on stderr
-      must not be mistaken for a SPEF-annotation failure.
+    When the stdout markers are missing, accept only known reader codes.
+    Stderr has no markers, so it always needs the narrower filter.
     """
-    matched: list[str] = []
     region = _extract_block(stdout, _SPEF_READ_BEGIN, _SPEF_READ_END)
-    if region is not None:
-        matched += [
-            line.strip() for line in region.splitlines() if _STA_WARNING_RE.search(line)
-        ]
-    else:
-        matched += [
-            line.strip()
-            for line in stdout.splitlines()
-            if _SPEF_READER_WARNING_RE.search(line)
-        ]
-    matched += [
+    stdout_pattern = _STA_WARNING_RE if region is not None else _SPEF_READER_WARNING_RE
+    output = region if region is not None else stdout
+    return [
+        line.strip() for line in output.splitlines() if stdout_pattern.search(line)
+    ] + [
         line.strip()
         for line in stderr.splitlines()
         if _SPEF_READER_WARNING_RE.search(line)
     ]
-    return len(matched), matched[:_SPEF_READER_WARNING_SAMPLE_LIMIT]
 
 
 def _parse_delay_changed(stdout: str) -> bool | None:
