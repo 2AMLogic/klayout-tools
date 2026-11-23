@@ -85,6 +85,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -7716,10 +7717,9 @@ def _run_corner(
     """Run one corner point through the selected engine's batch binary and
     classify the result.
 
-    Returns ``(corner_report, engine_version_or_none)``. Never raises: any
-    failure to run (bad spawn, timeout, nonzero-but-uninformative exit) is
-    folded into the corner's own ``status: "error"`` + ``diagnostics``,
-    per the contract's "every corner is reported" guarantee.
+    Returns ``(corner_report, engine_version_or_none)``. A missing executable,
+    timeout or unsuccessful engine exit is recorded in the corner report.
+    Unexpected exceptions propagate after the scratch directory is released.
 
     ``engine="ngspice"`` runs ``ngspice -b`` on a deck carrying a
     ``.control`` block (see ``_write_corner_deck``). ``engine="xyce"``
@@ -7744,388 +7744,381 @@ def _run_corner(
     how a caller says "I do not trust a solve that needed stepping to
     converge". Empty (the default) leaves grading byte-identical to before.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    forwarded to :func:`_prepare_corner_run`, which materializes it as
-    ``corner_dir/.spiceinit`` for the ``ngspice`` branch. This function's own
-    ``subprocess.run`` call passes ``cwd=corner_dir`` (the other half of
-    issue #2520) so that file -- and any relative ``.lib``/``.include`` path
-    the netlist itself declares -- is read from the per-corner directory
-    this run controls, never the caller's ambient working directory. That
-    holds for both the ``keep_artifacts=True`` directory under
-    ``artifacts_dir`` and the ``keep_artifacts=False`` :func:`_tmp_work_dir`
-    scratch directory -- ``corner_dir`` names whichever one this call is
-    using either way.
+    ``_prepare_corner_run`` writes the validated ``ngspice_init`` lines to
+    the ngspice corner's ``.spiceinit`` (#2520). The simulator runs with
+    that directory as its cwd, so init and relative include paths resolve
+    there for both retained artifacts and temporary runs.
     """
     is_xyce = engine == "xyce"
     engine_name = XYCE_BINARY if is_xyce else "ngspice"
-    if keep_artifacts:
-        corner_dir = os.path.join(artifacts_dir, point.slug)
-        os.makedirs(corner_dir, exist_ok=True)
-        _write_corner_manifest(corner_dir, point)
-    else:
-        corner_dir = _tmp_work_dir()
+    with _runner_work_dir(artifacts_dir, point.slug, keep_artifacts) as corner_dir:
+        if keep_artifacts:
+            _write_corner_manifest(corner_dir, point)
 
-    run_netlist_path, include_diagnostics = _expand_netlist_includes(
-        netlist_path, corner_dir, pdk_root
-    )
-    run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
-        run_netlist_path, netlist_path, corner_dir, point
-    )
-    command, log_path, raw_path, deck_path = _prepare_corner_run(
-        corner_dir=corner_dir,
-        netlist_path=run_netlist_path,
-        models_lib=models_lib,
-        point=point,
-        analysis=analysis,
-        measurements_spec=measurements_spec,
-        want_waveforms=want_waveforms,
-        engine=engine,
-        ngspice_binary=ngspice_binary,
-        ngspice_init=_with_thread_pin(ngspice_init, threads_per_worker, engine),
-        osdi_preload=osdi_preload,
-        save_mode=save_mode,
-        save_vectors=save_vectors,
-        complex_vectors=complex_vectors,
-        ngspice_options=ngspice_options,
-        stimulus_lines=stimulus_lines,
-        extra_options_card=extra_options_card,
-    )
-
-    diagnostics: list[dict[str, str]] = list(include_diagnostics)
-    diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
-    started = sim_peak_rss.RunWatch()
-    timed_out = False
-    engine_aborted = False
-    analysis_never_started = False
-    engine_version: str | None = None
-    stdout_text = ""
-    stderr_text = ""
-    engine_exit_code: int | None = None
-    engine_killed_by_signal: str | None = None
-    launched = False
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            cwd=corner_dir,
-            **_worker_env_kwargs(None if is_xyce else threads_per_worker, pdk_root),
+        run_netlist_path, include_diagnostics = _expand_netlist_includes(
+            netlist_path, corner_dir, pdk_root
         )
-        stdout_text = completed.stdout or ""
-        stderr_text = completed.stderr or ""
-        launched = True
-        engine_exit_code, engine_killed_by_signal = _split_returncode(
-            completed.returncode
+        run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
+            run_netlist_path, netlist_path, corner_dir, point
         )
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    except FileNotFoundError as exc:
-        diagnostics.append(
-            {
-                "severity": "error",
-                "code": "unknown",
-                "message": f"could not launch {engine_name}: {exc}",
-            }
+        command, log_path, raw_path, deck_path = _prepare_corner_run(
+            corner_dir=corner_dir,
+            netlist_path=run_netlist_path,
+            models_lib=models_lib,
+            point=point,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            want_waveforms=want_waveforms,
+            engine=engine,
+            ngspice_binary=ngspice_binary,
+            ngspice_init=_with_thread_pin(ngspice_init, threads_per_worker, engine),
+            osdi_preload=osdi_preload,
+            save_mode=save_mode,
+            save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
+            ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
+            extra_options_card=extra_options_card,
         )
-    runtime_s = round(started.elapsed(), 3)
 
-    log_text = _read_log_file(log_path)
-
-    if is_xyce:
-        # Xyce stamps its version banner into the `-l` log (ngspice's lands
-        # on stdout, read below); the log is read either way.
-        engine_version = _extract_xyce_version(log_text)
-    elif not timed_out:
-        engine_version = _extract_engine_version(stdout_text)
-
-    if timed_out:
-        diagnostics.append(
-            {
-                "severity": "error",
-                "code": "timeout",
-                "message": (
-                    f"{engine_name} did not complete within {timeout_s}s, killed"
-                ),
-            }
-        )
-    else:
-        output_tail = _engine_abort_tail(stderr_text, stdout_text, log_text)
-        output_tail = _prepend_engine_log_error(output_tail, log_text)
-        tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
-        if engine_killed_by_signal is not None:
+        diagnostics: list[dict[str, str]] = list(include_diagnostics)
+        diagnostics.extend(_par_call_cap_preflight(deck_path, is_xyce))
+        started = sim_peak_rss.RunWatch()
+        timed_out = False
+        engine_aborted = False
+        analysis_never_started = False
+        engine_version: str | None = None
+        stdout_text = ""
+        stderr_text = ""
+        engine_exit_code: int | None = None
+        engine_killed_by_signal: str | None = None
+        launched = False
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=corner_dir,
+                **_worker_env_kwargs(None if is_xyce else threads_per_worker, pdk_root),
+            )
+            stdout_text = completed.stdout or ""
+            stderr_text = completed.stderr or ""
+            launched = True
+            engine_exit_code, engine_killed_by_signal = _split_returncode(
+                completed.returncode
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        except FileNotFoundError as exc:
             diagnostics.append(
                 {
                     "severity": "error",
-                    "code": "engine_killed",
+                    "code": "unknown",
+                    "message": f"could not launch {engine_name}: {exc}",
+                }
+            )
+        runtime_s = round(started.elapsed(), 3)
+
+        log_text = _read_log_file(log_path)
+
+        if is_xyce:
+            # Xyce stamps its version banner into the `-l` log (ngspice's lands
+            # on stdout, read below); the log is read either way.
+            engine_version = _extract_xyce_version(log_text)
+        elif not timed_out:
+            engine_version = _extract_engine_version(stdout_text)
+
+        if timed_out:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "timeout",
                     "message": (
-                        f"{engine_name} was killed by {engine_killed_by_signal} "
-                        "(not by the harness timeout) -- e.g. the OOM killer, "
-                        "a host reaper, or a reclaimed worker" + tail_suffix
+                        f"{engine_name} did not complete within {timeout_s}s, killed"
                     ),
                 }
             )
-            engine_aborted = True
-        classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
-        diagnostics.extend(classified)
-        analysis_never_started = not is_xyce and _mark_analysis_not_started(
-            classified, log_text
+        else:
+            output_tail = _engine_abort_tail(stderr_text, stdout_text, log_text)
+            output_tail = _prepend_engine_log_error(output_tail, log_text)
+            tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
+            if engine_killed_by_signal is not None:
+                diagnostics.append(
+                    {
+                        "severity": "error",
+                        "code": "engine_killed",
+                        "message": (
+                            f"{engine_name} was killed by {engine_killed_by_signal} "
+                            "(not by the harness timeout) -- e.g. the OOM killer, "
+                            "a host reaper, or a reclaimed worker" + tail_suffix
+                        ),
+                    }
+                )
+                engine_aborted = True
+            classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
+            diagnostics.extend(classified)
+            analysis_never_started = not is_xyce and _mark_analysis_not_started(
+                classified, log_text
+            )
+            no_log_reported = False
+            diagnostics.extend(
+                _alterparam_failures(point, log_text + "\n" + stdout_text)
+            )
+            diagnostics.extend(_nodeset_failures(point, log_text + "\n" + stdout_text))
+            if engine_exit_code and not log_text and not os.path.exists(log_path):
+                diagnostics.append(
+                    {
+                        "severity": "error",
+                        "code": "unknown",
+                        "message": (
+                            f"{engine_name} exited with code {engine_exit_code} "
+                            "without writing its log (deck or log path not found?)"
+                            f"{_engine_output_tail(stdout_text, stderr_text)}"
+                        ),
+                    }
+                )
+                no_log_reported = True
+            aborted = (
+                None
+                if engine_aborted or no_log_reported
+                else _engine_aborted_diagnostic(
+                    engine_name, engine_exit_code, classified, tail_suffix
+                )
+            )
+            if aborted is not None:
+                diagnostics.append(aborted)
+                engine_aborted = True
+
+        # Both engines fold a `.meas`/`.measure` card's name to lower-case in
+        # their own report output (Xyce actually upper-cases, but
+        # `_parse_xyce_measurements` lower-cases its keys to normalize that);
+        # `_parse_engine_measurements` -> `_parse_measurements` for ngspice does
+        # the same, storing keys exactly as the (already lower-cased) log
+        # printed them. `_harvest_measurement_value` folds the requested `name`
+        # to lower-case on a miss for both engines and both measurement forms
+        # (#2546) -- an upper/mixed-case `spice`-form name (e.g. `Vout`) still
+        # harvests even though ngspice's own report prints `vout = ...`. The
+        # *response* below still echoes the caller's original `name` spelling --
+        # only the internal lookup is case-folded.
+        measurement_values = _parse_engine_measurements(log_text, engine)
+        # Issue #2868: crossings series are read from this corner's own working
+        # directory now, before it is cleaned up below -- so the reduced array is
+        # what leaves the corner, on every backend, whatever `keep_artifacts` is.
+        crossings = sim_crossings.extract_corner_crossings(
+            measurements_spec, corner_dir, point.supply_v, analysis.get("kind")
         )
-        no_log_reported = False
-        diagnostics.extend(_alterparam_failures(point, log_text + "\n" + stdout_text))
-        diagnostics.extend(_nodeset_failures(point, log_text + "\n" + stdout_text))
-        if engine_exit_code and not log_text and not os.path.exists(log_path):
+        # Issue #3033: same for the energy reduction.
+        energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
+        # Issue #4592: and for the windowed stress reduction.
+        stress = sim_stress.extract_corner_stress(measurements_spec, corner_dir)
+        cycle_means = sim_cycle_mean.extract_corner_cycle_means(
+            measurements_spec, corner_dir
+        )
+        transfers = sim_transfer_meas.extract_corner_transfers(
+            measurements_spec, corner_dir
+        )
+        snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
+        slope_bands = sim_slope_band_meas.extract_corner_slope_bands(
+            measurements_spec, corner_dir
+        )
+        eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
+        step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
+            measurements_spec, corner_dir
+        )
+        settleds = sim_settled.extract_corner_settleds(measurements_spec, corner_dir)
+        searches = sim_search.extract_corner_searches(measurements_spec, log_text)
+        nzm = sim_noise_mechanism.extract_corner(
+            measurements_spec, corner_dir, analysis
+        )
+        # Issue #3160: each pass's rawfile is decoded once, shared by the tian
+        # reduction below and the corner's `passes` field.
+        pass_results = (
+            sim_passes.extract_corner_passes(analysis, corner_dir)
+            if sim_passes.is_passes_analysis(analysis)
+            else []
+        )
+        tians = sim_tian.extract_corner_tians(measurements_spec, pass_results)
+        measurement_results, measurement_diagnostics, step_fields = (
+            _corner_measurement_results(
+                measurement_values,
+                measurements_spec,
+                analysis=analysis,
+                log_text=log_text,
+                is_xyce=is_xyce,
+                save_mode=_effective_save_mode(save_mode, diagnostics),
+                crossings=crossings,
+                energy=energy,
+                stress=stress,
+                cycle_means=cycle_means,
+                transfers=transfers,
+                snms=snms,
+                slope_bands=slope_bands,
+                eyes=eyes,
+                step_resolutions=step_resolutions,
+                settleds=settleds,
+                searches=searches,
+                tians=tians,
+                noise_mechanisms=nzm,
+                engine_diagnostics=diagnostics,
+            )
+        )
+        measurement_diagnostics = _demote_abort_cascade(
+            measurement_diagnostics, engine_aborted or analysis_never_started
+        )
+        diagnostics.extend(measurement_diagnostics)
+        pass_fields, pass_diagnostics = sim_passes.corner_fields(
+            analysis, corner_dir, keep_artifacts=keep_artifacts, results=pass_results
+        )
+        diagnostics.extend(pass_diagnostics)
+        # Issue #3337: decode the declared vectors into the sidecar before the
+        # corner is graded, so a missing or non-finite one fails it.
+        complex_outcome = sim_complex_vectors.extract_corner(
+            complex_vectors, corner_dir
+        )
+        diagnostics.extend(complex_outcome.diagnostics)
+        # Issue #3338: reduce a two-port corner's two excitations to S; a missing
+        # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
+        twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
+        diagnostics.extend(twoport_outcome.diagnostics)
+        # Issue #5077: metastable-op detection, before `disqualifying` is sampled.
+        op_check_field, op_check_diagnostics = sim_op_check.evaluate(
+            analysis,
+            point.supply_v,
+            log_text + "\n" + stdout_text,
+            skip=timed_out or engine_aborted or analysis_never_started,
+        )
+        diagnostics.extend(op_check_diagnostics)
+
+        # Issue #3016: the engine ran (any exit status, including 0) yet left no
+        # log text and not a single requested measurement has a value -- the
+        # bare N x "produced no value" says nothing about why, so attach the
+        # exit status and the engine's own stdout/stderr tail.
+        if (
+            launched
+            and not timed_out
+            and engine_killed_by_signal is None
+            and not no_log_reported
+            and not engine_aborted
+            and not log_text.strip()
+            and measurement_results
+            and all(m.get("value") is None for m in measurement_results)
+        ):
             diagnostics.append(
                 {
                     "severity": "error",
                     "code": "unknown",
                     "message": (
-                        f"{engine_name} exited with code {engine_exit_code} "
-                        "without writing its log (deck or log path not found?)"
+                        f"{engine_name} exited with code {engine_exit_code} but "
+                        "wrote no log output and produced no measurement values"
                         f"{_engine_output_tail(stdout_text, stderr_text)}"
                     ),
                 }
             )
-            no_log_reported = True
-        aborted = (
-            None
-            if engine_aborted or no_log_reported
-            else _engine_aborted_diagnostic(
-                engine_name, engine_exit_code, classified, tail_suffix
-            )
-        )
-        if aborted is not None:
-            diagnostics.append(aborted)
-            engine_aborted = True
 
-    # Both engines fold a `.meas`/`.measure` card's name to lower-case in
-    # their own report output (Xyce actually upper-cases, but
-    # `_parse_xyce_measurements` lower-cases its keys to normalize that);
-    # `_parse_engine_measurements` -> `_parse_measurements` for ngspice does
-    # the same, storing keys exactly as the (already lower-cased) log
-    # printed them. `_harvest_measurement_value` folds the requested `name`
-    # to lower-case on a miss for both engines and both measurement forms
-    # (#2546) -- an upper/mixed-case `spice`-form name (e.g. `Vout`) still
-    # harvests even though ngspice's own report prints `vout = ...`. The
-    # *response* below still echoes the caller's original `name` spelling --
-    # only the internal lookup is case-folded.
-    measurement_values = _parse_engine_measurements(log_text, engine)
-    # Issue #2868: crossings series are read from this corner's own working
-    # directory now, before it is cleaned up below -- so the reduced array is
-    # what leaves the corner, on every backend, whatever `keep_artifacts` is.
-    crossings = sim_crossings.extract_corner_crossings(
-        measurements_spec, corner_dir, point.supply_v, analysis.get("kind")
-    )
-    # Issue #3033: same for the energy reduction.
-    energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
-    # Issue #4592: and for the windowed stress reduction.
-    stress = sim_stress.extract_corner_stress(measurements_spec, corner_dir)
-    cycle_means = sim_cycle_mean.extract_corner_cycle_means(
-        measurements_spec, corner_dir
-    )
-    transfers = sim_transfer_meas.extract_corner_transfers(
-        measurements_spec, corner_dir
-    )
-    snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
-    slope_bands = sim_slope_band_meas.extract_corner_slope_bands(
-        measurements_spec, corner_dir
-    )
-    eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
-    step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
-        measurements_spec, corner_dir
-    )
-    settleds = sim_settled.extract_corner_settleds(measurements_spec, corner_dir)
-    searches = sim_search.extract_corner_searches(measurements_spec, log_text)
-    nzm = sim_noise_mechanism.extract_corner(measurements_spec, corner_dir, analysis)
-    # Issue #3160: each pass's rawfile is decoded once, shared by the tian
-    # reduction below and the corner's `passes` field.
-    pass_results = (
-        sim_passes.extract_corner_passes(analysis, corner_dir)
-        if sim_passes.is_passes_analysis(analysis)
-        else []
-    )
-    tians = sim_tian.extract_corner_tians(measurements_spec, pass_results)
-    measurement_results, measurement_diagnostics, step_fields = (
-        _corner_measurement_results(
-            measurement_values,
+        # Issue #2846: the engine's abort trailer gets its own analysis-level
+        # diagnostic, always at `severity: "error"`, reported alongside (not
+        # instead of) the per-measurement ones. Appended before
+        # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
+        aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+        aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
+        if aborted_diagnostic is not None:
+            diagnostics.append(aborted_diagnostic)
+
+        # Both engines may narrate failed stepping attempts on the path to a
+        # successful solve. Only these two codes are eligible for recovery.
+        # Issue #2492: sampled *before* the downgrade immediately below, on the
+        # diagnostic's `code` rather than its severity. A caller who listed
+        # `singular_matrix` is saying they distrust exactly the case the
+        # downgrade exists to forgive, so reading this after the downgrade (or
+        # reading `severity` instead of `code`) would make the option a no-op
+        # for its single most important use.
+        disqualifying = sorted(
+            {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
+        )
+
+        waveform_complete = _capture_only_waveform_complete(
+            measurements_spec, raw_path, diagnostics, analysis, engine, log_text
+        )
+
+        if _recovered_from_stepping(
             measurements_spec,
-            analysis=analysis,
-            log_text=log_text,
-            is_xyce=is_xyce,
-            save_mode=_effective_save_mode(save_mode, diagnostics),
-            crossings=crossings,
-            energy=energy,
-            stress=stress,
-            cycle_means=cycle_means,
-            transfers=transfers,
-            snms=snms,
-            slope_bands=slope_bands,
-            eyes=eyes,
-            step_resolutions=step_resolutions,
-            settleds=settleds,
-            searches=searches,
-            tians=tians,
-            noise_mechanisms=nzm,
-            engine_diagnostics=diagnostics,
-        )
-    )
-    measurement_diagnostics = _demote_abort_cascade(
-        measurement_diagnostics, engine_aborted or analysis_never_started
-    )
-    diagnostics.extend(measurement_diagnostics)
-    pass_fields, pass_diagnostics = sim_passes.corner_fields(
-        analysis, corner_dir, keep_artifacts=keep_artifacts, results=pass_results
-    )
-    diagnostics.extend(pass_diagnostics)
-    # Issue #3337: decode the declared vectors into the sidecar before the
-    # corner is graded, so a missing or non-finite one fails it.
-    complex_outcome = sim_complex_vectors.extract_corner(complex_vectors, corner_dir)
-    diagnostics.extend(complex_outcome.diagnostics)
-    # Issue #3338: reduce a two-port corner's two excitations to S; a missing
-    # or non-finite rawfile is an error diagnostic, so it cannot grade `pass`.
-    twoport_outcome = sim_twoport.extract_corner(analysis, corner_dir)
-    diagnostics.extend(twoport_outcome.diagnostics)
-    # Issue #5077: metastable-op detection, before `disqualifying` is sampled.
-    op_check_field, op_check_diagnostics = sim_op_check.evaluate(
-        analysis,
-        point.supply_v,
-        log_text + "\n" + stdout_text,
-        skip=timed_out or engine_aborted or analysis_never_started,
-    )
-    diagnostics.extend(op_check_diagnostics)
-
-    # Issue #3016: the engine ran (any exit status, including 0) yet left no
-    # log text and not a single requested measurement has a value -- the
-    # bare N x "produced no value" says nothing about why, so attach the
-    # exit status and the engine's own stdout/stderr tail.
-    if (
-        launched
-        and not timed_out
-        and engine_killed_by_signal is None
-        and not no_log_reported
-        and not engine_aborted
-        and not log_text.strip()
-        and measurement_results
-        and all(m.get("value") is None for m in measurement_results)
-    ):
-        diagnostics.append(
-            {
-                "severity": "error",
-                "code": "unknown",
-                "message": (
-                    f"{engine_name} exited with code {engine_exit_code} but "
-                    "wrote no log output and produced no measurement values"
-                    f"{_engine_output_tail(stdout_text, stderr_text)}"
-                ),
-            }
-        )
-
-    # Issue #2846: the engine's abort trailer gets its own analysis-level
-    # diagnostic, always at `severity: "error"`, reported alongside (not
-    # instead of) the per-measurement ones. Appended before
-    # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
-    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
-    aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
-    if aborted_diagnostic is not None:
-        diagnostics.append(aborted_diagnostic)
-
-    # Both engines may narrate failed stepping attempts on the path to a
-    # successful solve. Only these two codes are eligible for recovery.
-    # Issue #2492: sampled *before* the downgrade immediately below, on the
-    # diagnostic's `code` rather than its severity. A caller who listed
-    # `singular_matrix` is saying they distrust exactly the case the
-    # downgrade exists to forgive, so reading this after the downgrade (or
-    # reading `severity` instead of `code`) would make the option a no-op
-    # for its single most important use.
-    disqualifying = sorted(
-        {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
-    )
-
-    waveform_complete = _capture_only_waveform_complete(
-        measurements_spec, raw_path, diagnostics, analysis, engine, log_text
-    )
-
-    if _recovered_from_stepping(
-        measurements_spec,
-        measurement_results,
-        log_text,
-        aborted_re=aborted_re,
-        waveform_complete=waveform_complete,
-    ):
-        _downgrade_stepping_diagnostics(
-            diagnostics, bool(measurements_spec), analysis["kind"]
-        )
-
-    status = _grade_corner(diagnostics, measurement_results, disqualifying)
-    diagnostics.extend(sim_homotopy.recovery_diagnostics(engine, log_text))
-
-    artifacts: dict[str, str | int | None] = {
-        "log": None,
-        "raw": None,
-        "waveform": None,
-        "deck": None,
-    }
-    # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
-    noise_fields: dict[str, str] = {}
-    artifacts.update(
-        sim_complex_vectors.artifact_fields(complex_vectors, complex_outcome)
-    )
-    artifacts.update(sim_twoport.artifact_fields(analysis, twoport_outcome))
-    if keep_artifacts:
-        if os.path.isfile(log_path):
-            artifacts["log"] = log_path
-        if raw_path is not None and os.path.isfile(raw_path):
-            artifacts["raw"] = raw_path
-            raw_size = os.path.getsize(raw_path)
-            artifacts["raw_bytes"] = raw_size  # issue #5622
-            try:
-                waveform_path = _persist_waveform_artifact(
-                    raw_path,
-                    raw_size,
-                    waveform_max_bytes,
-                    analysis,
-                    diagnostics,
-                    noise_fields,
-                    waveform_decimate,
-                )
-                if waveform_path is not None:
-                    artifacts["waveform"] = waveform_path
-            except (SimError, ValueError) as exc:
-                # Generic defensive catch, not expected in normal operation:
-                # `parse_ascii_rawfile` understands both plain-real (`tran`/
-                # `dc`) and `Flags: complex` (`ac`/`sp`) rawfiles (issue
-                # #1756), but a still-malformed or otherwise unrecognised
-                # rawfile should degrade to a diagnostic rather than crash
-                # the whole corner. `_run_corner`'s own contract is "never
-                # raises", and a corner that ran its analysis successfully
-                # should not have its `status` invalidated just because one
-                # *optional* artifact could not be parsed.
-                #
-                # Which is also why this one `"unknown"` lands *after*
-                # `_grade_corner` and so escapes `options.fail_on_diagnostic`
-                # (issue #2492): a corner whose analysis and every
-                # measurement succeeded is not made untrustworthy by an
-                # unparseable optional waveform dump, so it is deliberately
-                # outside the grading window rather than an oversight.
-                diagnostics.append(
-                    {
-                        "severity": "warning",
-                        "code": "unknown",
-                        "message": f"could not parse waveform rawfile: {exc}",
-                    }
-                )
-        # Issue #3052: the engine has exited and its log is parsed, so the
-        # persisted deck/log can now be rewritten to stable tokens.
-        diagnostics.extend(
-            sim_portable.rewrite_corner_artifacts(
-                corner_dir, deck_path, log_path, portable_roots
+            measurement_results,
+            log_text,
+            aborted_re=aborted_re,
+            waveform_complete=waveform_complete,
+        ):
+            _downgrade_stepping_diagnostics(
+                diagnostics, bool(measurements_spec), analysis["kind"]
             )
+
+        status = _grade_corner(diagnostics, measurement_results, disqualifying)
+        diagnostics.extend(sim_homotopy.recovery_diagnostics(engine, log_text))
+
+        artifacts: dict[str, str | int | None] = {
+            "log": None,
+            "raw": None,
+            "waveform": None,
+            "deck": None,
+        }
+        # Additive (issue #3006): only for a `noise` corner whose rawfile parsed.
+        noise_fields: dict[str, str] = {}
+        artifacts.update(
+            sim_complex_vectors.artifact_fields(complex_vectors, complex_outcome)
         )
-        if os.path.isfile(deck_path):
-            artifacts["deck"] = deck_path
-    else:
-        _cleanup_dir(corner_dir)
+        artifacts.update(sim_twoport.artifact_fields(analysis, twoport_outcome))
+        if keep_artifacts:
+            if os.path.isfile(log_path):
+                artifacts["log"] = log_path
+            if raw_path is not None and os.path.isfile(raw_path):
+                artifacts["raw"] = raw_path
+                raw_size = os.path.getsize(raw_path)
+                artifacts["raw_bytes"] = raw_size  # issue #5622
+                try:
+                    waveform_path = _persist_waveform_artifact(
+                        raw_path,
+                        raw_size,
+                        waveform_max_bytes,
+                        analysis,
+                        diagnostics,
+                        noise_fields,
+                        waveform_decimate,
+                    )
+                    if waveform_path is not None:
+                        artifacts["waveform"] = waveform_path
+                except (SimError, ValueError) as exc:
+                    # Generic defensive catch, not expected in normal operation:
+                    # `parse_ascii_rawfile` understands both plain-real (`tran`/
+                    # `dc`) and `Flags: complex` (`ac`/`sp`) rawfiles (issue
+                    # #1756), but a still-malformed or otherwise unrecognised
+                    # rawfile should degrade to a diagnostic rather than crash
+                    # the whole corner. `_run_corner`'s own contract is "never
+                    # raises", and a corner that ran its analysis successfully
+                    # should not have its `status` invalidated just because one
+                    # *optional* artifact could not be parsed.
+                    #
+                    # Which is also why this one `"unknown"` lands *after*
+                    # `_grade_corner` and so escapes `options.fail_on_diagnostic`
+                    # (issue #2492): a corner whose analysis and every
+                    # measurement succeeded is not made untrustworthy by an
+                    # unparseable optional waveform dump, so it is deliberately
+                    # outside the grading window rather than an oversight.
+                    diagnostics.append(
+                        {
+                            "severity": "warning",
+                            "code": "unknown",
+                            "message": f"could not parse waveform rawfile: {exc}",
+                        }
+                    )
+            # Issue #3052: the engine has exited and its log is parsed, so the
+            # persisted deck/log can now be rewritten to stable tokens.
+            diagnostics.extend(
+                sim_portable.rewrite_corner_artifacts(
+                    corner_dir, deck_path, log_path, portable_roots
+                )
+            )
+            if os.path.isfile(deck_path):
+                artifacts["deck"] = deck_path
 
     monte_carlo: dict[str, Any] | None = None
     if point.sample_index is not None:
@@ -8811,9 +8804,19 @@ def _read_log_file(path: str) -> str:
         return ""
 
 
-def _tmp_work_dir() -> str:
-    import tempfile
+def _runner_work_dir(
+    artifacts_dir: str, name: str, keep_artifacts: bool
+) -> contextlib.AbstractContextManager[str]:
+    if not keep_artifacts:
+        return tempfile.TemporaryDirectory(
+            prefix="klt-sim-", ignore_cleanup_errors=True
+        )
+    path = os.path.join(artifacts_dir, name)
+    os.makedirs(path, exist_ok=True)
+    return contextlib.nullcontext(path)
 
+
+def _tmp_work_dir() -> str:
     return tempfile.mkdtemp(prefix="klt-sim-")
 
 
@@ -9222,12 +9225,11 @@ def _corner_deck_control_lines(
     if raw_path is not None:
         lines.append(f"write {raw_path}")
         if analysis["kind"] == "ac" and not measurements_spec:
-            lines.append("display frequency")  # Record the original AC point count.
+            # An aborted sweep has no frequency vector to count (#7293).
+            lines.extend(["if length(frequency) > 0", "display frequency", "end"])
     if analysis.get("linearize") is True:
-        # Issue #4014: resample onto a uniform grid, after any rawfile
-        # `write` (which keeps the solver's own points) and before the
-        # `expr` lets, so time-weighted sums are not biased by the
-        # adaptive timestep distribution.
+        # Resample after saving the solver's points and before expression measurements
+        # so adaptive timesteps do not bias time-weighted sums (#4014).
         lines.append("linearize")
     lines.extend(sim_post_commands.control_lines(analysis))  # issue #6080
     expr_specs = sim_noise.emittable_exprs(_expr_measurements(measurements_spec))
@@ -9798,8 +9800,8 @@ def _run_calibration_probe(
     preflight" section documents for a truncated window) and a scaled-down
     ``tran`` window in place of the real ``analysis``.
 
-    Returns ``{"wall_s", "timed_out", "error"}``; never raises. A timed-out
-    probe (``timed_out=True``) still yields a usable rate estimate at the
+    Returns ``{"wall_s", "timed_out", "error"}`` for a completed run, timeout
+    or missing executable. A timed-out probe still yields a rate estimate at the
     call site -- an *upper bound*, since ``probe_window_s`` of simulated
     time provably was not reached within ``probe_timeout_s`` of wall time,
     even though (mirroring this module's core finding) exactly how far it
@@ -9824,59 +9826,52 @@ def _run_calibration_probe(
     behaviour (and rate estimate) would diverge from the corners it is meant
     to be representative of.
     """
-    probe_dir = (
-        os.path.join(artifacts_dir, f"{point.slug}__probe")
-        if keep_artifacts
-        else _tmp_work_dir()
-    )
-    if keep_artifacts:
-        os.makedirs(probe_dir, exist_ok=True)
-    deck_path = os.path.join(probe_dir, "probe.cir")
-    log_path = os.path.join(probe_dir, "probe.log")
+    with _runner_work_dir(
+        artifacts_dir, f"{point.slug}__probe", keep_artifacts
+    ) as probe_dir:
+        deck_path = os.path.join(probe_dir, "probe.cir")
+        log_path = os.path.join(probe_dir, "probe.log")
 
-    _write_corner_deck(
-        deck_path=deck_path,
-        netlist_path=netlist_path,
-        models_lib=models_lib,
-        point=point,
-        analysis={"kind": "tran", "args": f"{step_token} {probe_window_s:.9g}"},
-        measurements_spec=[],
-        raw_path=None,
-        osdi_preload=osdi_preload,
-        save_mode=save_mode,
-        ngspice_options=ngspice_options,
-        stimulus_lines=stimulus_lines,
-    )
-    _write_spiceinit(probe_dir, ngspice_init)
-
-    started = time.monotonic()
-    timed_out = False
-    error: str | None = None
-    try:
-        subprocess.run(
-            [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path],
-            capture_output=True,
-            text=True,
-            timeout=probe_timeout_s,
-            cwd=probe_dir,
+        _write_corner_deck(
+            deck_path=deck_path,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            point=point,
+            analysis={"kind": "tran", "args": f"{step_token} {probe_window_s:.9g}"},
+            measurements_spec=[],
+            raw_path=None,
+            osdi_preload=osdi_preload,
+            save_mode=save_mode,
+            ngspice_options=ngspice_options,
+            stimulus_lines=stimulus_lines,
         )
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    except FileNotFoundError as exc:
-        error = f"could not launch ngspice for the calibration probe: {exc}"
-    wall_s = round(time.monotonic() - started, 3)
+        _write_spiceinit(probe_dir, ngspice_init)
 
-    if not timed_out and error is None:
-        log_text = _read_log_file(log_path)
-        if _SIMULATION_ABORTED_RE.search(log_text):
-            # The probe's own (shortened) analysis never completed cleanly
-            # -- e.g. a genuine convergence failure at this corner, not the
-            # probe window being too generous. Its wall time is not a
-            # trustworthy rate sample either way.
-            error = "the calibration probe's own analysis did not complete cleanly"
+        started = time.monotonic()
+        timed_out = False
+        error: str | None = None
+        try:
+            subprocess.run(
+                [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path],
+                capture_output=True,
+                text=True,
+                timeout=probe_timeout_s,
+                cwd=probe_dir,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        except FileNotFoundError as exc:
+            error = f"could not launch ngspice for the calibration probe: {exc}"
+        wall_s = round(time.monotonic() - started, 3)
 
-    if not keep_artifacts:
-        _cleanup_dir(probe_dir)
+        if not timed_out and error is None:
+            log_text = _read_log_file(log_path)
+            if _SIMULATION_ABORTED_RE.search(log_text):
+                # The probe's own (shortened) analysis never completed cleanly
+                # -- e.g. a genuine convergence failure at this corner, not the
+                # probe window being too generous. Its wall time is not a
+                # trustworthy rate sample either way.
+                error = "the calibration probe's own analysis did not complete cleanly"
 
     return {"wall_s": wall_s, "timed_out": timed_out, "error": error}
 
