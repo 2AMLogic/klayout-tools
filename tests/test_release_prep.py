@@ -335,14 +335,14 @@ def test_refresh_collects_late_notes_once_and_leaves_history_intact(tmp_path):
     note.write_text(SIGNOFF)
     before = changelog.read_text()
     assert (
-        rp.main(["refresh", "--repo", str(repo), "--version", "0.9.0", "--check"]) == 1
+        rp.main(["--repo", str(repo), "refresh", "--version", "0.9.0", "--check"]) == 1
     )
     assert (
         changelog.read_text() == before
         and pending.is_file()
         and note.read_text() == SIGNOFF
     )
-    args = ["refresh", "--repo", str(repo), "--version", "0.9.0"]
+    args = ["--repo", str(repo), "refresh", "--version", "0.9.0"]
     assert rp.main(args) == 0
     refreshed = changelog.read_text()
     assert refreshed.startswith("# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-01)")
@@ -355,15 +355,24 @@ def test_refresh_collects_late_notes_once_and_leaves_history_intact(tmp_path):
     assert rp.prepare(repo, "0.10.0", "2026-12-01")["version"] == "0.10.0"
 
 
-@pytest.mark.parametrize("invalid", ["branch", "stale"])
-def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid):
+@pytest.mark.parametrize("invalid", ["branch", "fragment", "unreleased", "prepared"])
+def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid, capsys):
     repo = _repo(tmp_path)
     rp.prepare(repo, "0.9.0", "2026-11-01")
     directory = repo / "changelog.d"
     directory.mkdir()
     fragment = directory / "late.md"
-    anchor = "0.8.0" if invalid == "branch" else "0.7.0"
-    fragment.write_text(f"- late: first release after `v{anchor}`\n")
+    fragment.write_text("- another fragment\n")
+    stale = "- stale: first release after `v0.7.0`"
+    source = fragment
+    if invalid == "fragment":
+        fragment.write_text(f"\n\n{stale}\n")
+    elif invalid in {"unreleased", "prepared"}:
+        source = repo / "CHANGELOG.md"
+        heading = (
+            "## Unreleased" if invalid == "unreleased" else "## 0.9.0 (2026-11-01)"
+        )
+        source.write_text(source.read_text().replace(heading, f"{heading}\n\n{stale}"))
     paths = [
         repo / "pyproject.toml",
         repo / "CHANGELOG.md",
@@ -372,5 +381,11 @@ def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid):
     ]
     before = [p.read_bytes() for p in paths]
     version = "0.9.1" if invalid == "branch" else "0.9.0"
-    assert rp.main(["refresh", "--repo", str(repo), "--version", version]) == 2
+    assert rp.main(["--repo", str(repo), "refresh", "--version", version]) == 2
     assert [p.read_bytes() for p in paths] == before
+    if invalid != "branch":
+        line = source.read_text().splitlines().index(stale) + 1
+        assert (
+            f"release_prep.py: {source.relative_to(repo)}:{line}:"
+            in capsys.readouterr().err
+        )

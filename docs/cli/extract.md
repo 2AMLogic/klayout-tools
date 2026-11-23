@@ -3568,6 +3568,14 @@ reference CDL writes every transistor as
 
 ### Device contract
 
+When the selected ASAP7 circuit instantiates child circuits, `device_count_scope`
+is `"selected_circuit"`. The `devices` list, `device_count`, `device_counts` and
+`metrics.extract__device__count` describe devices drawn directly in that circuit.
+`instantiated_device_count` and `instantiated_device_counts` include those devices
+plus each reachable child's devices once per placement. For example, two instances
+of an inverter with one nFET and one pFET contribute four devices. The census
+precedes parasitic injection. Flat ASAP7 reports retain their existing count fields.
+
 | Field | Meaning |
 | --- | --- |
 | `devices[].class` | The compact-model name: `nmos_rvt`/`pmos_rvt` by default; `*_lvt`, `*_slvt` or `*_sram` where the channel touches the LVT (98/0), SLVT (97/0) or SRAMVT (110/0) marker; `nmos_io`/`pmos_io` under the predictive THICKOX (111/0) marker (declared gap: the card names are unconfirmed against 2AMLogic/pdks; VT + THICKOX is malformed geometry). A different VT is a different class, so a model mismatch is a class mismatch. |
@@ -8973,6 +8981,9 @@ numbering described in
 | `timing`           | object                     | Additive (issue #3181): wall-clock `stages` (seconds per stage), `total_seconds`, `unattributed_seconds`. A measurement, ignored by `--check --rerun`. |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
+| `device_count_scope` | string (optional) | `"selected_circuit"` for a curated ASAP7 circuit with child instances. |
+| `instantiated_device_count` | integer (optional) | Total direct and descendant devices for that ASAP7 circuit, weighted by its placements. |
+| `instantiated_device_counts` | object (optional) | Per-class instantiated counts for that ASAP7 circuit. The runset engine also emits its per-class census. |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |
 | `pin_count`        | integer                    | Number of `nets[]` entries with `pin: true`.                                                           |
 | `device_counts`    | object\<string, int\>      | Per-device-class counts, keyed by `devices[].class`, keys sorted for determinism (`"nfet"`/`"pfet"`, and, on decks/layouts that have one, a bipolar class like `"pnp"`/`"bjt"`, a MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"`/`"cap_mim_2f0_m4m5_noshield"`, and/or a drawn-resistor class like `"res_generic_po"`/`"ppolyf_u"`). What was actually **found**.  |

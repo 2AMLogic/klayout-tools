@@ -289,8 +289,8 @@ that root without the first-match-wins search, so the PDK ambiguity warning does
 not fire. The pinned root shows in `provenance.pdk`. For a local ngspice
 corner, klt expands `$PDK_ROOT` in the body’s include paths with the selected
 install root and passes the same `PDK_ROOT` to the child process. This also
-applies to a store selected by discovery. Corner requests only:
-`decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
+applies to a store selected by discovery. Corner requests and `--op-lint` accept the pin.
+`decks`/`commands` requests, `--batch-set` and `--job-status`
 refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
 
 **Pinning the PDK revision (`models.pdk_version`, issue #4046).** The
@@ -9747,7 +9747,10 @@ stay verbatim.
 `models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
 runner; drop it and use `models.pdk`. A path that does not exist here is
 assumed runner-valid and passes. `--pdk-root` is folded into `models.pdk_root`
-as an absolute path, so the flag form is refused the same way.
+as an absolute path, so the flag form is refused the same way. The refusal
+message names the pin that does work on `batch`: set `$PDK_ROOT` to choose which
+install this *client* resolves (the runner reads its own, selected by
+`models.pdk`) ([#5751](https://github.com/2AMLogic/klayout-tools/issues/5751)).
 
 `klt sim --dry-run --backend batch` raises the same error rather than passing
 clean ([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)), with
@@ -10491,6 +10494,17 @@ sweep response.
 klt sim <request.json> --op-lint [--op-lint-corner <corner_id>|all] [--format text|json]
 ```
 
+- `--pdk-root DIR` — pin the PDK install root for the lint, exactly as on the
+  graded path ([#5751](https://github.com/2AMLogic/klayout-tools/issues/5751)):
+  folded into `models.pdk_root`, so it wins over the request's own field and a
+  relative `DIR` resolves against the CWD. Use it on a host with more than one
+  install of the same PDK so the lint reads the install the grid will.
+- **Resolved PDK reporting** — the lint reports which PDK it resolved:
+  `provenance.pdk` in JSON (unchanged), and in `--format text` a
+  `pdk: <name> <version> (via <source>)` line. When more than one
+  install holds the variant and none was pinned, it also prints the same
+  one-line stderr ambiguity warning as the graded path and a `pdk: WARNING`
+  text line.
 - `--op-lint-corner` — which expanded `corner_id` from the request's own
   matrix to bias at. Defaults to the **first** expanded corner. Exactly one
   corner is run either way: this is a diagnostic meant to be cheap enough to
