@@ -72,10 +72,10 @@ def test_no_missing_features_adds_no_field(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("models_lib", "libraries", "model_reason"),
     [
-        ({"scope": "client"}, [], "runner_hash_unavailable"),
-        ({"scope": "absent"}, [], "no_models_lib"),
+        ({"path": None, "scope": "external"}, [], "runner_hash_unavailable"),
+        ({"path": None, "scope": "absent"}, [], "no_models_lib"),
         (
-            {"scope": "client"},
+            {"path": None, "scope": "external"},
             [{"name": "nfet.lib", "sha256": "a" * 64}],
             "runner_hash_unavailable",
         ),
@@ -89,6 +89,7 @@ def test_checkpoint_only_batch_resume_reports_client_comparisons(
         "remote": {"run": summary},
         "models_lib": models_lib,
         "corner_section_libs": libraries,
+        "models_lib_sha256_scope": "client",
     }
     finalize_batch_remote(environment, "batch")
     expected = {
