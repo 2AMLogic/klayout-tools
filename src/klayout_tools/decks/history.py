@@ -699,12 +699,10 @@ def _terminal_entry(
 ) -> dict[str, Any]:
     """One terminal of a device class, in :func:`deck_devices`' shape.
 
-    ``relation`` is the terminal's
-    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
-    as ``{"source", "op", "extents"}`` so two entries differing only in a
-    relation project differently -- or ``None`` (``null``) for a terminal
-    defined by its static layer/``requires``/``excludes`` alone, which is
-    every terminal of every non-bipolar class.
+    ``relation`` (issue #2863) is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation`, reported as ``{"source",
+    "op", "extents"}``, or ``None`` for a terminal defined by its static
+    layer/``requires``/``excludes`` alone (every non-bipolar terminal).
     """
     return {
         "name": name,
@@ -817,6 +815,21 @@ def _provenance_entry(provenance: Any) -> dict[str, Any] | None:
     }
 
 
+def _resistor_terminals(
+    resistor: Any, names: dict[tuple[int, int], str]
+) -> list[dict[str, Any]]:
+    """Resistor terminals; ``anode_marker`` (#4312) adds a third, ``anode``."""
+    body = (resistor.body, resistor.requires, resistor.excludes)
+    terminals = [
+        _terminal_entry("body", *body, names),
+        _terminal_entry("terminal", resistor.terminal, (), (), names),
+    ]
+    if resistor.anode_marker is not None:
+        marker = resistor.anode_marker
+        terminals.append(_terminal_entry("anode", marker, (), (), names))
+    return terminals
+
+
 def _project_device_classes(
     deck: Any, layer_names: dict[tuple[int, int], str]
 ) -> list[dict[str, Any]]:
@@ -832,11 +845,9 @@ def _project_device_classes(
     # MOS. Markerless by construction: recognition is the deck's own
     # active/poly/nwell stack, split by which side of the well the active
     # island sits on (see `ExtractionDeck`'s docstring). Reported anyway --
-    # "this class needs no marker" is exactly the fact a caller comparing
-    # against a marker-gated class needs to see, and the `nwell`
-    # require/exclude asymmetry is what tells NMOS from PMOS (so `pfet`
-    # reports `predicate_gated: true` on `nwell`, which is the literal
-    # truth: a PMOS is not recognised outside the well).
+    # "this class needs no marker" is a fact a caller comparing against a
+    # marker-gated class needs to see, and the `nwell` require/exclude
+    # asymmetry tells NMOS from PMOS (`pfet` is `predicate_gated` on `nwell`).
     for class_name, in_well in ((deck.nfet_class, False), (deck.pfet_class, True)):
         entries.append(
             _device_class_entry(
@@ -993,22 +1004,11 @@ def _project_device_classes(
                 name=resistor.name,
                 kind="resistor",
                 marker=resistor.marker,
-                terminals=[
-                    _terminal_entry(
-                        "body",
-                        resistor.body,
-                        resistor.requires,
-                        resistor.excludes,
-                        layer_names,
-                    ),
-                    _terminal_entry("terminal", resistor.terminal, (), (), layer_names),
-                ],
+                terminals=_resistor_terminals(resistor, layer_names),
                 layer_names=layer_names,
                 provenance=resistor.provenance,
-                # Issue #2679: how `body` relates to `marker`. Under
-                # "abutting_heads" the `requires`/`excludes` above narrow
-                # the *marker* region (the resistive body itself), and the
-                # `body` layer only has to abut it as two separate heads.
+                # Issue #2679: how `body` relates to `marker` ("abutting_heads":
+                # the marker is the body; `body` is only the two heads).
                 extra={"topology": resistor.topology},
             )
         )

@@ -246,7 +246,21 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Matching files are merged into one
+  and both files' values. Every differing field between the first file and
+  the offending one is reported in the same error (up to 10, then a count of
+  the rest), long group values are shown around their first difference, and
+  a group renamed between files (`operating_conditions (typ)` vs
+  `operating_conditions (slow)`) is reported once as the same group under a
+  different name.
+  A differing `default_max_transition` is refused
+  with an explanation: an output pin without its own `max_transition` is
+  limited by its source library's default. The error names a cell and output
+  that inherit that limit when it finds one. To use the files together,
+  supply a single plain `.lib` that preserves each output's original
+  effective limit and set `liberty.<cell_library>.<corner>` to its
+  root-relative path (a prepared cell group can carry an explicit pin
+  `max_transition` wherever changing the shared header would otherwise
+  change that output's limit). Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized
@@ -278,6 +292,50 @@ directory itself, or a named subdirectory of it). When present it wins over
 ship Liberty only as `.7z`; extract it in the pinned flow (or a fetch script)
 and point the descriptor at the plain `.lib`. When the mapped file is missing but
 a sibling `.7z` exists, the error says so.
+
+#### Assembling an ASAP7 root
+
+From a klayout-tools checkout, initialize the two data submodules in an
+[ASAP7 checkout](https://github.com/The-OpenROAD-Project/asap7).
+Install 7-Zip (`7zz` or `7z` on PATH) for the upstream Liberty archives.
+
+```sh
+git -C "$ASAP7" submodule update --init asap7sc7p5t_28 asap7_pdk_r1p7
+uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"
+uv run klt pdk find --pdk asap7 --pdk-root "$ROOT" --format json
+```
+
+Choose a new output directory. The script publishes it after checking every
+requested Liberty group and physical view. Its default selection is RVT at TT.
+For several threshold voltages and corners, append `--vt RVT LVT --corner TT SS`.
+The other supported selections are `SLVT`, `SRAM` and the fast corner `FF`.
+For each selected flavour, use the library key `asap7sc7p5t_rvt`,
+`asap7sc7p5t_lvt`, `asap7sc7p5t_slvt` or `asap7sc7p5t_sram` and the uppercase
+corner key in requests. Pass the same root to synthesis, place-and-route and STA.
+
+Under `libs/<library>/`, `lef/`, `techlef/`, `gds/` and `lib/` hold regular
+files. `klayout/tech/asap7.map` is the upstream APR layer map.
+`klt-pdk-sources.json` records the superproject and two submodule commits,
+SHA-256 digests of every consumed input (including the compressed archives),
+every published view and the descriptor. It records working-tree bytes, so a
+local edit remains distinguishable at the same checkout commit.
+
+The upstream SIMPLE files have a 4000 ps default maximum transition while
+the other cell groups specify 320 ps. The assembler writes an explicit
+4000 ps limit on each SIMPLE signal pin that inherited it, then sets the
+shared library default to 320 ps. Existing pin limits and timing tables are
+preserved. The sidecar counts newly explicit limits. The shared Liberty
+merger checks the remaining headers, cell names and timing-table templates.
+
+At ASAP7 commit `d24f8b857ff74cf5b21ab18a7e1b11a3954c449b`, the
+RVT SIMPLE file labelled FF declares the TT operating conditions. Selecting
+RVT/FF there produces a header mismatch and leaves the output unpublished.
+When a checkout includes the corrected `250407` RVT SIMPLE FF file, the
+assembler aligns its operating-condition name and adds the reference
+library's unused input/output voltage declarations. The corrected file and SEQ
+reuse template names for different timing tables, so its templates and their
+references receive unique names. Table contents, pin data and operating
+conditions are preserved. The sidecar records each name change.
 
 See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
@@ -1354,20 +1412,18 @@ classified against that flavour's own typical-corner evidence:
 
 - `"skewed"` — the flavour's include tokens differ from its typical corner's
   (token evidence always wins);
-- `"param"` — tokens identical, but at least one `.param` value that differs
-  from the typical section's is **consumed** by the flavour's own
-  sub-library. Attribution is by consumption: the differing `.param` names
-  are matched against the sub-library bodies the flavour's tokens point at.
-  Only when a flavour's sub-library body is not resolvable in the deck does
-  a name-prefix fallback (`nfet_06v0_vth0` → `06v0`) attribute instead;
-- `"typical"` — provably unmoved: identical tokens, and either no `.param`
-  differs from typical at all or the flavour's resolvable sub-libraries
-  consume none of the differing values;
-- `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
-  do differ, but the flavour's sub-library is unresolvable in the deck and
-  no differing `.param`'s name-prefix maps to it. `klt sim` reports these
-  under `environment.corner_coverage`'s `unknown_devices` key, never folded
-  into `unmoved_devices`;
+- `"param"` — with identical tokens, a visible use of a differing parameter
+  in any referenced sub-library establishes skew. The scanner matches both
+  the include file and the named section to the deck it read. If some bodies
+  remain unresolved and none of the visible bodies consumes a differing
+  parameter, a matching parameter prefix (such as `nfet_06v0_vth0` for
+  `06v0`) also establishes skew.
+- `"typical"` — identical tokens and either no differing parameters or a
+  complete set of referenced bodies that consume none of those parameters.
+- `"unknown"` — parameters differ and the available bodies and parameter
+  prefixes leave the flavour undecided. Ambiguous parameter assignments
+  also give this result. `klt sim` lists these devices under
+  `environment.corner_coverage.unknown_devices`.
 - `null` — the typical corner ships the flavour but the section does not.
 
 For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
@@ -1987,6 +2043,61 @@ follows the same shape and raises `PdkNotFoundError` when no PDK install
 resolves at all — a variant shipping no `libs_ref` asset, or one whose
 libraries ship no `techlef/` directory at all, returns an empty
 `sources`/`layers`/`disagreements` result rather than raising.
+
+### Stream vs. tech-LEF dbu resolution (`resolve_output_dbu` vs. `resolve_pdk_dbu`, issue #5721)
+
+Two further library functions answer the database-unit question, and they are
+deliberately **two** functions, because a PDK can legitimately carry two
+different dbu answers:
+
+```python
+from klayout_tools.pdk import resolve_pdk_dbu
+from klayout_tools.pdk_output_dbu import required_stream_dbu, resolve_output_dbu
+
+info = find_pdk(variant="gf180mcuA")
+
+resolve_pdk_dbu(info)  # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
+resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
+required_stream_dbu(info)  # 0.001 for gf180mcu; None when the family declares none
+```
+
+- **`resolve_pdk_dbu(pdk_info)`** is the tech LEF's `DATABASE MICRONS` truth
+  — the finest value declared across the family-wide `libs.ref/*/techlef/`
+  set, or `None` (never an exception) when nothing readable declares one. It
+  is what a DEF *reader* must be configured with: a DEF's coordinates for
+  gf180mcu are in 1/2000 µm units, and re-interpreting them at another dbu
+  moves geometry. `klt place-and-route`'s DEF→GDS merge uses it, unchanged
+  by #5721.
+- **`resolve_output_dbu(pdk_info)`** is "what dbu a GDS/OASIS stream *for*
+  this PDK must be written at": the family's entry in
+  `_REQUIRED_STREAM_DBU_UM` when it declares one — **gf180mcu, the only
+  entry today: `0.001`**, because the family's native DRC runset enforces an
+  exact-equality `DBU` rule (`rule_decks/geom.rb`:
+  `extent.output('DBU', ...) if dbu != 0.001`) that rejects a 0.0005 stream
+  whole-cell — falling through to `resolve_pdk_dbu` for every family with no
+  declared requirement, and returning `None` exactly where `resolve_pdk_dbu`
+  would. `klt gen` writes at it (see
+  [`gen.md`](gen.md)'s "Output database unit (dbu)"), where the fall-through
+  reproduces the pre-#5721 stream byte-for-byte.
+- **`required_stream_dbu(pdk_info)`** is that answer's narrower half: only a
+  *declared* requirement, `None` with no fall-through. `klt gen-compose`
+  resolves its composed-dbu target with it, because compose's own fallback
+  when no requirement is declared is the *finest block's* dbu (issue #1514)
+  — falling through to the tech LEF there would silently replace that
+  refinement target for every family whose install ships a readable tech
+  LEF (see [`gen-compose.md`](gen-compose.md)'s "Reconciling mismatched
+  `dbu`s").
+
+Why the two disagree on gf180mcu and both are still kept: the tech LEF's
+`DATABASE MICRONS 2000` is LEF headroom nothing in the install uses (every
+GDS the gf180mcu install itself ships is at 0.001, and so is the runset's own
+rule), while its DEFs really are authored in 1/2000 µm units. Collapsing the
+answers into one function — e.g. reusing the curated deck's
+`get_nominal_dbu` — would make the next PDK's requirement unexpressible
+(that helper means "the dbu klt's deck transcribed thresholds against", and
+it raises for families whose packaged deck legitimately wants a finer dbu,
+e.g. asap7). Keep writing streams at `resolve_output_dbu` and reading DEFs
+at `resolve_pdk_dbu`.
 
 ## Exit codes and errors
 

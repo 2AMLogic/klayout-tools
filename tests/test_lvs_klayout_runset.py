@@ -276,7 +276,7 @@ def test_nonzero_exit_with_unusable_database_is_an_error(
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "ERROR: died after extraction\n"
 
-    def no_xref(path, reference=None):
+    def no_xref(path, reference=None, **kwargs):
         raise LvsError("database has no cross-reference")
 
     monkeypatch.setattr(lvs_runset, "read_lvsdb_verdict", no_xref)

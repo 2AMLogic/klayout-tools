@@ -104,6 +104,10 @@ def _what_metric(c: dict) -> str:
     )
 
 
+def _what_unmeasured_metric(c: dict) -> str:
+    return f"{c['role']} {c['corner']} {c['metric']}: unmeasured ({c['reason']})"
+
+
 def _what_pin(c: dict) -> str:
     if c["role"] == "tool_version":
         what = f"pin {c['tool']} {c['value']}"
@@ -128,6 +132,7 @@ _WHAT_RENDERERS = {
     "envelope": _what_envelope,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,
+    "unmeasured_metric": _what_unmeasured_metric,
     "pin": _what_pin,
 }
 

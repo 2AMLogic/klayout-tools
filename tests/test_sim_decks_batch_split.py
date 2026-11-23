@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+from unittest.mock import Mock
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_decks
 from klayout_tools import sim_batch as sb
 from test_sim_decks import (
     _FakeFleet,
@@ -230,3 +231,40 @@ def test_collect_partial_without_attach_still_refused(tmp_path):
     with pytest.raises(sim.SimError) as err:
         _run(tmp_path, _request(tmp_path), collect_partial=True)
     assert err.value.code == "collect_partial_requires_attach"
+
+
+@pytest.mark.parametrize(
+    ("cap", "expected"), [(4, [["d0", "d1", "d2"]]), (2, [["d0", "d1"], ["d2"]])]
+)
+def test_blocking_batch_stages_only_submitted_units(
+    tmp_path, monkeypatch, cap, expected
+):
+    write_stub_engine(tmp_path)
+    fleet = _install_and_fleet(monkeypatch)
+    request = _request(tmp_path, count=3, max_concurrent_jobs=1)
+    stage = Mock(wraps=sim_decks.stage_deck_job)
+    monkeypatch.setattr(sim_decks, "stage_deck_job", stage)
+    report = _run(tmp_path, request, max_units_per_job=cap, resume=True)
+
+    assert report["status"] == "pass"
+    assert [
+        [d["id"] for d in c.args[0]["decks"]] for c in stage.call_args_list
+    ] == expected
+    assert len(fleet.specs) == len(expected)
+
+    stage.reset_mock()
+    fleet.specs.clear()
+    report = _run(tmp_path, request, max_units_per_job=cap, resume=True)
+    assert all(unit["resumed"] for unit in report["units"])
+    stage.assert_not_called()
+    assert not fleet.specs
+
+
+def test_late_invalid_unit_rejected_before_any_batch_submission(tmp_path, monkeypatch):
+    fleet = _install_and_fleet(monkeypatch)
+    request = _request(tmp_path, count=3)
+    request["decks"][-1]["deck"] = "missing.sp"
+
+    with pytest.raises(sim.SimError, match="missing.sp"):
+        _run(tmp_path, request, max_units_per_job=1)
+    assert not fleet.specs
