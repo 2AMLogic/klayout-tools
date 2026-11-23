@@ -308,6 +308,13 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
         default=False,
         hidden=True,
     )
+    pcell.param(
+        "voltage_flavor_well_over_mark",
+        pcell.TypeBoolean,
+        "Extend the PFET nwell to the voltage marker box for HV-well enclosure",
+        default=False,
+        hidden=True,
+    )
 
 
 def declare_guard_ring_voltage_flavor_params(pcell: Any, kdb: Any) -> None:

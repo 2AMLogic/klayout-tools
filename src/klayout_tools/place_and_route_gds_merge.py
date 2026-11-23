@@ -62,6 +62,7 @@ import tempfile
 from collections.abc import Iterable
 from typing import Any
 
+from ._c_stdout import native_stdout_to_stderr
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
@@ -502,10 +503,8 @@ def _merge_def_to_gds(
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    # Match the tech LEF's DATABASE MICRONS to avoid lossy via geometry
-    # when KLayout's default DBU differs (e.g. gf180mcu uses 2000).
-    # A missing/malformed declaration keeps the reader default. Retain the
-    # full header for the DIEAREA guard's site-height check below (#1032).
+    # Match DATABASE MICRONS to preserve vias, defaulting to the reader DBU.
+    # Keep the full header for the DIEAREA site-height guard (#1032).
     tech_lef_header = read_lef_header(tech_lef)
     database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
@@ -525,7 +524,8 @@ def _merge_def_to_gds(
                     if pin_conductor_info["status"] == "staged"
                     else layer_map_path
                 )
-            main_layout.read(def_path, opts)
+            with native_stdout_to_stderr():
+                main_layout.read(def_path, opts)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise PlaceAndRouteError(
             f"could not read DEF '{def_path}' for GDS merge: {exc}"

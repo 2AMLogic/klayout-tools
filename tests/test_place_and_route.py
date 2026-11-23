@@ -3182,14 +3182,13 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    # Issue #2086's additive `power.placed` block is asserted separately
-    # below (tmp-path `def_path`); every other member is still pinned here.
     assert _power_without_placed(report) == {
         # issue #2123: an explicit `straps[]`/`connects[]` request is not a
         # preset run -- echoed as `None`, never a fabricated recipe name.
         "preset": None,
         "connects_overridden": False,
         "pdn": True,
+        "library_rail_labels": {"VPWR": "VDD", "VGND": "VSS"},
         "global_connect": True,
         "power_net": "VDD",
         "ground_net": "VSS",
@@ -5033,13 +5032,13 @@ def test_power_audit_specialnets_count_must_match_its_header():
 
 
 def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
-    """End to end: the truncated DEF above must not satisfy the
-    complete-grid gate. Every count is `null`, `status` is `"unknown"`,
-    and the run is warned about rather than silently passing."""
-    def_path = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
-
-    placed = power_audit.audit_power_delivery(
-        def_path=def_path,
+    """End to end: the truncated DEF must not satisfy the complete-grid gate
+    (counts `null`, `status` `"unknown"`, the run warned), and that gate's
+    prose names the DEF by file name, never its host path (issue #6146)."""
+    unreadable = str(tmp_path / "gone.def")  # never written
+    truncated = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
+    no_components = _write(tmp_path / "empty.def", "VERSION 5.8 ;\nEND DESIGN\n")
+    kwargs = dict(
         unavailable_reason=None,
         tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
         endcap_master=None,
@@ -5048,25 +5047,25 @@ def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_p
         ground_net="VGND",
         expect_fillers=True,
     )
-
-    assert placed["evidence"] == "unavailable"
-    assert placed["status"] == "unknown"
-    assert placed["special_nets"] is None
-    assert placed["tapcells"] is None
-    assert "SPECIALNETS" in placed["unavailable_reason"]
-    assert power_audit.power_delivery_warnings(placed, power_requested=True)
-
-    # The same DEF with its final record terminated *is* a measurement --
-    # the gate rejects truncation, not this grid.
+    for def_path in (unreadable, truncated, no_components):
+        placed = power_audit.audit_power_delivery(def_path=def_path, **kwargs)
+        assert placed["evidence"] == "unavailable"
+        assert placed["status"] == "unknown"
+        assert placed["special_nets"] is None
+        assert placed["tapcells"] is None
+        assert placed["def_path"] == def_path  # field keeps the full path (#6146)
+        prose = [placed["unavailable_reason"]]
+        prose += power_audit.power_delivery_warnings(placed, power_requested=True)
+        prose += power_audit.power_delivery_warnings(placed, power_requested=False)
+        for text in prose:
+            assert str(tmp_path) not in text, text
+        assert f"'{os.path.basename(def_path)}'" in placed["unavailable_reason"]
+        if def_path == truncated:  # the truncated case alone names this gate
+            assert "SPECIALNETS" in placed["unavailable_reason"]
+            assert power_audit.power_delivery_warnings(placed, power_requested=True)
+    # The same DEF with its final record terminated *is* a measurement.
     complete = power_audit.audit_power_delivery(
-        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF),
-        unavailable_reason=None,
-        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
-        endcap_master=None,
-        filler_masters=("sky130_fd_sc_hd__fill_1",),
-        power_net="VPWR",
-        ground_net="VGND",
-        expect_fillers=True,
+        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF), **kwargs
     )
     assert complete["evidence"] == "def"
     assert complete["status"] == "complete"
@@ -9281,7 +9280,7 @@ def test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning(
         out_path=str(out_path),
     )
     captured = capfd.readouterr()
-    assert "DEF UNITS does not match reader DBU" in captured.out
+    assert captured.out == "" and "DEF UNITS does not match reader DBU" in captured.err
     # Falls back to KLayout's own default rather than crashing (issue
     # #1032's second acceptance criterion) -- the merge still completes.
     assert out_path.is_file()

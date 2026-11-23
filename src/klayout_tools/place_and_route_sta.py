@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
 from ._openroad_engine import (
     _count_violations,
@@ -49,6 +50,7 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from ._tcl import tcl_literal as _tcl_literal
 
 
@@ -258,9 +260,8 @@ def _spef_sta_script_lines(
     net names?) runs **before** ``read_spef`` -- deliberately independent of
     whatever `read_spef` itself does with an unmatched name, so an uncaught
     Tcl error partway through that call cannot also silently skip this check.
-    It is measured in **both directions**, because they answer different
-    questions and only the second one decides whether the timing numbers
-    below are a real-parasitics measurement:
+    It is measured in **both directions**; only the second one decides
+    whether the timing numbers below are a real-parasitics measurement:
 
     - *SPEF-side* (``get_nets -quiet <name>`` per SPEF net): how many of the
       names the SPEF declares exist in the linked design. Flat extraction
@@ -269,10 +270,9 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` in the design, looked up in the
-      SPEF's own name set): how many of the design's nets the SPEF actually
-      names. **This** is the ratio that says whether every net OpenSTA times
-      got real routed parasitics.
+    - *design-side* (every ``get_nets *`` net but a confirmed driver-only
+      internal one, as standalone ``klt sta`` also skips (#6970/#7267)):
+      how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
     wraps each in Tcl braces, and brace-quoting performs no backslash
@@ -337,6 +337,7 @@ def _spef_sta_script_lines(
         "set klt_design_total 0",
         "set klt_design_annotated 0",
         "foreach klt_design_net [get_nets -quiet *] {",
+        *SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",
@@ -1067,12 +1068,9 @@ def _run_corner_sweep(
     corner_breakdown = []
     for corner in corners:
         corner_name = corner["name"]
-        corner_script_path = os.path.join(
-            output_dir, f"pnr_{hdl_toplevel}_route_corner_{corner_name}.tcl"
-        )
-        corner_metrics_path = os.path.join(
-            output_dir, f"{hdl_toplevel}_route_corner_{corner_name}_metrics.json"
-        )
+        stem = f"{hdl_toplevel}_route_corner_{quote(corner_name, safe='')}"
+        corner_script_path = os.path.join(output_dir, f"pnr_{stem}.tcl")
+        corner_metrics_path = os.path.join(output_dir, f"{stem}_metrics.json")
         corner_lines = _corner_sweep_script_lines(
             checkpoint_in=checkpoint_in,
             corners=[corner],

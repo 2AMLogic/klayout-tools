@@ -1,6 +1,5 @@
 """SDF-normalization pipeline steps for :func:`run_functional_verification`
-that reach into ``functional_verification`` only lazily, never at runtime
-module scope.
+using shared settings and diagnostics from ``functional_verification_base``.
 
 Split out of ``functional_verification.py`` / ``functional_verification_sdf.py``
 because the per-file size ratchet (``scripts/check_file_size_baseline.py``)
@@ -11,8 +10,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from .functional_verification_base import (
+    SDF_ALIAS_PORT_DROPPED_CLASS,
+    FunctionalVerificationError,
+)
 from .functional_verification_sdf import (
     _SDF_BUS_PORT_TOKEN_RE,
     _SDF_INTERCONNECT_HEAD_RE,
@@ -27,9 +30,6 @@ from .functional_verification_sdf import (
     _sdf_interconnect_is_zero_delay,
     _sdf_iopath_arc,
 )
-
-if TYPE_CHECKING:
-    from .functional_verification import FunctionalVerificationError
 
 #: The ``environment.sdf.dropped`` class counting ``COND``-wrapped ``IOPATH``
 #: entries removed before annotation because their condition is an operator
@@ -201,8 +201,6 @@ def _apply_sdf_alias_port_drop(
     the next step should read -- ``annotate_source_path`` unchanged when
     nothing was dropped.
     """
-    from .functional_verification import SDF_ALIAS_PORT_DROPPED_CLASS
-
     alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
         annotate_source_path,
         _collect_sdf_alias_port_bits(sources, hdl_toplevel),
@@ -460,8 +458,6 @@ def _sdf_refusal_error(
     merges ``details`` flat into ``error``: the path is
     ``error.sdf.dropped``.
     """
-    from .functional_verification import FunctionalVerificationError
-
     shown = " | ".join(diagnostics[:5])
     more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
     error = FunctionalVerificationError(
