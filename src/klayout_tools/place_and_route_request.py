@@ -658,7 +658,7 @@ def _validate_io(
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
@@ -669,7 +669,7 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
         _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
         for index, entry in enumerate(raw)
     ]
-    groups_spec.validate_fixed_members(groups, PlaceAndRouteError)
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
@@ -1948,9 +1948,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
 def _validate_sweep_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
     post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
-    a caller-named subset of the ``.lib`` corners ``request.pdk.cell_library``
-    ships, instead of always sweeping every shipped corner
-    (:func:`klayout_tools.pdk.list_lib_corners`'s own unfiltered return).
+    a caller-named subset of the library's available corners. The full set
+    comes from the PDK descriptor's corner keys for a mapped library and from
+    the unfiltered :func:`klayout_tools.pdk.list_lib_corners` enumeration otherwise.
 
     A design has exactly one operating supply -- for a cell library shipping
     several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
@@ -1964,9 +1964,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     own empty-``corners``-list short-circuit), distinct from omitting the
     field entirely.
 
-    Each requested name is validated against the *unfiltered* shipped-corner
-    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
-    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    Once ``cell_library`` and ``pdk_info`` are resolved, the post-route sweep
+    checks each requested name against that corner set. An unknown name raises
     :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
     this module's existing unresolvable-request-field convention (e.g.
     :func:`_validate_route_critical_nets_percentage`'s sibling validators).

@@ -26,6 +26,7 @@ from .lvs_combine import (
 )
 from .lvs_coverage import _implausible_dimensions
 from .lvs_finfet_flatten import flatten_layout_netlist
+from .lvs_flatten import root_selected_circuit
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .lvs_layout_short_nets import apply_layout_short_nets
 from .lvs_mos_options import split_layout_mos_flavours
@@ -246,6 +247,8 @@ def _resolve_layout_stage(
         layout_netlist, layout_spec.get("top")
     )
     if opts.flatten_layout:
+        if "netlist" in layout_spec:
+            root_selected_circuit(layout_netlist, layout_spec.get("top"))
         flatten_layout_netlist(layout_netlist, opts.finfet_layout, flatten_warnings)
     return _LayoutStage(
         layout_netlist,

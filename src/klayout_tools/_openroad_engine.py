@@ -447,8 +447,8 @@ def _run_openroad(
     engine_logs: list[dict[str, Any]] | None = None,
     threads: int | None = None,
 ) -> _OpenRoadResult:
-    """Stream both logs to disk, retaining partial output on interruption.
-    Raise ``error_cls`` for launch failures and return exit status otherwise."""
+    """See “Retained OpenROAD logs” in docs/cli/place-and-route.md for log streaming.
+    Keep partial logs. Raise ``error_cls`` on launch failure, else return the status."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(

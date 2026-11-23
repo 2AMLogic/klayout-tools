@@ -1315,10 +1315,11 @@ never operates at. Issue #1092 closes both gaps additively:
   mechanics rather than new, unverified Tcl surface.
 - **`pdk.sweep_corners`** — scopes both the combined sweep and the
   per-corner breakdown to a caller-named subset of the shipped corners
-  (see the request field table above). Every named corner must resolve
-  against the *unfiltered* `list_lib_corners` enumeration; an unresolvable
-  name raises `PlaceAndRouteError` before any OpenROAD invocation runs,
-  naming both the unresolvable name(s) and the full list of valid corners.
+  (see the request field table). For a library mapped by the PDK descriptor,
+  use the descriptor's corner keys. For an unmapped library, use the unfiltered
+  `list_lib_corners` enumeration. After routing, the tool validates the names
+  before starting the timing sweep. An unknown name raises `PlaceAndRouteError`
+  listing the unknown names and all available corners.
 
 **Wall-clock cost, updated.** A `sweep_corners`-scoped or naturally
 single-corner run pays exactly the original #949 cost above (one combined
@@ -3762,6 +3763,9 @@ model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
 stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
 OpenROAD 26Q3-1510).
 
+Use retained logs for local debugging and determine stage success from the
+OpenROAD exit status and the stage's required outputs.
+
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
 
@@ -4129,7 +4133,9 @@ Add `order.fixed_origin_um` to place the first listed standard cell at a
 specified DEF coordinate in micrometres. Each subsequent member advances by
 `pitch_um` in positive x for a row or positive y for a column. Use literal
 linked instance names, including any bus brackets. A member may belong to one
-fixed group and any number of measurement groups.
+fixed group and any number of measurement groups. Placement begins at the
+`place` stage. A fixed origin requires `target_stage` to be `place`, `cts`,
+or `route` (the default).
 
 ```json
 {

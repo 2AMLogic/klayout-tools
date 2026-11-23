@@ -205,17 +205,72 @@ def test_measurement_only_group_adds_no_placement_commands(tmp_path, monkeypatch
     assert script.read_bytes() == baseline
 
 
+@pytest.mark.usefixtures("real_build_identity_git")
+def test_floorplan_rejects_fixed_group(tmp_path, monkeypatch):
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+    group = {
+        "name": "chain",
+        "instances": ["next"],
+        "order": {"axis": "x", "pitch_um": 2, "fixed_origin_um": [1, 0]},
+    }
+    path = _setup_success_env(
+        tmp_path, monkeypatch, target_stage="floorplan", instance_groups=[group]
+    )
+    with pytest.raises(
+        PlaceAndRouteError, match=r"chain.*fixed_origin_um.*target_stage"
+    ):
+        place_and_route.run_place_and_route(path)
+
+
 @pytest.mark.skipif(shutil.which("openroad") is None, reason="OpenROAD is unavailable")
 @pytest.mark.parametrize(
-    ("names", "origin", "pitch", "diagnostic"),
+    ("names", "origin", "pitch", "diagnostic", "before_place", "before_verify"),
     [
-        (["dly[2]", "next"], [1, 0], 2, None),
-        (["absent"], [1, 0], 2, "unknown linked instance"),
-        (["dly[2]", "next"], [1, 0], 0.5, "overlaps fixed instance 'dly[2]'"),
-        (["next"], [1.1, 0], 2, "no legal row/site"),
+        (["dly[2]", "next"], [1, 0], 2, None, [], []),
+        (["absent"], [1, 0], 2, "unknown linked instance", [], []),
+        (["dly[2]", "next"], [1, 0], 0.5, "overlaps fixed instance 'dly[2]'", [], []),
+        (["next"], [1.1, 0], 2, "no legal row/site", [], []),
+        (
+            ["next"],
+            [1.0001, 0],
+            2,
+            "coordinate is not representable in DEF database units",
+            [],
+            [],
+        ),
+        (
+            ["next"],
+            [1, 0],
+            2,
+            "conflicts with the existing fixed placement",
+            [
+                "set member [[ord::get_db_block] findInst next]",
+                "$member setLocation 3000 0",
+                "$member setPlacementStatus FIRM",
+            ],
+            [],
+        ),
+        (
+            ["next"],
+            [1, 0],
+            2,
+            "overlaps placement blockage",
+            ["create_blockage -region {1 0 2 2}"],
+            [],
+        ),
+        (
+            ["next"],
+            [1, 0],
+            2,
+            "placement is no longer FIXED",
+            [],
+            ["[[ord::get_db_block] findInst next] setPlacementStatus PLACED"],
+        ),
     ],
 )
-def test_openroad_fixed_sites(tmp_path, names, origin, pitch, diagnostic):
+def test_openroad_fixed_sites(
+    tmp_path, names, origin, pitch, diagnostic, before_place, before_verify
+):
     (tmp_path / "cells.lef").write_text(
         """VERSION 5.8 ;
 UNITS DATABASE MICRONS 1000 ; END UNITS
@@ -255,7 +310,9 @@ END DESIGN
         "read_lef cells.lef",
         "read_def design.def",
         *declarations,
+        *before_place,
         *place,
+        *before_verify,
         *verify,
         "write_def final.def",
     ]

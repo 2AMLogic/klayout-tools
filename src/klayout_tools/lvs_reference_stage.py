@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 from . import lvs as _lvs
 from .lvs_coverage import _implausible_dimensions
+from .lvs_flatten import root_selected_circuit
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
 
@@ -40,10 +41,7 @@ def _flatten_reference(
     netlist: Any, top: str | None, flatten: bool | list[str]
 ) -> dict[str, Any] | None:
     """Make a selected interior circuit the root before inlining its descendants."""
-    if top is not None:
-        selected = netlist.circuit_by_name(top)
-        if selected is not None and any(selected.each_ref()):
-            _lvs._prune_extra_top_circuits(netlist, selected)
+    root_selected_circuit(netlist, top)
     return _lvs._flatten_netlist_safely(
         netlist, "reference", keep=flatten if isinstance(flatten, list) else None
     )

@@ -175,3 +175,37 @@ def test_published_runner_identities_carry_engine_identity(tmp_path):
     assert east["ngspice_version"] == "46.2"
     assert east["pdk_snapshot"] == "sky130A-2026.11.01"
     assert west["ngspice_version"] is None and west["pdk_snapshot"] is None
+
+
+@pytest.mark.parametrize(
+    ("pin", "found", "matches", "diagnostic"),
+    [
+        ("44", "44.2.1", True, None),
+        ("44.2", "44.2", True, None),
+        ("44.2", "44.2.1-release", True, None),
+        ("44.2", "44", False, "found ngspice 44"),
+        ("44.2", "44.20", False, "found ngspice 44.20"),
+        ("44.2", "45.2", False, "found ngspice 45.2"),
+        ("44.2", None, None, "reported no ngspice version"),
+        ("44.2", "", None, "reported an unparseable ngspice version ''"),
+        ("44.2", "unknown", None, "reported an unparseable ngspice version 'unknown'"),
+    ],
+)
+def test_manifest_and_report_apply_same_version_pin(pin, found, matches, diagnostic):
+    request = {"engine_version": pin}
+    assessment = {"images": [_image(ngspice_version=found)]}
+    if matches is False:
+        with pytest.raises(sim.SimError) as exc:
+            sb._enforce_published_engine_version_pin(request, assessment)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+    else:
+        sb._enforce_published_engine_version_pin(request, assessment)
+
+    components = sim._validate_engine_version_pin(request)
+    if matches:
+        sim._check_engine_version_pin(components, found, "ngspice", where="worker")
+    else:
+        with pytest.raises(sim.SimError) as exc:
+            sim._check_engine_version_pin(components, found, "ngspice", where="worker")
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+        assert diagnostic in str(exc.value)
