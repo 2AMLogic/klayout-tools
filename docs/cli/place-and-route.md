@@ -2393,11 +2393,33 @@ live re-measurement above.
 | `route_allow_congestion` | boolean \| omitted | Default `false` (no flag). `true` emits `global_route -allow_congestion` so the route stage continues past residual global-routing overflow (issue #4716); the final congestion report is still scraped into the response. |
 | `max_antenna_repair_iterations` | integer \| omitted | 0–8, default `1`. Zero disables antenna repair/reroute passes; initial routing and the final antenna check still run. Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
 | `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim. Capacitance is always pF/um: the scripts emit `set_cmd_units -time ns -capacitance pF` before `set_wire_rc`, independent of the Liberty `capacitive_load_unit`, so convert from fF first, e.g. ASAP7's 0.16579 fF/um is `0.00016579`. The resistance unit is not pinned: OpenROAD reads it in the first Liberty file's resistance unit (ASAP7 `report_units` prints `resistance 1kohm`), so convert if that is not what you supply). Omitted ⇒ scripts are byte-identical to before. Routing and power inputs (issue #4127): `route_layers` (`{"low": str, "high": str}`, emitted as `set_routing_layers`'s `low-high` range at `route`; it also **caps the signal routing layers** (issue #4802), e.g. `{"low": "Metal2", "high": "Metal4"}` for `gf180mcu_fd_sc_mcu7t5v0` to reserve the top metal for power/clock, and a cap that excludes `io.layer_h`/`io.layer_v` is rejected at request time naming the cap and the layer; the resolved range is echoed in `applied.signal_layers`); `antenna_diode` (`{"cell": str, "pin": str}`, the `repair_antennas` diode, or JSON `null` (issue #4274) to state the library has no antenna diode and no antenna rules, e.g. ASAP7: the `route` stage then emits no `repair_antennas` call and no reroute pass, exactly like `max_antenna_repair_iterations: 0`, while the initial `detailed_route`, `check_antennas` and routing-completeness still run, and the response `warnings` states that antenna repair did not run; distinct from omitting the key, i.e. "unverified", which is still rejected at `route` for a library with no built-in entry); `tapcell` (`{"master": str, "endcap": str\|null, "distance_um": >0}` for the `request.power` `tapcell` call, or JSON `null` to state the library has no tap/endcap cells, which is distinct from omitting it, i.e. "unverified"); `filler` (non-empty list of filler master names for `filler_placement` and the power audit). Together with `cts_buffer`, `power_pins` and `wire_rc` these let a library with no built-in table reach `route` with a `power` block. A supplied key overrides a built-in entry. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (`[supply request.library.<key>]`). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
+| `library.dont_use` | non-empty array of strings | Additional case-sensitive Liberty cell patterns to exclude in OpenROAD. See “Library cell exclusions” below. |
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 | `outputs` | object \| omitted | Additive field (issue #4231), mirroring `klt synthesize`'s `outputs.dir`. `{"dir": "<path>"}` replaces `.klt/place-and-route/` as the directory every artifact (DEF/GDS/Verilog/SPEF, Tcl, ODB, metrics) is written to; relative paths resolve against the request file's directory. Multi-corner requests write `<dir>/<corner>/` and `corner_runs[].output_dir` names it. Response paths are produced from this directory, so they name the committed location and `portable_paths` rewrites them as usual. Unknown keys and a non-string/empty `dir` are rejected, as is a `dir` that already exists and is non-empty (prior evidence is retained); an existing empty directory is accepted. The output-dir lock is held on this directory. `--check --rerun` reuses the directory in place (overwriting its own artifacts), so the non-empty refusal does not apply to a re-run. Not supported with `--backend batch` (rejected with an error). Omitting `outputs` leaves behaviour and JSON unchanged. |
 | `output_dbu_um` | number \| omitted | Additive field (issue #4482). Default unset: the merged GDS keeps the tech LEF's `DATABASE MICRONS` dbu, byte-identical to before. A positive value (um), e.g. `0.00025`, rewrites the merged GDS at that dbu so a deck written for a finer grid (the packaged ASAP7 DRC deck) sees no rounding artefacts. Only a lossless integer refinement is accepted (`0.001` → `0.00025` is ×4; equal to the native dbu is a no-op); a coarsening or non-integer ratio raises a `PlaceAndRouteError` and writes no GDS. Not a positive number → `PlaceAndRouteError`. The effective dbu is reported as `gds_dbu_um`. No `schema_version` bump. |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
+
+### Library cell exclusions
+
+To keep OpenROAD from selecting a standard cell during placement, CTS or routing,
+pass its name or a glob in `library.dont_use`. For example,
+`{"library": {"dont_use": ["sky130_fd_sc_hd__a21oi_*"]}}` excludes that family.
+The same list can be passed to `klt synthesize` as `constraints.dont_use`.
+Supply it in each request to apply it to both tools.
+
+Patterns match case-sensitively and can contain letters, digits, underscores,
+periods, hyphens, and the glob characters `*`, `?`, `[`, `]`, and `!`.
+When klt can read cell names from the resolved standard-cell Liberty, each
+requested pattern must match a cell. Patterns covering the active CTS buffer or
+antenna diode are rejected. An explicit `library.antenna_diode: null` disables
+the diode check.
+
+Every post-floorplan stage applies the built-in library patterns first, then the
+requested patterns, keeping the first occurrence of each. With this field set,
+the response records the original deduplicated list in `cell_exclusions.requested`,
+the built-ins in `library_defaults`, and the emitted order in `effective`.
+Existing instances in the input netlist can still appear in the output.
 
 ### Unknown request keys are errors (issue #4230)
 
@@ -3894,17 +3916,7 @@ RTL-side, the constructs that produce them are covered by
 
 ## Out of scope
 
-- **Metal fill (density fill), `DONT_USE_CELLS`-style cell exclusion.** A
-  core-only block v1, matching the contract's own IO-ring/footprint
-  exclusion — neither is part of the request/response contract this phase
-  implements, and each can be added later as an additive request field
-  without a contract-shape change. (Hard-macro placement and tapcell/PDN
-  power delivery were originally scoped out here too — see "Hard-macro
-  placement" above and "Power delivery" below; issues #438 and #1091 closed
-  those gaps.)
-- **Caller-supplied cell exclusion.** The built-in per-`cell_library`
-  exclusions `klt synthesize` applies are emitted as `set_dont_use` in every
-  post-floorplan stage script (issue #2378), with no request field.
+- **Metal fill (density fill).** The core-only flow has no density-fill stage.
 - **Macro-specific PDN grids** were scoped out here too — closed by issue
   #2635's `macros[].halo`; see "Macro halos" above and "Power delivery"
   below.
