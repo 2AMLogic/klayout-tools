@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
-from klayout_tools import pex, pex_binding
+from klayout_tools import pex, pex_binding, sim
 from klayout_tools.pex_dry_run import run_pex_dry_run
 from test_pex import (
     _fake_async_sim,
@@ -299,8 +299,20 @@ def test_real_public_interface_after_private_namesake(tmp_path, design, header):
         ".ends RES\n.ends fixture\n"
         f".subckt RES {header}\nRpublic RA RB 289.2\n.ends RES\n"
     )
+    source = dut.read_bytes()
+    expected_schematic = 1.39621
+    if header == "RA,RB":
+        # The unmodified schematic is passed to ngspice. Version 42 and 46
+        # simulate this bare-comma header differently even without PEX.
+        baseline = sim.run_sim(str(request), backend="local")
+        assert baseline["status"] == "pass"
+        (measurement,) = baseline["corners"][0]["measurements"]
+        assert measurement["name"] == "vout"
+        expected_schematic = measurement["value"]
+
     report = pex.run_pex(str(gds), [str(request)], "sky130", **_kwargs(tmp_path))
     assert report["status"] == "pass"
     (row,) = report["delta"]
-    assert row["schematic_value"] == pytest.approx(1.39621, rel=1e-4)
+    assert row["schematic_value"] == pytest.approx(expected_schematic, rel=1e-4)
     assert row["extracted_value"] == pytest.approx(1.11626, rel=1e-4)
+    assert dut.read_bytes() == source

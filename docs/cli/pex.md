@@ -225,6 +225,11 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   copy. The two interfaces still need matching positional pins. This works
   with schematic flattening enabled or disabled. An unresolved binding
   reports both names before either leg runs.
+  Use spaces between the pins of a schematic `.subckt` header for
+  portable simulation. The binding check recognizes comma-separated pins,
+  but the unflattened schematic leg passes the original file to ngspice.
+  The same `.subckt RES RA,RB` resistor deck gave different voltages in
+  ngspice 42 and 46, including when run directly.
 - `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
   before the schematic-side run (issue #2889) — the `klt pex` counterpart of
   `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical
