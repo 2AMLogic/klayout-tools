@@ -828,6 +828,16 @@ extracted-side leg whose testbench did not hand-author a tie hit ngspice's
 gmin/source-stepping recovery that followed could return a non-reproducible
 operating point rather than failing loudly.
 
+Single-top comparison and `--extract-only` JSON reports include
+`extraction.substrate_dc_tie` when the extraction engine supplies tie metadata.
+Each `nets[]` entry identifies the substrate `net` and resistor `device`.
+The block's `reference_node` is SPICE ground (`"0"`), and `resistance_ohm`
+is the value written in each resistor card. The default 1e12 Ω shunt provides
+a DC path while allowing substrate motion during a transient. A zero-ohm
+request reports `mode: "hard"` with the 0.001 Ω floor. An explicit positive
+0.001 Ω request reports `mode: "shunt"`. An empty `nets` list records zero
+written ties. An absent block means the engine supplied no tie metadata.
+
 `klt extract --parasitics` now emits one `R<net>_dctie <net> 0 1e+12` shunt
 per synthesized substrate net **inside the extracted `.SUBCKT` body** — see
 [`extract.md`](extract.md#substrate-dc-reference-issue-1263). Because the

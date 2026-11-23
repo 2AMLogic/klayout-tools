@@ -442,6 +442,7 @@ from .substrate_resistance import (
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+SPICE_GLOBAL_GROUND_NODE = _SPICE_GLOBAL_GROUND_NODE
 
 # `run_extract()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1848, adopting the #247 registry beyond its
@@ -451,9 +452,8 @@ if TYPE_CHECKING:
 # additive-vs-rename decision. `_METRIC_NAME_BY_FIELD` covers the three
 # fields always present; `_PARASITICS_METRIC_NAME_BY_FIELD` covers the eight
 # `--parasitics`-only fixed numeric fields (`parasitics_report`'s own keys,
-# not `run_extract()`'s top-level ones). `device_counts` (the per-device-class
-# dict) is deliberately excluded from both -- see `run_extract`'s docstring
-# "metrics" paragraph for why.
+# not `run_extract()`'s top-level ones). The "metrics" paragraph in
+# `run_extract` explains why both exclude the per-class `device_counts`.
 
 assert all(is_registered(name) for name in _METRIC_NAME_BY_FIELD.values())
 assert all(is_registered(name) for name in _PARASITICS_METRIC_NAME_BY_FIELD.values())
