@@ -96,6 +96,7 @@ from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_ac_waveform,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -106,6 +107,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_form_signals,
+    sim_homotopy,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -164,6 +166,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
 from .coverage import (
@@ -307,6 +310,7 @@ from .sim_plot import render_waveform_svg
 #: without importing this runner; re-exported self-aliased for existing callers.
 from .sim_raw import _parse_and_persist_waveform as _parse_and_persist_waveform
 from .sim_raw import parse_ascii_rawfile as parse_ascii_rawfile
+from .sim_raw import persist_waveform_with_header
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -519,18 +523,15 @@ WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 #: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
 IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
 
-#: The codes above: emitted by the **grading** step rather than by a log
-#: classifier or an unrun-corner path, and therefore deliberately **not**
-#: members of :data:`DIAGNOSTIC_CODES`. All are produced downstream of
-#: ``options.fail_on_diagnostic``'s code match on an already-inconclusive
-#: corner, so listing either there could not change any verdict; accepting
-#: them would only invite the misreading that it could. ``test_sim.py``'s
-#: drift guard derives this distinction rather than restating it.
+#: Grading markers and post-grading information are emitted downstream of
+#: ``options.fail_on_diagnostic`` matching. Keep these codes outside the
+#: selectable vocabulary. The drift guard derives them from emission sites.
 _GRADING_MARKER_CODES: frozenset[str] = frozenset(
     {
         INCONCLUSIVE_DIAGNOSTIC_CODE,
         IMPLAUSIBLE_DIAGNOSTIC_CODE,
         MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+        sim_homotopy.DC_HOMOTOPY_RECOVERY_CODE,
     }
 )
 
@@ -7093,7 +7094,7 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     top level, since a loaded section is."""
     decl = _NetlistDeclarations(set(), set(), {}, [])
     depth = 0
-    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+    for line in circuit_lines(_logical_netlist_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
         if word == ".subckt":
             depth += 1
@@ -7102,21 +7103,6 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
         elif not depth:
             _record_declaration(decl, line)
     return decl
-
-
-def _top_level_cards(lines: list[str]) -> list[str]:
-    """``lines`` without ``.control`` ... ``.endc`` blocks."""
-    kept: list[str] = []
-    in_control = False
-    for line in lines:
-        word = line.split(None, 1)[0].lower()
-        if word == ".control":
-            in_control = True
-        elif word == ".endc":
-            in_control = False
-        elif not in_control:
-            kept.append(line)
-    return kept
 
 
 def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
@@ -7769,10 +7755,8 @@ def _persist_waveform_artifact(
 ) -> str | None:
     """Convert ``raw_path`` to its ``waveform.raw.json`` artifact and return
     that path, or ``None`` when ``raw_size`` is over ``waveform_max_bytes``
-    (issue #3211): converting parses the whole ASCII rawfile into memory, so
-    past the cap a ``waveform_too_large`` warning is appended instead. For a
-    ``noise`` analysis the converted waveform also sets
-    ``noise_fields["noise_representation"]`` (issue #3006).
+    (issue #3211). Past the cap, append a ``waveform_too_large`` warning.
+    Otherwise stream the points and use the header to classify noise units.
     """
     if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
         # Keep the raw file and every measurement; only the JSON conversion
@@ -7794,10 +7778,9 @@ def _persist_waveform_artifact(
             }
         )
         return None
-    waveform_path = _parse_and_persist_waveform(raw_path, waveform_decimate)
+    waveform_path, header = persist_waveform_with_header(raw_path, waveform_decimate)
     if analysis.get("kind") == "noise":
-        with open(waveform_path, encoding="utf-8") as fh:
-            noise_fields["noise_representation"] = noise_representation(json.load(fh))
+        noise_fields["noise_representation"] = noise_representation(header)
     return waveform_path
 
 
@@ -8223,18 +8206,8 @@ def _run_corner(
     if aborted_diagnostic is not None:
         diagnostics.append(aborted_diagnostic)
 
-    # A recovered `singular_matrix`/`nonconvergence` classification (the
-    # engine's own stepping-recovery narration -- routine noise on the way
-    # to a *successful* analysis, not evidence the run failed) does not
-    # count as fatal on its own: downgrade its severity in place before
-    # computing the corner's aggregate status. See
-    # `_recovered_from_stepping` and issue #205;
-    # `timeout`/`netlist`/`measurement`/`no_such_vector`/`unknown` are never
-    # downgraded.
-    # Xyce (issue #2016) gets the same rule against its own abort trailer:
-    # its Amesos "numerically singular matrix, returning zero" warnings can
-    # narrate intermediate solver trouble on a run that ultimately produced
-    # every requested measurement.
+    # Both engines may narrate failed stepping attempts on the path to a
+    # successful solve. Only these two codes are eligible for recovery.
     # Issue #2492: sampled *before* the downgrade immediately below, on the
     # diagnostic's `code` rather than its severity. A caller who listed
     # `singular_matrix` is saying they distrust exactly the case the
@@ -8246,7 +8219,7 @@ def _run_corner(
     )
 
     waveform_complete = _capture_only_waveform_complete(
-        measurements_spec, raw_path, diagnostics, analysis
+        measurements_spec, raw_path, diagnostics, analysis, engine, log_text
     )
 
     if _recovered_from_stepping(
@@ -8256,9 +8229,12 @@ def _run_corner(
         aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
-        _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
+        _downgrade_stepping_diagnostics(
+            diagnostics, bool(measurements_spec), analysis["kind"]
+        )
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
+    diagnostics.extend(sim_homotopy.recovery_diagnostics(engine, log_text))
 
     artifacts: dict[str, str | int | None] = {
         "log": None,
@@ -8512,11 +8488,6 @@ _ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
-#: ngspice's data-row count line, e.g. ``No. of Data Rows : 1`` (verified on
-#: ngspice-46). An ``ac lin 2 ...`` sweep leaves one row, so ``.meas ac ...
-#: AT=`` cannot interpolate and fails without an ``Error: measure`` line
-#: (issue #4084).
-_DATA_ROWS_RE = re.compile(r"No\. of Data Rows\s*:\s*(\d+)", re.IGNORECASE)
 _AC_TOO_FEW_POINTS_HINT = (
     " -- the ac sweep produced fewer than 2 data points, so AT=/interpolation "
     "has nothing to interpolate between: use a denser sweep (e.g. `dec`)"
@@ -8525,7 +8496,7 @@ _AC_TOO_FEW_POINTS_HINT = (
 
 def _ac_sweep_too_few_points(log_text: str) -> bool:
     """Whether the log's (last) ``No. of Data Rows`` is below 2."""
-    rows = _DATA_ROWS_RE.findall(log_text or "")
+    rows = sim_ac_waveform.DATA_ROWS_RE.findall(log_text or "")
     return bool(rows) and int(rows[-1]) < 2
 
 
@@ -8640,66 +8611,16 @@ def _crossings_measurement_result(
     return result, grading_diagnostics
 
 
-def _cycle_mean_measurement_result(
+def _vector_measurement_result(
     spec: dict[str, Any],
-    outcome: sim_cycle_mean.CycleMeanOutcome | None,
+    outcome: Any,
     *,
     save_mode: str,
+    key: str,
+    default_reason: str | None = None,
+    report_with_spec: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``cycle_mean`` measurement's response entry (issue #2947).
-
-    ``value`` is the time-weighted mean, graded through
-    :func:`_grade_measurement_value` like any scalar; the window rides the
-    additive ``cycle_mean`` sibling. A failure is ``status: "error"``,
-    ``value: null`` and a ``code: "measurement"`` diagnostic whose message
-    starts with a stable ``[<reason>]`` token (one of
-    :data:`klayout_tools.sim_cycle_mean.ERROR_CODES`), so the existing
-    ``diagnostics[].code`` vocabulary is unchanged."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.mean is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no cycle_mean value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "cycle_mean_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "cycle_mean_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.mean)
-    result = {
-        "name": name,
-        "value": outcome.mean,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "cycle_mean": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
-def _vector_measurement_result(
-    spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Response entry for an eye, step-resolution, or settled measurement; the
+    """Response entry for a vector measurement with a coded diagnostic; the
     detail rides the additive ``key`` sibling. A failure is ``status:
     "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
@@ -8711,7 +8632,9 @@ def _vector_measurement_result(
             else f"measurement '{name}' produced no {key} value"
         )
         missing = f"{key}_vector_missing"
-        reason = outcome.code if outcome is not None and outcome.code else missing
+        reason = (
+            (outcome.code if outcome is not None else None) or default_reason or missing
+        )
         if save_mode == "netlist" and reason == missing:
             message += SAVE_MODE_NETLIST_NO_VALUE_HINT
         result = {"name": name, "value": None, "unit": unit}
@@ -8727,74 +8650,28 @@ def _vector_measurement_result(
         spec, outcome.value
     )
     result = {"name": name, "value": outcome.value, "unit": unit}
-    result.update(status=m_status, margin=margin, **{key: outcome.report()})
+    detail = outcome.report(spec) if report_with_spec else outcome.report()
+    result.update(status=m_status, margin=margin, **{key: detail})
     return result, grading_diagnostics
 
 
-#: Per-kind builders; ``settled`` value 1.0/0.0 = (not) settled.
+#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
 _eye_measurement_result = functools.partial(_vector_measurement_result, key="eye")
+_cycle_mean_measurement_result = functools.partial(
+    _vector_measurement_result, key="cycle_mean"
+)
+_tian_measurement_result = functools.partial(
+    _vector_measurement_result,
+    key="tian",
+    default_reason="tian_pass_missing",
+    report_with_spec=True,
+)
 _step_resolution_measurement_result = functools.partial(
     _vector_measurement_result, key="step_resolution"
 )
 _settled_measurement_result = functools.partial(
     _vector_measurement_result, key="settled"
 )
-
-
-def _tian_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_tian.TianOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``tian`` measurement's response entry (issue #3160).
-
-    ``value`` is the metric, graded through :func:`_grade_measurement_value`
-    like any scalar; the request echo rides the additive ``tian`` sibling. A
-    failure is ``status: "error"``, ``value: null`` (so it can never pass a
-    limit) with a ``code: "measurement"`` diagnostic whose message starts with
-    a ``[<reason>]`` token from :data:`klayout_tools.sim_tian.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no tian value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "tian_pass_missing"
-        )
-        if save_mode == "netlist" and reason == "tian_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "tian": outcome.report(spec),
-    }
-    return result, grading_diagnostics
 
 
 def _energy_measurement_result(
@@ -9520,6 +9397,8 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        if analysis["kind"] == "ac" and not measurements_spec:
+            lines.append("display frequency")  # Record the original AC point count.
     if analysis.get("linearize") is True:
         # Issue #4014: resample onto a uniform grid, after any rawfile
         # `write` (which keeps the solver's own points) and before the
@@ -10607,11 +10486,8 @@ def _recovered_from_stepping(
     means the analysis never produced a trustworthy result and the
     classification stays fatal.
 
-    A corner with no ``measurements[]`` (a waveform-capture-only request,
-    issue #3246) has no measurement to check; its independent signal is
-    ``waveform_complete`` -- the captured ``tran`` waveform reached the
-    analysis stop time (:func:`_waveform_reached_tran_window`). Without it
-    such a corner is never considered recovered.
+    For a capture-only request, the original waveform can establish that the
+    transient reached its stop time or ngspice completed the AC sweep.
     """
     if not measurements_spec:
         return waveform_complete and not aborted_re.search(log_text)
@@ -10663,14 +10539,10 @@ def _capture_only_waveform_complete(
     raw_path: str | None,
     diagnostics: list[dict[str, Any]],
     analysis: dict[str, Any],
+    engine: str,
+    log_text: str,
 ) -> bool:
-    """Issue #3246: for a waveform-capture-only ``tran`` request (no
-    ``measurements[]``) the captured waveform is the independent completion
-    signal. Parse the rawfile -- only when a ``singular_matrix`` /
-    ``nonconvergence`` diagnostic makes it matter -- and report whether it
-    reached the transient stop time. A truncated/unparseable rawfile stays
-    fatal (``False``).
-    """
+    """Check the original waveform only when it could explain stepping recovery."""
     if (
         measurements_spec
         or raw_path is None
@@ -10680,6 +10552,8 @@ def _capture_only_waveform_complete(
         or not os.path.isfile(raw_path)
     ):
         return False
+    if analysis["kind"] == "ac" and engine == "ngspice":
+        return sim_ac_waveform.complete(raw_path, analysis.get("args", ""), log_text)
     try:
         waveform = parse_ascii_rawfile(raw_path)
     except (SimError, ValueError):
@@ -10688,7 +10562,7 @@ def _capture_only_waveform_complete(
 
 
 def _downgrade_stepping_diagnostics(
-    diagnostics: list[dict[str, Any]], has_measurements: bool
+    diagnostics: list[dict[str, Any]], has_measurements: bool, analysis_kind: str
 ) -> None:
     """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
     to warnings; a capture-only corner also gets the reason appended."""
@@ -10696,9 +10570,13 @@ def _downgrade_stepping_diagnostics(
         if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
             diagnostic["severity"] = "warning"
             if not has_measurements:
+                reached = (
+                    "completed the AC sweep"
+                    if analysis_kind == "ac"
+                    else "reached the transient stop time"
+                )
                 diagnostic["message"] += (
-                    " (treated as recovered: the captured waveform "
-                    "reached the transient stop time)"
+                    f" (treated as recovered: the captured waveform {reached})"
                 )
 
 

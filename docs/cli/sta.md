@@ -2118,6 +2118,20 @@ stays the primary diagnosis, and a genuine OpenROAD/Tcl analysis failure gets
 no such clause. Seeing it in a CI log means the request was never analyzed, so
 starting the runtime and retrying the *same* request is the right response
 rather than changing the design.
+
+A related mount gap gets its own appended clause (issue #5753, shared with
+place-and-route): when OpenROAD reports it cannot open or read an absolute
+path that this process can itself still read — e.g. a request directory
+outside the invocation directory, which the documented wrapper does not
+bind-mount — `error.message` appends a
+` -- 'openroad' could not read '<path>', but this process can read it ...`
+clause naming the path and the wrapper mounts, including the klt cache
+root and `/tmp` when it differs from `$TMPDIR`. For inputs elsewhere, run
+from a common ancestor of the request and its inputs. For a cached Liberty
+file, regenerate the wrapper or set `KLT_CACHE_DIR` under a mounted
+directory. See place-and-route’s “Installing OpenROAD” section. This is
+likewise a wording addition only: a genuinely missing or unreadable file
+gets no such clause, and no response field or `schema_version` changes.
 Both captured streams remain separate and unabridged; the raw transcripts
 may contain engine-emitted absolute paths. Log retention does not make a
 partial output into successful timing evidence or isolate other STA artifacts.
