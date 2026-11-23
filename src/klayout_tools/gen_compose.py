@@ -223,6 +223,10 @@ from .gen_compose_base import (
     _apply_orientation_um as _apply_orientation_um,
 )
 from .gen_compose_base import (
+    _nearest_grid_point_within,
+    _port_probe_position_um,
+)
+from .gen_compose_base import (
     _orient_port as _orient_port,
 )
 from .gen_compose_base import (
@@ -2796,34 +2800,6 @@ def _snap_port_to_grid(
     return new_port
 
 
-def _nearest_grid_point_within(
-    composed: float, grid: float, limit: float | None
-) -> float | None:
-    """The grid point nearest ``composed`` that lies within ``limit`` of it
-    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
-    steps = composed / grid
-    base = math.floor(steps + 0.5 + 1e-9)
-    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
-    for cand in candidates:
-        value = cand * grid
-        if limit is None or abs(value - composed) <= limit + 1e-9:
-            return value
-    return None
-
-
-def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
-    """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
-    numeric position (the same "nothing to check" case the rest of the
-    landing-connectivity path tolerates rather than fails). ``bool`` is
-    rejected explicitly because it is a subclass of ``int``."""
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_finite_number(x_um):
-        return None
-    if not is_finite_number(y_um):
-        return None
-    return float(x_um), float(y_um)
-
-
 def _pin_landed_on_block(
     pin: dict[str, Any],
     blocks: dict[str, dict[str, Any]],
@@ -3008,6 +2984,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     routing = request.get("routing") or {}
     if not isinstance(routing, dict):
         raise GenComposeError("request.routing must be a JSON object")
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
@@ -3105,7 +3082,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     )
 
     # --- Routing (phase 2) --------------------------------------------------
-    # An absent or empty routing block declares connectivity without drawing it.
+    # A connectivity[] net is routed only when routing.layer_role/width_um are
+    # given. #1188: routing being entirely absent/{} is *not* an error -- it
+    # is a declare-only request (every net still validated against blocks'
+    # ports, none of it drawn; see declare_only below). Supplying routing
+    # with only *some* keys set is still an application error (there is no
+    # unambiguous "partial" routing spec) -- unchanged from before #1188.
     declare_only = connectivity and not routing
     route_layer: tuple[int, int] | None = None
     label_layer: tuple[int, int] | None = None
@@ -3147,7 +3129,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         width_um = float(raw_width)
         route_layer = _resolve_route_layer(pdk_info["variant"], layer_role)
-        # Use the same minimum-width rule that DRC applies to the backbone.
+        # #1501: routing.width_um must clear the resolved PDK deck's own
+        # minimum-width rule for route_layer -- the same deck `klt drc`
+        # judges the drawn backbone with. Without this, a request that omits
+        # `routing.width_um` (or names one below the deck's own floor, e.g.
+        # gf180mcu's metal1.width.1 = 0.23um vs. the documented 0.17um
+        # default) draws a guaranteed-illegal backbone with no error or
+        # warning at generation time, and the resulting `klt drc` violation
+        # count is silently mis-attributed to placement/routing rather than
+        # this units mismatch.
         route_width_floor = _min_width_um_for_layer(pdk_info["variant"], route_layer)
         if route_width_floor is not None and width_um < route_width_floor[0] - 1e-9:
             floor_um, rule_id = route_width_floor
