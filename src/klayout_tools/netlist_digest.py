@@ -59,7 +59,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .extract import spice_safe_net_name
+from .extract_base import spice_safe_net_name
 
 if TYPE_CHECKING:
     import klayout.db as kdb
