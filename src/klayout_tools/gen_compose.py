@@ -1200,6 +1200,7 @@ def _merge_label_ports(
     block_id: str,
     parsed_cell: dict[str, Any],
     pdk_variant: str | None,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
     its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
@@ -1219,7 +1220,12 @@ def _merge_label_ports(
             "declared in both ports[] and ports_from_labels -- ambiguous"
         )
     derived, reports, warnings = derive_label_ports(
-        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+        block_id,
+        parsed_cell["gds_path"],
+        parsed_cell["cell_name"],
+        spec,
+        pdk_variant,
+        pad_override_um,
     )
     return declared + derived, reports, warnings
 
@@ -1228,6 +1234,7 @@ def _parse_blocks(
     raw_blocks: Any,
     request_dir: str | None = None,
     pdk_variant: str | None = None,
+    pad_override_um: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1279,7 +1286,7 @@ def _parse_blocks(
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports, derived_reports, derived_warnings = _merge_label_ports(
-                block_id, parsed_cell, pdk_variant
+                block_id, parsed_cell, pdk_variant, pad_override_um
             )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
@@ -2998,18 +3005,25 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
+    routing = request.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise GenComposeError("request.routing must be a JSON object")
+    landing_pad_override_um = None
+    if request.get("connectivity") and routing:
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
     blocks = _parse_blocks(
-        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+        request.get("blocks"),
+        request_dir or os.getcwd(),
+        pdk_info["variant"],
+        landing_pad_override_um,
     )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
     promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
-
-    routing = request.get("routing") or {}
-    if not isinstance(routing, dict):
-        raise GenComposeError("request.routing must be a JSON object")
 
     options = request.get("options") or {}
     if not isinstance(options, dict):
@@ -3091,12 +3105,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     )
 
     # --- Routing (phase 2) --------------------------------------------------
-    # A connectivity[] net is routed only when routing.layer_role/width_um are
-    # given. #1188: routing being entirely absent/{} is *not* an error -- it
-    # is a declare-only request (every net still validated against blocks'
-    # ports, none of it drawn; see declare_only below). Supplying routing
-    # with only *some* keys set is still an application error (there is no
-    # unambiguous "partial" routing spec) -- unchanged from before #1188.
+    # An absent or empty routing block declares connectivity without drawing it.
     declare_only = connectivity and not routing
     route_layer: tuple[int, int] | None = None
     label_layer: tuple[int, int] | None = None
@@ -3116,8 +3125,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
-    landing_pad_override_um = None
     # routing.minimal_ladder (issue #6058): False keeps every pad at today's
     # sizing; True sizes a ladder's intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
@@ -3140,15 +3147,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         width_um = float(raw_width)
         route_layer = _resolve_route_layer(pdk_info["variant"], layer_role)
-        # #1501: routing.width_um must clear the resolved PDK deck's own
-        # minimum-width rule for route_layer -- the same deck `klt drc`
-        # judges the drawn backbone with. Without this, a request that omits
-        # `routing.width_um` (or names one below the deck's own floor, e.g.
-        # gf180mcu's metal1.width.1 = 0.23um vs. the documented 0.17um
-        # default) draws a guaranteed-illegal backbone with no error or
-        # warning at generation time, and the resulting `klt drc` violation
-        # count is silently mis-attributed to placement/routing rather than
-        # this units mismatch.
+        # Use the same minimum-width rule that DRC applies to the backbone.
         route_width_floor = _min_width_um_for_layer(pdk_info["variant"], route_layer)
         if route_width_floor is not None and width_um < route_width_floor[0] - 1e-9:
             floor_um, rule_id = route_width_floor
@@ -3171,9 +3170,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        landing_pad_override_um = _parse_landing_pad_override(
-            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
-        )
         raw_minimal_ladder = routing.get("minimal_ladder")
         if raw_minimal_ladder is not None:
             if not isinstance(raw_minimal_ladder, bool):

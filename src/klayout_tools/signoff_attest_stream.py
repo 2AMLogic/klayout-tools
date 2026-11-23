@@ -14,13 +14,6 @@ from typing import Any
 from ._provenance import sha256_file
 from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
-from .signoff import (
-    _HASH_KIND_BYTES,
-    _HASH_KIND_GEOMETRY,
-    _REGENERATED_HASH_RE,
-    SCHEMA_VERSION,
-    input_set_digest,
-)
 from .signoff_attest import (
     _ITEM_TITLES,
     HASH_ALGORITHM,
@@ -44,6 +37,13 @@ from .signoff_attest_item2_inputs import (
     input_checks,
     validated_checks,
     validated_inputs,
+)
+from .signoff_base import (
+    _HASH_KIND_BYTES,
+    _HASH_KIND_GEOMETRY,
+    _REGENERATED_HASH_RE,
+    SCHEMA_VERSION,
+    input_set_digest,
 )
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
