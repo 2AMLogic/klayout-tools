@@ -6427,7 +6427,7 @@ sim` reduces it in Python once every corner has reported:
 {"name": "code_range_rel",
  "derive": {"from": "vout", "axis": "params.code", "reduce": "range_rel",
             "reference": {"params.code": 128}, "group_by": ["process", "supply_v"]},
- "unit": "ratio", "limits": {"min": 0.30}, "spec_row": "trim-range"}}
+ "unit": "ratio", "limits": {"min": 0.30}, "spec_row": "trim-range"}
 ```
 
 - **Form.** `derive` is an object with **all four** of `from`, `axis`,

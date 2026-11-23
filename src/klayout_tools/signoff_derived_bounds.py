@@ -33,10 +33,12 @@ def limit_work_names(ids: Iterable[Any]) -> set[str]:
             parts = json.loads(raw.partition(":")[2])
         except ValueError:
             continue
-        index = 2 if raw.startswith("limit:") else 1
+        # ``limit:`` carries four parts with the name third; ``derived_limit:``
+        # carries three with the name first (the shapes ``work_id`` emits).
+        index, width = (2, 4) if raw.startswith("limit:") else (0, 3)
         if (
             isinstance(parts, list)
-            and len(parts) == 4
+            and len(parts) == width
             and isinstance(parts[index], str)
         ):
             names.add(parts[index])
