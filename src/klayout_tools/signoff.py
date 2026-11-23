@@ -1312,11 +1312,12 @@ def _na_spec_refusal(
     shape = _na_spec_shape_refusal(spec_rows)
     if shape is not None:
         return shape
+    rows = cast("list[dict[str, Any]]", spec_rows)
     if scope is not None:
-        problem = partition_coverage_problem(spec_rows, scope)
+        problem = partition_coverage_problem(rows, scope)
         if problem is not None:
             return _na_refusal(_REASON_INVALID_EVIDENCE, problem)
-    for row in cast("list[dict[str, Any]]", spec_rows):
+    for row in rows:
         if scope is not None and row["id"] not in scope[0]:
             continue
         hit = _na_scan_statistical(row, "", row["id"] not in reviewed)
