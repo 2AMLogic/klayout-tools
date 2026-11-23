@@ -3,8 +3,10 @@
 A stamp is the sha256 of a variant install's ``SOURCES`` text
 (``sources-sha256``), falling back to the bundle's ``.pdk-store.json``
 ``version`` (``store-version-sha256``, issue #5318) for a bundle install,
-which carries no ``SOURCES``; that file sits one level above the real
-(symlink-resolved) variant dir. Read only, never written.
+which carries no ``SOURCES``; that file is accepted either at the variant
+root (where the fleet's provisioner writes it, issue #5624) or one level
+above the real (symlink-resolved) variant dir (#5318's documented
+placement) -- the nearest one wins. Read only, never written.
 
 :func:`client_pdk_stamp` is the entry point `klt sim`'s ``batch`` backend
 uses: it stamps the install under a pinned root when the request or
@@ -17,30 +19,73 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
 #: Upper bound on bytes read from ``.pdk-store.json``.
 _STORE_FILE_MAX = 65536
 
+#: The bundle stamp file ``read_store_version``/``read_store_sha256`` read.
+PDK_STORE_MARKER = ".pdk-store.json"
+
+
+def _store_field(variant_dir: str, field: str) -> str | None:
+    """The string ``field`` of the nearest ``.pdk-store.json``.
+
+    Searched at ``<variant_dir>/.pdk-store.json`` (the variant root, where
+    the fleet's provisioner writes it, issue #5624) and then one level above
+    the real (symlink-resolved) variant dir (#5318's documented placement).
+    The nearest stamp wins: one that is present but unreadable, malformed,
+    or records no usable ``field`` is **not** skipped in favour of a farther
+    one (mirroring :func:`klayout_tools.pdk_compat.read_fetched_marker`).
+    """
+    candidates = [
+        os.path.join(variant_dir, PDK_STORE_MARKER),
+        os.path.join(os.path.dirname(os.path.realpath(variant_dir)), PDK_STORE_MARKER),
+    ]
+    for path in dict.fromkeys(candidates):
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return _read_store_field(path, field)
+    return None
+
+
+def _read_store_field(path: str, field: str) -> str | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_STORE_FILE_MAX + 1)
+        if len(raw) > _STORE_FILE_MAX:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get(field) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
 
 def read_store_version(variant_dir: str) -> str | None:
-    """The string ``version`` of ``.pdk-store.json``.
+    """The string ``version`` of the nearest ``.pdk-store.json``.
 
     Missing/unreadable/non-object/non-string/empty → ``None`` (never guessed).
     """
-    path = os.path.join(
-        os.path.dirname(os.path.realpath(variant_dir)), ".pdk-store.json"
-    )
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read(_STORE_FILE_MAX + 1)[:_STORE_FILE_MAX]
-        data = json.loads(raw.decode("utf-8", "replace"))
-    except (OSError, ValueError):
-        return None
-    version = data.get("version") if isinstance(data, dict) else None
-    if isinstance(version, str) and version.strip():
-        return version.strip()
-    return None
+    value = _store_field(variant_dir, "version")
+    return (value or "").strip() or None
+
+
+def read_store_sha256(variant_dir: str) -> str | None:
+    """Return the nearest stamp's 64-digit ASCII hex digest, preserving case.
+
+    A missing or malformed digest is unknown. The unpacked tree cannot be
+    hashed back to the original tar bytes.
+    """
+    value = _store_field(variant_dir, "sha256")
+    return value if re.fullmatch(r"[0-9a-fA-F]{64}", value or "") else None
 
 
 def read_store_stamp(variant_dir: str) -> str | None:
@@ -100,20 +145,13 @@ def resolved_variant_dir(variant: str) -> str | None:
     its models from rather than being reported as unavailable. The import is
     deferred because :mod:`klayout_tools.pdk` imports this module.
     """
-    from .pdk import PdkNotFoundError, find_pdk
+    from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 
     try:
         info = find_pdk(variant=variant)
     except (PdkNotFoundError, OSError, ValueError):
         return None
-    root = info.get("root")
-    name = info.get("variant")
-    if not (isinstance(root, str) and root and isinstance(name, str) and name):
-        return None
-    # A flat, single-PDK install (issue #522) *is* its own variant directory;
-    # a nested open_pdks store holds it as `<root>/<name>`.
-    nested = os.path.join(root, name)
-    return nested if os.path.isdir(nested) else root
+    return variant_dir_of(info)
 
 
 def client_pdk_stamp(variant: Any, root: Any = None) -> dict[str, Any] | None:

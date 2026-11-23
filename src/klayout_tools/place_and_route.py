@@ -79,6 +79,11 @@ from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
 from .place_and_route_fences import checked_fence_reports, fence_failure_context
 
+# Deck-known configuration warnings (issue #7311) for the two gf180mcu
+# `request.power` shapes the bundled deck is known to reject: pure, static
+# (no DRC run) strings kept out of this file for its size ceiling.
+from .place_and_route_deck_warnings import deck_warnings
+
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
 # the one name that subsystem calls back into this module for -- called once
@@ -99,6 +104,8 @@ from .place_and_route_gds_merge import (
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 from .place_and_route_hints import grt_hint, null_unconstrained_fmax
+from .place_and_route_layer_map import explain_spef_layer_map
+from .place_and_route_layer_map import layer_map_warnings as _layer_map_warnings
 from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
@@ -135,13 +142,6 @@ from .place_and_route_power_audit import (
 from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
-
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
 from .place_and_route_power_pins import _POWER_PIN_PATTERNS as _POWER_PIN_PATTERNS
 from .place_and_route_power_pins import rail_label_evidence
 from .place_and_route_reports import (
@@ -350,6 +350,7 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
+from .place_and_route_threads import observed_threads, resolve_threads, validate_threads
 from .place_and_route_unconstrained import unconstrained_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -1054,6 +1055,7 @@ _ALLOWED_REQUEST_KEYS = (
     "power",
     "constraints",
     "seed",
+    "threads",
     "target_stage",
     "route_critical_nets_percentage",
     "placement_density",
@@ -1072,17 +1074,10 @@ _ALLOWED_REQUEST_KEYS = (
 )
 
 
-def load_request(request_path: str) -> dict[str, Any]:
-    """Read and minimally validate a ``klt place-and-route`` request JSON
-    file.
-
-    Raises :class:`PlaceAndRouteError` if the file is missing/unreadable,
-    not valid JSON, or missing a required top-level field (``netlist``,
-    ``hdl_toplevel``, ``pdk``, ``floorplan``, ``seed``), or carries an
-    unrecognised top-level key (issue #4230; ``_comment`` is exempt). Does
-    not require a ``schema`` field, matching every other request-taking
-    verb's ``load_request``.
-    """
+def load_request(
+    request_path: str, *, threads: int | str | None = None
+) -> dict[str, Any]:
+    """Validate the request envelope and apply an optional CLI thread override."""
     request = _load_request_json(request_path, PlaceAndRouteError)
     request = validate_request_shape(
         request,
@@ -1095,6 +1090,7 @@ def load_request(request_path: str) -> dict[str, Any]:
     _reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
+    validate_threads(request, threads)
     _validate_outputs(request, request_path)
     return request
 
@@ -1184,19 +1180,6 @@ def _antenna_repair_warnings(
     ]
 
 
-def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
-    """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
-    if layer_map_info is None or layer_map_info.get("resolution") != "none":
-        return []
-    return [
-        "no KLayout LEF/DEF layer map was resolved: routing layers and vias "
-        "were written with KLayout's sequential default layer numbers and may "
-        "overlap the PDK's device layers, so DRC results on the GDS are "
-        "unreliable; supply one at <assets.klayout>/tech/<variant>.map (or "
-        "family-level <family>.map) for the PDK's klt-pdk.json"
-    ]
-
-
 def _response_warnings(
     placed: dict[str, Any],
     *,
@@ -1270,6 +1253,7 @@ def run_place_and_route(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     backend: str | None = None,
+    threads: int | str | None = None,
     reuse_outputs_dir: bool = False,
     resume: bool = False,
     _ownership: contextlib.ExitStack | None = None,
@@ -1326,7 +1310,7 @@ def run_place_and_route(
     matches the stage's input hash and whose artifacts are on disk, and adds
     ``resume: {"resumed_stages": [...]}`` to the response.
     """
-    request = load_request(request_path)
+    request = load_request(request_path, threads=threads)
     # `resume` (issue #4411) reuses the stage artifacts of an interrupted run
     # in the same directory, so it lifts the populated-`outputs.dir` refusal.
     _own_stage_root(
@@ -1612,6 +1596,7 @@ def _run_single_corner(
     """
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
+    threads = resolve_threads(request.get("threads", 1))
     engine = request.get("engine", "openroad")
     if engine not in SUPPORTED_ENGINES:
         raise PlaceAndRouteError(
@@ -1673,7 +1658,8 @@ def _run_single_corner(
     # no-op.
     check_io_pin_constraints(io_spec, netlist_path, hdl_toplevel)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    instance_groups = _validate_instance_groups(request.get("instance_groups"))
+    target_stage = _validate_target_stage(request.get("target_stage", "route"))
+    groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
         clock_port,
@@ -1689,7 +1675,6 @@ def _run_single_corner(
         request.get("constraints") or {}, PlaceAndRouteError
     )
     seed = _validate_seed(request["seed"])
-    target_stage = _validate_target_stage(request.get("target_stage", "route"))
     route_critical_nets_percentage = _validate_route_critical_nets_percentage(
         request.get("route_critical_nets_percentage")
     )
@@ -1786,6 +1771,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
+            instance_groups=groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -1796,7 +1782,6 @@ def _run_single_corner(
             floorplan=floorplan,
             io_spec=io_spec,
             macros=macros,
-            instance_groups=instance_groups,
             power=power,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
@@ -1845,6 +1830,7 @@ def _run_single_corner(
         can_resume = record is not None
         if record is not None:
             stages.append(record["stage_entry"])
+            stages[-1].setdefault("threads", 1)
             engine_logs.extend(record["engine_logs"])
             placement_routability = record["placement_routability"]
             resumed_stages.append(stage)
@@ -1858,6 +1844,7 @@ def _run_single_corner(
             script_path,
             metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
         )
         with completed.diagnostics(PlaceAndRouteError):
@@ -1870,7 +1857,7 @@ def _run_single_corner(
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
                     )
-                    + fence_failure_context(stage, instance_groups),
+                    + fence_failure_context(stage, groups),
                     details=_route_overflow.route_failure_congestion(
                         stage,
                         completed,
@@ -1880,6 +1867,7 @@ def _run_single_corner(
                     ),
                 )
 
+            actual_threads = observed_threads(completed.stdout, threads)
             metrics = _read_metrics(metrics_path, stage)
         setup_count, hold_count = (None, None)
         if stage != "floorplan":
@@ -1944,6 +1932,7 @@ def _run_single_corner(
                 max_transition_violation_count_vs_library,
                 max_capacitance_violation_count_vs_library,
             ) = _run_corner_sweep(
+                threads=threads,
                 engine_logs=engine_logs,
                 checkpoint_in=next_checkpoint,
                 corners=corners,
@@ -1982,6 +1971,7 @@ def _run_single_corner(
                 congestion=congestion,
             )
         )
+        stages[-1]["threads"] = actual_threads
         checkpoint_path = next_checkpoint
         previous_hash = stage_hash
         _resume.write_commit(
@@ -2052,26 +2042,28 @@ def _run_single_corner(
         # at the pipeline-step level instead). Off by default -- see
         # `_validate_post_route_spef`'s own docstring for why.
         if post_route_spef:
-            spef_sta = _post_route_spef_metrics(
-                engine_logs=engine_logs,
-                output_dir=output_dir,
-                hdl_toplevel=hdl_toplevel,
-                gds_path=gds_path,
-                def_path=def_path,
-                cell_library=cell_library,
-                liberty_path=liberty_path,
-                clock_port=clock_port,
-                clock_period_ns=clock_period_ns,
-                max_transition_ns=max_transition_ns,
-                max_capacitance_pf=max_capacitance_pf,
-                max_fanout=max_fanout,
-                input_delay_ns=input_delay_ns,
-                output_delay_ns=output_delay_ns,
-                checkpoint_in=checkpoint_path,
-                # Issue #1002: `write_sdf` inside that same session, right
-                # after its `read_spef` -- see `_validate_post_route_sdf`.
-                write_sdf=post_route_sdf,
-            )
+            with explain_spef_layer_map(layer_map_info):
+                spef_sta = _post_route_spef_metrics(
+                    threads=threads,
+                    engine_logs=engine_logs,
+                    output_dir=output_dir,
+                    hdl_toplevel=hdl_toplevel,
+                    gds_path=gds_path,
+                    def_path=def_path,
+                    cell_library=cell_library,
+                    liberty_path=liberty_path,
+                    clock_port=clock_port,
+                    clock_period_ns=clock_period_ns,
+                    max_transition_ns=max_transition_ns,
+                    max_capacitance_pf=max_capacitance_pf,
+                    max_fanout=max_fanout,
+                    input_delay_ns=input_delay_ns,
+                    output_delay_ns=output_delay_ns,
+                    checkpoint_in=checkpoint_path,
+                    # Issue #1002: `write_sdf` inside that same session, right
+                    # after its `read_spef` -- see `_validate_post_route_sdf`.
+                    write_sdf=post_route_sdf,
+                )
     else:
         def_path = None
 
@@ -2278,6 +2270,7 @@ def _run_single_corner(
     warnings.extend(_antenna_repair_warnings(target_stage, library))
     warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
+    warnings.extend(deck_warnings(cell_library, power, power_info))
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -2315,6 +2308,7 @@ def _run_single_corner(
         ),
         "status": "failed" if route_open else "ok",
         "stage_reached": target_stage,
+        "environment": {"threads": last_stage["threads"]},
         "seed": seed,
         # Additive field (issue #4914): what `estimated_power_mw` was
         # computed under, as in `klt sta`.
@@ -2376,8 +2370,8 @@ def _run_single_corner(
         ),
         "instance_groups": (
             checked_fence_reports(
-                read_def_instance_groups(audited_def_path, instance_groups),
-                instance_groups,
+                read_def_instance_groups(audited_def_path, groups),
+                groups,
                 PlaceAndRouteError,
             )
             if audited_def_path
@@ -2987,6 +2981,7 @@ _canonicalize_place_and_route_report_for_rerun_diff = (
 
 def _place_and_route_provenance_hashes(
     request_path: str,
+    request: dict[str, Any],
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
@@ -3003,7 +2998,6 @@ def _place_and_route_provenance_hashes(
     ``provenance.deck``. Raises :class:`PlaceAndRouteError` for a request
     that cannot be read, validated, or resolved -- never a traceback.
     """
-    request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
 
@@ -3026,29 +3020,18 @@ def check_place_and_route_report(
     report_path: str,
     request_path: str,
     *,
+    threads: int | str | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
 ) -> dict[str, Any]:
-    """``klt place-and-route <request> --check <report>`` (cheap mode, issue
-    #2224): verify a previously committed ``klt place-and-route --format
-    json`` report at ``report_path`` still reproduces from the request at
-    ``request_path``, without invoking OpenROAD at all.
+    """Compare committed netlist and Liberty digests to the current inputs.
 
-    Re-resolves the request's gate-level netlist and standard-cell liberty
-    and re-hashes both (:func:`_place_and_route_provenance_hashes`),
-    comparing each against the ``sha256:``-prefixed digest the committed
-    report already recorded in ``provenance.input.content_hash``/
-    ``provenance.deck.content_hash``. Returns the shared ``--check`` payload
-    (:func:`klayout_tools._report_verify.build_check_result`): ``status:
-    "match"`` when both agree, ``"drifted"`` naming which one moved
-    otherwise -- the same contract ``klt drc --check`` established (issue
-    #1106). A recorded hash that is itself ``None`` never counts as a match.
-
-    Raises :class:`PlaceAndRouteError` for a missing/unparseable committed
-    report or an unresolvable request -- never a traceback.
+    Each rebuilt corner has its own pair. This engine-free check excludes thread count.
+    See the ``--check`` / ``--rerun`` contract in ``docs/cli/place-and-route.md``.
     """
     committed = load_committed_report(report_path, PlaceAndRouteError)
-    rebuild_corners = _validate_rebuild_corners(load_request(request_path))
+    request = load_request(request_path, threads=threads)
+    rebuild_corners = _validate_rebuild_corners(request)
     if rebuild_corners is not None:
         # Issue #3507: a multi-corner request is verified per unit -- each
         # corner's recorded input/deck digests against a fresh re-hash.
@@ -3060,7 +3043,11 @@ def check_place_and_route_report(
         unit_checks = []
         for name in rebuild_corners:
             input_hash, deck_hash = _place_and_route_provenance_hashes(
-                request_path, pdk_variant=pdk_variant, pdk_root=pdk_root, corner=name
+                request_path,
+                request,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                corner=name,
             )
             recorded = by_corner.get(name, {})
             unit_checks.append(
@@ -3079,7 +3066,7 @@ def check_place_and_route_report(
             )
         return build_check_result(report_path=report_path, checks=unit_checks)
     input_hash, deck_hash = _place_and_route_provenance_hashes(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path, request, pdk_variant=pdk_variant, pdk_root=pdk_root
     )
     checks = [
         hash_check(
@@ -3103,6 +3090,7 @@ def rerun_place_and_route_report(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     backend: str | None = None,
+    threads: int | str | None = None,
 ) -> dict[str, Any]:
     """``klt place-and-route <request> --check <report> --rerun`` (full mode,
     issue #2224): verify a committed report by actually re-running the
@@ -3140,6 +3128,7 @@ def rerun_place_and_route_report(
     committed = load_committed_report(report_path, PlaceAndRouteError)
     fresh = run_place_and_route(
         request_path,
+        threads=threads,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
         backend=backend,

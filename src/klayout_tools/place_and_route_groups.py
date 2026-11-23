@@ -54,12 +54,17 @@ def _fixed_origin(
 
 
 def validate_fixed_members(
-    groups: list[dict[str, Any]], error: type[Exception]
+    groups: list[dict[str, Any]], error: type[Exception], stage: str = "route"
 ) -> None:
     owners: dict[str, str] = {}
     for group in groups:
         if "fixed_origin_um" not in group.get("order", {}):
             continue
+        if stage == "floorplan":
+            raise error(
+                f"instance group {group['name']!r}: order.fixed_origin_um requires "
+                "target_stage 'place', 'cts', or 'route'"
+            )
         for name in group["instances"]:
             if name in owners:
                 raise error(

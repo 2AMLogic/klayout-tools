@@ -20,17 +20,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .sim_osdi_pin import osdi_pdk_root_pin, resolve_osdi_preload
+from .sim_osdi_pin import resolve_osdi_preload, resolve_request_osdi
 
 
 def _settle_on_host(
-    options: dict[str, Any], request_dir: str, pdk_root: str | None
+    options: dict[str, Any],
+    request_dir: str,
+    pdk_root: str | None,
+    pdk_variant: str | None,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     """Settle for a run that executes here: every entry is expanded and
     existence-checked now (see :func:`sim_osdi_pin.resolve_osdi_preload`) and
     nothing is deferred to a runner, so no entry can reach a deck
     unresolved."""
-    return resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
+    return resolve_osdi_preload(
+        options, request_dir, pdk_root=pdk_root, pdk_variant=pdk_variant
+    ), []
 
 
 def finalize_osdi_preload(
@@ -40,6 +45,7 @@ def finalize_osdi_preload(
     osdi_preload: tuple[str, ...],
     osdi_runner_resolved: dict[int, str],
     pdk_root: str | None = None,
+    pdk_variant: str | None = None,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     """Settle ``osdi_preload`` once the backend is known (issue #3819).
 
@@ -58,7 +64,7 @@ def finalize_osdi_preload(
     ``options.osdi_preload[index]`` for itself.
     """
     if not offhost:
-        return _settle_on_host(options, request_dir, pdk_root)
+        return _settle_on_host(options, request_dir, pdk_root, pdk_variant)
     return osdi_preload, [
         {
             "entry": options["osdi_preload"][index],
@@ -76,33 +82,13 @@ def resettle_osdi_preload_for_local(
     engine: str,
     engine_binary: str,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
-    """Re-settle the OSDI list after a *late* host-default yield landed the
-    run on this host (issue #5492).
+    """Resolve the whole list after an off-host default yields to local execution.
 
-    :func:`finalize_osdi_preload` answers once, early, against the backend as
-    it stands at that point. Two yields run after it -- the resume yield in
-    ``sim._prepare_sim_request`` and the single-unit yield in
-    ``sim._run_sim_corners`` (the unit count is only known after shard/resume
-    scoping) -- and either can step an env-sourced off-host default back to
-    ``local``. Without this, the deck that actually runs here carries no
-    ``pre_osdi`` line for the runner-resolved entries (issue #3819): the
-    report says ``backend.resolved: "local"`` while still listing them under
-    ``environment.osdi_preload_runner_resolved``, and the only symptom is an
-    ngspice ``Unknown model type`` error deep in a per-corner log.
-
-    The caller applies this exactly when the yield moved an off-host run
-    on-host **and** the request deferred at least one entry to the runner (a
-    non-empty ``osdi_runner_environment``, which is the off-host settling's
-    own record of that);
-    the on-host settling then applies in full, so a missing image-baked
-    ``.osdi`` raises the same ``SimError`` a ``--backend local`` run raises,
-    before any corner is dispatched. The OSDI-ABI pre-check (issue #4438) is
-    re-applied over the re-settled entries for the same reason: it was a
-    no-op while the backend still looked off-host.
+    Both staged files and runner-resolved references now execute on this host.
+    Check their existence, declared order, and compatibility with local ngspice
+    before dispatching any corner.
     """
-    osdi_preload, osdi_runner_environment = _settle_on_host(
-        request.get("options") or {}, request_dir, osdi_pdk_root_pin(request)
-    )
+    osdi_preload = resolve_request_osdi(request, request_dir)
     # Deferred import: ``sim`` imports this module at import time, and the
     # ABI pre-check lives there because it needs ``sim``'s engine-version
     # probe. Reaching it through the module object also keeps it patchable
@@ -110,7 +96,7 @@ def resettle_osdi_preload_for_local(
     from . import sim
 
     sim._check_local_osdi_abi(osdi_preload, backend, engine, engine_binary)
-    return osdi_preload, osdi_runner_environment
+    return osdi_preload, []
 
 
 def osdi_runner_environment_fields(
