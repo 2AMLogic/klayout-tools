@@ -75,7 +75,6 @@ real failure.
 from __future__ import annotations
 
 import contextlib
-import functools
 import hashlib
 import json
 import math
@@ -317,6 +316,52 @@ from .sim_analysis_overrides import (  # isort: skip
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from .sim_errors import SimError as SimError
+from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
+
+#: Moved to `sim_measurement_grading.py` (issue #7320) so the measurement
+#: sidecars import the grading primitives and shared response builders at
+#: module scope instead of back-importing this runner; re-exported
+#: (self-aliased where nothing below calls them) so
+#: ``klayout_tools.sim.<name>`` keeps working.
+from .sim_measurement_grading import (
+    IMPLAUSIBLE_DIAGNOSTIC_CODE as IMPLAUSIBLE_DIAGNOSTIC_CODE,
+)
+from .sim_measurement_grading import (
+    SAVE_MODE_NETLIST_NO_VALUE_HINT as SAVE_MODE_NETLIST_NO_VALUE_HINT,
+)
+from .sim_measurement_grading import (
+    _cycle_mean_measurement_result as _cycle_mean_measurement_result,
+)
+from .sim_measurement_grading import (
+    _energy_measurement_result as _energy_measurement_result,
+)
+from .sim_measurement_grading import (
+    _evaluate_limits as _evaluate_limits,
+)
+from .sim_measurement_grading import (
+    _eye_measurement_result as _eye_measurement_result,
+)
+from .sim_measurement_grading import (
+    _grade_measurement_value as _grade_measurement_value,
+)
+from .sim_measurement_grading import (
+    _settled_measurement_result as _settled_measurement_result,
+)
+from .sim_measurement_grading import (
+    _step_resolution_measurement_result as _step_resolution_measurement_result,
+)
+from .sim_measurement_grading import (
+    _stress_measurement_result as _stress_measurement_result,
+)
+from .sim_measurement_grading import (
+    _tian_measurement_result as _tian_measurement_result,
+)
+from .sim_measurement_grading import (
+    _vector_measurement_result as _vector_measurement_result,
+)
+from .sim_measurement_grading import (
+    _within_plausible_range as _within_plausible_range,
+)
 from .sim_measurement_results import (
     MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE as MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
 )
@@ -538,13 +583,6 @@ INCONCLUSIVE_DIAGNOSTIC_CODE = "inconclusive"
 #: ``options.waveform_max_bytes`` and the JSON conversion is skipped (#3211).
 WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 
-#: The marker diagnostic :func:`_grade_measurement_value` attaches to a
-#: measurement whose value fell outside its declared
-#: ``measurements[].plausible_range``/``options.node_voltage_bounds``
-#: (issue #2493) -- the *other* reason a corner can grade
-#: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
-IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
-
 #: Grading markers and post-grading information are emitted downstream of
 #: ``options.fail_on_diagnostic`` matching. Keep these codes outside the
 #: selectable vocabulary. The drift guard derives them from emission sites.
@@ -556,30 +594,6 @@ _GRADING_MARKER_CODES: frozenset[str] = frozenset(
         sim_homotopy.DC_HOMOTOPY_RECOVERY_CODE,
     }
 )
-
-#: The corner/measurement/report status token issues #2492 and #2493 add
-#: beside ``pass``/``fail``/``error``: the run produced numbers, but it will
-#: not vouch for them. Ranked ``error > inconclusive > fail > pass`` at every
-#: level (:func:`_grade_corner`, :func:`_aggregate_measurement_status`, and
-#: ``run_sim``'s top-level rollup override).
-#:
-#: **Recorded decision -- one status, two reason codes.** The two increments
-#: of split #2489 independently invented the same concept: #2492's
-#: ``options.fail_on_diagnostic`` ("the solve narrated trouble I do not
-#: trust") and #2493's plausibility bounds ("the solve converged somewhere
-#: physically impossible"). Both assert *exactly* the same thing about the
-#: report -- a number exists and must not be graded against ``limits`` as if
-#: it were a result -- and both justified outranking ``fail`` with the same
-#: argument, which is why neither could break the tie against the other.
-#: Shipping them as two status tokens would have put two near-synonyms in
-#: the JSON contract, forced a five-term sum invariant, two parallel counts,
-#: two Monte Carlo exclusion fields and an arbitrary precedence between
-#: them. They are therefore **one** status whose *reason* is carried by the
-#: marker diagnostic's ``code`` (:data:`_GRADING_MARKER_CODES`) -- which
-#: issue #2491's ``diagnostic_counts`` already rolls up per code, so the
-#: per-reason breakdown a caller might want from two counts is still in the
-#: report, derived rather than duplicated.
-_INCONCLUSIVE_STATUS = "inconclusive"
 
 #: Implemented engines. ``ngspice`` is the reference path (see the spike's
 #: engine survey). ``xyce`` (issue #2016, pairing #5 of oracle-tracking
@@ -5454,28 +5468,6 @@ def _resolve_plausible_ranges(
             spec["plausible_range"] = node_voltage_bounds
 
 
-def _within_plausible_range(value: float, plausible_range: dict[str, float]) -> bool:
-    """Whether ``value`` sits inside a declared plausibility bound.
-
-    The numeric-range pre-check for ``options.node_voltage_bounds``/
-    ``measurements[].plausible_range`` (issue #2493) -- run by
-    :func:`_grade_measurement_value`, *before* the ordinary ``limits``
-    comparison (:func:`_evaluate_limits`). Deliberately not a
-    log-text classification: an implausible-but-numerically-valid solve
-    (a compact model evaluated far outside its fitted range) produces no
-    distinguishing ngspice log line for ``_classify_diagnostics`` to catch
-    -- this is a purely numeric check the tool performs on the measured
-    value itself.
-    """
-    min_bound = plausible_range.get("min")
-    max_bound = plausible_range.get("max")
-    if min_bound is not None and value < min_bound:
-        return False
-    if max_bound is not None and value > max_bound:
-        return False
-    return True
-
-
 def _validate_mc_statistics_spec(
     mc_spec: dict[str, Any],
 ) -> tuple[tuple[float, ...], float | None]:
@@ -8433,160 +8425,6 @@ def _crossings_measurement_result(
     return result, grading_diagnostics
 
 
-def _vector_measurement_result(
-    spec: dict[str, Any],
-    outcome: Any,
-    *,
-    save_mode: str,
-    key: str,
-    default_reason: str | None = None,
-    report_with_spec: bool = False,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Response entry for a vector measurement with a coded diagnostic; the
-    detail rides the additive ``key`` sibling. A failure is ``status:
-    "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no {key} value"
-        )
-        missing = f"{key}_vector_missing"
-        reason = (
-            (outcome.code if outcome is not None else None) or default_reason or missing
-        )
-        if save_mode == "netlist" and reason == missing:
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {"name": name, "value": None, "unit": unit}
-        result.update(status="error", margin=None)
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {"name": name, "value": outcome.value, "unit": unit}
-    detail = outcome.report(spec) if report_with_spec else outcome.report()
-    result.update(status=m_status, margin=margin, **{key: detail})
-    return result, grading_diagnostics
-
-
-#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
-_eye_measurement_result = functools.partial(_vector_measurement_result, key="eye")
-_cycle_mean_measurement_result = functools.partial(
-    _vector_measurement_result, key="cycle_mean"
-)
-_tian_measurement_result = functools.partial(
-    _vector_measurement_result,
-    key="tian",
-    default_reason="tian_pass_missing",
-    report_with_spec=True,
-)
-_step_resolution_measurement_result = functools.partial(
-    _vector_measurement_result, key="step_resolution"
-)
-_settled_measurement_result = functools.partial(
-    _vector_measurement_result, key="settled"
-)
-
-
-def _energy_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_energy.EnergyOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``energy`` measurement's response entry (issue #3033).
-
-    ``value`` is the net energy in joules -- a plain number, graded through
-    :func:`_grade_measurement_value` like any scalar -- and the
-    net/gross/recovered/charge breakdown rides the additive ``energy``
-    sibling. A source or voltage that did not resolve is an ordinary
-    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
-    no ``energy`` member."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.error is not None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no energy"
-        )
-        if save_mode == "netlist":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {"severity": "error", "code": "measurement", "message": message}
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.net)
-    result = {
-        "name": name,
-        "value": outcome.net,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "energy": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
-def _stress_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_stress.StressOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``stress`` measurement's response entry (issue #4592).
-
-    ``value`` is the worst ``|v(a) - v(b)|`` in volts over the window -- a
-    plain number, graded through :func:`_grade_measurement_value` like any
-    scalar -- and ``{from, to, peak_time}`` rides the additive ``stress``
-    sibling. A node that did not resolve is an ordinary ``status: "error"``
-    entry with a ``code: "measurement"`` diagnostic and no ``stress`` member."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.error is not None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no stress"
-        )
-        if save_mode == "netlist":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {"severity": "error", "code": "measurement", "message": message}
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.peak)
-    result = {
-        "name": name,
-        "value": outcome.peak,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "stress": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
 #: ngspice's own ``.meas`` failure line, e.g.
 #: ``Error: measure  bad  when(WHEN) : Expressions like 0.5*1.62 are not
 #: supported.`` (verified on ngspice-46). Group 1 is the card's (lower-cased)
@@ -8781,18 +8619,6 @@ def _unsupported_function_hint(expr: str) -> str:
     if not found:
         return ""
     return " -- ngspice has no such function; use: " + "; ".join(found)
-
-
-#: The trailing hint :func:`_no_value_message` (and the step-sequence
-#: equivalent in :mod:`klayout_tools.sim_steps`, issue #2482) appends under
-#: ``options.save_mode: "netlist"`` (issue #2732).
-SAVE_MODE_NETLIST_NO_VALUE_HINT = (
-    ' -- options.save_mode is "netlist", so klt emitted no `save '
-    "all` and only the vectors the netlist's own .save cards retain "
-    "were available: add every signal this measurement reads to the "
-    "netlist's .save card, or omit options.save_mode (default "
-    '"all")'
-)
 
 
 def _read_log_file(path: str) -> str:
@@ -10665,103 +10491,6 @@ def _build_coverage(
     if capture_only:
         block["capture_only"] = True
     return block
-
-
-def _evaluate_limits(
-    value: float, limits: dict[str, float] | None
-) -> tuple[str, float | None]:
-    """Evaluate ``value`` against ``limits`` (``min``/``max``, either optional).
-
-    Returns ``(status, margin)``. No ``limits`` -> reported but never fails
-    (``margin`` reflects the nearer bound if any bound exists, else
-    ``None``). ``margin``: positive is headroom, negative is violation --
-    the nearest *binding* limit when passing, the nearest *violated* limit
-    when failing.
-    """
-    if not limits:
-        return "pass", None
-
-    min_limit = limits.get("min")
-    max_limit = limits.get("max")
-
-    violations = []
-    if min_limit is not None and value < min_limit:
-        violations.append(value - min_limit)  # negative
-    if max_limit is not None and value > max_limit:
-        violations.append(max_limit - value)  # negative
-
-    if violations:
-        # Worst (most negative) violation.
-        return "fail", min(violations)
-
-    headrooms = []
-    if min_limit is not None:
-        headrooms.append(value - min_limit)
-    if max_limit is not None:
-        headrooms.append(max_limit - value)
-    margin = min(headrooms) if headrooms else None
-    return "pass", margin
-
-
-def _grade_measurement_value(
-    spec: dict[str, Any], value: float
-) -> tuple[str, float | None, list[dict[str, Any]]]:
-    """Grade one extracted measurement ``value`` against its ``spec``.
-
-    Returns ``(status, margin, diagnostics)`` -- ``diagnostics`` is empty
-    except on the plausibility-violation path, where it carries the
-    ``severity: "warning"``, ``code: "implausible_solution"`` entry the
-    caller extends the corner's own ``diagnostics`` with. That code is the
-    *reason* half of the status; the status itself is the shared
-    :data:`_INCONCLUSIVE_STATUS` (see its note on why the two "produced a
-    number I will not vouch for" routes are one token).
-
-    **This function owns the grading order**, which is the whole point of
-    issue #2493: a declared plausibility bound
-    (``measurements[].plausible_range``, or an inherited
-    ``options.node_voltage_bounds`` -- both already resolved into ``spec``
-    by :func:`_resolve_plausible_ranges`) is checked **first**, and an
-    out-of-range value short-circuits :func:`_evaluate_limits` entirely
-    rather than being graded against ``limits`` as if it were a real
-    result. ``margin`` stays ``None`` there: margin is defined relative to
-    ``limits``, which never ran.
-
-    The reason the ordering lives in one named function rather than inline
-    at the call site is that the failure mode this closes is *silent*. An
-    ngspice Newton solve can converge onto a numerically valid but
-    physically implausible operating point (a compact model evaluated far
-    outside its fitted range) without emitting any distinguishing log line
-    for :func:`_classify_diagnostics` to match -- so the only thing standing
-    between that solve and an ordinary-looking ``pass``/``fail`` verdict is
-    this check running before :func:`_evaluate_limits`. A second grading
-    path that reached ``_evaluate_limits`` without passing through here
-    would silently reopen the gap.
-
-    Never fires for a request that declares no plausibility bound: with
-    ``spec["plausible_range"]`` absent, this is exactly
-    :func:`_evaluate_limits` plus an empty diagnostic list.
-    """
-    plausible_range = spec.get("plausible_range")
-    if plausible_range is not None and not _within_plausible_range(
-        value, plausible_range
-    ):
-        return (
-            _INCONCLUSIVE_STATUS,
-            None,
-            [
-                {
-                    "severity": "warning",
-                    "code": IMPLAUSIBLE_DIAGNOSTIC_CODE,
-                    "message": (
-                        f"measurement {spec['name']!r} = {value!r} is outside its "
-                        f"declared plausible range {plausible_range!r} -- graded "
-                        f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
-                    ),
-                }
-            ],
-        )
-    status, margin = _evaluate_limits(value, spec.get("limits"))
-    return status, margin, []
 
 
 def _quantile_key(percentile: float) -> str:
