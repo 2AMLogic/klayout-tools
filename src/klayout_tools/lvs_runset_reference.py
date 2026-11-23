@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from typing import Any
+
+from .lvs_base import LvsError
 
 #: ``reference.form`` values the runset engine accepts.
 _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
@@ -17,7 +20,6 @@ _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
 def refuse_unsupported(
     request: dict[str, Any], layout_spec: dict[str, Any], ref_spec: dict[str, Any]
 ) -> None:
-    from .lvs import LvsError
     from .lvs_runset import RUNSET_ENGINE
 
     for field in ("hints", "parameter_tolerance"):
@@ -147,7 +149,6 @@ def convert_reference(
     Reuses the ``"klayout"`` engine's conversion, so the schematic MIM call
     ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
     extraction pairs with (``C.. a b <pdk>__model__cap_mim A= P=``)."""
-    from .lvs import LvsError
     from .lvs_runset import _deck_device_list
     from .netlist_normalize import (
         NormalizeError,
@@ -196,3 +197,33 @@ def convert_reference(
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)
     return out
+
+
+def _unresolved_reference_calls(
+    reference_path: str,
+    top: str | None,
+    converted_names: set[str],
+    find_unresolved: Callable[..., list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
+    calls the runset neither converted nor could resolve.
+
+    The reference is re-read with the plain SPICE reader (hierarchy intact).
+    A callee the runset itself converts (``converted_names``, upper-cased:
+    its declared device classes plus the deck's ``DEVICE_LIST``) is not
+    reported. ``[]`` when the reference cannot be re-read: the
+    runset's own verdict stands."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    try:
+        netlist.read(reference_path, kdb.NetlistSpiceReader())
+    except Exception:
+        return []
+    return find_unresolved(
+        netlist,
+        converted_names,
+        form="spice",
+        top=top,
+        reference_path=reference_path,
+    )

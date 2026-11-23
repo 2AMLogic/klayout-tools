@@ -383,8 +383,11 @@ def test_modelname_message_with_card_only_log_keeps_the_card():
     assert "instance 'm.x1.m0' model 'nfet_03v3'" in diag["message"]
 
 
-def test_read_log_head_unreadable_path_is_empty(tmp_path):
-    from klayout_tools.sim_batch_hints import _read_log_head
+def test_collected_log_unreadable_path_has_no_head_or_fatal_evidence(tmp_path):
+    from klayout_tools.sim_batch_log import read_collected_log
 
-    assert _read_log_head(str(tmp_path / "absent" / "ngspice.log")) == ""
-    assert _read_log_head(str(tmp_path)) == ""  # a directory: IsADirectoryError
+    assert read_collected_log(str(tmp_path / "absent" / "ngspice.log"), 1024) == (
+        "",
+        "",
+    )
+    assert read_collected_log(str(tmp_path), 1024) == ("", "")

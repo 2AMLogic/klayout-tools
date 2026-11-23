@@ -2721,8 +2721,8 @@ def test_container_runtime_hint_none_for_empty_output():
 
 def test_engine_error_message_appends_container_runtime_hint():
     """The hint is appended to -- never a replacement for -- the engine's own
-    captured output, following `place_and_route.py`'s `_mount_namespace_hint`
-    pattern (issue #1868)."""
+    captured output, following the shared `mount_namespace_hint` pattern
+    (issue #1868)."""
     completed = fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
     message = post_route_sta._engine_error_message(completed)
@@ -4359,10 +4359,7 @@ def _propagated_constraints(**overrides) -> dict:
 
 
 def test_clock_capture_fixture_matches_module_tcl():
-    """Fixture drift guard: the captures must come from the Tcl this module
-    emits today -- the stored fragments byte-for-byte, and the stored full
-    propagated+SPEF script equal to a fresh `_sta_script_lines` build with
-    the same placeholder paths re-substituted."""
+    """Compare the captured clock fragments and propagated script to current Tcl."""
     assert _CLOCK_CAPTURES["tcl_fragments"][
         "propagated_clock_lines"
     ] == post_route_sta._propagated_clock_lines("clk")
@@ -4391,21 +4388,24 @@ def test_clock_capture_fixture_matches_module_tcl():
         input_delay_ns=0.0,
         propagated_clock=True,
     )
-    # Issue #2780 appends the read-only constraint-completeness query as the
-    # script's last block -- after every metric/report this capture replays
-    # -- so the pre-#2780 capture still matches everything before it.
+    # The original capture predates the appended constraint and electrical queries.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    # Issue #3005 likewise inserts the electrical-limit block just before it.
     electrical = post_route_sta._electrical_check_lines()
     head = fresh[: -len(completeness)]
     assert head[-len(electrical) :] == electrical
-    # Issue #4089 pins ns/pF command units just before ``create_clock``; the
-    # pre-#4089 capture predates that line.
+    # The captured clock also predates the ns/pF unit pin (#4089).
     pinned = head[: -len(electrical)]
     pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
     assert pinned[pin_idx + 1].startswith("create_clock")
-    assert stored == pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    current = pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    # The historical capture includes every linked net. Its buffered design
+    # has no driver-only nets, so the #6970 predicate leaves its counts intact.
+    at = stored.index("    incr klt_design_total")
+    assert (
+        current
+        == stored[:at] + list(post_route_sta.SPEF_SKIP_DRIVER_ONLY) + stored[at:]
+    )
 
 
 def test_unit_pin_precedes_clock_and_metrics_issue_4089():

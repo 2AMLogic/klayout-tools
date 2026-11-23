@@ -237,16 +237,6 @@ def _find_engine_logs(collected: str) -> list[str]:
     return sorted(found)
 
 
-def _read_log_head(path: str) -> str:
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
-                "utf-8", errors="replace"
-            )
-    except OSError:
-        return ""
-
-
 # --- run-level hint: no batch unit converged (issue #6720) --------------------
 
 CONVERGENCE_ALL_FAILED_CODE = "batch_convergence_all_failed"

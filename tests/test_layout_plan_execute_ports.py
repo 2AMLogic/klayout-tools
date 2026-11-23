@@ -45,7 +45,10 @@ def test_execute_promotes_subckt_ports_to_labelled_pins(tmp_path, pdk_root):
 
 
 def test_execute_surfaces_unrouted_reasons(tmp_path, pdk_root):
-    # #4966: a net in `unrouted_nets[]` carries its compose() reason.
+    # #4966: a net in `unrouted_nets[]` carries its compose() reason. The
+    # same-facing VSS bundle routes via #6920's automatic plane climb by
+    # default; pinning its plane through `routing.nets` keeps it unroutable,
+    # which is what this feature test needs as its vehicle.
     netlist = """
 .subckt gate_rail VBIAS D1 D2 D3
 M1 D1 VBIAS VSS VSS nfet L=0.28U W=0.42U
@@ -54,6 +57,7 @@ M3 D3 VBIAS VSS VSS nfet L=0.28U W=0.42U
 .ends
 """
     request = _gate_rail_request(tmp_path, pdk_root, netlist)
+    request["routing"]["nets"] = {"VSS": {"layer_role": "metal"}}
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
     assert "VSS" in response["unrouted_nets"]

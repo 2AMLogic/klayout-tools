@@ -149,6 +149,7 @@ from typing import TYPE_CHECKING, Any
 # its imports of this module's own helpers to call time.
 from . import extract_dead_metal as _dead_metal
 from . import extract_runset
+from . import extract_split_terminal as _split_terminal
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
@@ -164,7 +165,7 @@ from ._provenance import (
     sha256_file,
 )
 from ._report_verify import (
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -252,6 +253,8 @@ from .extract_flavour import (
     _flavour_split_island,
     apportion_shared_sd,
 )
+from .extract_inductors import connect_inductors, cut_inductor_windings
+from .extract_layer_coverage import capture_layout_coverage
 from .extract_mos_capacitor import _resolve_mos_capacitors
 
 # Moved out (issue #5481) and re-exported, so every existing
@@ -262,7 +265,7 @@ from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
-from .extract_netlist_write import write_flat_netlist
+from .extract_netlist_write import write_flat_netlist, write_spice_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
 
@@ -1485,38 +1488,6 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
-def _require_parasitics_for_resistance_graph(
-    resistance_graph: bool, parasitics: bool
-) -> None:
-    if resistance_graph and not parasitics:
-        raise ExtractError("--resistance-graph requires --parasitics")
-
-
-def _require_resistance_graph_for_emit(
-    emit_selected_resistance: bool, resistance_graph: bool
-) -> None:
-    """``emit_selected_resistance`` (issue #4037) reads the graph result."""
-    if emit_selected_resistance and not resistance_graph:
-        raise ExtractError("emit_selected_resistance requires resistance_graph")
-
-
-def _validate_resistance_graph_r_cut(
-    resistance_graph: bool, r_cut_ohm: float | None
-) -> None:
-    if r_cut_ohm is None:
-        return
-    if not resistance_graph:
-        raise ExtractError("--resistance-graph-r-cut requires --resistance-graph")
-    if isinstance(r_cut_ohm, bool) or not (
-        isinstance(r_cut_ohm, (int, float))
-        and math.isfinite(r_cut_ohm)
-        and r_cut_ohm >= 0
-    ):
-        raise ExtractError(
-            "--resistance-graph-r-cut must be a finite number >= 0 (0 = ideal via)"
-        )
-
-
 def _model_delegate_factory(
     model_bindings: Any, global_nets: Any, sink: list[Any]
 ) -> Callable[[], Any]:
@@ -1590,6 +1561,7 @@ def run_extract(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     emit_selected_resistance: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
@@ -2074,10 +2046,21 @@ def run_extract(
     ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    sets the per-cut via/contact resistance (``0`` = ideal via) the decks
-    curate (``ParasiticsDeck.cuts``) but ``klt extract`` does not consume yet
-    (#3053). ``None`` (the default) keeps a cross-level landing
-    ``unsupported`` and on the legacy scalar; needs ``resistance_graph=True``.
+    overrides every landing's per-cut resistance (``0`` = ideal via).
+    ``None`` (the default) resolves each landing from the deck's nominal
+    per-cut tables (``ParasiticsDeck.cuts``/``.poly_contact``, issue #6917)
+    and keeps an uncurated landing ``unsupported`` on the legacy scalar.
+
+    ``resistance_graph_caps`` (``--resistance-graph-max-terminals`` /
+    ``--resistance-graph-max-cells`` / ``--resistance-graph-max-nodes`` /
+    ``--resistance-graph-max-edges``, issue #6964) raises the builder's own
+    per-net size caps, as ``{builder keyword: positive integer}`` holding
+    only the caps that were given (``None``/empty: none). A cap the builder
+    would exceed is reported ``graph_too_large`` naming the value applied,
+    so a net stays on the legacy scalar until its cap is raised. Defaults
+    come from :mod:`~klayout_tools.extract_resistance_graph`'s constants
+    (64 terminals, 4096 mesh cells, 5000 nodes, 20000 edges); needs
+    ``resistance_graph=True``.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2993,6 +2976,7 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=emit_selected_resistance,
         critical_net_patterns=critical_net_patterns,
         critical_net_all=critical_net_all,
@@ -3073,6 +3057,7 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -3669,7 +3654,7 @@ def _write_subcircuit_deck(
     if parasitics:
         description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
-        netlist.write(subcircuit_path, writer, description)
+        write_spice_netlist(netlist, subcircuit_path, writer, description)
     except Exception as exc:
         raise ExtractError(
             f"could not write sub-circuit netlist '{subcircuit_path}': {exc}"
@@ -3697,9 +3682,9 @@ def check_extract_report(
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
     using the same hash functions as the original report. Returns the
     shared ``--check`` payload built by
-    :func:`klayout_tools._report_verify.build_check_result`: ``status:
-    "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
-    otherwise.
+    :func:`klayout_tools._report_verify.build_input_check_result`: ``status:
+    "match"`` when both hashes agree, ``"unverifiable"`` for an unavailable
+    recorded input, or ``"drifted"`` for a changed digest or missing baseline.
 
     This is what surfaces a deck rebuild that silently changed
     device-recognition behavior (e.g. gf180mcu's substrate/well-tap
@@ -3752,7 +3737,7 @@ def check_extract_report(
             committed, deck_content_hash=deck_content_hash
         ),
     ]
-    return build_check_result(report_path=report_path, checks=checks)
+    return build_input_check_result(report_path=report_path, checks=checks)
 
 
 # `\$<n>` -- the escaped spelling `spice_safe_net_name` gives every anonymous
@@ -4305,6 +4290,7 @@ def extract_netlist_from_layout(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -4318,6 +4304,7 @@ def extract_netlist_from_layout(
     missing_flavour_markers: list[dict[str, Any]] | None = None,
     unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
+    layout_coverage: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4530,11 +4517,7 @@ def extract_netlist_from_layout(
     ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
     identical error semantics to ``run_extract``.
     """
-    # Issue #5464: the engine-free prefix (file checks, deck resolution, the
-    # layout read, top-cell resolution and the FinFET option refusal) lives
-    # in `extract_preflight` so `klt pex --dry-run` runs exactly these checks
-    # without starting the extraction engine -- one helper, two callers, so
-    # the two can never drift.
+    # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
         path,
         deck_name,
@@ -4562,6 +4545,7 @@ def extract_netlist_from_layout(
         },
     )
 
+    capture_layout_coverage(layout_coverage, layout, top_cell, deck)
     _validate_probes(deck, probes)
 
     # `--hierarchical-cells` (issue #2722): selection validated against the
@@ -4733,6 +4717,7 @@ def extract_netlist_from_layout(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
@@ -7005,6 +6990,7 @@ def _extract_netlist(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -7363,6 +7349,11 @@ def _extract_netlist(
         resistor_dummy_dropped,
     ) = _resolve_resistors(layout, top_cell, deck, poly, active, metals, dummy)
     dummy_devices_dropped += resistor_dummy_dropped
+
+    # Spiral-inductor windings (issue #6726): a recognised winding is cut out
+    # of its conductor layers before `metals` is registered, so its two port
+    # nets are not joined through the spiral (`extract_inductors.py`).
+    metals, inductors = cut_inductor_windings(layout, top_cell, deck, metals)
 
     # MiM top-plate-via / bottom-plate overlap exclusion (issue #364): must
     # run before `vias` is registered into the netlist graph below and
@@ -8227,20 +8218,15 @@ def _extract_netlist(
         layout, top_cell, deck
     )
 
-    # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466):
-    # each of the deck's optional `mom_capacitors` entries (see
-    # `MomCapacitorDevice` in `decks/__init__.py`) is recognised by a single
-    # marker layer covering the whole device footprint, containing exactly
-    # two per-metal port shapes told apart by *position* rather than by
-    # declared layer -- structurally distinct from the MiM `capacitors`
-    # block above (two independently-drawn plate layers, capacitance
-    # computed from their geometric overlap). `_build_mom_capacitor_extractor`
-    # builds a fresh `kdb.GenericDeviceExtractor` subclass instance per entry
-    # (a Python transcription of upstream's own `CapMomExtractor`) that
-    # reports `W`/`L` (the marker's own bounding-box dimensions) plus
-    # `MMIN`/`MMAX` (the drawn finger stack's inclusive metal-index range,
-    # issue #2435) -- but no capacitance value, since the real device's `C`
-    # is supplied by the SPICE/Verilog-A model, not computed by LVS.
+    # MoM (Metal-oxide-Metal) capacitor device recognition (issue #1466): each
+    # of the deck's `mom_capacitors` entries (`MomCapacitorDevice`) is
+    # recognised by one marker layer covering the whole device footprint,
+    # holding exactly two per-metal port shapes told apart by *position* --
+    # unlike the MiM `capacitors` block above (two drawn plate layers,
+    # capacitance from their overlap). `_build_mom_capacitor_extractor` (a
+    # transcription of upstream's `CapMomExtractor`) reports `W`/`L` (the
+    # marker's bounding box) and `MMIN`/`MMAX` (the finger stack's metal
+    # range, issue #2435), but no capacitance: the SPICE/Verilog-A model has `C`.
     for mom_capacitor in deck.mom_capacitors:
         # Deck-authoring validation (mirrors the capacitor block's own
         # `top_plate_via`/`top_plate_via_metal` pairing check above):
@@ -8316,14 +8302,10 @@ def _extract_netlist(
 
         l2n.register(marker_region, f"{mom_capacitor.name}_marker")
         layer_geometry = {"core": marker_region, "dev_mk": marker_region}
-        # NOTE: this loop's own index variable is deliberately named
-        # `metal_level` rather than `metal_index` -- the latter is already
-        # bound, earlier in this same function, to the list of registered
-        # `metals[]` layer indices `_detect_dead_metal`'s call below reads
-        # back. A plain `for` loop's target leaks into the enclosing
-        # function scope in Python (unlike a comprehension's own scope), so
-        # reusing that name here would silently clobber it with a bare
-        # `int` on the last iteration.
+        # NOTE: named `metal_level`, not `metal_index`: that name is already
+        # bound earlier in this function to the registered `metals[]` layer
+        # indices `_detect_dead_metal` reads back, and a `for` target leaks
+        # into the function scope, so reusing it would clobber that list.
         for metal_level, (port_region, drawn_region) in enumerate(
             zip(port_regions, drawn_metal_regions, strict=True)
         ):
@@ -8331,14 +8313,11 @@ def _extract_netlist(
             l2n.register(port_region, f"{mom_capacitor.name}_{port_layer_name}")
             layer_geometry[port_layer_name] = port_region
 
-            # The drawn-finger recognition layers are registered but
-            # deliberately never `connect`ed into the outer connectivity
-            # graph (issue #2435): this geometry is already part of
-            # `metals[metal_level]`, which the generic per-layer
-            # `metals[i]`/`vias[i]` loop wires up on its own. Connecting it
-            # a second time here would be a no-op at best and a duplicate
-            # node at worst; it exists purely as an input layer for this
-            # extractor's own `mmin`/`mmax` measurement.
+            # The drawn-finger layers are registered but deliberately never
+            # `connect`ed (issue #2435): this geometry is already part of
+            # `metals[metal_level]`, which the generic `metals[i]`/`vias[i]`
+            # loop wires up on its own, so they are purely input layers for
+            # this extractor's own `mmin`/`mmax` measurement.
             drawn_layer_name = f"m{metal_level + 1}d"
             l2n.register(drawn_region, f"{mom_capacitor.name}_{drawn_layer_name}")
             layer_geometry[drawn_layer_name] = drawn_region
@@ -8358,15 +8337,18 @@ def _extract_netlist(
             layer_geometry,
         )
 
-    # Drawn resistors: `R` is the recognised resistive segment, `C` the
-    # terminal (contacted head) region -- the same conductor layer the
-    # segment was cut out of, already part of the connectivity graph below,
-    # so the heads pick up their nets from ordinary contact/metal routing.
-    # The body itself is deliberately never `connect`ed to anything: that is
-    # precisely what stops it being a short.
-    for index, (spec, body, terminal) in enumerate(resistors):
+    connect_inductors(
+        l2n, deck, inductors, metals, metal_labels, nwell, isolation_islands
+    )
+
+    # Drawn resistors: `R` the recognised segment, `C` the contacted head
+    # region (the conductor it was cut from, already in the graph below). The
+    # body is never `connect`ed: that is what stops it being a short.
+    for index, (spec, body, terminal, split) in enumerate(resistors):
         l2n.register(body, f"res{index}_body")
-        if spec.bulk_to_substrate:
+        if split is not None:
+            _split_terminal.extract_device(l2n, index, spec, body, terminal, split)
+        elif spec.bulk_to_substrate:
             l2n.extract_devices(
                 kdb.DeviceExtractorResistorWithBulk(spec.name, spec.sheet_rho_ohm_sq),
                 {"R": body, "C": terminal, "W": nfet_body},
@@ -8390,13 +8372,11 @@ def _extract_netlist(
         + capacitor_variant_warnings
     )
 
-    # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
-    # `contact` as a blanket rule -- see `ExtractionDeck`'s docstring: the
-    # well is a background region spanning the whole PMOS area, so a
-    # blanket well<->contact connect would short every terminal inside the
-    # well together. Only a genuinely distinct `tap` region (drawn or
-    # derived -- `tap_declared`, issue #1084) is safe to tie the well to
-    # directly.
+    # Connectivity. Deliberately no blanket `nwell`/`tap` -> `contact`
+    # connect -- see `ExtractionDeck`'s docstring: the well spans the whole
+    # PMOS area, so it would short every terminal inside it. Only a
+    # genuinely distinct `tap` region (drawn or derived -- `tap_declared`,
+    # issue #1084) is safe to tie the well to directly.
     l2n.connect(nfet_sd)
     l2n.connect(pfet_sd)
     l2n.connect(nfet_gate)
@@ -8506,6 +8486,7 @@ def _extract_netlist(
         l2n.connect(f_nfet_sd, contact)
         l2n.connect(f_pfet_sd, contact)
     l2n.connect(poly, contact)
+    _split_terminal.connect_terminals(l2n, resistors, contact)
 
     if metals:
         l2n.connect(contact, metals[0])
@@ -8629,17 +8610,18 @@ def _extract_netlist(
         ) from exc
     netlist = l2n.netlist()
 
-    # Asymmetric-MOS orientation (issue #4570): KLayout's MOS4 extractor
-    # orders S/D by geometry and ignores `tS`/`tD` roles (the PDK's own
-    # `gf180mcu.lvs` does the same), so re-point each LDMOS's S/D onto the
-    # source/drain-marked diffusion it actually touches.
+    # Asymmetric-MOS orientation (issue #4570): KLayout's MOS4 extractor orders
+    # S/D by geometry and ignores `tS`/`tD` (as the PDK's own `gf180mcu.lvs`
+    # does), so re-point each LDMOS's S/D onto the marked diffusion it touches.
+    top_circuit = netlist.circuit_by_name(top_cell.name)
     orient_asymmetric_mos(
         l2n,
-        netlist.circuit_by_name(top_cell.name),
+        top_circuit,
         deck,
         flavour_terminals,
         (flavour_nfet_gate, flavour_pfet_gate),
     )
+    _split_terminal.orient_terminals(l2n, top_circuit, resistors, contact)  # #4312
     # Issue #5311: re-divide S/D shared across the per-gate flavour split.
     apportion_shared_sd(
         l2n,
@@ -9200,6 +9182,7 @@ def _extract_netlist(
                 parasitics_top_cell_only=parasitics_top_cell_only,
                 resistance_graph=resistance_graph,
                 resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                resistance_graph_caps=resistance_graph_caps,
                 # Per-fragment square counting (issue #2359): `via_index` lets
                 # the parasitics pass read each net's own via landings back
                 # through `polygons_of_net`, so it can tell where current enters

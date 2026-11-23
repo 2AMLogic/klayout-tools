@@ -284,7 +284,7 @@ def _variants_shipping(
             except PdkNotFoundError:
                 continue
             if _ships_cell_library(other, cell_library):
-                found.append(other)
+                found.append({**other, "resolved_via": install["resolved_via"]})
     return found
 
 
@@ -365,8 +365,8 @@ def resolve_liberty_for_cell_library(
     ``cell_library``, the first installed variant that ships it is used
     instead (issue #4204); an explicit ``variant``/``$PDK`` is never overridden.
 
-    ``pdk_info`` is :func:`find_pdk`'s own resolution dict, returned
-    unchanged for the caller to pass through to its own provenance builder.
+    ``pdk_info`` describes the chosen variant and how its root was discovered,
+    for the caller to pass through to its provenance builder.
 
     Liberty filename convention: tries open_pdks' double-underscore
     ``<cell_library>__<corner>.lib`` first, falling back to a single

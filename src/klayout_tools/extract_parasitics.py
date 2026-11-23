@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import region as _region
 from .decks import ExtractionDeck, ParasiticsDeck
 from .extract_abstract import _sanitize_instance_name
+from .extract_cut_resistance import CutResistanceResolver, cut_resistance_resolver
 from .extract_fragment_resistance import _n_squares as _n_squares
 from .extract_fragment_resistance import _region_n_squares
 from .parasitic_integrity import (
@@ -72,7 +73,7 @@ from .parasitic_integrity import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import klayout.db as kdb
 
@@ -386,7 +387,7 @@ def _graph_landings_and_ports(
     contacts: kdb.Region | None,
     vias: list[kdb.Region],
     dbu: float,
-    r_cut_ohm: float | None,
+    r_cut_for: CutResistanceResolver,
 ) -> tuple[list[Any], list[Any]]:
     """The ``LandingInput`` / terminal ``PortInput`` lists for one net.
 
@@ -396,9 +397,10 @@ def _graph_landings_and_ports(
     coefficient for), so it becomes a terminal on that side. Device-body cut
     edges (drawn-layer interfaces) are terminals too. Every ordering is by
     integer geometry, so repeated equivalent requests are byte-identical.
-
-    A contact/via with no side on the conductor outline (a landing in the
-    interior of a strap) is attached by its whole bounding box."""
+    ``r_cut_for`` resolves each landing's per-cut resistance from the deck
+    (or a uniform override) by its ``(lower_role, upper_role)``; a cut with
+    no side on the conductor outline (a landing in the interior of a strap)
+    is attached by its whole bounding box."""
     import klayout.db as kdb
 
     from .extract_resistance_graph import LandingInput, PortInput
@@ -442,7 +444,7 @@ def _graph_landings_and_ports(
                         upper,
                         patch,
                         max(polygon.area() * dbu * dbu, 1e-12),
-                        r_cut_ohm,
+                        r_cut_for(lower, upper),
                     )
                 )
             else:
@@ -478,9 +480,18 @@ class _ResistanceGraphCollector:
     method is a no-op when ``enabled`` is false, so the caller stays
     branch-free and the default path does no graph work and adds no key."""
 
-    def __init__(self, enabled: bool, r_cut_ohm: float | None = None) -> None:
+    def __init__(
+        self,
+        enabled: bool,
+        r_cut_ohm: float | None = None,
+        deck: ParasiticsDeck | None = None,
+        *,
+        caps: Mapping[str, int] | None = None,
+    ) -> None:
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
+        self._deck = deck
+        self._caps = caps
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -513,6 +524,8 @@ class _ResistanceGraphCollector:
                 dbu,
                 entry["resistance_ohm"],
                 self._r_cut_ohm,
+                self._deck,
+                caps=self._caps,
             )
 
 
@@ -526,11 +539,10 @@ def _with_selected_resistance(report: dict[str, Any]) -> dict[str, Any]:
     """Add the additive scalar-selection provenance (issue #2983).
 
     The graph result is selected only when the net has exactly two terminals,
-    the solve is ``ok`` and the pair resistance is a number. Anything else
-    (``unsupported``, ``skipped``, three or more terminals, a disconnected
-    pair) keeps the legacy scalar, and ``resistance_source_reason`` says why.
-    ``resistance_ohm`` itself is never changed; this only reports which value
-    a caller that wants the topology-aware scalar should read."""
+    the solve is ``ok`` and the pair resistance is a number; anything else
+    (``unsupported``, ``skipped``, 3+ terminals, a disconnected pair) keeps
+    the legacy scalar and ``resistance_source_reason`` says why.
+    ``resistance_ohm`` itself is never changed."""
     terminals = report["terminals"]
     pair = report["pair_resistance_ohm"]
     selected: float | None = None
@@ -560,35 +572,29 @@ def _resistance_graph_report(
     dbu: float,
     legacy_resistance_ohm: float,
     r_cut_ohm: float | None = None,
+    deck: ParasiticsDeck | None = None,
+    *,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``parasitics.nets[].resistance_graph`` object for one net
-    (issue #2982, Stage 3.D5 increment 3).
+    """Build a per-net resistance graph and render its terminal-pair matrix.
 
-    ``roles`` is ``(role name, sheet resistance, net region, drawn region)``
-    per conductor role the net has geometry on. This only converts the
-    per-net geometry :func:`_compute_parasitics` already holds into the graph
-    builder's inputs and renders the builder's and solver's results; it adds
-    no geometry or solving logic. ``status``, ``terminals``,
-    ``pair_resistance_ohm`` and the diagnostics are taken from
-    :class:`~klayout_tools.extract_resistance_graph.TerminalResistanceMatrix`
-    as-is; ``legacy_resistance_ohm`` is the unchanged series-sum scalar.
-
-    ``r_cut_ohm`` is the caller's per-cut via/contact resistance, forwarded
-    from ``--resistance-graph-r-cut`` and ``None`` only without it, as ``klt
-    extract`` does not read the decks' ``ParasiticsDeck.cuts`` yet (#3053); a
-    landing then reports ``via_resistance_unknown`` (``unsupported``)."""
+    The legacy scalar stays in the report for comparison and fallback.
+    An explicit per-cut resistance overrides the deck's nominal value for
+    each landing. A landing without either value is unsupported. Explicit
+    caps override the corresponding builder defaults (issue #6964)."""
     from .extract_resistance_graph import (
         RoleInput,
         build_resistance_graph,
         terminal_resistance_matrix,
     )
 
-    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, r_cut_ohm)
+    resolver = cut_resistance_resolver(r_cut_ohm, deck)
+    landings, ports = _graph_landings_and_ports(roles, contacts, vias, dbu, resolver)
     role_inputs = [
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
     ]
-    graph = build_resistance_graph(role_inputs, ports, landings, dbu)
+    graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
     reported = (
@@ -795,6 +801,7 @@ def _compute_parasitics(
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -833,16 +840,16 @@ def _compute_parasitics(
     abuts a device body that is not part of the net's conductor region.
     Both are optional: without ``via_index``, or without
     ``layout``/``top_cell``, every fragment falls back to the whole-fragment
-    long/short fit, which for a single-fragment net is exactly this
-    function's pre-#2359 answer.
+    long/short fit -- exactly this function's pre-#2359 answer for a
+    single-fragment net.
 
     Roles map to the registered geometry layers: ``poly`` the poly region with
     the transistor gate regions subtracted out (issue #226 -- gate capacitance
     lives in the device model), and ``metals[i]`` each metal-stack layer
-    (index-aligned with the deck's ``metals``). The optional ``diffusion`` role
-    (NMOS+PMOS source/drain) is left unset by the shipped decks: the M cards'
-    ``AS``/``AD``/``PS``/``PD`` already feed the device model's junction
-    capacitance, so a diffusion cap term would double-count it.
+    (index-aligned with the deck's ``metals``). The optional ``diffusion``
+    role (NMOS+PMOS source/drain) is left unset by the shipped decks: the M
+    cards' ``AS``/``AD``/``PS``/``PD`` already feed the device model's
+    junction capacitance, so a diffusion cap term would double-count it.
 
     **Vertical-overlap coupling (issue #760):** for each adjacent pair of
     metal levels ``(i, i+1)`` with a curated ``parasitics_deck.metal_overlaps``
@@ -850,8 +857,8 @@ def _compute_parasitics(
     of levels, the area of ``net_a``'s shapes on level ``i`` intersected with
     ``net_b``'s shapes on level ``i+1`` (a plain ``Region & Region`` boolean,
     KLayout's own already-registered per-net regions -- no halo/neighbour
-    search) becomes a coupling capacitance between ``net_a`` and ``net_b``
-    (``overlap_area_um2 * metal_overlaps[i]``), and is subtracted from
+    search) becomes a coupling capacitance ``overlap_area_um2 *
+    metal_overlaps[i]`` between ``net_a`` and ``net_b``, subtracted from
     *both* nets' ground area term on their own respective level (``net_a``'s
     on level ``i``, ``net_b``'s on level ``i+1``) -- charge is *moved*, never
     duplicated. The per-level deduction is the **geometric union** of every
@@ -862,8 +869,8 @@ def _compute_parasitics(
     destroyed rather than moved. Same-net overlap (a via stack tying one net's
     own two levels together) is excluded by construction: coupling is only
     ever computed between two *distinct* nets, so a net's own via stack
-    contributes nothing
-    here (it is ordinary connectivity, already merged into one net upstream).
+    contributes nothing here (it is ordinary connectivity, already merged
+    into one net upstream).
 
     **Recognised capacitors are not double-counted (issue #3021):**
     ``capacitor_top_regions`` maps each recognised ``CapacitorDevice``'s name
@@ -888,10 +895,10 @@ def _compute_parasitics(
     is the roadmap's own "medium cost" Stage 2b (a real neighbour-search
     cost across every same-layer pair on a routed block, not the cheap
     bounding-box-prefiltered ``Region & Region`` boolean vertical overlap
-    uses -- see ``docs/design/extract-fidelity-roadmap.md``'s Stage 2b cost
-    estimate). Scoping the search to a caller-declared "nets that matter"
-    set (Epic #709 Phase 2's own framing: high-impedance nodes, a SAR ADC's
-    CDAC top plate, a PLL loop filter) keeps this increment's cost bounded
+    uses -- see the roadmap's Stage 2b cost estimate). Scoping the search to
+    a caller-declared "nets that matter" set (Epic #709 Phase 2's own
+    framing: high-impedance nodes, a SAR ADC's CDAC top plate, a PLL loop
+    filter) keeps this increment's cost bounded
     to exactly the nets a caller cares about while still closing the gap
     ``PARASITIC_MODEL_SCOPE["coupling"]`` names.
 
@@ -902,18 +909,15 @@ def _compute_parasitics(
     pre-#1700 behaviour. The membership test is the identical
     ``spice_safe_net_name(_net_identity_name(net)) in <frozenset>`` check the
     lateral pass already applies to ``critical_nets`` (issue #1162's escaped
-    spelling), reused rather than introducing a second net-classification
-    mechanism. Pass 1 is where the per-net ``polygons_of_net`` /
+    spelling). Pass 1 is where the per-net ``polygons_of_net`` /
     ``_net_area_perim_um`` calls live, so skipping a net there is the actual
     saving; the consequence is that an unnamed net also contributes no
     ``metal_regions`` entry, and therefore can neither give nor receive
-    *coupling* capacitance -- only a pair of both-named nets can couple under
-    a scoped run. That is deliberate and is the point: a coupling term
-    computed against a partner whose own ground model was never built would
-    be attributing charge to a net that does not appear in the output at all.
-    Unlike ``critical_nets``, which only ever *adds* a pass, this one
-    subtracts work, so a caller trading completeness for runtime must say so
-    explicitly.
+    *coupling* capacitance -- only a pair of both-named nets can couple
+    under a scoped run, deliberately: a coupling term against a never-
+    measured partner would attribute charge to a net absent from the
+    output. Unlike ``critical_nets``, which only ever *adds* a pass, this
+    one subtracts work: a caller trading completeness for runtime says so.
 
     **Top-cell-only hierarchy split, ground terms only (issue #1704, the
     implementation half of the spike in #1702 --
@@ -924,10 +928,9 @@ def _compute_parasitics(
     sub-block, reported as the additive ``resistance_ohm_top_cell``/
     ``capacitance_ff_top_cell`` ground-entry fields below. ``None``/``False``
     (the default) computes neither field and runs no extra ``Region`` work
-    at all -- byte-identical to this function's pre-#1704 behaviour.
-
-    Built once per curated layer (poly, diffusion's constituent SD indices,
-    each ``metals[i]``), **not** once per net or per instance -- via
+    at all -- byte-identical to this function's pre-#1704 behaviour. Built
+    once per curated layer (poly, diffusion's constituent SD indices, each
+    ``metals[i]``), **not** once per net or per instance -- via
     :func:`_instance_drawn_mask`, the merged union of that role's *drawn*
     layer (``deck.poly``/``deck.active``/``deck.metals[i]``, **not** the
     ``layer_index``/``metal_index`` values this function otherwise reads --
@@ -942,10 +945,7 @@ def _compute_parasitics(
     strap routed over a std cell's own pin, the normal case rather than a
     corner case) is charged to the **instance** side -- the only form that
     keeps "subtract what I already extracted for this sub-block separately"
-    arithmetically sound (spike doc section 3.3). The top-cell portion is
-    fed through the exact same ``cap_area_ff_um2``/``cap_perim_ff_um``/
-    ``sheet_res_ohm_sq`` + ``_n_squares`` formulas Pass 1 already applies to
-    the raw (pre-coupling-deduction) totals.
+    arithmetically sound (spike doc section 3.3).
 
     **Known limitation, documented rather than fixed: the split is exact in
     area but not in perimeter.** A conductor that genuinely straddles the
@@ -958,9 +958,9 @@ def _compute_parasitics(
     likewise C) comes out **slightly larger** than this net's own
     ``resistance_ohm``/``capacitance_ff`` total -- proportional to the
     number and length of such crossings. This is expected, not a bug: a net
-    lying wholly on one side of the boundary (fully top-cell-drawn, or fully
-    inside one instance) stays exactly additive; only a genuinely spanning
-    net's split needs a tolerance rather than exact equality.
+    lying wholly on one side of the boundary stays exactly additive; only a
+    genuinely spanning net's split needs a tolerance rather than exact
+    equality.
 
     **Terminal-aware resistance graph (issue #2982, opt-in):**
     ``resistance_graph=True`` (``klt extract --resistance-graph``) attaches a
@@ -968,15 +968,16 @@ def _compute_parasitics(
     :func:`_resistance_graph_report` from the per-net geometry Pass 1 already
     holds. It is purely additive: ``resistance_ohm`` and every other field
     keep their legacy value, and with ``False`` (the default) no key is added
-    and no graph work runs.
+    and no graph work runs. Each landing's per-cut resistance resolves from
+    the deck (issue #6917; see :func:`cut_resistance_resolver`), so a net
+    whose landing types are curated solves without ``--resistance-graph-r-cut``.
 
     For each metal level ``i`` with a curated
     ``parasitics_deck.metal_sidewalls[i]`` coefficient and
     ``parasitics_deck.metal_sidewall_lookback_um[i]`` lookback distance, and
     each qualifying pair of *distinct* nets with geometry on that level,
     ``net_a``'s region and ``net_b``'s region are checked with KLayout's own
-    ``Region.separation_check`` (the same primitive ``drc.py`` already uses
-    for ``check="separation"`` DRC rules) at that lookback distance; the
+    ``Region.separation_check`` at that lookback distance; the
     summed length of the facing edge pairs it reports
     (``EdgePairs.first_edges().length()``) becomes a coupling capacitance
     between the two nets (``facing_length_um * metal_sidewalls[i]``). Unlike
@@ -994,18 +995,15 @@ def _compute_parasitics(
       output): ``{"net", "net_id", "resistance_ohm", "capacitance_ff",
       "by_layer", "resistance_ohm_top_cell", "capacitance_ff_top_cell"}`` for
       every net with non-zero *raw* (pre-coupling-deduction)
-      ground-eligible geometry --
-      including a net whose ground capacitance was fully moved to coupling
-      by the correction above (``capacitance_ff`` can be ``0.0`` in that
-      case; the net still needs a star/hub so a coupling ``C`` card has
-      somewhere to attach). A net with no eligible interconnect geometry at
-      all is omitted, exactly as before this feature existed. ``by_layer``
+      ground-eligible geometry -- including a net whose ground capacitance
+      was fully moved to coupling by the correction above (it still needs a
+      star/hub so a coupling ``C`` card has somewhere to attach). A net with
+      no eligible interconnect geometry at all is omitted. ``by_layer``
       (issue #1701) is a per-role/per-metal-level breakdown -- see the "Pass
-      3" comment above `results.append` for the exact shape and the
-      sum-equals-total invariant it satisfies. ``resistance_ohm_top_cell``/
-      ``capacitance_ff_top_cell`` (issue #1704) are ``None`` unless
-      ``parasitics_top_cell_only`` was given -- see this docstring's
-      "Top-cell-only hierarchy split" paragraph above.
+      3" comment above `results.append` for the shape and the
+      sum-equals-total invariant it satisfies.
+      ``resistance_ohm_top_cell``/``capacitance_ff_top_cell`` (issue #1704)
+      are ``None`` unless ``parasitics_top_cell_only`` was given.
     - Coupled-pair list (sorted by ``(net_a, net_b)`` for deterministic
       output): ``{"net_a", "net_b", "capacitance_ff", "levels",
       "lateral_levels"}`` for every distinct net pair with non-zero
@@ -1020,11 +1018,10 @@ def _compute_parasitics(
       coupling (issue #760, empty if none); ``lateral_levels`` (issue #976)
       is the sorted list of same-``metal_index`` levels that contributed
       lateral coupling (empty if none, and always empty when
-      ``critical_nets`` is not given -- byte-identical to this field's
-      pre-#976 absence). Empty when neither ``parasitics_deck.metal_overlaps``
-      nor (``critical_nets``-scoped) ``parasitics_deck.metal_sidewalls``
-      curate a coefficient, or the layout has no qualifying coupling
-      geometry between distinct nets.
+      ``critical_nets`` is not given). Empty when neither
+      ``parasitics_deck.metal_overlaps`` nor (``critical_nets``-scoped)
+      ``parasitics_deck.metal_sidewalls`` curates a coefficient, or the
+      layout has no qualifying coupling geometry between distinct nets.
 
     ``net_id`` is ``net.cluster_id`` -- the id ``LayoutToNetlist`` already
     uses internally to key a net to its layout cluster (see the
@@ -1050,8 +1047,8 @@ def _compute_parasitics(
     same hub, making the "coupling capacitor" a self-loop that would inflate
     the reported total while contributing nothing electrically; and overlap
     between two *different* names accumulates into one pair however many net
-    objects on each side contributed, matching the one hub per name that the
-    card attaches to.
+    objects on each side contributed, matching the one hub per name the card
+    attaches to.
 
     That name-keying is *this* pass's own aggregation choice, not something
     forced on it from downstream. Since issue #765 the ground entries above
@@ -1061,7 +1058,7 @@ def _compute_parasitics(
     injection step nor the emitted netlist collapses same-labelled islands
     into one node. Coupling is therefore modelled one level coarser than the
     per-net ground terms; a per-net-object coupling model is a named
-    follow-on, not a behaviour this function claims today.
+    follow-on.
     """
     if circuit is None:
         return [], []
@@ -1221,11 +1218,9 @@ def _compute_parasitics(
     # strictly inside it is a cut against a gate or a drawn resistor body);
     # `via_index` supplies the inter-layer half, read back per net through
     # the same `polygons_of_net` Pass 1 already uses. Both are optional: with
-    # neither, every fragment gets the whole-fragment long/short fit, which
-    # for a single-fragment net is exactly the pre-#2359 answer.
-    #
-    # Built once per role here, never per net -- one `_drawn_region` call per
-    # conductor role, independent of net count.
+    # neither, every fragment gets the whole-fragment long/short fit, exactly
+    # the pre-#2359 answer for a single-fragment net. Built once per role
+    # here, never per net.
     drawn = _role_drawn_regions(
         layout,
         top_cell,
@@ -1235,10 +1230,11 @@ def _compute_parasitics(
         num_metals,
     )
     contact_layer_index = layer_index.get("contact")
-    # `resistance_graph` (issue #2982): each net's per-role geometry and
-    # landings, kept only when the opt-in flag is on.
     graph_collector = _ResistanceGraphCollector(
-        resistance_graph, resistance_graph_r_cut_ohm
+        resistance_graph,
+        resistance_graph_r_cut_ohm,
+        parasitics_deck,
+        caps=resistance_graph_caps,
     )
 
     for net in nets:
