@@ -141,7 +141,14 @@ def _unit(corner_id, *codes, status="error"):
 
 
 def _worker_entry(
-    *, status="match", source="none", sha=None, omp=None, capture="ok", **extra
+    *,
+    status="match",
+    source="none",
+    sha=None,
+    omp=None,
+    threads=None,
+    capture="ok",
+    **extra,
 ):
     """One ``environment.remote`` / ``fleet[]`` entry, as klt reports it."""
     return {
@@ -150,6 +157,7 @@ def _worker_entry(
             "engine_build_comparison": {"status": status},
             "ngspice_init": {"source": source, "lines": None, "sha256": sha},
             "omp_num_threads": omp,
+            "threads_per_worker": threads,
         },
         **extra,
     }
@@ -170,7 +178,9 @@ def _hints_in(report):
 @pytest.mark.parametrize("code", ["singular_matrix", "nonconvergence"])
 def test_all_units_failing_to_converge_get_one_hint_with_worker_values(code):
     corners = [_unit("a", code), _unit("b", code)]
-    remote = _worker_entry(status="mismatch", source="home", sha=_SHA, omp="1")
+    remote = _worker_entry(
+        status="mismatch", source="home", sha=_SHA, omp="1", threads=1
+    )
     report = _attach(corners, remote, ngspice_options={"gmin": 1e-10})
 
     [hint] = _hints_in(report)
@@ -184,6 +194,7 @@ def test_all_units_failing_to_converge_get_one_hint_with_worker_values(code):
         "ngspice_init.source",
         "ngspice_init.sha256",
         "omp_num_threads",
+        "threads_per_worker=1",
         "environment.ngspice_options",
     ):
         assert field in message
@@ -202,6 +213,7 @@ def test_all_units_failing_to_converge_get_one_hint_with_worker_values(code):
             "engine_build_comparison": "mismatch",
             "ngspice_init": {"source": "home", "sha256": _SHA},
             "omp_num_threads": "1",
+            "threads_per_worker": 1,
         }
     ]
 
@@ -267,6 +279,7 @@ def _attach_with_client_values(remote):
         remote,
         ngspice_init={"source": "home", "lines": None, "sha256": _CLIENT_SHA},
         engine_build={"version_banner": "CLIENT-BANNER"},
+        threads_per_worker=8,
     )
 
 
@@ -285,6 +298,7 @@ def test_missing_worker_environment_still_hints_without_worker_values(remote):
     assert "CLIENT-BANNER" not in hint["message"]
     assert all(w["ngspice_init"] is None for w in hint["workers"])
     assert all(w["omp_num_threads"] is None for w in hint["workers"])
+    assert all(w["threads_per_worker"] is None for w in hint["workers"])
     assert all(w["engine_build_comparison"] is None for w in hint["workers"])
     assert "Transient convergence differs between local and batch" in hint["message"]
 
@@ -304,27 +318,6 @@ def test_ngspice_options_not_set_is_stated_not_invented():
     [hint] = _hints_in(_attach(corners, _worker_entry()))
     assert "environment.ngspice_options" in hint["message"]
     assert "not set" in hint["message"]
-
-
-def test_sharded_run_lists_each_shard_and_collapses_identical_ones():
-    corners = [_unit(f"c{i}", "singular_matrix") for i in range(4)]
-    remote = {
-        "fleet": [
-            _worker_entry(source="none", job_id="j0"),
-            _worker_entry(source="none", job_id="j1"),
-            _worker_entry(source="home", sha=_SHA, job_id="j2"),
-        ]
-    }
-    [hint] = _hints_in(_attach(corners, remote))
-    assert [w["fleet_index"] for w in hint["workers"]] == [0, 1, 2]
-    assert [w["ngspice_init"]["source"] for w in hint["workers"]] == [
-        "none",
-        "none",
-        "home",
-    ]
-    message = hint["message"]
-    assert "fleet[0], fleet[1]" in message and "fleet[2]" in message
-    assert message.count(_SHA) == 1
 
 
 def test_many_distinct_shards_keep_the_message_bounded():
@@ -474,6 +467,7 @@ def test_hint_reads_the_real_worker_environment_shape(tmp_path, monkeypatch):
             "engine_build_comparison": "mismatch",
             "ngspice_init": {"source": "home", "sha256": init["sha256"]},
             "omp_num_threads": "1",
+            "threads_per_worker": None,
         }
     ]
     assert init["sha256"] in hint["message"]

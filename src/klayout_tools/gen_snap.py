@@ -6,6 +6,8 @@ the names so existing ``from .gen import _snap_square_box_um`` keeps working.
 
 from __future__ import annotations
 
+import math
+
 _GRID_DBU_UM = 0.001
 
 
@@ -123,3 +125,41 @@ def _snap_cut_box_dbu(
     left, right = _snap_span(*_clamp_span(x0, x1, fixed_dbu), grid_dbu)
     bottom, top = _snap_span(*_clamp_span(y0, y1, fixed_dbu), grid_dbu)
     return left, bottom, right, top
+
+
+def _grid_snapped(dbu: float, *values_um: float) -> bool:
+    """Whether any of ``values_um`` is not an exact multiple of ``dbu``."""
+
+    def _snapped(value_um: float) -> bool:
+        count = value_um / dbu
+        return abs(count - round(count)) > 1e-9
+
+    return any(_snapped(v) for v in values_um)
+
+
+def _mfg_grid_neighbours(
+    grid_um: float, value_um: float, multiple: int = 1
+) -> tuple[float, float] | None:
+    """The nearest values below and above ``value_um`` that are exact
+    multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
+    ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
+    family's curated deck declares no ``"ongrid"`` rule, see
+    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
+    nothing to check against.
+
+    ``multiple`` is for a quantity built from ``multiple`` equal on-grid
+    parts (e.g. a ``diff_pair`` device's total width, ``splits`` unit
+    widths): the representable set is then the multiples of
+    ``multiple * grid_um``, not of ``grid_um``. Unlike :func:`_grid_snapped`
+    this checks against the PDK *manufacturing* grid, never the dbu."""
+    if grid_um <= 0 or multiple < 1:
+        return None
+    step = grid_um * multiple
+    count = value_um / step
+    nearest = round(count)
+    if abs(count - nearest) <= 1e-6:
+        return None
+    below = math.floor(count)
+    # Round away float noise so the reported values read as the grid
+    # multiples they are (e.g. 4.635, not 4.635000000000001).
+    return (round(below * step, 9), round((below + 1) * step, 9))
