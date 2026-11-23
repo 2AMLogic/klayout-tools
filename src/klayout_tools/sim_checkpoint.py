@@ -13,6 +13,7 @@ from . import sim_analysis_overrides as _sao
 from . import sim_mismatch_scale
 from ._provenance import sha256_file
 from .sim_corner_point import CornerPoint
+from .sim_transient_noise import key_in_fingerprint
 
 DEFAULT_MC_SEED_SCOPE = "per_corner"
 DEFAULT_MC_SEED_MODE = "derived"
@@ -162,8 +163,7 @@ def _checkpoint_fingerprint(
         # checkpoint written under other options never applies. Only keyed
         # in when declared, leaving existing fingerprints untouched.
         payload["ngspice_options"] = ngspice_options
-    if transient_noise_seed is not None:
-        payload["transient_noise_seed"] = transient_noise_seed
+    key_in_fingerprint(payload, transient_noise_seed)
     _key_in_mc_seed_options(payload, corner_points)
     _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:

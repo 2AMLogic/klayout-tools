@@ -87,6 +87,15 @@ def seed_lines(seed: int | None) -> list[str]:
     return [] if seed is None else [f"setseed {seed}"]
 
 
+def key_in_fingerprint(payload: dict[str, Any], seed: int | None) -> None:
+    """Issue #5772: the seed changes every corner deck's bytes (the
+    ``setseed`` card), so a checkpoint written under another seed -- or none
+    -- never applies. Keyed in off ``None`` only, so an existing checkpoint
+    stays valid for a request that omits the field."""
+    if seed is not None:
+        payload["transient_noise_seed"] = seed
+
+
 def check_transient_noise_seed_echo(
     request: dict[str, Any], report: dict[str, Any]
 ) -> None:
