@@ -158,7 +158,7 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -214,7 +214,14 @@ from .sim_batch_features import (
 from .sim_batch_hints import attach_runner_hints as _attach_runner_hints
 from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
-from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+from .sim_convergence_retry import (
+    DEFAULT_CONVERGENCE_RETRY as DEFAULT_CONVERGENCE_RETRY,
+)
+from .sim_convergence_retry import (
+    _validate_convergence_retry,
+    is_retryable_convergence_failure,
+    note_not_retried,
+)
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
 #: under its per-file size ratchet; re-exported here -- self-aliased where
@@ -1893,68 +1900,6 @@ def _portable_substitutions(
             entry["models_lib_sha256"] = models_lib_sha256
         out.append(entry)
     return out
-
-
-#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
-#: retried unit runs with when the object form leaves a key out. ``gear``
-#: integration and a looser ``reltol`` are the standard first remedies for
-#: ngspice's "time step too small".
-DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
-    "max_attempts": 1,
-    "reltol": 0.003,
-    "method": "gear",
-}
-_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
-
-
-def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
-    """Validate and normalise ``options.retry_on_convergence_error`` (issue
-    #2973).
-
-    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
-    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
-    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
-    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
-    unknown key is an application error (``SimError``) rather than a silent
-    no-op, like :func:`_validate_fail_on_diagnostic`.
-    """
-    if value is None or value is False:
-        return None
-    if value is True:
-        return dict(DEFAULT_CONVERGENCE_RETRY)
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.retry_on_convergence_error must be a boolean or an object "
-            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
-        )
-    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
-    if unknown:
-        raise SimError(
-            "options.retry_on_convergence_error has unknown key(s): "
-            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
-        )
-    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
-    attempts = resolved["max_attempts"]
-    if not is_int(attempts) or attempts < 1:
-        raise SimError(
-            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
-        )
-    reltol = resolved["reltol"]
-    if (
-        isinstance(reltol, bool)
-        or not isinstance(reltol, (int, float))
-        or not 0 < reltol < 1
-    ):
-        raise SimError(
-            "options.retry_on_convergence_error.reltol must be a number "
-            "between 0 and 1 (exclusive)"
-        )
-    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
-        raise SimError(
-            "options.retry_on_convergence_error.method must be one of: "
-            + ", ".join(_CONVERGENCE_RETRY_METHODS)
-        )
-    return resolved
 
 
 def _resolve_convergence_retry(
