@@ -43,7 +43,9 @@
       "modules": [
         "klayout_tools.characterize",
         "klayout_tools.characterize_arcs",
+        "klayout_tools.characterize_async",
         "klayout_tools.characterize_bisect",
+        "klayout_tools.characterize_bisect_deck",
         "klayout_tools.characterize_capacity",
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
@@ -54,6 +56,7 @@
         "klayout_tools.characterize_pool",
         "klayout_tools.characterize_probe",
         "klayout_tools.characterize_sequential",
+        "klayout_tools.characterize_stimulus",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.cli.parser_characterize",
         "klayout_tools.liberty_compare",
@@ -290,6 +293,7 @@
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_abstract_pin_join",
         "klayout_tools.extract_assemble",
+        "klayout_tools.extract_report_canonicalize",
         "klayout_tools.extract_validate",
         "klayout_tools.extract_base",
         "klayout_tools.extract_batch",
@@ -520,6 +524,7 @@
         "klayout_tools.layout_plan_check",
         "klayout_tools.layout_plan_execute",
         "klayout_tools.layout_plan_fields",
+        "klayout_tools.layout_plan_flavors",
         "klayout_tools.layout_plan_ports",
         "klayout_tools.layout_plan_routing"
       ]
@@ -555,6 +560,7 @@
         "klayout_tools.lvs_hierarchy",
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_label_coverage",
+        "klayout_tools.lvs_layout_short_nets",
         "klayout_tools.lvs_layout_stage",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
@@ -631,6 +637,7 @@
       "description": "PDK resolution and rule decks -- the documented exception to verb self-containment (docs/ARCHITECTURE.md).",
       "modules": [
         "klayout_tools.cli.pdk_cmd",
+        "klayout_tools.cli.pdk_expect",
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
@@ -713,6 +720,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_batch_job",
         "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
@@ -732,6 +740,7 @@
         "klayout_tools.place_and_route_reports",
         "klayout_tools._dont_use",
         "klayout_tools.place_and_route_request",
+        "klayout_tools.place_and_route_threads",
         "klayout_tools.place_and_route_resume",
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
@@ -925,6 +934,7 @@
         "klayout_tools.signoff_pex_disclosure",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
+        "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
@@ -992,6 +1002,7 @@
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_case_names",
+        "klayout_tools.sim_checkpoint",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_corner_axes",
@@ -1128,6 +1139,7 @@
         "klayout_tools.cli.sta_cmd",
         "klayout_tools._sta_clock_transition",
         "klayout_tools._sta_clock_uncertainty",
+        "klayout_tools._sta_io_delay_clock",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
@@ -3293,12 +3305,6 @@
       },
       {
         "consumer": "klayout_tools.size",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_models_lib",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.size_topology",
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."

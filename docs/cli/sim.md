@@ -418,10 +418,14 @@ one worker and unit) — so the same request can read the host's ambient init on
 `--backend local` and ignore it on `--backend local-parallel`. The report's
 `environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
 `source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
-`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
-reads, never what the request merely declared, and carries no absolute path.
-Two runs whose `sha256` differ read different init files. See
-`docs/json-contract.md`.
+`remote`/`batch` (resolved by the worker). The digest identifies the effective init file's bytes. Batch corner reports
+with explicit `options.ngspice_init` emit the warning
+`batch_ngspice_init_unverified`. Each entry in its `jobs` array identifies a
+`job_id` and the zero-based `fleet_index` when sharded. A `request_identity`
+of `digest_reported` means the worker reported the requested lines and their
+digest. Missing, malformed or different evidence yields `unverified`.
+The simulator's application of the file remains unverified for every job.
+The observed worker values remain in `worker_environment.ngspice_init`.
 
 Two stderr warnings (stdout JSON unaffected, silent when no
 `$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
@@ -9618,8 +9622,10 @@ would read it here rather than forward it. To choose which install the
 is not forwarded to the runner.
 
 When an off-host run returns no value for a `measurements[].expr` measurement,
-the report's top-level `diagnostics[]` also carries a warning with code
-`expr_runner_may_predate` (the runner image may predate `expr`).
+the report lists the missing names in a top-level warning. When every runner
+version supports expressions, `expr_no_value` gives the runner and client
+versions and the first affected measurement diagnostic available from a corner.
+An older or unidentified runner retains the `expr_runner_may_predate` warning.
 
 A `$PDK` / `${PDK}` reference in `models.lib` (or a per-section `lib`) is
 refused the same way when the request declares no `models.pdk`
@@ -9829,9 +9835,11 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `batch_ngspice_init_unverified` | Report-level warning. Corner-mode batch workers lack simulator acknowledgement for explicit `options.ngspice_init`. See the per-job request identities in `diagnostics[].jobs`. |
 | `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
-| `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
+| `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): a missing off-host expression value on an older or unidentified runner. `measurements` lists the affected names. |
+| `expr_no_value` | Report-level warning for missing off-host expression values when every identified runner supports expressions. Includes client and worker versions, affected names, and the first available matching corner diagnostic. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
 | `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`, `threads_per_worker`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
