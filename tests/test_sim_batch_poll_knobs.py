@@ -59,6 +59,14 @@ def test_absent_poll_timeout_s_keeps_the_callers_derived_default():
     assert sbjt.resolve_poll_timeout_s({}, 4321.5) == 4321.5
 
 
+@pytest.mark.parametrize("default", [-5, float("nan")])
+def test_invalid_derived_timeout_names_its_source(default):
+    with pytest.raises(sim.SimError, match="derived batch poll timeout") as exc:
+        sbjt.resolve_poll_timeout_s({}, default)
+    assert exc.value.code == BATCH_POLL_KNOB_CODE
+    assert "request.batch.poll_timeout_s" not in str(exc.value)
+
+
 @pytest.mark.parametrize("bad", BAD_VALUES)
 def test_bad_poll_interval_s_is_a_documented_error_not_a_traceback(bad):
     with pytest.raises(sim.SimError, match=r"request\.batch\.poll_interval_s") as exc:

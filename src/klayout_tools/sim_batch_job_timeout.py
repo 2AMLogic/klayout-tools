@@ -82,21 +82,19 @@ def resolve_poll_interval_s(batch_spec: dict[str, Any]) -> float:
 
 
 def resolve_poll_timeout_s(batch_spec: dict[str, Any], default: float) -> float:
-    """``request.batch.poll_timeout_s`` (issue #7543): the wall-clock budget
-    the client waits for a terminal ``status.json`` -- a finite,
-    non-negative number of seconds, else
-    :class:`~klayout_tools.sim.SimError` before any S3 write, exactly as
-    :func:`resolve_poll_interval_s` (which see for the ``bool``/``0`` rules
-    and the uncaught-``float()`` escape this replaces). When the key is
-    absent the caller-supplied ``default`` -- the derived serial or
-    caller-bound budget -- is returned untouched, so only the request's own
-    explicit value is ever validated here; ``0`` is a legitimate "give up on
-    the first poll" request."""
+    """Validate the explicit polling timeout or the caller's derived budget.
+
+    Both must be finite, non-negative seconds. Zero stops at the first poll.
+    """
     value = batch_spec.get("poll_timeout_s", default)
     if not is_finite_number(value) or value < 0:
+        source = (
+            "request.batch.poll_timeout_s"
+            if "poll_timeout_s" in batch_spec
+            else "derived batch poll timeout"
+        )
         raise SimError(
-            "request.batch.poll_timeout_s must be a non-negative number of "
-            f"seconds (got {value!r})",
+            f"{source} must be a non-negative number of seconds (got {value!r})",
             code=BATCH_POLL_KNOB_CODE,
         )
     return float(value)
