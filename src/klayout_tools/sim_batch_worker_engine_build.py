@@ -104,7 +104,7 @@ def apply_worker_engine_build(environment: dict[str, Any]) -> None:
     }
     banner, codes = _worker_banner(simulators)
     probe, reason = ("ok", None) if banner else _no_worker_banner(codes)
-    if len(digests - {None}) > 1:
+    if banner and len(digests - {None}) > 1:
         probe, reason = (
             "disagreement",
             "the sharded members reported different binary digests",

@@ -717,15 +717,12 @@ def dry_run_runner_check(
     runner_out: dict[str, Any] | None = None,
     config_out: dict[str, BatchConfig] | None = None,
 ) -> dict[str, Any] | None:
-    """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
-    (issue #4120): the same :func:`_resolve_batch_config` comparison a real
-    submit makes, so a request using a feature every published image predates
-    is refused (or, under ``warn``, diagnosed) without any S3 write or launch.
-
-    Returns a feature warning, if present. Unconfigured hosts can still dry
-    run. With a resolvable configuration, populate the supplied runner/config
-    outputs and propagate version, feature, engine and job-size refusals.
-    """
+    """Run submit preflight for batch dry runs (#4120). Unconfigured hosts return None.
+    Return a warned or unverified feature diagnostic, otherwise None. runner_out stores
+    status, client_klt_version and images for match, unknown and warn-mode mismatch
+    (#4675). An enforce mismatch raises BATCH_RUNNER_MISMATCH_CODE first (#4680).
+    Feature, engine-pin and job-size refusals propagate. config_out saves the resolved
+    configuration so the caller avoids resolving and warning twice (#5674)."""
     from .sim import ENGINE_VERSION_UNMET_CODE
 
     try:
@@ -866,8 +863,11 @@ def _feature_diagnostic(
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Check mandatory features before upload. A missing candidate list warns;
-    a known unsupported mandatory feature refuses submission under either policy."""
+    """Check all features before upload or launch (#3249). A legacy entry, unknown
+    runner version or capable image defers to runner preflight. With no images,
+    warn_unverified_features warns for mandatory features (#7062). If all images lack
+    features, mandatory gaps always refuse. Other gaps refuse under enforce or warn
+    on stderr and return the _feature_diagnostic result under warn (#2901)."""
     features = _request_features(request)
     images = assessment["images"]
     if not images:
@@ -2086,8 +2086,11 @@ def _read_worker_environment(
 ) -> dict[str, Any]:
     """The ``worker_environment`` block of ``environment.remote`` (issue #2834).
 
-    Captures report the worker’s observations. Missing or malformed captures
-    carry None observations. Validate and bound each field from the worker file.
+    Worker-observed: it describes what the job instance resolved, never the
+    submitter's values. Always present; ``capture`` is ``"ok"``, ``"absent"``
+    (legacy worker or no collected artifact) or ``"malformed"``, and a
+    non-ok capture carries ``None`` observations. Every field is
+    re-validated and bounded here -- the file is untrusted input.
     """
     unknown: dict[str, Any] = {
         "capture": "absent",

@@ -238,6 +238,15 @@ def test_sharded_members_failing_the_probe_identically_keep_the_single_code():
     assert build["probe"] == "timeout" and "'timeout'" in build["reason"]
 
 
+@pytest.mark.parametrize("codes", [("timeout", "timeout"), ("error", "timeout")])
+def test_different_digests_preserve_the_reason_for_a_missing_banner(codes):
+    fleet = [_banner_block("ok", None, code) for code in codes]
+    expected = _offhost({"fleet": fleet})["engine_build"]
+    for member, digest in zip(fleet, ("a" * 64, "b" * 64), strict=True):
+        member["worker_environment"]["simulator"]["binary_sha256"] = digest
+    assert _offhost({"fleet": fleet})["engine_build"] == expected
+
+
 def test_whitespace_only_difference_between_shards_still_agrees():
     remote = {
         "fleet": [

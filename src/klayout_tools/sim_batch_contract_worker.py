@@ -306,13 +306,14 @@ def _worker_capture_command(
         *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
-    if not _capture_engine_digest(remote_request):
-        target = "--omit-binary-digest " + target
+    digest_flag = (
+        "" if _capture_engine_digest(remote_request) else "--omit-binary-digest "
+    )
     return (
         'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
         "{ command -v python3 >/dev/null 2>&1 && "
         f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
-        f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+        f"{digest_flag}{target} {' '.join(args)} 2>/dev/null; true; }}"
     )
 
 
