@@ -45,6 +45,7 @@ from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
+from ._dont_use import cell_exclusion_fields
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1719,12 +1720,10 @@ def _run_single_corner(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
-    # Issue #2635: which of each macro's per-corner liberties applies to
-    # *this* run, resolvable only now that `_resolve_liberty` has named the
-    # corner. A macro that declared a `lib` map with no entry for this
-    # corner (and no `"default"`) is rejected here with a named error rather
-    # than silently timed at some other corner -- see
-    # `klayout_tools.macros.macro_lib_for_corner`.
+    exclusions = cell_exclusion_fields(
+        cell_library, library, liberty_path, error_cls=PlaceAndRouteError
+    )
+    # Select hard-macro Liberties for the resolved corner.
     macro_liberty_paths = [
         path
         for path in (
@@ -2305,6 +2304,7 @@ def _run_single_corner(
     )
 
     response: dict[str, Any] = {
+        **exclusions,
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,

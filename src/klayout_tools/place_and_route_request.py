@@ -20,10 +20,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from . import macros as macro_spec
 from . import place_and_route_groups as groups_spec
+from ._dont_use import validate_patterns
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
@@ -1644,17 +1646,6 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
-_LIBRARY_KEYS = (
-    "cts_buffer",
-    "power_pins",
-    "wire_rc",
-    "route_layers",
-    "antenna_diode",
-    "tapcell",
-    "filler",
-)
-
-
 def _positive_number(value: Any, where: str) -> float:
     if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
@@ -1797,6 +1788,7 @@ def _validate_library_cts_buffer(buf: Any) -> str:
 
 _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
     "cts_buffer": _validate_library_cts_buffer,
+    "dont_use": partial(validate_patterns, error_cls=PlaceAndRouteError),
     "power_pins": _validate_library_power_pins,
     "wire_rc": _validate_library_wire_rc,
     "route_layers": _validate_library_route_layers,
@@ -1817,13 +1809,13 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
     the library has no antenna diode, so no antenna repair; issue #4274),
     ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
+    has no tap cells), ``filler`` (tuple of masters), and ``dont_use`` (tuple of globs).
     """
     if library is None:
         return None
     if not isinstance(library, dict):
         raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
+    unknown = sorted(set(library) - _LIBRARY_VALIDATORS.keys())
     if unknown:
         raise PlaceAndRouteError(
             f"request.library has unknown key(s): {', '.join(unknown)}"

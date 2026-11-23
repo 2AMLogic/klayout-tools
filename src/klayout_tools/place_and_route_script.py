@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from . import place_and_route_clock as _vclk
+from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_groups import fixed_group_commands
@@ -882,19 +883,12 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     ]
 
 
-def _dont_use_lines(cell_library: str) -> list[str]:
-    """``set_dont_use`` lines for ``cell_library`` (issue #2378).
-
-    Reuses the same per-library table ``klt synthesize`` hands to ABC
-    (:data:`~klayout_tools.synthesize._ABC_DONT_USE_GLOBS`) so both commands
-    agree on the usable cell set. Each glob is brace-quoted (Tcl-safe: the
-    ``*``/``?``/``[]`` metacharacters reach OpenROAD's own pattern matcher
-    unexpanded). A library with no entry emits nothing.
-    """
-    from .synthesize import _ABC_DONT_USE_GLOBS
-
+def _dont_use_lines(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> list[str]:
+    """Brace-quote the patterns so Tcl passes them unchanged to OpenROAD."""
     return [
-        f"set_dont_use {{{glob}}}" for glob in _ABC_DONT_USE_GLOBS.get(cell_library, ())
+        f"set_dont_use {{{glob}}}" for glob in effective_patterns(cell_library, library)
     ]
 
 
@@ -1064,7 +1058,7 @@ def _stage_script_lines(
     lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step, and is re-emitted in each OpenROAD process.
-    lines += _dont_use_lines(cell_library)
+    lines += _dont_use_lines(cell_library, library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
