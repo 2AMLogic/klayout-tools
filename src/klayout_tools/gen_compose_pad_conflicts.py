@@ -408,6 +408,17 @@ def _pad_other_block_contact_reason(
     the own-block notch check's grid for each box: the writer's grid for
     via landings and the source layout's grid for stub-widen boxes.
 
+    This is the *other-block* half of a pair. Its same-block sibling, the
+    #1520 notch check (:func:`.gen_compose_routing._pad_self_notch_violation_um`),
+    exists because a port hand-declared on a pre-existing ``blocks[].cell``
+    stream's own internal wire -- the only way to declare a port on a cell no
+    ``klt`` verb generated -- lets a pad land close enough to a *different*
+    part of that same wire (e.g. a perpendicular leg near a corner the port
+    sits close to) to break the deck's same-layer spacing rule, though both
+    shapes are one electrical node. ``kdb.Region.notch_check`` sees it
+    because the pad and the wire merge into one polygon; the overlap and
+    inflate comparisons in ``_leg_conflict`` have no second shape to test.
+
     Returns the rejection wording naming the pad, the block and the net --
     carrying a ``_CLIMBABLE_REASON_MARKERS`` fragment so the #6920 plane
     climb can lift the leg to a plane that clears the block -- or ``None``

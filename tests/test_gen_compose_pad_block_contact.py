@@ -1,7 +1,10 @@
 """A landing pad must stay electrically separate from another net's block metal."""
 
+from collections import Counter
+
 import klayout.db as kdb
 
+from klayout_tools import gen_compose
 from klayout_tools.extract import run_extract
 from klayout_tools.gen_compose import compose
 from klayout_tools.gen_compose_plane_climb import _climbable
@@ -158,3 +161,54 @@ def test_far_pad_with_a_positive_gap_merges_with_own_port_wire_only(tmp_path):
     statuses = {net["net"]: net for net in result["nets"]}
     assert statuses["A"]["routed"] and statuses["B"]["routed"]
     assert not extracted["merged_net_labels"]
+
+
+def test_contact_check_reads_each_bystander_block_layer_once_per_request(
+    tmp_path, monkeypatch
+):
+    """More nets mean more ``_leg_conflict`` calls, never more GDS reads of a
+    block hosting no pin of any net.
+
+    The contact check consults every block hosting no pin of the net being
+    routed, for each pad of each candidate leg. It must go through the
+    request's cached ``_own_block_layer_geometry`` so a bystander's drawn
+    geometry on a layer is read once per ``(layer, scale)`` -- not once per
+    pad, leg or net (issue #7325). Pin-hosting blocks are left out of the
+    assertion: two older, separate readers also consult those.
+    """
+    reads: Counter = Counter()
+    real = gen_compose.read_block_layer_geometry
+
+    def counting(block_id, block, offset, layer, dbu=None):
+        reads[(block_id, tuple(layer), dbu)] += 1
+        return real(block_id, block, offset, layer, dbu)
+
+    monkeypatch.setattr(gen_compose, "read_block_layer_geometry", counting)
+    specs = {
+        "a1": (MET1, (0, 0, 1.0, 0.14), (1.0, 0.07), 0, (-1.0, -0.07)),
+        "a2": (MET1, (0, 0, 1.0, 0.14), (0.0, 0.07), 180, (4.0, -0.07)),
+        "c": (LI1, (0, 0, 1.0, 0.17), (0.0, 0.085), 0, (4.31, -0.5)),
+        "d": (LI1, (0, 0, 1.0, 0.17), (0.0, 0.085), 0, (9.31, -0.5)),
+    }
+    connectivity = [_net_a("a1", "a2"), _net_b_on_metal3()]
+    for k in range(3):  # three more routed nets, each a fresh set of legs
+        row = 10.0 * (k + 1)
+        specs[f"p{k}a"] = (MET1, (0, 0, 1.0, 0.14), (1.0, 0.07), 0, (-1.0, row))
+        specs[f"p{k}b"] = (MET1, (0, 0, 1.0, 0.14), (0.0, 0.07), 180, (4.0, row))
+        connectivity.append(_net_a(f"p{k}a", f"p{k}b") | {"net": f"P{k}"})
+    for i in range(6):  # bystanders: hosting no pin of any net
+        specs[f"z{i}"] = (
+            MET1,
+            (0, 0, 1.0, 0.14),
+            (0.0, 0.07),
+            180,
+            (20.0 + 3 * i, 30.0),
+        )
+
+    result, extracted = _compose_cell_strips(tmp_path, specs, connectivity)
+
+    assert not result["unrouted_nets"]
+    assert not extracted["merged_net_labels"]
+    bystander_reads = {key: n for key, n in reads.items() if key[0].startswith("z")}
+    assert bystander_reads, "the check never consulted a bystander block"
+    assert {key: n for key, n in bystander_reads.items() if n > 1} == {}
