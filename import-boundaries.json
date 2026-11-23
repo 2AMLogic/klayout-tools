@@ -1930,7 +1930,7 @@
     {
       "consumer": "synthesize",
       "exporter": "sta",
-      "reason": "Issue #6924: validate synthesis multicycle entries with the shared STA grammar and run standalone Verilog-mode STA on the final mapped netlist."
+      "reason": "Issue #6924: validate synthesis multicycle entries with the shared STA grammar and run standalone Verilog-mode STA on the mapped netlist before restructuring."
     },
     {
       "consumer": "synthesize",
