@@ -1,0 +1,1 @@
+- **STA checks multicycle SDC drift and identifies exception-backed signoff evidence** (#6922, 2026-11-23). Reports with multicycle paths carry the request SHA-256. Item 5 cites the applied selection and multipliers per corner.

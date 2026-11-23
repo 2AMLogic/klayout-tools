@@ -7,11 +7,14 @@ from klayout_tools.signoff import build_tier_report
 from test_signoff import (
     DRC_CLEAN_ENVELOPE,
     DRC_VIOLATIONS_ENVELOPE,
+    FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
     LVS_MATCH_POWER_MATCH_ENVELOPE,
     LVS_MISMATCH_ENVELOPE,
     SIM_PASS_ENVELOPE,
     _write,
 )
+from test_signoff_derived_rows import _LIM, _meas, _tagged_sim
+from test_signoff_failed_sim_credit import TWO_ROW_FAIL_SIM
 
 
 def _item(item_id, entry):
@@ -132,3 +135,135 @@ def test_layout_item2_single_entry_unchanged(tmp_path):
     assert item["status"] == "met"
     assert "members_total" not in item
     assert "citations_graded" not in item
+
+
+# Issue #6027: a `check_failed` `sim` citation's envelope is captured for the
+# row credit only when it survives the trust gates (`_maybe_record_failed_sim`
+# in `signoff_derived_rows`): a stale pin, a vacuous verdict or an
+# unverifiable pin still grades `check_failed`, but credits nothing. These
+# live beside the member-grading tests for size-ratchet room, not scope.
+
+
+def _graded_item(item_id, entry, spec_rows):
+    manifest = {
+        "block": "lib",
+        "kind": "analog",
+        "evidence": {str(item_id): entry},
+        "spec_rows": {str(item_id): spec_rows},
+    }
+    report = build_tier_report(manifest)
+    return next(i for i in report["items"] if i["id"] == item_id)
+
+
+def _failing_item5(entry, spec_rows):
+    return _graded_item(5, entry, spec_rows)
+
+
+def test_failing_stale_pinned_sim_credits_nothing(tmp_path):
+    bad = _write(tmp_path, "bad.json", TWO_ROW_FAIL_SIM)
+    item = _failing_item5(
+        [{"file": bad, "rows": ["tdec"], "content_hash": "sha256:stale-revision"}],
+        [{"id": "tdec"}],
+    )
+
+    # The failure outranks the pin (issue #5598: the pin is disclosed beside
+    # the verdict, never as the verdict) -- but the pin refusal keeps the
+    # envelope out of the credit, so the passing row stays in `failed_rows`.
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
+
+
+def test_failing_nothing_checked_sim_credits_nothing(tmp_path):
+    bad = _write(
+        tmp_path,
+        "bad.json",
+        {**TWO_ROW_FAIL_SIM, "coverage": {"nothing_checked": True}},
+    )
+    item = _failing_item5([{"file": bad, "rows": ["tdec"]}], [{"id": "tdec"}])
+
+    # Same verdict as a trustworthy failure (issue #5479 orders the trust
+    # gates after the pass/fail check) -- but a vacuous-verdict envelope is
+    # not evidence for any row, so nothing is credited.
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
+
+
+def test_failing_unverifiable_pin_sim_credits_nothing(tmp_path):
+    bare = {k: v for k, v in TWO_ROW_FAIL_SIM.items() if k != "provenance"}
+    bad = _write(tmp_path, "bad.json", bare)
+    item = _failing_item5(
+        [{"file": bad, "rows": ["tdec"], "content_hash": "sha256:pinned"}],
+        [{"id": "tdec"}],
+    )
+
+    # No `provenance.input.content_hash` to compare the pin against -- the
+    # provenance refusal records nothing, like the stale pin above.
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
+
+
+# Issue #6027: the credit is for a citation the item *accepts*. A passing
+# tagged envelope of a kind the item rejects as `wrong_kind` grades
+# `unmet`/`wrong_kind` -- and must not leave its rows reading `derived`
+# (machine-checked) in `detail`, absent from both `failed_rows` and
+# `uncovered_rows`.
+
+
+def test_wrong_kind_sim_cited_for_item6_credits_nothing(tmp_path):
+    # Item 6 accepts only `yield`; `klt sim` is the one verb whose envelope
+    # carries `measurements[].spec_row`, so citing it here is a reachable
+    # manifest mistake.
+    sim = _write(tmp_path, "sim.json", _tagged_sim([_meas("t", "A", limits=_LIM)]))
+    item = _graded_item(6, [{"file": sim, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_wrong_kind_functional_verification_cited_for_item5_credits_nothing(tmp_path):
+    # Item 5 analog accepts `{sim, model-run}`, not `functional-verification`.
+    fv = _write(
+        tmp_path,
+        "fv.json",
+        {
+            **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
+            "measurements": [_meas("t", "A", limits=_LIM)],
+        },
+    )
+    item = _graded_item(5, [{"file": fv, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_opt_in_model_run_cited_for_item6_credits_nothing(tmp_path):
+    # The opt-in downgrade (`_OPT_IN_KIND_ITEMS`) is a second route to
+    # `wrong_kind`: `model-run` is item 5 only, so item 6 refuses it.
+    model_run = _write(
+        tmp_path,
+        "model.json",
+        {
+            "schema_version": 1,
+            "kind": "model-run",
+            "status": "pass",
+            "method": "linear small-signal model, ideal supplies",
+            "measurements": [_meas("t", "A", limits=_LIM)],
+        },
+    )
+    item = _graded_item(6, [{"file": model_run, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []

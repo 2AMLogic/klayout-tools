@@ -3,6 +3,8 @@
 Split out of ``pex.py`` (file-size ratchet, #2766): the ``testbenches[].sides``
 execution evidence (issues #2872 / #2876) and the ``unfinished[]`` shard-loss
 entries (issue #5282). Both transport ``klt sim``'s own response unchanged.
+Also home to the ``delta[]`` row-label fields (:func:`delta_labels`, issue
+#5681), kept here so ``pex.py`` does not grow.
 """
 
 from __future__ import annotations
@@ -122,3 +124,111 @@ def unfinished_legs(
     legs = (("schematic", schematic_report), ("extracted", extracted_report))
     entries = (unfinished_leg(testbench, side, report) for side, report in legs)
     return [entry for entry in entries if entry is not None]
+
+
+def delta_labels(
+    testbench: str | None, spec_row_prefix: str | None, name: str
+) -> dict[str, Any]:
+    """Issue #5681: the identity fields every ``delta[]`` row leads with.
+
+    ``spec_row`` is the display label -- ``<stem>.<name>`` only when the run
+    had several testbenches (``spec_row_prefix`` set), else the bare name -- so
+    it depends on invocation shape. ``testbench`` (the request's filename
+    stem; ``None`` in ``--measure-command`` mode, which has no testbench file)
+    and ``measurement`` (the bare ``measurements[].name``) do not, so
+    ``(testbench, measurement)`` is a stable key for a row.
+    """
+    return {
+        "spec_row": name if spec_row_prefix is None else f"{spec_row_prefix}.{name}",
+        "testbench": testbench,
+        "measurement": name,
+    }
+
+
+def _selected_probes(group: dict[str, Any], prefix: str, *, omit: bool) -> list[str]:
+    from .pex import PexError
+
+    specs = group.get("measurements")
+    if not isinstance(specs, list):
+        return []  # sim validates the container itself
+    selected = []
+    portable = []
+    for index, spec in enumerate(specs):
+        if not isinstance(spec, dict) or "sides" not in spec:
+            portable.append(spec)
+            continue
+        name = spec.get("name")
+        if spec["sides"] != "schematic" or not isinstance(name, str) or not name:
+            raise PexError(
+                f"measurement {name!r} (measurements[{index}].sides) needs a "
+                "name and the side selection 'schematic'"
+            )
+        if spec.get("intermediate"):
+            raise PexError(
+                f"measurement {name!r} (measurements[{index}]) is 'intermediate' "
+                "(never reported or graded), so it cannot declare 'sides'"
+            )
+        selected.append(prefix + name)
+    if omit and len(portable) != len(specs):
+        group["measurements"] = portable
+    return selected
+
+
+def schematic_probes(request: dict[str, Any], *, omit: bool = False) -> tuple[str, ...]:
+    """List schematic probes and optionally remove them from a leg request copy."""
+    selected = []
+    steps = request.get("analysis_steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                selected.extend(
+                    _selected_probes(step, f"{step.get('name')}.", omit=omit)
+                )
+    selected.extend(_selected_probes(request, "", omit=omit))
+    return tuple(selected)
+
+
+def schematic_probe_rows(
+    names: tuple[str, ...],
+    schematic: dict[str, Any],
+    extracted: dict[str, Any] | None,
+    *,
+    testbench: str,
+    prefix: str | None,
+    device_only_leg: bool,
+) -> list[dict[str, Any]]:
+    """Record the requested schematic observation without grading an extracted value."""
+    from .pex import _device_only_fields, _index_corner_measurements, _side_error
+
+    if not names:
+        return []
+    by_corner = _index_corner_measurements(schematic)
+    corners = dict.fromkeys(
+        [*by_corner, *(c["corner_id"] for c in (extracted or {}).get("corners", []))]
+    )
+    rows = []
+    for corner_id in corners:
+        for name in names:
+            measurement = by_corner.get(corner_id, {}).get(name)
+            status = measurement["status"] if measurement else "error"
+            value = measurement["value"] if measurement else None
+            row = {
+                **delta_labels(testbench, prefix, name),
+                "corner_id": corner_id,
+                "schematic_value": value,
+                "schematic_status": status,
+                "extracted_value": None,
+                "extracted_status": "skipped",
+                "delta_pct": None,
+                "status": "error" if status == "error" else "skipped",
+            }
+            if status == "error":
+                row["error"] = _side_error(
+                    "schematic", schematic, corner_id, measurement=measurement
+                )
+            if device_only_leg:
+                row.update(
+                    _device_only_fields(value, None, None), device_only_status="skipped"
+                )
+            rows.append(row)
+    return rows

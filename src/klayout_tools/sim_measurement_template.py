@@ -140,6 +140,8 @@ def expand_request(request: dict[str, Any]) -> dict[str, Any]:
 
 def _templated_entries(measurements: Any) -> list[tuple[dict[str, Any], list[str]]]:
     """``(spec, placeholder fields)`` per templated entry, in declared order."""
+    if not isinstance(measurements, list):
+        return []  # The form validator owns malformed measurement shapes.
     return [
         (spec, fields)
         for spec in measurements or []

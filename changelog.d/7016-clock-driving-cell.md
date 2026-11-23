@@ -1,0 +1,1 @@
+- **Static timing can model the primary clock driver** (#7016, 2026-11-21). Set `constraints.clock_driving_cell` to a Liberty cell and output pin. Timing reports echo the selected driver for both single-corner and multi-corner requests.

@@ -7,7 +7,7 @@ PyPI via trusted publishing.
 > **TL;DR** — Releases are automated (see "Automated release" below): a weekly
 > workflow opens a release PR when `main` is over the backstop; merging it tags
 > and publishes. The manual sequence further down is the documented fallback:
-> bump `base-version` in `pyproject.toml` + `uv lock` → merge to `main` → tag
+> run `release_prep.py prepare` + `uv lock` → merge to `main` → tag
 > `vX.Y.Z` on the merged commit → push the tag. Pushing the tag is what
 > triggers the publish workflow.
 
@@ -68,11 +68,33 @@ and every minor release is published to PyPI and gets a rebaked runner
 image -- the runner version gate compares major.minor only (#3184, see
 `docs/cli/sim.md` "Runner/client `klt` version skew").
 
-**Interim answer, between releases**: `CHANGELOG.md`'s `## Unreleased` →
-`### Fixed since release` section is the source of truth for "is fix X
-installable yet" — every dated, issue-numbered entry there has landed on
-`main` but not yet shipped to PyPI. Check it before assuming a closed issue
-is installable.
+For changes on `main` awaiting release, see the pending entries in
+[`changelog.d/`](changelog.d/) and any remaining entries under
+[`CHANGELOG.md`](CHANGELOG.md)'s `## Unreleased` heading.
+
+## Changelog fragments
+
+For each new changelog entry, add one Markdown bullet in
+[`changelog.d/<issue>-<slug>.md`](changelog.d/README.md). At release time,
+`scripts/release_prep.py prepare` inserts the new version heading under
+`## Unreleased`, appends the fragments in filename order after any existing
+entries, and removes the consumed files. The release commit includes the
+updated `CHANGELOG.md` and those deletions.
+
+When an open `release/vX.Y.Z` branch incorporates newer changes from
+`main`, refresh its notes before merging the release PR:
+
+```bash
+python3 -I scripts/release_prep.py refresh --version X.Y.Z
+```
+
+Commit the updated release section, signoff notes and fragment deletions on
+the release branch. The previous dated release heading supplies the version
+anchor. Refresh preserves the prepared version and its original release date.
+The release PR's lint job runs the same command with `--check` after each
+update. Exit 1 means there are pending edits, and exit 2 identifies invalid
+release inputs. An ordinary same-version `prepare` still leaves pending
+entries for a future cut.
 
 ## One-time prerequisite (human-only — completed before v0.1.0; kept for reference)
 
@@ -161,12 +183,14 @@ depending on someone remembering. Design decisions:
   batch-runner rule above by construction. A patch is a manual override via the
   dispatch `version` input.
 - **A release PR, never a push to `main`** (branch protection rejects direct
-  pushes). `scripts/release_prep.py` bumps `base-version`, inserts the
-  `## X.Y.Z (date)` CHANGELOG heading below `## Unreleased`, and resolves the
+  pushes). `scripts/release_prep.py` bumps `base-version`, assembles the
+  versioned changelog section, and resolves the
   "first release after `vPREV`" notes in `docs/cli/signoff.md`; the workflow
   then runs `uv lock`, `scripts/gen_site_cli_data.py` and
-  `scripts/generate_deck_history.py --as-release vX.Y.Z`. Only one release PR
-  (`release/v*` branch) is open at a time. It is never auto-merged.
+  `scripts/generate_deck_history.py --as-release vX.Y.Z`. The prep refuses
+  (exit 2) when both `## Unreleased` and the fragment directory have no
+  entries. This stops an empty release before tagging (issue #6086). Only one
+  release PR (`release/v*` branch) is open at a time. It is never auto-merged.
 - **Tag on merge.** A `push` to `main` that touches `pyproject.toml` runs the
   tag job. It tags the commit only if its subject is
   `chore(release): bump version to X.Y.Z`, `base-version` equals `X.Y.Z` and
@@ -192,6 +216,14 @@ depending on someone remembering. Design decisions:
   PR is opened and again before tagging; if a `klt-*-native` pin is unpublished
   the job files (or refreshes in place) a single "Automated release blocked"
   issue and opens no PR or tag. `publish.yml` keeps its own copy of the gate.
+- **The GitHub Release is part of the pipeline.** After the PyPI upload
+  succeeds, `publish.yml`'s `github-release` job creates the GitHub Release
+  for the tag from the matching `## X.Y.Z (date)` section of `CHANGELOG.md`
+  (`scripts/release_notes.py`) and marks it latest. A section over GitHub's
+  125,000-character release-body cap is cut at a line boundary under 120k
+  characters and ends with links to the CHANGELOG at the tag and the PyPI
+  version. The job is idempotent: a re-run of `publish.yml` on an
+  already-released tag edits the existing release instead of failing.
 - **Re-run after a failed publish:** run `publish.yml` via "Run workflow" on the
   existing `vX.Y.Z` tag; do not re-tag.
 - `release-lag.yml` was retired; its check is the first step of `release.yml`.
@@ -204,14 +236,16 @@ workflow has not been exercised live; use a `dry_run` dispatch first.
 
 Let `X.Y.Z` be the new version.
 
-1. **Bump the version** on a branch, and merge it to `main` through a normal
-   PR:
+1. **Prepare the release** on a branch and merge it to `main` through a normal
+   PR.
 
    ```bash
    git checkout -b release/vX.Y.Z
-   # edit pyproject.toml: [tool.hatch.version] base-version = "X.Y.Z"
-   uv lock            # regenerate uv.lock to match
-   git add pyproject.toml uv.lock
+   python3 scripts/release_prep.py prepare --version X.Y.Z
+   uv lock
+   uv run python scripts/gen_site_cli_data.py
+   git add -A -- pyproject.toml uv.lock CHANGELOG.md changelog.d/ \
+     docs/cli/signoff.md site/src/data/cli.generated.json
    git commit -m "chore(release): bump version to X.Y.Z"
    git push -u origin release/vX.Y.Z
    gh pr create --title "chore(release): bump version to X.Y.Z" --body "Release X.Y.Z"
@@ -237,14 +271,12 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Fill in availability notes.** Replace "the next release after 0.7.0"
-   in the `--attest` / `--inventory` availability notes in
-   `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
-   release" note), in the same release PR or a follow-up. This step is
-   enforced: `scripts/release_prep.py prepare` refuses (exit 2) when
-   `docs/cli/signoff.md` still contains a "first/next release after" note
-   anchored on a release older than the one being bumped from — a missed
-   note fails the prep rather than shipping silently.
+4. **Verify availability notes.** Release preparation resolves the
+   `--attest` / `--inventory` availability notes in `docs/cli/signoff.md`
+   anchored on the version being superseded. Review other notes about
+   availability in the release PR. `scripts/release_prep.py prepare` refuses
+   (exit 2) if a "first/next release after" note still references an older
+   version.
 
 5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
@@ -266,12 +298,11 @@ Let `X.Y.Z` be the new version.
    reads the release, verb list and MCP tool count from
    `site/src/data/cli.generated.json`, which is generated from the newest
    `## X.Y.Z (YYYY-MM-DD)` heading in `CHANGELOG.md` and the CLI registry.
-   In the PR that adds that heading, run
-   `uv run python scripts/gen_site_cli_data.py` and commit the result.
+   Step 1 regenerates this file in the PR that adds the heading.
    `tests/test_site_cli_data.py` fails until you do, and the commit
    (under `site/`) is what triggers the site redeploy.
 
-**Changelog convention for deck changes.** Any `CHANGELOG.md` entry that
+**Changelog convention for deck changes.** Any changelog entry that
 alters a built-in deck's content hash (rules added, removed or adjusted in
 `sky130`, `gf180mcu`, `sg13g2`, ...) must include the literal phrase
 `deck hash changes`, so consumers pinning `provenance.deck.content_hash` can
@@ -294,7 +325,7 @@ search for it. Hashes are stable only per package version; see
       `scripts/check_native_extras.py`, which you can run first.
 - Automated path: review and merge the `chore(release)` PR; the tag job does
   the tag and dispatches `publish.yml`. The items below are the manual fallback.
-- [ ] `base-version` bumped in `pyproject.toml`; `uv lock` re-run.
+- [ ] Release prepared with `scripts/release_prep.py prepare` and `uv lock`.
 - [ ] Bump commit merged to `main` via a PR.
 - [ ] Annotated tag `vX.Y.Z` created on the merged commit on `main`.
 - [ ] `git push origin vX.Y.Z` — confirm `publish.yml` runs and succeeds.
