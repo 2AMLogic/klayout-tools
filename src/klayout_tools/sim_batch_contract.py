@@ -360,7 +360,14 @@ _CAPACITY_BACKOFF_BASE_S = 30.0
 _CAPACITY_BACKOFF_CAP_S = 600.0
 
 #: ``status.json`` states that mean the job is over, one way or another.
-BATCH_TERMINAL_STATES = ("done", "failed", "timeout")
+#: ``cancelled`` is written by 2am's fleet ``cancel`` verb before it
+#: terminates the job's instances (2am#6502, issue #4351).
+BATCH_TERMINAL_STATES = ("done", "failed", "timeout", "cancelled")
+
+#: ``error.code`` of a poll that observes :data:`CANCELLED_STATE` (issue
+#: #4351): terminal, nothing is re-launched, no results are coming.
+BATCH_JOB_CANCELLED_CODE = "batch_job_cancelled"
+CANCELLED_STATE = "cancelled"
 
 #: ``status.json`` states that mean "keep waiting". ``interrupted`` is
 #: included on purpose: Spot reclaimed the instance, and 2am's own

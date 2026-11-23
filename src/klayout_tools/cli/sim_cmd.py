@@ -48,6 +48,7 @@ from ..sim import SimError, run_sim
 from ..sim_batch_plan import print_dry_run_plan_line
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
+from .sim_job_cancel import _run_job_cancel as _run_job_cancel
 from .sim_job_status import _run_job_status as _run_job_status
 from .sim_measurement_text import print_measurement_head
 from .sim_pdk_text import _print_pdk as _print_pdk
@@ -81,15 +82,11 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
 def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
     """Usage failures of the single-request form of ``klt sim`` (``None`` =
     the arguments are fine)."""
-    if args.request is None and (
-        getattr(args, "op_lint", False) or getattr(args, "job_status", None) is None
-    ):
-        # Keep the pre---batch-set contract: a bare ``klt sim`` is an
-        # argparse-style usage failure (stderr message, SystemExit(2)).
-        # ``--job-status`` alone is exempt (issue #5810): it needs no
-        # request file, resolving bucket/region/profile from the
-        # ``KLT_BATCH_*`` environment and the fleet config instead.
-        # ``--op-lint`` is not exempt -- it runs on the request document.
+    # A bare ``klt sim`` stays an argparse-style usage failure (stderr,
+    # SystemExit(2)). The job-by-id modes (``--job-status`` #5810,
+    # ``--cancel`` #4351) need no request; ``--op-lint`` does (it reads it).
+    job_id_mode = not (vars(args).get("job_status") or vars(args).get("cancel"))
+    if args.request is None and (getattr(args, "op_lint", False) or job_id_mode):
         sys.stderr.write(
             "klt sim: error: the following arguments are required: "
             "request (or --batch-set REQUEST...)\n"
@@ -121,6 +118,8 @@ def run(args: argparse.Namespace) -> int:
         return misuse
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
+    if getattr(args, "cancel", None) is not None:
+        return _run_job_cancel(args)
     if getattr(args, "job_status", None) is not None:
         return _run_job_status(args)
     return _run_sweep(args)
@@ -222,6 +221,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
             ("--job-status", getattr(args, "job_status", None)),
+            ("--cancel", getattr(args, "cancel", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
             ("--timeout-s", getattr(args, "timeout_s", None)),
         )
