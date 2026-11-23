@@ -1,28 +1,13 @@
 """Label-derived ports and via-stack landing search for ``klt gen-compose``
 ``blocks[].cell`` blocks (issue #2927).
 
-A hand-drawn macro names its ports only by text labels sitting on the block's
-own routing, usually interior to the cell. :func:`parse_ports_from_labels`
-validates the opt-in ``blocks[].cell.ports_from_labels`` option and
-:func:`derive_label_ports` turns it into ordinary ``ports[]`` entries:
-
-1. every named label is resolved to the net under it (``LayoutToNetlist``
-   connectivity over the resolved PDK deck's ``metals``/``vias`` stack -- the
-   same connectivity model ``klt extract`` and #2210's ``landed_on_block``
-   use), and
-2. when a port carries an ``access`` block, the port net's own shapes are
-   searched for a landing point where the via ladder up to ``access.up_to``
-   (the very ladder :func:`~.gen_compose_routing._resolve_via_drop_layer`
-   makes the router draw at a pin, sized by the same helpers) keeps rule
-   clearance from every other net, via spacing against the macro's existing
-   cuts, and avoids caller-named keep-out layers.
-
-The derived port is reported on the net's own layer, so the router's existing
-via-drop ladder draws the stack at the chosen point; the search only decides
-*where* that is legal. The search is grid-based, bounded and deterministic:
-candidates are ranked by distance to the label (ties by ``x`` then ``y``).
-
-Loading the source cell defers to the composer when layout geometry is needed.
+The opt-in ``ports_from_labels`` setting converts a macro's text labels
+to ports on the underlying PDK metal/via connectivity, as in extraction.
+For an access port, the search tests the router's actual via ladder,
+array pitches and drawn pad footprints against other nets, existing vias
+and keep-outs. Candidates belong to the port net and are ordered by
+distance to the label, then by x and y. The composer loads the source cell
+when geometry is needed.
 """
 
 from __future__ import annotations
@@ -34,9 +19,8 @@ from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
 from .gen_compose_base import GenComposeError
+from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 from .gen_compose_routing import (
-    _landing_pad_side_um_for_layer,
-    _min_enclosing_margin_um_for_layer,
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
@@ -355,7 +339,9 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
 
 
 def _stack_sizes(
-    variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
+    variant: str,
+    ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...],
+    pad_override_um: float | None = None,
 ) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
     """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
     as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
@@ -363,11 +349,9 @@ def _stack_sizes(
     pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
     for via, lower, upper in ladder:
         for metal in (lower, upper):
-            side = _landing_pad_side_um_for_layer(variant, metal)
-            enclosure = _min_enclosing_margin_um_for_layer(variant, metal, via)
-            if enclosure is not None:
-                side = max(side, cuts[via] + 2 * enclosure[0])
-            pads[metal, via] = side
+            pads[metal, via] = _landing_pad_side_um_for_pair(
+                variant, metal, via, cuts[via], pad_override_um
+            )
     return pads, cuts
 
 
@@ -529,6 +513,7 @@ def _search_landing(
     net_layer: _LayerPair,
     label_xy: tuple[int, int],
     access: dict[str, Any],
+    pad_override_um: float | None = None,
 ) -> dict[str, Any]:
     """Find the nearest legal via-stack landing on ``net``; raises a
     ``GenComposeError`` listing per-category rejections when none exists."""
@@ -538,7 +523,7 @@ def _search_landing(
         raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    hop_pads_um, cuts_um = _stack_sizes(variant, ladder)
+    hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pads_um: dict[_LayerPair, float] = {}
@@ -624,6 +609,7 @@ def derive_label_ports(
     cell_name: str,
     spec: dict[str, Any],
     variant: str,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Resolve ``spec`` (from :func:`parse_ports_from_labels`) against the
     cell in ``gds_path``. Returns ``(ports, reports, warnings)`` in
@@ -650,7 +636,14 @@ def derive_label_ports(
         landing = None
         if entry["access"] is not None:
             landing = _search_landing(
-                nets, variant, name, net, metal, (x, y), entry["access"]
+                nets,
+                variant,
+                name,
+                net,
+                metal,
+                (x, y),
+                entry["access"],
+                pad_override_um,
             )
             if landing["truncated"]:
                 warnings.append(

@@ -575,9 +575,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
-        # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
-        # `measurements[].expr` produced no value; the runner may predate it.
+        # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
+        "expr_no_value",
         # Report-level (top-level `diagnostics[]`, issue #5385): process legs
         # with bit-identical results; a warning.
         "process_leg_check",
@@ -1424,40 +1424,39 @@ def reject_unsupported_analysis(kind: Any) -> None:
 
 
 def _version_components(text: str) -> tuple[int, ...] | None:
-    """Leading dotted integer components of a version string (``"44.2"`` ->
-    ``(44, 2)``, ``"7.10.0-opensource"`` -> ``(7, 10, 0)``), or ``None``."""
+    """Read leading dotted integers, including from versions with a suffix."""
     match = re.match(r"\s*(\d+(?:\.\d+)*)", text)
-    if match is None:
-        return None
-    return tuple(int(part) for part in match.group(1).split("."))
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
+def _version_satisfies_pin(pin: tuple[int, ...], found: str | None) -> bool | None:
+    """Compare the pinned components, returning None for an unreadable version."""
+    parsed = _version_components(found) if found else None
+    return parsed[: len(pin)] == pin if parsed is not None else None
 
 
 def _validate_engine_version_pin(request: dict[str, Any]) -> tuple[int, ...] | None:
-    """The request's ``engine_version`` pin as ``(major,)`` or ``(major,
-    minor)`` (issue #3041), ``None`` when unset."""
+    """Parse an optional major or major.minor engine pin (issue #3041)."""
     pin = request.get("engine_version")
     if pin is None:
         return None
     if not isinstance(pin, str) or not re.fullmatch(r"\d+(?:\.\d+)?", pin.strip()):
-        raise SimError(
-            "request.engine_version must be a string of the form 'MAJOR' or "
-            f"'MAJOR.MINOR' (got {pin!r})"
-        )
+        expected = "a string of the form 'MAJOR' or 'MAJOR.MINOR'"
+        raise SimError(f"request.engine_version must be {expected} (got {pin!r})")
     return _version_components(pin) or None
 
 
 def _check_engine_version_pin(
     pin: tuple[int, ...], found: str | None, engine: str, *, where: str
 ) -> None:
-    """Fail closed with ``engine_version_unmet`` unless ``found`` matches the
-    pin on every component the pin states (``"44"`` pins the major only)."""
-    required = ".".join(str(part) for part in pin)
-    parsed = _version_components(found) if found else None
-    if parsed is not None and parsed[: len(pin)] == pin:
+    """Raise engine_version_unmet when the reported version cannot satisfy the pin."""
+    matches = _version_satisfies_pin(pin, found)
+    if matches:
         return
+    required = ".".join(str(part) for part in pin)
     if found is None:
         detail = f"{where} reported no {engine} version"
-    elif parsed is None:
+    elif matches is None:
         detail = f"{where} reported an unparseable {engine} version {found!r}"
     else:
         detail = f"{where} found {engine} {found}"

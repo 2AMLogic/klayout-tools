@@ -106,12 +106,11 @@ A request naming both, or neither, is a request error.
   real (or caller-supplied real-parasitics) delays. The two are unrelated —
   `klayout_tools/post_route_sta.py` is this command's own backing module,
   named to avoid clobbering the pre-existing `klayout_tools/sta.py`.
-- **Not corner-searched `fmax_mhz`.** This version reports
-  `report_fmax_metric`'s own `1/(T-WNS)` extrapolated `fmax_mhz` (not a
-  bisected one) — tracked as follow-up work, not required for this
-  command's initial scope. Propagated-clock timing (the other early
-  "not yet" item) landed as `constraints.propagated_clock` (issue #2739) —
-  see "Propagated-clock timing" below.
+- **Frequency estimate.** The clock-based `fmax_mhz` estimate excludes
+  rise-to-fall and fall-to-rise paths, so it can overstate achievable frequency.
+  In a 50%-duty-cycle ASAP7 example, the eligible paths implied an 84.4 ps
+  period (11.85 GHz). A longer rise-to-fall path needed 343.25 ps for half
+  a cycle, limiting that clock to about 1.46 GHz.
 
 ## Request
 
@@ -150,7 +149,8 @@ primary clock’s ideal slew during analysis.
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. Mutually exclusive with `pdk.corners` below (issue #1871) — a request giving both is a request error. |
 | `pdk.corners` | array of string \| omitted | Additive field (issue #1871). A **list** of corner names to characterize the *same* loaded geometry against, in one request/response round trip, instead of a caller hand-rolling an external loop of N single-corner requests (see "Multi-corner characterization" below). Mutually exclusive with the scalar `pdk.corner` above. Must be a non-empty list of non-empty, mutually-distinct strings — unlike `klt place-and-route`'s `pdk.sweep_corners` (which *narrows* an already-enumerated shipped-corner set, so `[]` meaningfully means "sweep zero of them"), `corners` here *is* the primary corner selection, so an empty list is a request error, not "characterize nothing". |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
-| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay; per-port I/O delays can name any declared clock via the entry's `clock` key (issue #7399, see `constraints.input_delays`), while generated clocks and per-clock uncertainty are not supported. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.clocks` | array\<{port, period_ns}\> \| omitted | Additive field (issue #4241). The multi-clock alternative to `clock_port`/`clock_period_ns` — **mutually exclusive** with them (giving both is a request error). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list or a malformed entry are errors. One `create_clock -name <port> -period <p> [get_ports <port>]` is emitted per entry. The **first entry is the primary clock** and keeps every role `clock_port` has: the `-clock` of `set_input_delay`/`set_output_delay`, the `report_ports` / `false_path_from` anchors, and the non-clock-input exclusion. Secondary clock ports are not excluded from the default input delay; per-port I/O delays can name any declared clock via the entry's `clock` key (issue #7399, see `constraints.input_delays`), and every other I/O delay uses the primary clock. See [Generated clocks](#generated-clocks) for derived domains and the clock uncertainty section for primary-clock uncertainty. With `propagated_clock: true`, every declared clock is marked propagated. A single-entry list equals the shorthand. **Per-corner periods (issue #5240):** with `pdk.corners`, `period_ns` may instead be an object `{"<corner>": <positive number>, ...}` (primary or secondary clock) whose keys equal the `pdk.corners` names exactly — a missing or extra key, a map without `pdk.corners` (or with scalar `pdk.corner`), or a non-positive/non-numeric value is a request error. Each corner's session is timed with its own period; scalar periods are unchanged. |
+| `constraints.generated_clocks` | array of objects | A source clock port, linked target pin and either a divider or three edge indices per derived clock. See [Generated clocks](#generated-clocks). |
 | `constraints.clock_groups` | array\<array\<string\>\> \| omitted | Additive field (issue #4241). Each inner array names declared clock ports that form one group; emits `set_clock_groups -asynchronous -group [get_clocks {a}] -group [get_clocks {b}]`. At least two groups; every port must be a declared clock (an undeclared name is an error). **Without it OpenSTA times cross-domain paths as synchronous** — this command never guesses a relationship. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
@@ -306,11 +306,11 @@ bump. Reports without the field still verify, and `--check` treats
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
 | `constraint_completeness` | object | Additive field (issue #2780), present on every response and every `corners[]` entry. Whether every timing endpoint is constrained and every register is clocked in this session — **separate from `timing_status`**, which only says whether the slack numbers are measurements: a design can report a finite WNS (`timing_status: "constrained"`) and still have unconstrained endpoints or unclocked registers. `{status, unconstrained_endpoints, unclocked_registers, sample_limit}`; `status` is `"complete"` \| `"incomplete"` \| `"unknown"`. Each check is `{status: "ok" \| "unavailable", count, sample, truncated, reason}` — a check that could not run reports `count: null`, never `0`. See "Constraint completeness" below. |
-| `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
+| `fmax_mhz` | number \| null | OpenROAD's `timing__fmax` in Hz, converted to MHz and rounded to four decimals. For each clock, OpenSTA takes the largest `period − path slack` among eligible same-clock, same-edge, single-cycle setup-side paths, including port paths. OpenROAD reports the highest reciprocal across clocks with a usable period. If none qualify, it tries an unconstrained combinational delay estimate. An absent metric yields null. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
 | `worst_*_path.stages` | object \| omitted | Additive field (issue #5783), present inside each `worst_setup_path` / `worst_hold_path` record only when `constraints.report_path_stages` is `true` — on the single-corner response and on every `corners[]` entry. `{status, reason, stages}`: that record's own path resolved to a per-stage `{pin, cell, incr_ns, path_ns}` list, or `stages: null` with a stated `reason` when the breakdown is not available. Never fabricated. See "Per-stage delay breakdown" below. |
-| `worst_paths_by_group` | object | Additive field (issue #5424), present on the single-corner response and on every `corners[]` entry. Every per-path-group worst path the session found, unreduced: `{status, reason, setup, hold}`, each side a list of `{check_type, engine_check_role, startpoint, endpoint, slack_ns}` sorted worst-slack-first (engine order kept on ties). `status` is `"ok"` (a side with no constrained path is an empty list) or `"unavailable"` with both lists empty and the same `reason` the `worst_*_path` records carry. This is where a **data-setup** WNS is read when an asynchronous recovery check binds `worst_slack_ns` / `fmax_mhz`. See "Response: `worst_paths_by_group`" below. |
+| `worst_paths_by_group` | object | Additive field (issue #5424), present on the single-corner response and on every `corners[]` entry. Every per-path-group worst path the session found, unreduced: `{status, reason, setup, hold}`, each side a list of `{check_type, engine_check_role, startpoint, endpoint, slack_ns}` sorted worst-slack-first (engine order kept on ties). `status` is `"ok"` (a side with no constrained path is an empty list) or `"unavailable"` with both lists empty and the same `reason` the `worst_*_path` records carry. This is where a **data-setup** WNS is read when an asynchronous recovery check determines `worst_slack_ns`. See "Response: `worst_paths_by_group`" below. |
 | `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `instance_paths` | object \| omitted | Additive field (issue #5754), present only when `constraints.report_instances` is given — on the single-corner response and on every `corners[]` entry. `{"<instance>": {"into": {"setup", "hold"}, "out_of": {"setup", "hold"}}}` in request order; the four records per instance are path records of the `worst_*_path` shape (`consistent_with_aggregate` always `null`). `into` is the worst path arriving at the instance's input pins; `out_of` is the worst path launching from its output pins. Output size is bounded by `entries × 4` records, never by design size or the instance's pin count. See "Per-instance path queries" below. |
 | `false_path_from` | array \| omitted | Additive field (issue #2968), present only when `constraints.false_path_from` is given: the exclusion list that was applied, in request order. On a multi-corner response it is hoisted to the top level (it is the same for every corner), not repeated in `corners[]`. |
@@ -1085,6 +1085,50 @@ identifier grammar) but un-escaped back to their real, design-side spelling
 before this correlation check runs — a caller-supplied SPEF with ordinary
 bus/hierarchy naming is not penalized for it.
 
+## Generated clocks
+
+Use `constraints.generated_clocks` when a cell output clocks other registers.
+For a flip-flop dividing a 10 ns clock by two, declare
+
+```json
+{
+  "clock_port": "clk",
+  "clock_period_ns": 10,
+  "generated_clocks": [
+    {"source": "clk", "pin": "div_ff/Q", "divide_by": 2}
+  ]
+}
+```
+
+`source` names the primary port or a port in `constraints.clocks`. Each
+`pin` names one literal linked pin, including numeric bus indices such as
+`divider[2]/Q`. Whitespace, wildcards, double quotes,
+backslashes, braces, semicolons, dollar signs and leading dashes are rejected. Each pin can appear once. Supply exactly one of
+`divide_by` (an integer of at least two) or `edges` (three strictly
+increasing positive integer edge numbers). For example, `"edges": [1, 3, 5]`
+selects source transitions 1, 3 and 5 for the generated rising, falling and
+next rising edges. A generated clock cannot be the source of another declaration.
+
+After linking and declaring the source clocks, the session resolves every
+source and target. A missing or ambiguous match fails the request with its
+entry index and name. In array order, OpenSTA creates `klt_gen_clk_0`,
+`klt_gen_clk_1`, and so on with `create_generated_clock`. These names must
+be available. DEF-mode `propagated_clock: true` propagates them as well.
+
+The flat response, or each entry of `corners[]`, echoes the definitions in
+`generated_clocks` with their `index`, generated `name`, measured `period_ns`
+and number of `clocked_registers` in that session. An unavailable measurement
+is null with a `reason`. Omitting the array or supplying `[]` emits no generated
+clock commands or response field.
+
+On the Sky130 divider fixture with OpenROAD 26Q3-1510, omitting the declaration
+left `sink_ff/CLK` unclocked and `sink_ff/D` and `slow_q` unconstrained.
+Both divider forms above produced a 20 ns clock with one downstream register
+and cleared those findings. The undivided domain retained its 10 ns clock and
+two registers. The setup path from `source_ff` to `sink_ff` launched at 10 ns
+and captured at 20 ns. An additional register on a separate, undeclared clock
+still appeared in the completeness report.
+
 ## Propagated-clock timing (`constraints.propagated_clock`, issue #2739)
 
 By default every corner is timed with an **ideal** clock: `create_clock`
@@ -1529,9 +1573,10 @@ only the head row can bind the session aggregate.
 (data setup, asynchronous recovery, clock-gating setup — see "Violation
 counts: check families" above), and `worst_slack_ns` is the aggregate over
 all three. When the worst recovery check is worse than every data path, that
-aggregate describes the **reset network**, and `fmax_mhz` — `1/(T-WNS)` over
-the same aggregate — is a reset-network number, not a datapath frequency.
-Filter this field by `check_type` to get the family you actually gate on:
+aggregate describes the **reset network**. The worst path can fall outside
+the paths eligible for the clock-frequency estimate, so `worst_slack_ns`
+alone cannot reconstruct `fmax_mhz`. Filter the setup rows by `check_type`
+to read the data-path slack.
 
 ```python
 setup_rows = response["worst_paths_by_group"]["setup"]
@@ -1540,12 +1585,8 @@ data_setup_wns = next(
 )  # None => no data setup path in this session, not "0 slack"
 ```
 
-`worst_slack_ns`, `total_negative_slack_ns`, `fmax_mhz`, both violation
-counts and `worst_*_path` are **unchanged** by this field: `fmax_mhz` remains
-the all-family setup aggregate, so a data-only `fmax` has to be derived from
-the filtered slack above and `clock_targets.clock_period_ns` — this command
-does not report one. The field adds no engine query; it is the rows the
-session already parsed.
+Use the data setup row to identify the path. Its launch and capture edges in
+the timing report determine the time available for data to propagate.
 
 ### Boundary example
 

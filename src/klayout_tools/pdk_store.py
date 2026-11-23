@@ -145,20 +145,13 @@ def resolved_variant_dir(variant: str) -> str | None:
     its models from rather than being reported as unavailable. The import is
     deferred because :mod:`klayout_tools.pdk` imports this module.
     """
-    from .pdk import PdkNotFoundError, find_pdk
+    from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 
     try:
         info = find_pdk(variant=variant)
     except (PdkNotFoundError, OSError, ValueError):
         return None
-    root = info.get("root")
-    name = info.get("variant")
-    if not (isinstance(root, str) and root and isinstance(name, str) and name):
-        return None
-    # A flat, single-PDK install (issue #522) *is* its own variant directory;
-    # a nested open_pdks store holds it as `<root>/<name>`.
-    nested = os.path.join(root, name)
-    return nested if os.path.isdir(nested) else root
+    return variant_dir_of(info)
 
 
 def client_pdk_stamp(variant: Any, root: Any = None) -> dict[str, Any] | None:

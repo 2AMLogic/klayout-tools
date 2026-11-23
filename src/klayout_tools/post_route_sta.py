@@ -64,10 +64,10 @@ drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
 bug, not just duplicated code.
 
-Scope deliberately excluded from the first version and landed since: a
-``propagated_clock`` request option (issue #2739, below). Still excluded
-(not required for this issue): a bisected (rather than
-``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+Propagated-clock timing is available through ``propagated_clock`` (issue #2739).
+``fmax_mhz`` comes from OpenROAD's ``report_fmax_metric``. Its clock estimate
+uses same-clock, same-edge, single-cycle paths and can overstate achievable
+frequency when an opposite-edge path limits the period.
 
 **Propagated-clock timing (issue #2739).** By default every analyzed corner
 is timed with an **ideal** clock: ``create_clock`` alone, no
@@ -256,6 +256,7 @@ from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
+from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
 from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
@@ -1183,7 +1184,7 @@ def _dispatch_sta(
         "worst_hold_path": corner_fields["worst_hold_path"],
         # Additive field (issue #5424): the unreduced per-path-group rows
         # behind the two records above -- how a caller reads a data-setup
-        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        # WNS when an async recovery check determines `worst_slack_ns`.
         "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
@@ -1191,14 +1192,9 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
-    if "wire_load" in corner_fields:
-        response["wire_load"] = corner_fields["wire_load"]
-    if "port_paths" in corner_fields:
-        response["port_paths"] = corner_fields["port_paths"]
-    # Additive field (issue #5754): present only when the request named
-    # `constraints.report_instances`.
-    if "instance_paths" in corner_fields:
-        response["instance_paths"] = corner_fields["instance_paths"]
+    for field in ("wire_load", "port_paths", "instance_paths", "generated_clocks"):
+        if field in corner_fields:
+            response[field] = corner_fields[field]
     # Additive field (issue #2968): the applied exclusion list, present only
     # when the request named `constraints.false_path_from`.
     if constraints.false_path_from:
@@ -1406,7 +1402,10 @@ def _run_corner_session(
         # error it is, ahead of the generic engine-failure message.
         port_errors = _parse_port_check_errors(completed.stdout or "")
         if port_errors:
-            raise PostRouteStaError(_port_check_error_message(port_errors))
+            raise PostRouteStaError(
+                _generated.link_error(port_errors)
+                or _port_check_error_message(port_errors)
+            )
         _check_multicycle_errors(completed.stdout or "", multicycle)
         if completed.returncode != 0:
             raise PostRouteStaError(
@@ -1536,6 +1535,7 @@ def _run_corner_session(
     )
 
     resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
+    corner_fields.update(_generated.response(clock_extras, stdout))
     return corner_fields, resolution
 
 
@@ -2022,6 +2022,10 @@ def _validate_constraints(
         clock_port = constraints.get("clock_port")
         clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
+        if constraints.get("generated_clocks"):
+            raise PostRouteStaError(
+                "constraints.generated_clocks[0] requires a declared source clock"
+            )
         raise PostRouteStaError("request.constraints.clock_port is required")
     if isinstance(clock_period_ns, dict):
         clock_period_ns = validate_period(  # values reach create_clock -period
@@ -2097,23 +2101,22 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
 
 
 def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
-    """The multi-clock additions beyond the primary clock (issue #4241):
-    ``{"clocks": [{port, period_ns}, ...secondary], "groups": [[port, ...]]}``,
-    or ``None`` when the request is the plain single-clock shorthand with no
-    ``clock_groups`` -- which keeps the generated Tcl byte-identical to the
-    pre-#4241 output. ``constraints.clock_groups`` names declared clocks only
-    and is emitted as ``set_clock_groups -asynchronous``."""
+    """Return None for one base clock to preserve its original Tcl and JSON (#4241)."""
     clocks = _validate_clocks_list(constraints)
+    declared = (
+        {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
+    )
+    generated = _generated.validate(constraints, declared)
     groups_raw = constraints.get("clock_groups")
-    groups: list[list[str]] = []
-    if groups_raw is not None:
-        declared = (
-            {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
-        )
-        groups = _validate_clock_groups(groups_raw, declared)
-    if len(clocks) <= 1 and not groups:
+    groups = (
+        _validate_clock_groups(groups_raw, declared) if groups_raw is not None else []
+    )
+    if len(clocks) <= 1 and not groups and not generated:
         return None
-    return {"clocks": clocks[1:], "groups": groups}
+    extras = {"clocks": clocks[1:], "groups": groups}
+    if generated:
+        extras["generated_clocks"] = generated
+    return extras
 
 
 def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str]]:
@@ -2760,24 +2763,12 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
 
 
 def _propagated_clock_lines(clock_port: str) -> list[str]:
-    """``set_propagated_clock`` (issue #2739) on exactly the clock object
-    :func:`_clock_lines` created -- ``[get_clocks <clock_port>]``, not
-    ``[all_clocks]``: this session has exactly one clock (the one this
-    command itself defines), and naming it keeps the command honest if a
-    future session shape ever loads more than one. Emitted immediately
-    after ``create_clock`` and before any I/O delay / SPEF / metric
-    collection, so every report the session produces is the propagated
-    analysis. The clock-port spelling matches :func:`_clock_lines`'s own
-    (`_tcl_literal`-quoted -- the same string ``create_clock -name`` sees,
-    issue #5708)."""
+    """Quote the clock name so Tcl preserves literal bus brackets and spaces (#5708)."""
     return [f"set_propagated_clock [get_clocks {_tcl_literal(clock_port)}]"]
 
 
 def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
-    """Issue #4241: one ``create_clock`` per secondary clock, then any
-    ``set_clock_groups -asynchronous``. Empty for a single-clock request.
-
-    Clock groups are braced Tcl words (no substitution)."""
+    """Declare secondary clocks and asynchronous groups before derived clocks."""
     if not clock_extras:
         return []
     lines = [
@@ -2791,7 +2782,12 @@ def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
             "set_clock_groups -asynchronous "
             + " ".join(f"-group [get_clocks {{{' '.join(g)}}}]" for g in groups)
         )
-    return lines
+    return lines + _generated.constraint_lines(
+        clock_extras.get("generated_clocks", []),
+        _PORT_CHECK_BEGIN,
+        _PORT_CHECK_END,
+        _PORT_CHECK_EXIT_CODE,
+    )
 
 
 def _clock_latency_lines() -> list[str]:
@@ -3585,8 +3581,10 @@ def _sta_script_lines(
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
         if clock_extras:
-            for extra in clock_extras["clocks"]:
-                lines += _propagated_clock_lines(extra["port"])
+            for name in [e["port"] for e in clock_extras["clocks"]] + [
+                g["name"] for g in clock_extras.get("generated_clocks", [])
+            ]:
+                lines += _propagated_clock_lines(name)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _derate.timing_derate_lines(timing_derate)
     lines += _request_io_delay_lines(
@@ -3637,6 +3635,7 @@ def _sta_script_lines(
     # Before the completeness query, which must stay the script's last
     # statements (issue #2780): it can take the session down.
     lines += _electrical_check_lines()
+    lines += _generated.evidence_lines(clock_extras)
     lines += _constraint_completeness_lines()
     return lines
 
@@ -3753,6 +3752,7 @@ def _sta_netlist_script_lines(
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
+    lines += _generated.evidence_lines(clock_extras)
     lines += _constraint_completeness_lines()
     return lines
 

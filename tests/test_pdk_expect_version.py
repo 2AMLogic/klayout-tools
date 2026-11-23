@@ -151,6 +151,38 @@ def test_store_exact_string_pin_matches_in_store_namespace(capsys, tmp_path):
     assert report["version_expectation"]["installed"] == "2026.11.14"
 
 
+@pytest.mark.parametrize(
+    ("version", "pin"), [("2026", "2026"), ("123456", "123456"), ("ABCDEF", "abcdef")]
+)
+def test_store_short_hex_pin_matches_identical_version(capsys, tmp_path, version, pin):
+    # Issue #6298: an all-hex store version shorter than git's 7-char
+    # abbreviation floor is still byte-identical to the pin, so it must
+    # match, not mismatch (case-insensitively, like the prefix path).
+    _install(tmp_path / "r", store={"version": version})
+    code, report, err = _run(capsys, tmp_path, "find", "--expect-version", pin)
+    assert code == 0 and err == ""
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": pin,
+        "installed": version,
+    }
+
+
+def test_open_pdks_short_hex_stamp_pin_matches_identical_stamp(capsys, tmp_path):
+    # Issue #6298: same equality short-circuit for an explicit
+    # `open_pdks <short-hex>` pin against an identical SOURCES stamp.
+    _install(tmp_path / "r", "open_pdks 2026\n")
+    code, report, err = _run(
+        capsys, tmp_path, "find", "--expect-version", "open_pdks 2026"
+    )
+    assert code == 0 and err == ""
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": "open_pdks 2026",
+        "installed": "open_pdks 2026",
+    }
+
+
 def test_store_open_pdks_stamp_pin_is_unknown(capsys, tmp_path):
     # An explicit `open_pdks <sha>` stamp names the SOURCES namespace; against
     # a store install the namespaces differ, so the result stays `unknown`.
