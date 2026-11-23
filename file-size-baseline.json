@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 2647
+      "lines": 2646
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,11 +509,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2128
+      "lines": 2127
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1332
+      "lines": 1330
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
