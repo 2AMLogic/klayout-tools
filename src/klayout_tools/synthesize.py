@@ -4096,15 +4096,15 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
     {
         "run_id",
         "netlist_path",
+        "stats_path",
         "script_path",
         "run_script_path",
         "restructured_netlist_path",
         "log_path",
         "stage2_script_path",
         "stage2_log_path",
-        # Issue #2635: `macros[].blackbox_path` is inside the run directory
-        # whenever this run *generated* the stub from a LEF, so it carries
-        # the same per-run `run_id` every other key here does and would
+        # A stub generated from LEF (#2635) lives under the run directory.
+        # Its `macros[].blackbox_path` carries the run ID and would
         # otherwise make every rerun diff report a spurious difference.
         # `macros[].lef`/`.lib`/`.gds`/`.verilog_blackbox` are caller-
         # supplied inputs, stable across reruns, and deliberately stay in
