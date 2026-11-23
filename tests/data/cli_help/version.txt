@@ -10,3 +10,4 @@ an unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
 options:
   -h, --help show this help message and exit
   --format {text,json} output format (default: text)
+  --require COMMAND top-level verb this install must provide; repeat the flag or separate names with commas. Exit 3 if any is missing

@@ -11,9 +11,12 @@ was:
 * ``PlaneClimbContext.climb_leg`` -- the automatic metals-stack **plane
   climb** (issue #6920): a leg the fixed one-jog backbone cannot route on
   its own plane -- because the shape reaches a pin from behind (#1895),
-  plows through a placed block's drawn metal, or crosses a net routed
-  earlier -- is retried, plane by plane up the resolved PDK's own
-  ``metals`` stack, before the net is reported unroutable.
+  plows through a placed block's drawn metal, crosses a net routed
+  earlier, crosses a self-net's or own-block's own pad metal (#433/#453/
+  #1527), or would merge with a guard/collector ring's own loop (#199
+  case 2 / #434, plane-conditional since #1960) -- is retried, plane by
+  plane up the resolved PDK's own ``metals`` stack, before the net is
+  reported unroutable.
 
 The climb is the automated form of the escape the #1895 rejection text
 already names by hand ("route to a layer_role with a metal2/via stack
@@ -53,12 +56,32 @@ from .gen_compose_plane_change import RouteConflict, _leg_conflict_reason
 #: ("from behind") family and the block-interior crossings come from
 #: ``gen_compose_routing._obstacle_rejection_reason``; the three
 #: already-routed-net fragments from ``gen_compose_pad_conflicts`` -- the
-#: route-vs-route gate ``route_bundle()`` itself runs; the #7325 fragment
-#: from ``gen_compose_pad_conflicts``' pad-vs-other-block contact check --
-#: a pad clear of the block on a higher plane lifts the leg. Every other
-#: class (a too-narrow channel, a closed guard ring, an unresolvable via
-#: drop) is a property of the pin pair, not of the plane, and is left
-#: alone.
+#: route-vs-route gate ``route_bundle()`` itself runs. The pad-contact marker
+#: covers a landing pad touching another net's block on the current plane.
+#:
+#: The self-net classes (``#433``'s pad footprint, ``#453``'s degenerate
+#: same-facing jog and drawn-metal overlap, ``#1527``'s own-block escape,
+#: and the ``leg's drawn``-family deck-spacing conflict ``#1904`` reports)
+#: each name the met2/via escape in their own remedy text and are
+#: layer-guarded at the point of the check -- ``#433`` skips a pad on
+#: another physical layer outright, and the drawn-metal reads read the
+#: obstacle's geometry *on the route layer* (empty for a generator block on
+#: a plane it draws nothing on) -- so the climbed retry re-evaluates every
+#: one against the candidate plane's own geometry exactly as the climb's
+#: full re-run contract requires (#6912).
+#:
+#: The ring classes (``#199`` case 2's closed ring, ``#434``'s
+#: opening-crossing family) were deliberately left out of the #6920 climb
+#: on the theory they were "a property of the pin pair, not of the plane".
+#: They are plane-conditional since #1960: ``_leg_plane_clears_ring``
+#: proves a backbone drawn on a plane at least one via above the ring's
+#: own conductor -- with every via-drop landing pad clear of the ring's
+#: trace -- shares no conductor with the loop, and the retry runs it with
+#: the climbed plane as the route layer (#6912: an own-ringed ``mos_array``
+#: group in a mixed row is otherwise unroutable, the exact "needs no
+#: floorplan change at all" escape #1960 documented for ``gen-compose``).
+#: Still left alone: a too-narrow channel, an unresolvable via drop, and a
+#: gapped ring that reports too few side ports to check at all.
 _CLIMBABLE_REASON_MARKERS = (
     "reaches the pin from behind",
     "through unrelated block",
@@ -69,6 +92,12 @@ _CLIMBABLE_REASON_MARKERS = (
     "shares a conductive edge with already-routed net",
     "shares a conductive corner with already-routed net",
     "a pad touches a block hosting no pin of its net",
+    "self-net backbone crosses",
+    "self-net between two same-facing ports",
+    "self-net's drawn",
+    "leg's drawn",
+    "has a closed guard/collector ring",
+    "'s ring on its",
 )
 
 

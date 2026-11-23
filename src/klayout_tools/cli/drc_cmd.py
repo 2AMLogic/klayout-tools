@@ -59,13 +59,11 @@ from ..deck_hash_assertion import assert_deck_hash
 from ..drc import (
     REQUEST_SCHEMA,
     DrcError,
-    check_drc_report,
     drc_exit_code,
     list_deck_rules,
     load_request_arg,
     load_rule_category_manifest,
     parse_rule_selectors,
-    rerun_drc_report,
     run_drc,
     run_drc_klayout_engine,
 )
@@ -73,6 +71,7 @@ from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from . import _drc_list_categories
 from . import _drc_native as native_deck
 from . import _request_document as reqdoc
+from ._drc_check import run_check as _run_check
 from ._drc_request_fields import (
     _expect_deck_hash,
     _expect_rule_categories,
@@ -82,8 +81,6 @@ from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
 from .output import (
     emit_error,
     emit_success,
-    render_check_text,
-    render_rerun_drift,
     write_json_file,
 )
 
@@ -92,6 +89,7 @@ EXIT_VIOLATIONS = 3
 #: Aliases for the --check/--rerun outcome (issue #1106) -- same numeric
 #: values as a normal run's 0/3 split (see this module's docstring), just
 #: named for the "match"/"drifted" vocabulary those modes report under.
+#: Kept as the canonical 0/3 anchor `equiv_cmd`/`synthesize_cmd` cite in prose.
 EXIT_MATCH = EXIT_CLEAN
 EXIT_DRIFTED = EXIT_VIOLATIONS
 
@@ -218,66 +216,6 @@ def _non_default_flags(
         for dest, (option, default) in sorted(args.request_argv_flags.items())
         if dest not in allowed and getattr(args, dest, default) != default
     ]
-
-
-def _run_check(args: argparse.Namespace) -> int:
-    if args.output is not None:
-        # Issue #4393: --check emits a verification result, not a run report.
-        return emit_error(
-            "drc",
-            "-o/--output cannot be combined with --check: --check emits no "
-            "run report to write",
-            args.format,
-        )
-    if args.waivers is not None:
-        # Issue #3483: like --rules, the waivers a report was run with are
-        # recorded in its provenance and replayed by `--check --rerun`.
-        return emit_error(
-            "drc",
-            "--waivers cannot be combined with --check: --check --rerun "
-            "replays the committed report's own recorded waivers file",
-            args.format,
-        )
-    if args.tile is not None:
-        # Issue #4226: the abutment context a report was run with is
-        # recorded in its `tile` echo and replayed by `--check --rerun`.
-        return emit_error(
-            "drc",
-            "--tile cannot be combined with --check: --check --rerun replays "
-            "the committed report's own recorded tile",
-            args.format,
-        )
-    if args.expect_deck_hash is not None:
-        # Issue #5806: a fresh-run assertion; --check re-verifies the
-        # committed report's own recorded deck hash instead.
-        return emit_error(
-            "drc",
-            "--expect-deck-hash cannot be combined with --check: --check "
-            "verifies the committed report's own recorded deck hash",
-            args.format,
-        )
-    if args.rules is not None:
-        # Issue #2768: `--check` verifies a committed report as it was run;
-        # `--rerun` replays that report's own recorded `rule_selection`, so a
-        # second, argv-supplied selection would be ambiguous.
-        return emit_error(
-            "drc",
-            "--rules cannot be combined with --check: --check --rerun replays "
-            "the committed report's own recorded rule selection",
-            args.format,
-        )
-    try:
-        run = rerun_drc_report if args.rerun else check_drc_report
-        result = run(args.check, input_path=args.file, deck_path=args.deck_file)
-    except DrcError as exc:
-        return emit_error("drc", str(exc), args.format)
-    except pdk_module.PdkNotFoundError as exc:
-        return emit_error("drc", str(exc), args.format)
-
-    text_renderer = render_rerun_drift if args.rerun else render_check_text
-    emit_success(result, args.format, text_renderer)
-
-    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 #: Every top-level field a ``klt drc`` request document may carry (issue

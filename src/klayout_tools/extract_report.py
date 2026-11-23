@@ -21,22 +21,23 @@ helpers -- :func:`_describe_layers_in_set`, :func:`_pin_index_by_net_id`
 and :func:`_each_pin_net` -- are private to this module (their only callers
 are its own siblings), so ``extract.py`` does not import them.
 
-:func:`_describe_devices` still needs the
-``_PARAM_PRECISION_UM``/``_PARAM_PRECISION_FARAD``/``_PARAM_PRECISION_OHM``
-rounding tunables, which stay in ``extract.py`` because they have other
-callers there. That import is deferred into the function body -- the same
-convention ``extract_parasitics.py`` already uses for its own
-back-references -- because ``extract.py`` imports *this* module at its top
-level, so a module-level ``from .extract import ...`` here would be a
-circular import evaluated mid-load.
+The extraction report and the parasitic writers share precision and feed
+constants from ``extract_base``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, ParasiticsDeck
+from .extract_base import (
+    _PARAM_PRECISION_FARAD,
+    _PARAM_PRECISION_OHM,
+    _PARAM_PRECISION_UM,
+    MOM_FEED_TOKENS,
+)
 from .extract_parasitics import spice_safe_net_name
 
 if TYPE_CHECKING:
@@ -83,22 +84,6 @@ def _describe_devices(
     itself is ``None`` (a caller with none to offer, matching
     ``net_label_positions``'s own default-empty convention below).
     """
-    # Deferred (call-time) import, not a module-level one: `extract.py`
-    # imports this module at its own module scope (mirroring the
-    # `extract_spef.py`/`extract_abstract.py`/`extract_parasitics.py`
-    # precedent), so a module-level `from .extract import ...` here would be a
-    # circular import evaluated during that very load. The three
-    # `_PARAM_PRECISION_*` tunables stay in `extract.py` because they have
-    # other callers there -- this defers the back-reference until
-    # `_describe_devices` is actually called, by which point `extract.py` has
-    # finished importing.
-    from .extract import (
-        _PARAM_PRECISION_FARAD,
-        _PARAM_PRECISION_OHM,
-        _PARAM_PRECISION_UM,
-        MOM_FEED_TOKENS,
-    )
-
     devices: list[dict[str, Any]] = []
     device_counts: dict[str, int] = {}
     instance_paths = device_instance_paths or {}
@@ -443,19 +428,9 @@ def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
     """Map each promoted pin's underlying net's ``cluster_id`` to its 0-based
     position in ``circuit.each_pin()`` order -- issue #1540.
 
-    This is the exact order ``kdb.NetlistSpiceWriter`` writes a circuit's
-    ``.SUBCKT`` header / instance-line port list in (both iterate the same
-    ``Circuit.each_pin()`` sequence), so a caller can resolve a specific
-    ``.SUBCKT`` port index straight back to a ``nets[]`` entry via
-    ``net_id`` -- positionally, without re-matching by (possibly collided)
-    name and without a separate ``klt lvs`` run against a reference
-    schematic. Keyed by ``cluster_id`` rather than net identity/index so it
-    composes directly with :func:`_net_label_positions`'s own keying and
-    with the pre-existing ``net_id`` convention (issue #765/#811). A pin
-    whose net has ``cluster_id == 0`` (see :func:`_net_label_positions`'s
-    docstring) collapses onto the same dict key as any other such pin --
-    an accepted, documented edge case, since a cluster-less net already has
-    no position to disambiguate by either.
+    KLayout writes SPICE ports in this order. Matching by cluster ID keeps
+    separately drawn nets with the same name distinct. Manually created
+    nets can share cluster ID zero and lack geometric disambiguation.
     """
     result: dict[int, int] = {}
     for index, pin in enumerate(circuit.each_pin()):
@@ -465,23 +440,31 @@ def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
     return result
 
 
+def _net_structural_id(net: kdb.Net, runset_label_ids: set[int] | None) -> str | None:
+    """Identify an unnamed net by its own device terminals, even if names collide."""
+    if net.name:
+        if runset_label_ids is None or net.pin_count():
+            return None
+        numbered = re.fullmatch(r"\$[1-9][0-9]*", net.name)
+        if not numbered or net.cluster_id in runset_label_ids:
+            return None
+    attachments = sorted(
+        f"{ref.device().expanded_name()}.{ref.terminal_def().name.lower()}"
+        for ref in net.each_terminal()
+    )
+    return f"$anon<{','.join(attachments)}>" if attachments else None
+
+
 def _describe_nets(
     circuit: kdb.Circuit,
     net_label_positions: Mapping[int, list[dict[str, Any]]] | None = None,
+    *,
+    runset_label_ids: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the response's ``nets[]`` array.
+    """Describe top-level nets, including their drawn labels and SPICE pin positions.
 
-    ``net_id``/``pin_index``/``label_positions_um`` (issue #1540) are
-    additive fields disclosing, per net, the exact identity KLayout's own
-    ``cluster_id`` assigns it, its 0-based position in the written
-    ``.SUBCKT``'s port order (``None`` when the net is not a promoted pin),
-    and the drawn-label geometry that named it -- see
-    :func:`_net_label_positions`/:func:`_pin_index_by_net_id`'s docstrings
-    for why a caller needs these when several distinct nets collide on one
-    ``name`` (a flat extraction of a layout with internally-repeated
-    sub-cells, e.g. a ring of identical stages). ``net_label_positions``
-    defaults to an empty mapping -- a caller that has none to offer (or a
-    net with no drawn label) simply gets ``label_positions_um: []``.
+    Use the same cluster IDs as :func:`_net_label_positions` and
+    :func:`_pin_index_by_net_id` to distinguish nets sharing a name.
     """
     pin_nets = {pin.expanded_name() for pin in _each_pin_net(circuit)}
     pin_index_by_net_id = _pin_index_by_net_id(circuit)
@@ -495,6 +478,7 @@ def _describe_nets(
                 "name": spice_safe_net_name(raw_name),
                 "pin": raw_name in pin_nets,
                 "device_count": net.terminal_count(),
+                "structural_id": _net_structural_id(net, runset_label_ids),
                 "net_id": net.cluster_id,
                 "pin_index": pin_index_by_net_id.get(net.cluster_id),
                 "label_positions_um": label_positions.get(net.cluster_id, []),

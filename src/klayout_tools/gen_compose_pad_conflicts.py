@@ -31,17 +31,15 @@ path keeps resolving unchanged -- the same convention the earlier splits
 of this family (``gen_compose_layer_rules``, ``gen_compose_via_cuts``,
 ``gen_compose_landing_pads`` itself) established.
 
-Same conventions as the modules it was split from:
-``gen_compose.py``/``gen_compose_routing.py`` names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_drop_array_extra_um``) are imported *inside*
-the functions that use them, so this module never has a load-time
-dependency back on them.
+The resolver and conflict checks share the landing-pad and via-cut geometry.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+
+from .gen_compose_base import _VIA_LANDING_SIZE_UM, _drop_array_extra_um
 
 
 def _pad_is_intermediate(
@@ -290,10 +288,8 @@ def _drawn_pad_side_um(
     with the mode answers its per-pair floor directly, so report that
     rather than re-max-ing the baseline over it.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
     from .gen_compose_ladder_floors import _intermediate_landing_pad_floor_um
     from .gen_compose_layer_rules import _landing_pad_floor_um
-    from .gen_compose_routing import _drop_array_extra_um
     from .gen_compose_via_cuts import via_drop_cut_side_um
 
     if getattr(side_for_pair, "minimal_ladder", False) and _pad_is_intermediate(
