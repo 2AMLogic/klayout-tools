@@ -5,14 +5,19 @@ ratchet, following the same precedent as the ``signoff_*`` module splits:
 the "not applicable" (issue #2865) and justified declared-gap (issue #5599)
 renderers -- the count suffixes on the ``T1: ...`` summary line and the
 per-item evidence listings -- live here. Both dispositions render beside an
-item that is still ``unmet``; neither ever reads as ``met``.
+item that is still ``unmet``; neither ever reads as ``met``. So does the
+composition rendering (issue #6927): a ``met_by_composition`` row is real
+sub-block evidence that still does not satisfy the tier, so it renders as
+its own ``[COMP ]`` marker, never ``MET``, with the sub-blocks named.
 """
 
 from __future__ import annotations
 
+from ..signoff_composition import STATUS_MET_BY_COMPOSITION
 from ..signoff_evidence_pin import CONTENT_HASH_BASIS_EVIDENCE_FILE
 from ..signoff_justified_gap import FINDING_JUSTIFIED_GAP_WITHOUT_ISSUE_LINK
 from ..signoff_store_pin import CONTENT_HASH_BASIS_ARTIFACT_MANIFEST
+from .color import Palette
 
 
 def input_verified_statement(citation: dict) -> str | None:
@@ -56,6 +61,51 @@ def _justified_gap_suffix(report: dict) -> str:
     glance."""
     count = report.get("t1_justified_gap_count")
     return f", {count} justified gaps" if count else ""
+
+
+def _composed_suffix(report: dict) -> str:
+    """``", N composed (parent boundary uncovered)"`` when the report has
+    rows met by composition (issue #6927); empty otherwise, so a report
+    that composes nothing renders exactly as before. The parenthetical is
+    the point of the count: composition is visible evidence, never T1 --
+    the parent's own boundary is exactly what those rows do not cover."""
+    count = report.get("t1_composed_count")
+    return f", {count} composed (parent boundary uncovered)" if count else ""
+
+
+def status_marker(status: str, palette: Palette) -> tuple[str, str]:
+    """The ``(marker, color)`` for an item ``status`` in the text report.
+
+    Moved here from ``signoff_cmd.py`` (issue #6927) so the new
+    ``met_by_composition`` status -- yellow, never the plain MET green --
+    lives beside the other per-disposition renderers in this module.
+    """
+    if status == STATUS_MET_BY_COMPOSITION:
+        return "COMP ", palette.yellow
+    if status == "met":
+        return "MET  ", palette.green
+    if status == "not_applicable":
+        return "N/A  ", palette.green
+    return "UNMET", palette.red
+
+
+def _print_composed_from(item: dict) -> None:
+    """The sub-block evidence behind a ``met_by_composition`` row (issue
+    #6927): each sub-block, the manifest it was read from (``<inline>``
+    for an inline object) and the content hash of the evidence its own
+    report item cited -- so staleness stays visible in the committed
+    artifact, exactly as a ``cite:`` line does for a direct citation."""
+    for entry in item.get("composed_from") or []:
+        source = entry["source"] if entry["source"] is not None else "<inline>"
+        note = (
+            f", content_hash={entry['content_hash']}"
+            if entry.get("content_hash")
+            else ""
+        )
+        print(
+            f"        composed from: {entry['block']} "
+            f"(source={source}, status={entry['status']}{note})"
+        )
 
 
 def _print_not_applicable(item: dict) -> None:
