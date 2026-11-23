@@ -181,11 +181,11 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4397
+      "lines": 4308
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
-      "lines": 613
+      "lines": 604
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 2134
+      "lines": 1942
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -397,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5989
+      "lines": 5886
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/size.py",
-      "lines": 2115
+      "lines": 2113
     },
     {
       "path": "src/klayout_tools/size_topology.py",
