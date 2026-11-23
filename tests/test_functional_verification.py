@@ -3949,11 +3949,7 @@ def test_collect_sdf_alias_port_bits_finds_a_tie_cell_aliased_output_bit(tmp_pat
     assert fv._collect_sdf_alias_port_bits([source], "tie_alias_top") == {"uio_oe[0]"}
 
 
-def test_collect_sdf_alias_port_bits_is_empty_when_the_top_is_not_gate_level(tmp_path):
-    """A top module outside `verilog_netlist`'s narrow gate-level subset (an
-    ANSI-style header here) yields no alias map -- and must degrade to an
-    empty set rather than raising, since this is a normalization pass and
-    failing to normalize has to be no worse than never having tried."""
+def test_collect_sdf_alias_port_bits_in_ansi_gate_level_module(tmp_path):
     source = _write(
         tmp_path / "ansi_top.v",
         "module ansi_top (input wire a, output wire [1:0] y);\n"
@@ -3964,7 +3960,7 @@ def test_collect_sdf_alias_port_bits_is_empty_when_the_top_is_not_gate_level(tmp
         "endmodule\n",
     )
 
-    assert fv._collect_sdf_alias_port_bits([source], "ansi_top") == set()
+    assert fv._collect_sdf_alias_port_bits([source], "ansi_top") == {"y[0]", "y[1]"}
 
 
 def test_collect_sdf_alias_port_bits_is_empty_when_the_module_is_absent(tmp_path):
@@ -3990,35 +3986,13 @@ def test_drop_sdf_zero_delay_alias_port_interconnects_drops_only_that_entry(tmp_
     assert "(INTERCONNECT u2.out uio_oe[1] (2.000:2.000:2.000)" in text
 
 
-def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_entry(tmp_path):
-    """Acceptance criterion #2, at the unit level: a non-zero-delay entry on
-    the *identical* aliased destination is not dropped, so it reaches Icarus,
-    fails to annotate, and still raises through the diagnostic gate. Dropping
-    it would silently change simulated timing -- exactly what this exemption
-    must never do."""
-    sdf_path = _write(
-        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="1.000:1.000:1.000")
-    )
-
-    assert (
+@pytest.mark.parametrize("delay", ["1.000:1.000:1.000", "0.000:0.000:1.000"])
+def test_alias_port_refuses_any_nonzero_corner(tmp_path, delay):
+    sdf_path = _write(tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay=delay))
+    with pytest.raises(
+        FunctionalVerificationError, match=r"const_drive_0\.L_LO.*uio_oe\[0\]"
+    ):
         fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
-        is None
-    )
-
-
-def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_corner(tmp_path):
-    """The zero test spans *every* `min:typ:max` member, not just the one
-    `iverilog -T <corner>` selects: an entry that is zero at `min`/`typ` but
-    not at `max` still models real delay at a corner a caller may ask for,
-    so it stays."""
-    sdf_path = _write(
-        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="0.000:0.000:1.000")
-    )
-
-    assert (
-        fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
-        is None
-    )
 
 
 def test_drop_sdf_zero_delay_alias_port_interconnects_is_a_noop_without_aliases(
@@ -4412,21 +4386,16 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
 def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
     tmp_path,
 ):
-    """Acceptance criterion #2 against the real toolchain: the identical
-    `assign`-aliased destination carrying a **non**-zero delay is left in
-    place, hits the same `Could not find intermodpath!` inside Icarus, and
-    still raises. The #2285 exemption is bounded by the delay value, not by
-    the diagnostic text -- so it can never silently retime a run."""
+    """A nonzero tie-cell arc cannot be discarded at any corner."""
     _stage_tie_alias_port_design(tmp_path, tie_delay="1.000:1.000:1.000")
     annotated = _tie_alias_port_request(
         tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
     )
 
     with pytest.raises(
-        FunctionalVerificationError, match="did not fully apply"
-    ) as excinfo:
+        FunctionalVerificationError, match=r"const_drive_0\.L_LO.*uio_oe\[0\]"
+    ):
         run_functional_verification(annotated)
-    assert "Could not find intermodpath" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #

@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_finite_number
+from .sim_errors import SimError
 
 #: Keys the object form may carry.
 FORM_KEYS = frozenset({"frac_of", "fraction"})
@@ -78,3 +79,63 @@ def resolve(value: Any, field: str, supply_v: dict[str, Any] | None) -> float:
             f"(keys: {sorted(str(key) for key in supply)})"
         )
     return float(value["fraction"]) * float(supply[match])
+
+
+def _relative_bounds(spec: dict[str, Any]) -> dict[str, Any]:
+    limits = spec.get("limits")
+    if not isinstance(limits, dict):
+        return {}
+    return {k: limits[k] for k in ("min", "max") if is_supply_relative(limits.get(k))}
+
+
+def validate_limits(
+    specs: list[dict[str, Any]],
+    supply_maps: list[dict[str, Any]],
+    mc: dict[str, Any] | None,
+) -> None:
+    """Validate bounds across the full sweep before a worker can start."""
+    for spec in specs:
+        for key, value in _relative_bounds(spec).items():
+            field = f"measurement '{spec['name']}': limits.{key}"
+            if spec.get("k_sigma") is not None or (mc or {}).get("k_sigma") is not None:
+                raise SimError(
+                    f"{field} cannot be supply-relative with a k_sigma window"
+                )
+            try:
+                validate(value, field)
+                for supply in supply_maps:
+                    resolve(value, field, supply)
+            except SupplyRelativeError as exc:
+                raise SimError(str(exc)) from exc
+
+
+def resolve_limits(
+    specs: list[dict[str, Any]], supply: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    """Copy only affected specs, leaving declarations intact for the aggregate."""
+    resolved = []
+    echoes = {}
+    for spec in specs:
+        bounds = _relative_bounds(spec)
+        if bounds:
+            name = spec["name"]
+            limits = spec["limits"].copy()
+            for key, value in bounds.items():
+                limits[key] = resolve(
+                    value, f"measurement '{name}': limits.{key}", supply
+                )
+            echoes[name] = {
+                k: limits[k] for k in ("min", "max") if limits.get(k) is not None
+            }
+            spec = {**spec, "limits": limits}
+        resolved.append(spec)
+    return resolved, echoes
+
+
+def attach_limits(
+    results: list[dict[str, Any]], echoes: dict[str, dict[str, float]]
+) -> None:
+    """Record the numeric bounds beside each affected measurement's grade."""
+    for result in results:
+        if result["name"] in echoes:
+            result["limits_resolved"] = echoes[result["name"]]
