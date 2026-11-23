@@ -11,8 +11,8 @@ regression has only RTL and log text to reason from — no way to ask "when
 did `o_valid` first go high after reset?" or "how many handshakes happened
 between 1,000 ns and 2,000 ns?" against the simulation that actually ran.
 `klt functional-verification`'s own `options.trace` (Phase 3, issue #1845)
-now names that artifact directly — its `trace` response field drops
-straight into this verb's own `trace` request field unchanged.
+names that artifact directly. Copy `trace.path` and `trace.format` into the
+wave-build request. The response also records the waveform size in bytes.
 
 Phase 2c of [Epic #1585](https://github.com/2AMLogic/klayout-tools/issues/1585)
 ("`klt wave` — waveform query surface for functional-verification traces").

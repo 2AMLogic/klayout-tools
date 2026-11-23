@@ -26,6 +26,7 @@ from .sim_batch_contract import (
 from .sim_batch_contract_spec import (
     _release_segment,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     from .sim_batch import BatchConfig
@@ -433,8 +434,6 @@ def _assess_capability_support(
     predates: str,
     remedy: str,
 ) -> None:
-    from .sim import SimError
-
     pdk = (request.get("models") or {}).get("pdk")
     try:
         images = published_runner_identities(str(pdk) if pdk else None, config.region)

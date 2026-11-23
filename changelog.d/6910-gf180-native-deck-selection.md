@@ -1,0 +1,1 @@
+- **GF180 native DRC reports identify selected, omitted, and started deck IDs.** A zero-finding subset now yields partial coverage and cannot earn full signoff credit (#6910, 2026-11-21).

@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import re
 
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
+
 
 def _sdf_unresolvable_cell_instances(
     text: str, names: set[str], divider: str
@@ -53,7 +57,6 @@ def _reject_sdf_unresolvable_cell_instance(
     instance list cannot be derived, when the ``DIVIDER`` is not ``.``/``/``,
     and for the design's own root cell (empty or ``*`` ``INSTANCE``).
     """
-    from .functional_verification import FunctionalVerificationError
     from .functional_verification_sdf import (
         _find_gate_level_instances,
         _read_verilog_source_texts,

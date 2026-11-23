@@ -335,13 +335,13 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``provenance.deck.content_hash``), or ``None`` if the deck's source
       file can't be hashed.
     - ``device_classes`` -- the device-class roles this deck is structurally
-      capable of recognising (``ExtractionDeck.device_classes``), e.g.
-      whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
+      capable of recognising (``ExtractionDeck.device_classes``) --
       independent of whether any given layout actually contains one.
-    - ``provides`` -- which capabilities this deck supplies (issue #3783),
-      any of ``curated_drc`` (``klt drc --deck`` / ``klt deck rules``),
-      ``klayout_drc`` (a shipped KLayout DRC script run via ``--engine
-      klayout --deck-file``) and ``extraction``.
+    - ``provides`` -- which capabilities this deck supplies (issue #3783):
+      ``curated_drc`` (``klt drc --deck``/``klt deck rules``),
+      ``klayout_drc`` (a shipped KLayout DRC script) and ``extraction``.
+    - ``enforced_rule_count`` -- rules the deck's curated DRC rule table
+      enforces (issue #5843); ``None`` for a deck with no table (``asap7``).
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -363,10 +363,8 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       release}`` with the same semantics as the fields of the same name;
       ``path_kind`` is ``"packaged"`` (the file inside this install).
     """
-    # Imported lazily, not at module scope: `_provenance` itself imports
-    # `is_deck_hash_released` from this module, so a module-level import here
-    # would be a circular import (this module would be mid-initialization the
-    # first time anything imports `_provenance` first).
+    # Lazy imports: `_provenance` imports `is_deck_hash_released` from this
+    # module, so a module-level import here would be circular.
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
@@ -376,6 +374,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         get_unmodeled_rules,
         known_extraction_deck_names,
     )
+    from .enforced_rules import enforced_rule_count
 
     names = [name] if name is not None else list(known_extraction_deck_names())
 
@@ -394,6 +393,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
             "content_hash": content_hash,
             "device_classes": list(deck.device_classes),
             "provides": deck_provides(deck_name),
+            "enforced_rule_count": enforced_rule_count(deck_name),
             "released": released,
             "release": release,
             "unmodeled_rules": get_unmodeled_rules(deck_name),
@@ -699,12 +699,10 @@ def _terminal_entry(
 ) -> dict[str, Any]:
     """One terminal of a device class, in :func:`deck_devices`' shape.
 
-    ``relation`` is the terminal's
-    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
-    as ``{"source", "op", "extents"}`` so two entries differing only in a
-    relation project differently -- or ``None`` (``null``) for a terminal
-    defined by its static layer/``requires``/``excludes`` alone, which is
-    every terminal of every non-bipolar class.
+    ``relation`` (issue #2863) is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation`, reported as ``{"source",
+    "op", "extents"}``, or ``None`` for a terminal defined by its static
+    layer/``requires``/``excludes`` alone (every non-bipolar terminal).
     """
     return {
         "name": name,
@@ -817,6 +815,21 @@ def _provenance_entry(provenance: Any) -> dict[str, Any] | None:
     }
 
 
+def _resistor_terminals(
+    resistor: Any, names: dict[tuple[int, int], str]
+) -> list[dict[str, Any]]:
+    """Resistor terminals; ``anode_marker`` (#4312) adds a third, ``anode``."""
+    body = (resistor.body, resistor.requires, resistor.excludes)
+    terminals = [
+        _terminal_entry("body", *body, names),
+        _terminal_entry("terminal", resistor.terminal, (), (), names),
+    ]
+    if resistor.anode_marker is not None:
+        marker = resistor.anode_marker
+        terminals.append(_terminal_entry("anode", marker, (), (), names))
+    return terminals
+
+
 def _project_device_classes(
     deck: Any, layer_names: dict[tuple[int, int], str]
 ) -> list[dict[str, Any]]:
@@ -832,11 +845,9 @@ def _project_device_classes(
     # MOS. Markerless by construction: recognition is the deck's own
     # active/poly/nwell stack, split by which side of the well the active
     # island sits on (see `ExtractionDeck`'s docstring). Reported anyway --
-    # "this class needs no marker" is exactly the fact a caller comparing
-    # against a marker-gated class needs to see, and the `nwell`
-    # require/exclude asymmetry is what tells NMOS from PMOS (so `pfet`
-    # reports `predicate_gated: true` on `nwell`, which is the literal
-    # truth: a PMOS is not recognised outside the well).
+    # "this class needs no marker" is a fact a caller comparing against a
+    # marker-gated class needs to see, and the `nwell` require/exclude
+    # asymmetry tells NMOS from PMOS (`pfet` is `predicate_gated` on `nwell`).
     for class_name, in_well in ((deck.nfet_class, False), (deck.pfet_class, True)):
         entries.append(
             _device_class_entry(
@@ -993,22 +1004,11 @@ def _project_device_classes(
                 name=resistor.name,
                 kind="resistor",
                 marker=resistor.marker,
-                terminals=[
-                    _terminal_entry(
-                        "body",
-                        resistor.body,
-                        resistor.requires,
-                        resistor.excludes,
-                        layer_names,
-                    ),
-                    _terminal_entry("terminal", resistor.terminal, (), (), layer_names),
-                ],
+                terminals=_resistor_terminals(resistor, layer_names),
                 layer_names=layer_names,
                 provenance=resistor.provenance,
-                # Issue #2679: how `body` relates to `marker`. Under
-                # "abutting_heads" the `requires`/`excludes` above narrow
-                # the *marker* region (the resistive body itself), and the
-                # `body` layer only has to abut it as two separate heads.
+                # Issue #2679: how `body` relates to `marker` ("abutting_heads":
+                # the marker is the body; `body` is only the two heads).
                 extra={"topology": resistor.topology},
             )
         )

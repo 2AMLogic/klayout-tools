@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .lvs_base import LvsError
+
 
 def _validate_omit_mismatches(value: Any) -> bool:
     """Optional top-level ``request.omit_mismatches`` (issue #5610, the
@@ -22,10 +24,6 @@ def _validate_omit_mismatches(value: Any) -> bool:
     ``mismatches_omitted`` echo. A non-boolean value is a clean
     :class:`LvsError`, the same discipline ``request.portable_paths``
     applies -- never a silent no-op."""
-    # Local import: `lvs` imports this module at load time, so a module-level
-    # import would be circular (the `lvs_runset.py` pattern).
-    from .lvs import LvsError
-
     if value is None:
         return False
     if not isinstance(value, bool):

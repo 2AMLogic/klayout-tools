@@ -2,14 +2,14 @@
 that rebuilds floorplan -> ``target_stage`` once per corner into one report.
 
 Reuses ``test_place_and_route``'s fake PDK install and stubbed OpenROAD, so no
-real engine runs. Every request targets ``floorplan`` (no clock/IO/GDS merge
-needed) -- the per-corner loop is independent of the stage reached.
+real engine runs. The route-failure case replays a captured congestion report.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -25,9 +25,17 @@ from test_place_and_route import (
     _base_request,
     _isolate_pdk,
     _make_pdk_install,
+    _stub_merge_def_to_gds,
     _stub_openroad_success,
     _write,
     _write_request,
+)
+from test_place_and_route_grt_0116_hint import (
+    _CONGESTION_REPORT_FIXTURE,
+    _GRT_0116_TABLE,
+    _KNOWN_REGION_BBOX,
+    _stub_openroad_route_failure,
+    _write_20x20_macro_lef,
 )
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
@@ -103,9 +111,118 @@ def test_one_failing_corner_does_not_abort_the_others(tmp_path, monkeypatch):
     assert report["status"] == "failed"
     assert report["failed_corners"] == [CORNERS[0]]
     assert first["status"] == "failed"
-    assert "boom" in first["error"] or first["error"]
+    assert set(first) == {
+        "corner",
+        "output_dir",
+        "input_content_hash",
+        "deck_content_hash",
+        "status",
+        "error",
+    }
+    assert first["error"]
     assert first["deck_content_hash"].startswith("sha256:")
     assert second["status"] == "ok"
+
+
+@pytest.mark.parametrize("portable", [False, True])
+def test_route_failure_keeps_congestion_per_corner(
+    tmp_path, monkeypatch, capsys, portable
+):
+    path = Path(_setup(tmp_path, monkeypatch))
+    (tmp_path / ".git").mkdir()
+    _write_20x20_macro_lef(tmp_path / "analog_20x20.lef")
+    request = _base_request(
+        pdk=json.loads(path.read_text())["pdk"],
+        portable_paths=portable,
+        macros=[
+            {"instance": "u_analog", "lef": "analog_20x20.lef", "x_um": 0, "y_um": 30}
+        ],
+    )
+    _write_request(path, request)
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_openroad_route_failure(
+        monkeypatch,
+        route_stdout=_GRT_0116_TABLE,
+        report_text=_CONGESTION_REPORT_FIXTURE.read_text(),
+        fail_corner=CORNERS[0],
+    )
+
+    assert main(["place-and-route", str(path), "--format", "json"]) == 1
+    captured = capsys.readouterr()
+    assert all(
+        line.startswith("klt place-and-route: warning:")
+        for line in captured.err.splitlines()
+    )
+    report = json.loads(captured.out)
+    failed, passed = report["corner_runs"]
+    assert report["status"] == "failed"
+    assert report["failed_corners"] == [CORNERS[0]], passed.get("error")
+    assert failed["status"] == "failed"
+    assert "GRT-0116" in failed["error"]
+    assert passed["status"] == "ok" and "congestion" in passed
+    congestion = failed["congestion"]
+    assert "null_reasons" in congestion
+    gr = congestion["global_route"]
+    assert gr["total_overflow"] == 12
+    assert gr["overflow_per_layer"]["met2"]["total_overflow"] == 12
+    regions = gr["overflow_regions"]
+    assert len(regions) == 20
+    assert [r["overflow"] for r in regions] == sorted(
+        (r["overflow"] for r in regions), reverse=True
+    )
+    hit = next(r for r in regions if r["bbox_um"] == _KNOWN_REGION_BBOX)
+    assert (hit["macro"], hit["where"]) == ("u_analog", "inside_footprint")
+    raw = gr["congestion_report_path"]
+    if portable:
+        assert raw["scope"] == "repo"
+        assert Path(raw["path"]).parent == Path(failed["output_dir"]["path"])
+        assert (tmp_path / raw["path"]).is_file()
+    else:
+        assert Path(raw).parent == Path(failed["output_dir"])
+        assert Path(raw).is_file()
+
+
+@pytest.mark.parametrize("code", [None, "corner_error"])
+@pytest.mark.parametrize("job", [None, "job-17"])
+def test_error_details_keep_corner_metadata(tmp_path, monkeypatch, code, job):
+    path = _setup(tmp_path, monkeypatch)
+    details = dict.fromkeys(
+        (
+            "status",
+            "error",
+            "corner",
+            "output_dir",
+            "input_content_hash",
+            "deck_content_hash",
+            "error_code",
+            "job_id",
+        ),
+        "collision",
+    )
+
+    def fail(*args, **kwargs):
+        raise PlaceAndRouteError(
+            "failed", code=code, job_id=job, details={**details, "diagnostic": 17}
+        )
+
+    monkeypatch.setattr(place_and_route, "_run_single_corner", fail)
+    for name, entry in zip(
+        CORNERS, run_place_and_route(path)["corner_runs"], strict=True
+    ):
+        assert entry["corner"] == name
+        assert Path(entry["output_dir"]).name == name
+        assert entry["input_content_hash"].startswith("sha256:")
+        assert entry["deck_content_hash"].startswith("sha256:")
+        assert (entry["status"], entry["error"], entry["diagnostic"]) == (
+            "failed",
+            "failed",
+            17,
+        )
+        for field, value in (("error_code", code), ("job_id", job)):
+            if value is None:
+                assert field not in entry
+            else:
+                assert entry[field] == value
 
 
 @pytest.mark.parametrize(

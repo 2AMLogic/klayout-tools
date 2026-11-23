@@ -795,37 +795,45 @@ def lef_layer_probe_roles(
     return roles
 
 
-def _local_pin_candidate_points(
+def _pin_labels_on_nets(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    l2n: kdb.LayoutToNetlist,
+    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]],
+) -> tuple[dict[int, set[str]], dict[tuple[int, str], list[kdb.Point]]]:
+    """Index local labels by conductor and by layer/name before abstraction (#1994)."""
+    import klayout.db as kdb
+
+    names_by_net: dict[int, set[str]] = {}
+    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
+    for layer, region in labelled_regions:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            point = kdb.Point(text.x, text.y)
+            label_points.setdefault((layer_index, text.string), []).append(point)
+            net = l2n.probe_net(region, point)
+            if net is not None:
+                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    return names_by_net, label_points
+
+
+def indexed_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
-) -> dict[str, list[tuple[kdb.Point, str]]]:
+    label_clusters: dict[str, set[int]],
+) -> dict[str, list[tuple[kdb.Point, int]]]:
     """Extra local (cell-frame) candidate access points for every in-cell
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
     internal routing -- issue #1183.
 
-    Must run *before* :func:`_erase_abstracted_cell_geometry` mutates
-    ``layout`` (the caller -- :func:`extract_netlist_from_layout` -- already
-    guarantees this: it calls this function first, over every matched cell
-    type, then erases). :func:`_resolve_abstract_cell_pins`'s
-    ``"in_cell_labels"`` path resolves a pin to exactly the one point where
-    its name label sits -- but a real standard cell's pin can legally carry
-    *several* geometrically disjoint metal shapes for one electrical node
-    (the same "one LEF pin, several PORT rectangles" shape #1181/#1182
-    already fixed for the ``"lef_abstract"`` path), and nothing guarantees
-    the label sits on the specific rectangle that ends up externally routed
-    -- the label is drawn once, at design-library time, long before any
-    particular instance's place-and-route decides which rectangle a via
-    actually lands on. When the label's own rectangle is a different,
-    internally-isolated fragment (tied to the routed one only through the
-    cell's own poly/diffusion -- exactly the connectivity
-    :func:`_erase_abstracted_cell_geometry` deliberately severs for
-    black-box abstraction), the label-only point resolves onto that isolated
-    island instead of the routed net (this issue's reported failure,
-    confirmed against the real ``gf180-trng`` ``clkload13``/``I`` case this
-    issue cites: the label's own local point resolves to an isolated net
-    while a probe at the DEF-verified via location resolves to the correctly
-    merged, externally-routed net).
+    Run before erasing the cell's internal geometry. A named metal pad can
+    reach a second access pad through the cell's own poly and contacts even
+    when the external via lands only on that second pad.
 
     This computes a *local*, cell-scoped ``LayoutToNetlist`` connectivity
     pass -- deliberately narrower than :func:`_extract_netlist`'s full
@@ -897,11 +905,8 @@ def _local_pin_candidate_points(
     precisely why :func:`_erase_abstracted_cell_geometry` severs it for the
     real extraction pass.
 
-    Deliberately *not* fixed in :func:`_abstract_pin_net_score` instead: the
-    score is presented with a candidate that genuinely does resolve onto
-    ``VPWR``, and nothing at that layer can tell it apart from a pin the
-    design really does route to the supply. The bad candidate must not be
-    produced in the first place.
+    The ``label_clusters`` output identifies labels on distinct
+    cell-local conductors for callers that require physical proof.
     """
     import klayout.db as kdb
 
@@ -932,47 +937,29 @@ def _local_pin_candidate_points(
             l2n.connect(metals[index + 1])
     l2n.extract_netlist()
 
-    # Every label this cell draws on a conductor the local graph above
-    # reaches, grouped by the cell-local net it sits on (issue #1994).
-    # `label_points` is the same scan indexed the other way round, so the
-    # second pass can ask "which shapes on this layer carry *this* pin's own
-    # label?" without re-probing.
-    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]] = [
-        (deck.poly_label, poly)
-    ] + [
-        (layer, metals[index])
-        for index, layer in enumerate(deck.metal_labels)
-        if index < len(metals)
+    # The second pass needs both the names on each conductor and each pin's
+    # own label points to reject fragments reached through a second pin.
+    labelled_regions = [
+        (deck.poly_label, poly),
+        *zip(deck.metal_labels, metals, strict=False),
     ]
-    names_by_net: dict[int, set[str]] = {}
-    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
-    for layer, region in labelled_regions:
-        if layer is None:
-            continue
-        layer_index = layout.find_layer(*layer)
-        if layer_index is None:
-            continue
-        for text in kdb.Texts(cell.shapes(layer_index)).each():
-            point = kdb.Point(text.x, text.y)
-            label_points.setdefault((layer_index, text.string), []).append(point)
-            net = l2n.probe_net(region, point)
-            if net is not None:
-                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    names_by_net, label_points = _pin_labels_on_nets(
+        layout, cell, l2n, labelled_regions
+    )
 
-    extra_points: dict[str, list[tuple[kdb.Point, str]]] = {}
-    for metal_index, layer in enumerate(deck.metal_labels):
-        if layer is None or metal_index >= len(metals):
-            continue
-        layer_index = layout.find_layer(*layer)
+    extra_points: dict[str, list[tuple[kdb.Point, int]]] = {}
+    for metal_index, (layer, target_region) in enumerate(
+        zip(deck.metal_labels, metals, strict=False)
+    ):
+        layer_index = layout.find_layer(*layer) if layer is not None else None
         if layer_index is None:
             continue
-        role = f"metal{metal_index}"
-        target_region = metals[metal_index]
         for text in kdb.Texts(cell.shapes(layer_index)).each():
             point = kdb.Point(text.x, text.y)
             net = l2n.probe_net(target_region, point)
             if net is None:
                 continue
+            label_clusters.setdefault(text.string, set()).add(net.cluster_id)
             # Issue #1994: this walk crossed from one *declared pin* to
             # another, so the net's shapes can no longer all be attributed
             # to `text.string` -- keep only the fragments carrying this
@@ -985,7 +972,7 @@ def _local_pin_candidate_points(
             for polygon in kdb.Region(shapes).merged().each():
                 if crossed and not any(polygon.inside(own) for own in own_points):
                     continue
-                candidate = (_polygon_interior_point(polygon), role)
+                candidate = (_polygon_interior_point(polygon), metal_index)
                 if candidate not in points:
                     points.append(candidate)
     return extra_points
@@ -1094,6 +1081,25 @@ def _lef_port_access_points(
     return points
 
 
+# Only a nonempty base followed entirely by numeric index groups is a bus bit.
+_BUS_BIT_RE = re.compile(r"([^<>()\[\]{}]+)((?:<\d+>|\(\d+\)|\[\d+\]|\{\d+\})+)")
+
+
+def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
+    """Compare indexed pins by base and numeric indices (issue #6843).
+
+    For example, ``A[01][0]`` and ``A<1><0>`` share a key. A literal name
+    such as ``A<B>`` keeps its spelling and has an empty index tuple.
+    """
+    match = _BUS_BIT_RE.fullmatch(pin_name)
+    if match is None:
+        return (pin_name, ())
+    return (
+        match.group(1),
+        tuple(int(index) for index in re.findall(r"\d+", match.group(2))),
+    )
+
+
 def _merge_lef_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -1102,17 +1108,19 @@ def _merge_lef_pins(
     labelled: dict[str, Any],
     pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]],
 ) -> tuple[str | None, set[str], list[str]]:
-    """Append the LEF ``MACRO``'s pins the labels did not supply to ``pins``
-    (issue #3749). Returns ``(lef_path or None if nothing merged, merged pin
-    names, warnings)``."""
+    """Append LEF-only pins, preserving label names and access points for aliases.
+
+    Return the LEF path if any pins were merged, their names, and warnings.
+    """
     entry = lef_macros.get(cell.name)
     if entry is None:
         return None, set(), []
     lef_path, lef_pins = entry
+    labelled_keys = {_bus_bit_alias_key(name) for name in labelled}
     merged: set[str] = set()
     warnings: list[str] = []
     for pin_name in sorted(lef_pins):
-        if pin_name in labelled:
+        if _bus_bit_alias_key(pin_name) in labelled_keys:
             continue
         boxes = lef_pins[pin_name]
         if not boxes:
@@ -1127,6 +1135,16 @@ def _merge_lef_pins(
         pins.append((pin_name, points))
         merged.add(pin_name)
     return (lef_path if merged else None), merged, warnings
+
+
+def _local_pin_candidate_points(
+    layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, list[tuple[kdb.Point, str]]]:
+    """Return local access points with the layer role used by abstract extraction."""
+    return {
+        name: [(point, f"metal{index}") for point, index in points]
+        for name, points in indexed_pin_candidate_points(layout, cell, deck, {}).items()
+    }
 
 
 def _resolve_abstract_cell_pins(
@@ -1185,22 +1203,14 @@ def _resolve_abstract_cell_pins(
     regardless of whether it is the one the design actually routes.
     ``resolution_source`` is:
 
-    - ``"in_cell_labels"`` -- the cell draws text on one of the deck's own
-      label layers (``metal_labels[i]``/``well_label``/``poly_label``)
-      **directly in the cell** (``cell.shapes``, never
-      ``begin_shapes_rec``): a label promoted up from a nested sub-cell
-      belongs to that sub-cell's interface, not this one's, and the whole
-      point of this mode is to stop at *this* cell's boundary. Each label
-      carries its own layer role, so the pin is probed on exactly the
-      conductor its label names.
-      **LEF merge (issue #3749):** when a ``--abstract-cell-lef`` LEF also
-      declares a ``MACRO`` of this cell's name, every LEF pin whose name the
-      labels did not supply is appended (labels win on any name present in
-      both), and ``lef_path`` names that LEF. A standard cell routinely
-      draws its substrate/well pin (``VNB``) on a label layer the deck does
-      not read (sky130 ``pwell.label``), so the labels alone silently lose
-      it; the LEF is the only place it is declared. ``lef_merged`` is the
-      set of appended pin names (always empty on the other paths).
+    - ``"in_cell_labels"`` -- only text directly on the cell's deck label
+      layers (``metal_labels[i]``/``well_label``/``poly_label``) belongs to
+      its interface. Read ``cell.shapes`` to exclude nested cells' labels
+      and keep each point's layer role for probing.
+      A matching LEF macro supplies missing pins such as sky130's
+      ``VNB`` substrate pin (#3749). Labels win for equivalent bus bits
+      such as ``DATA<0>`` and ``DATA[0]`` (#6843). When pins are appended,
+      ``lef_path`` names the LEF and ``lef_merged`` lists their names.
     - ``"lef_abstract"`` -- no such label, but a ``--abstract-cell-lef`` LEF
       declares a ``MACRO`` of this cell's name with ``PORT`` geometry. Each
       port's bounding-box centre is the access point, read directly as
@@ -1225,22 +1235,10 @@ def _resolve_abstract_cell_pins(
       into an :class:`ExtractError` when the cell type actually has
       instances.
 
-    ``warnings`` (issue #624) is only ever populated on the ``"lef_abstract"``
-    path: a LEF-declared ``PIN`` whose :func:`~klayout_tools.lef_header.
-    parse_lef_macro_pin_ports` entry resolves zero port boxes (e.g. a pin
-    drawn only via ``PATH``/``VIA`` geometry, or a malformed ``POLYGON`` --
-    both statement shapes that module's own "declarative header + pin-access-
-    point only" scope deliberately never reads, see its module docstring) is
-    dropped from the returned pin list rather than raising, mirroring every
-    other malformed/partial-LEF tolerance in this codebase -- but *this*
-    silent drop is otherwise invisible to a caller, since it never prevents
-    the macro overall from resolving (the acceptance criterion only requires
-    *some* pin to resolve). One ``warnings`` entry per dropped pin names the
-    macro and pin so the gap has a caller-visible signal instead of a
-    silently incomplete black-box ``.SUBCKT``. Always ``[]`` on the
-    ``"in_cell_labels"``/``None`` paths, where every resolved pin always
-    carries at least one concrete point (an in-cell label is never
-    geometry-less).
+    When a LEF pin has no readable PORT geometry, it is omitted.
+    On both the LEF-only and label-merge paths, ``warnings`` names each
+    such pin if the macro resolves (#624). The unresolved path returns
+    an empty list.
 
     ``local_candidates`` (issue #1183) is
     :func:`_local_pin_candidate_points`'s ``{<pin name>: [(<extra local
@@ -1256,12 +1254,10 @@ def _resolve_abstract_cell_pins(
     every candidate exactly as it already does for a multi-rectangle LEF pin
     (#1181/#1182) and pick whichever one actually lands on routed geometry.
 
-    ``lef_layer_roles`` (issue #2658) is :func:`lef_layer_probe_roles`'s
-    ``{<lower-cased LEF layer name>: "metal<i>"}`` result for the active
-    PDK. Only consulted on the ``"lef_abstract"`` path (an in-cell label
-    already knows its own layer directly). ``None`` (the default) or an
-    empty dict behaves exactly as before this issue's fix: every LEF point
-    carries ``role=None`` and is probed bottom-up.
+    ``lef_layer_roles`` maps lower-cased LEF layer names to deck metal
+    roles (#2658, :func:`lef_layer_probe_roles`). It applies to both
+    LEF-only and merged pins. A missing mapping leaves the point's role
+    unset for bottom-up probing.
     """
     import klayout.db as kdb
 

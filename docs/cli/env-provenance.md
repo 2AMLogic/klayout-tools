@@ -10,6 +10,10 @@ klt env-provenance scan FILE [FILE ...] [--format text|json]
 klt env-provenance lint-envelope FILE [FILE ...] [--allow-prefix PREFIX ...] [--json-stream] [--format text|json]
 ```
 
+`scan` and `lint-envelope` (including `--json-stream`) read gzip-compressed
+files such as `report.json.gz`. Detection uses the gzip header, so renamed
+files work too. A damaged gzip stream produces a read error.
+
 The rule this implements is stated in
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md) →
 "Provenance hygiene in evidence records"; the record wrapper it is written

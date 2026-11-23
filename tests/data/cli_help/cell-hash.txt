@@ -1,0 +1,9 @@
+Compute the canonical cell_hash used by foundry-cell exceptions.
+
+positional arguments:
+  LAYOUT input GDSII or OASIS layout
+
+options:
+  -h, --help show this help message and exit
+  --cell NAME cell to hash
+  --format {text,json} output format (default: text)
