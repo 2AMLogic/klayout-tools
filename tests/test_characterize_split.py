@@ -13,7 +13,7 @@ import zlib
 import pytest
 
 from klayout_tools import characterize, characterize_split, sim
-from test_characterize import _inverter_request, _plan_for
+from test_characterize import _inverter_request, _plan_for, _write_request
 
 GRID = {
     "input_transition_ns": [0.02, 0.05, 0.08, 0.12, 0.2],
@@ -85,6 +85,30 @@ def test_split_rows_chunking():
     assert characterize_split.split_rows(5, 1) == [(0, 1, 2, 3, 4)]
     assert len(characterize_split.split_rows(2, 9)) == 2
     assert characterize_split.split_rows(7, 3) == [(0, 1, 2), (3, 4), (5, 6)]
+
+
+@pytest.mark.parametrize(
+    ("split_grid", "expected_builds"),
+    [(1, [(10, 84)]), (2, [(6, 52), (4, 36)])],
+)
+def test_builds_only_submitted_decks(
+    tmp_path, monkeypatch, split_grid, expected_builds
+):
+    builds = []
+    calls = []
+    build_plan = characterize._build_stimulus_plan
+
+    def record_build(**kwargs):
+        plan = build_plan(**kwargs)
+        builds.append((len(plan["points"]), len(plan["measurements"])))
+        return plan
+
+    monkeypatch.setattr(characterize, "_build_stimulus_plan", record_build)
+    monkeypatch.setattr(sim, "run_sim", _stub_run_sim(calls))
+    request = _write_request(tmp_path, _inverter_request(tmp_path, grid=GRID))
+    characterize.run_characterize(str(request), split_grid=split_grid)
+    assert builds == expected_builds
+    assert len(calls) == len(expected_builds)
 
 
 def test_split_run_equals_unsplit_run(tmp_path, monkeypatch):
