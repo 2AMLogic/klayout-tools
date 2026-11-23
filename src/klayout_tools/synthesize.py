@@ -2137,7 +2137,7 @@ def _resolve_liberty(
     ``corner`` (explicit or nominal-default) liberty view -- the "liberty
     not found for deck" posture this module's docstring describes.
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``place_and_route.py`` and ``post_route_sta.py``'s own

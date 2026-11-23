@@ -51,7 +51,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from . import design_centering, env_provenance
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
@@ -125,13 +125,10 @@ _TOPOLOGY_ROLE_KIND = {
     "tail": "nmos",
 }
 
-#: Points in the coarse, log-spaced width sweep run inside the single
-#: sweep invocation (see this module's docstring). Overridable via
-#: ``request.options.sweep_points``.
+#: Default number of log-spaced width samples for ``request.options.sweep_points``.
 DEFAULT_SWEEP_POINTS = 25
 
-#: Minimum sweep points accepted -- fewer than this and a monotonic bracket
-#: search has too little resolution to be meaningful.
+#: Minimum samples needed for a useful monotonic bracket search.
 MIN_SWEEP_POINTS = 5
 
 #: Joint-solve iteration cap for a coupled topology request (issue #768),
@@ -161,9 +158,7 @@ _JOINT_WIDTH_STEP_EPS = 1e-3
 #: module's docstring.
 DEFAULT_TIMEOUT_S = 180
 
-#: Default relative tolerance on the confirmed operating point's ``gm/Id``
-#: against ``request.target.gm_id`` -- overridable via
-#: ``request.tolerance.gm_id_rel``.
+#: Default ``request.tolerance.gm_id_rel`` on achieved versus target gm/Id.
 DEFAULT_GM_ID_TOLERANCE = 0.03
 
 #: Loop-gain constant for the fixed-``Vds`` mode's feedback-regulated gate
@@ -566,6 +561,39 @@ def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def _resolve_size_models(
+    request: dict[str, Any], request_dir: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Resolve the library and any available PDK provenance for either sizing mode."""
+    models = request.get("models") or {}
+    try:
+        models_lib = _resolve_models_lib(models, request_dir)
+    except SimError as exc:
+        raise SizeError(str(exc)) from exc
+
+    pdk, root = models.get("pdk"), models.get("pdk_root")
+    if pdk or root:
+        with contextlib.suppress(PdkNotFoundError):
+            return models_lib, find_pdk(variant=pdk, root=root)
+    return models_lib, None
+
+
+def _parse_sweep_settings(request: dict[str, Any]) -> tuple[float, int]:
+    """Read the shared gm/Id tolerance and number of width samples."""
+    tolerance = request.get("tolerance") or {}
+    gm_id_rel = _require_positive_number(
+        tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE),
+        "request.tolerance.gm_id_rel",
+    )
+    options = request.get("options") or {}
+    points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
+    if not is_int(points) or points < MIN_SWEEP_POINTS:
+        raise SizeError(
+            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
+        )
+    return gm_id_rel, points
+
+
 #: ``method.name``/``method.bias`` text for the two single-device bias
 #: modes (issue #1015) -- shared by every response-building site
 #: (:func:`run_size`'s own success/fail path, :func:`_error_payload`, and
@@ -780,38 +808,10 @@ def _run_single_device_size(
         corner_points, sizing_index, hold_across_corners, objective
     )
 
-    models = request.get("models") or {}
-    try:
-        models_lib = _resolve_models_lib(models, request_dir)
-    except SimError as exc:
-        raise SizeError(str(exc)) from exc
-
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
-    tolerance = request.get("tolerance") or {}
-    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
-    gm_id_rel_tol = _require_positive_number(
-        gm_id_rel_tol, "request.tolerance.gm_id_rel"
-    )
+    models_lib, provenance_pdk = _resolve_size_models(request, request_dir)
+    gm_id_rel_tol, sweep_points = _parse_sweep_settings(request)
 
     options = request.get("options") or {}
-    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
-    if (
-        isinstance(sweep_points, bool)
-        or not isinstance(sweep_points, int)
-        or sweep_points < MIN_SWEEP_POINTS
-    ):
-        raise SizeError(
-            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
-        )
-
     timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")
     timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
     timeout_s = _require_positive_number(timeout_s, "request.options.timeout_s")

@@ -82,6 +82,7 @@ from klayout_tools.place_and_route import (
     load_request,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_deck_warnings import tap_distance_warning
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -436,7 +437,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 26
+    assert len(_ALLOWED_REQUEST_KEYS) == 27
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -2600,8 +2601,8 @@ def _stub_openroad_success(
             # docstring.
             return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
-        metrics_path = cmd[4]
-        script_path = cmd[5]
+        metrics_path = cmd[-2]
+        script_path = cmd[-1]
         if script_path.endswith("_route_corners.tcl"):
             # The post-route corner-sweep script (issue #949,
             # `_corner_sweep_script_lines`) -- a second, standalone OpenROAD
@@ -3685,14 +3686,14 @@ def _stub_openroad_success_with_post_route_spef(
     base_fake_run = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(
             "_route_spef.tcl"
         ):
             return base_fake_run(cmd, **kwargs)
 
         # Stand in for the script's own `write_sdf` call (issue #1002): read
         # the generated Tcl back and honour (or deliberately ignore) it.
-        script_text = Path(cmd[5]).read_text()
+        script_text = Path(cmd[-1]).read_text()
         write_sdf_lines = [
             line for line in script_text.splitlines() if line.startswith("write_sdf")
         ]
@@ -3703,7 +3704,7 @@ def _stub_openroad_success_with_post_route_spef(
             if writes_sdf:
                 Path(write_sdf_lines[0].split()[-1]).write_text("(DELAYFILE)\n")
 
-        metrics_path = cmd[4]
+        metrics_path = cmd[-2]
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
@@ -3874,9 +3875,9 @@ def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: s
 
     def fake_run(cmd, **kwargs):
         completed = base_fake_run(cmd, **kwargs)
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(script_suffix):
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(script_suffix):
             return completed
-        region = _replayed_violation_region(scenario, Path(cmd[5]).read_text())
+        region = _replayed_violation_region(scenario, Path(cmd[-1]).read_text())
         return fake_completed(
             returncode=completed.returncode,
             stdout=_with_replayed_violations(completed.stdout, region),
@@ -4060,7 +4061,7 @@ def _overlay_real_def_pins(monkeypatch, *, def_pins_text: str) -> None:
     def fake_run(cmd, **kwargs):
         result = base_fake_run(cmd, **kwargs)
         if cmd[:2] != ["openroad", "-version"]:
-            script_path = cmd[5]
+            script_path = cmd[-1]
             if not script_path.endswith("_route_corners.tcl"):
                 def_path = _script_write_def_path(script_path)
                 if def_path is not None:
@@ -4778,12 +4779,12 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "floorplan":
             checkpoint_out = _script_write_db_path(script_path)
             Path(checkpoint_out).write_text("fake odb\n")
-            with open(cmd[4], "w", encoding="utf-8") as handle:
+            with open(cmd[-2], "w", encoding="utf-8") as handle:
                 json.dump(_STAGE_METRICS["floorplan"], handle)
             return fake_completed(returncode=0)
         return fake_completed(
@@ -6634,7 +6635,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-1080-gab6fd26351 \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "route":
             return fake_completed(
@@ -6642,7 +6643,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
             )
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS[stage], handle)
         return fake_completed(returncode=0)
 
@@ -6660,7 +6661,7 @@ def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         return fake_completed(returncode=0)  # no metrics file written
@@ -6693,10 +6694,10 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             raise FileNotFoundError("openroad vanished")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS["floorplan"], handle)
         return fake_completed(returncode=0)
 
@@ -10627,11 +10628,10 @@ def _run_preset_pdn_integration(
     at all -- only `{"preset": ...}` -- and return the report.
 
     This is the automated form of this issue's "a preset-driven run reaches
-    `power.placed.status == "complete"` and `warnings == []` under
-    #2086/#2122's audit on a real toolchain run (not a stub), for each
-    supported library" acceptance criterion. The two assertions that
-    criterion names are made by each caller below, so a failure names the
-    library it happened on.
+    `power.placed.status == "complete"` with no #2086/#2122 audit warning on
+    a real toolchain run (not a stub), for each supported library"
+    acceptance criterion. Each caller below makes both assertions (a
+    gf180mcu caller expects the #7311 tap-distance entry and nothing else).
     """
     root, variant = variant_gate
     monkeypatch.setenv("PDK_ROOT", root)
@@ -10742,7 +10742,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -10784,7 +10784,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(

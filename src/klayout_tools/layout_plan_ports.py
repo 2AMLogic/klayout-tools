@@ -1,7 +1,9 @@
 """Port-name and pin/unrouted-reason helpers for ``layout_plan_execute``
-(#4966): device-owned port lookup, netlist-port pin promotion, and parsing
-of ``compose()``'s unrouted-net notes. Split out to keep
-``layout_plan_execute.py`` under its file-size ceiling.
+(#4966): device-owned port lookup, netlist-port pin promotion, parsing
+of ``compose()``'s unrouted-net notes, the per-group param-resolution
+helpers (netlist-derived size params, #5765) and the ``diff_pair``
+distinct-legs guard (#5765). Split out to keep ``layout_plan_execute.py``
+under its file-size ceiling.
 """
 
 from __future__ import annotations
@@ -9,10 +11,19 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .gen import GenError
-from .gen_layer_params import resistor_flavor_for_class
-from .pdk import PdkNotFoundError, find_pdk
-from .pdk_families import pdk_variant_family
+from ._jsonnum import is_number
+from .layout_plan_flavors import (
+    _MOS_FLAVOR_GENERATORS as _MOS_FLAVOR_GENERATORS,
+)
+from .layout_plan_flavors import (
+    apply_derived_flavors as apply_derived_flavors,
+)
+from .layout_plan_flavors import (
+    apply_mos_flavor as apply_mos_flavor,
+)
+from .layout_plan_flavors import (
+    apply_resistor_flavor as apply_resistor_flavor,
+)
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -80,50 +91,91 @@ def apply_gate_contact(
     return [gate_contact_warning(group["id"])]
 
 
-def apply_resistor_flavor(
+#: Digest dimensions accepted by each generator, in micrometres.
+_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
+    "mos_array": {"L": "l_um", "W": "w_um"},
+    "diff_pair": {"L": "l_um", "W": "w_um"},
+    "esd_device": {"L": "l_um", "W": "finger_width_um"},
+    "res_array": {"L": "length_um", "W": "width_um"},
+}
+
+
+def _netlist_derived_size_params(
+    generator: str, device_params: dict[str, Any]
+) -> dict[str, float]:
+    """Map positive digest dimensions to generator parameters.
+
+    KLayout reports zero for the unspecified L and W of a bare SPICE resistor.
+    Omitting those dimensions lets the generator apply its geometry defaults.
+    """
+    targets = _SIZE_PARAM_TARGETS.get(generator)
+    if not targets:
+        return {}
+    resolved: dict[str, float] = {}
+    for digest_key, gen_param in targets.items():
+        value = device_params.get(digest_key)
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
+            resolved[gen_param] = float(value)
+    return resolved
+
+
+def diff_pair_leg_error(
     group: dict[str, Any],
-    params: dict[str, Any],
-    pdk_spec: dict[str, Any],
-    family: str | None,
-) -> list[str]:
-    """Select the first mapped device class and disclose mixed materials."""
-    if (
-        group["generator"] != "res_array"
-        or "flavor" in params
-        or "metal_level" in params
-    ):
-        return []
-    if family is None:
-        try:
-            variant = (
-                pdk_spec.get("variant")
-                or find_pdk(root=pdk_spec.get("root"))["variant"]
-            )
-        except PdkNotFoundError as exc:
-            raise GenError(str(exc)) from exc
-        family = pdk_variant_family(variant)
-    selected = []
-    for device in group["devices"]:
-        flavor = resistor_flavor_for_class(family, device["device_class"])
-        if flavor is not None and flavor not in selected:
-            selected.append(flavor)
-    if not selected:
-        return []
-    first = selected[0]
-    warnings = []
-    group_label = f"device_groups (id '{group['id']}')"
-    if first != "generic":
-        params["flavor"] = first
-        warnings.append(
-            f"{group_label}: derived params.flavor='{first}' "
-            "from the declared resistor class"
+    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+    *,
+    mirror: bool,
+) -> str | None:
+    """Reject a repeated MOS, folded fingers or shorted differential inputs.
+
+    The mirror form may share a gate when the two drains are distinct and one
+    is tied to that gate. Other generators use their own terminal conventions.
+    """
+    if group["generator"] != "diff_pair" or len(group["devices"]) < 2:
+        return None
+    resolved = [
+        (
+            device_ref["name"],
+            digest_devices_by_key.get((device_ref["name"], device_ref["device_class"])),
         )
-    if len(selected) > 1:
-        warnings.append(
-            f"{group_label}: devices disagree on resistor flavor "
-            f"({', '.join(selected)}). Using '{first}'"
-        )
-    return warnings
+        for device_ref in group["devices"]
+    ]
+    for index, (name_i, device_i) in enumerate(resolved):
+        for name_j, device_j in resolved[index + 1 :]:
+            if device_i is None or device_j is None:
+                # An unresolvable device reference is Phase B's own
+                # validation error (exit 1, "does not resolve"); skip it
+                # here exactly like derive_gate_contact does.
+                continue
+            left, right = device_i["terminals"], device_j["terminals"]
+            shared = {
+                t: left[t]
+                for t in ("G", "D")
+                if left.get(t) is not None and left.get(t) == right.get(t)
+            }
+            if (
+                mirror
+                and shared.keys() == {"G"}
+                and shared["G"] in (left.get("D"), right.get("D"))
+            ):
+                continue
+            if shared:
+                terminals = " and ".join(
+                    f"terminal {t} on net '{net}'" for t, net in shared.items()
+                )
+                return (
+                    f"device_groups (id '{group['id']}'): declared diff_pair "
+                    f"devices '{name_i}' and '{name_j}' are not electrically "
+                    f"distinct legs -- they share {terminals}. Differential "
+                    "inputs need separate gates and drains. A current mirror "
+                    "may share its diode-connected gate with params.mirror=true. "
+                    "Declare one digest device per leg, write the matched pair "
+                    "with no nf (or nf=1) and let params.splits "
+                    "do the folding -- or drive klt gen-compose directly with "
+                    "explicit connectivity[] (see "
+                    "docs/cli/layout-plan-execute.md)."
+                )
+    return None
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:

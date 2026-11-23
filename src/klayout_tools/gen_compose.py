@@ -224,6 +224,10 @@ from .gen_compose_base import (
     _apply_orientation_um as _apply_orientation_um,
 )
 from .gen_compose_base import (
+    _nearest_grid_point_within,
+    _port_probe_position_um,
+)
+from .gen_compose_base import (
     _orient_port as _orient_port,
 )
 from .gen_compose_base import (
@@ -1192,6 +1196,7 @@ def _merge_label_ports(
     block_id: str,
     parsed_cell: dict[str, Any],
     pdk_variant: str | None,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
     its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
@@ -1211,7 +1216,12 @@ def _merge_label_ports(
             "declared in both ports[] and ports_from_labels -- ambiguous"
         )
     derived, reports, warnings = derive_label_ports(
-        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+        block_id,
+        parsed_cell["gds_path"],
+        parsed_cell["cell_name"],
+        spec,
+        pdk_variant,
+        pad_override_um,
     )
     return declared + derived, reports, warnings
 
@@ -1220,6 +1230,7 @@ def _parse_blocks(
     raw_blocks: Any,
     request_dir: str | None = None,
     pdk_variant: str | None = None,
+    pad_override_um: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1271,7 +1282,7 @@ def _parse_blocks(
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports, derived_reports, derived_warnings = _merge_label_ports(
-                block_id, parsed_cell, pdk_variant
+                block_id, parsed_cell, pdk_variant, pad_override_um
             )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
@@ -2781,34 +2792,6 @@ def _snap_port_to_grid(
     return new_port
 
 
-def _nearest_grid_point_within(
-    composed: float, grid: float, limit: float | None
-) -> float | None:
-    """The grid point nearest ``composed`` that lies within ``limit`` of it
-    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
-    steps = composed / grid
-    base = math.floor(steps + 0.5 + 1e-9)
-    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
-    for cand in candidates:
-        value = cand * grid
-        if limit is None or abs(value - composed) <= limit + 1e-9:
-            return value
-    return None
-
-
-def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
-    """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
-    numeric position (the same "nothing to check" case the rest of the
-    landing-connectivity path tolerates rather than fails). ``bool`` is
-    rejected explicitly because it is a subclass of ``int``."""
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_finite_number(x_um):
-        return None
-    if not is_finite_number(y_um):
-        return None
-    return float(x_um), float(y_um)
-
-
 def _pin_landed_on_block(
     pin: dict[str, Any],
     blocks: dict[str, dict[str, Any]],
@@ -2990,18 +2973,42 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
+    routing = request.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise GenComposeError("request.routing must be a JSON object")
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    landing_pad_override_um = None
+    raw_minimal_ladder = routing.get("minimal_ladder")
+    if request.get("connectivity") and routing:
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
+        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
     blocks = _parse_blocks(
-        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+        request.get("blocks"),
+        request_dir or os.getcwd(),
+        pdk_info["variant"],
+        landing_pad_override_um,
     )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
     promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
-
-    routing = request.get("routing") or {}
-    if not isinstance(routing, dict):
-        raise GenComposeError("request.routing must be a JSON object")
 
     options = request.get("options") or {}
     if not isinstance(options, dict):
@@ -3116,13 +3123,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
-    landing_pad_override_um = None
     # routing.minimal_ladder (issue #6058): False keeps every pad at today's
     # sizing; True sizes a ladder's intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together below.
+    # rejected together before label-derived landings are searched.
     minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
@@ -3171,31 +3176,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        landing_pad_override_um = _parse_landing_pad_override(
-            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
-        )
-        raw_minimal_ladder = routing.get("minimal_ladder")
         if raw_minimal_ladder is not None:
             if not isinstance(raw_minimal_ladder, bool):
                 raise GenComposeError(
                     "request.routing.minimal_ladder must be a boolean when given"
                 )
             minimal_ladder = raw_minimal_ladder
-        if minimal_ladder and landing_pad_override_um is not None:
-            # Issue #6058: the two fields are competing pad-sizing policies
-            # -- the override replaces the fixed baseline for *every* pad,
-            # the mode drops the baseline from *intermediate* pads only --
-            # so honouring both would silently pick one per hop. Name both
-            # fields and let the caller choose.
-            raise GenComposeError(
-                "request.routing.minimal_ladder and "
-                "request.routing.landing_pad_size_um select two different "
-                "pad-sizing policies and cannot be combined -- "
-                "minimal_ladder sizes a ladder's intermediate hop pads at "
-                "their own per-pair enclosure/area floors while keeping "
-                "the terminal pads, landing_pad_size_um replaces the fixed "
-                "baseline for every pad; set one or the other"
-            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um

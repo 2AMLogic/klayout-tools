@@ -35,9 +35,9 @@ from .coverage import (
 from .deck_global_defaults import _record_deck_default
 from .drc import (
     CODE_MULTIPLE_TOP_CELLS,
-    CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
+    _grade_negative_control,
 )
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import (
@@ -694,27 +694,7 @@ def _run_negative_control(
     :class:`DrcError` (code ``negative_control_failed``) when the fixture
     yields no violation, or misses an expected rule category."""
     control = run_drc_klayout_engine(control_path, deck_file, **engine_kwargs)
-    found = sorted({v["rule"] for v in control["violations"]})
-    missing = sorted(set(categories or []) - set(found))
-    if control["violation_count"] < 1 or missing:
-        detail = (
-            f"missing expected categories {missing}"
-            if control["violation_count"] and missing
-            else "no violations reported"
-        )
-        raise DrcError(
-            f"negative control {control_path!r} failed on the same deck: "
-            f"{detail} -- the deck may not have executed its rules, so a "
-            "clean verdict on the real layout cannot be trusted",
-            code=CODE_NEGATIVE_CONTROL_FAILED,
-        )
-    return {
-        "file": control_path,
-        "status": "passed",
-        "violation_count": control["violation_count"],
-        "rules_found": found,
-        "expected_categories": sorted(categories or []),
-    }
+    return _grade_negative_control(control, control_path, categories)
 
 
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
@@ -1259,16 +1239,15 @@ def run_drc_klayout_engine(
     temporary stream holding only that cell's subtree (the input file is not
     modified). A multi-top stream without ``top`` raises :class:`DrcError`
     (``code="multiple_top_cells"``) before KLayout is launched; a single-top
-    stream is passed through unchanged.
+    stream is passed through unchanged. A given ``top`` is recorded as the
+    report's ``top`` field (issue #7000), replayed by ``--check --rerun``.
 
     The returned dict matches :func:`run_drc`'s documented top-level shape
     (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
     ``violation_count``, ``rule_counts``, ``violations``, ``coverage``,
-    ``provenance``) plus one additive field, ``"engine": "klayout"`` (the
-    curated engine's own output carries no ``engine`` key at all, unchanged,
-    since it has always been the sole engine until this issue) -- and, only
-    on a run that actually tolerated deck errors via ``allow_deck_errors``,
-    a second additive ``engine_deck_errors`` field (issue #1941):
+    ``provenance``) plus the additive ``"engine": "klayout"`` (the curated
+    engine predates one) and, only on a tolerated deck-error run
+    (``allow_deck_errors``), ``engine_deck_errors`` (issue #1941):
     ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
     That key is omitted entirely otherwise. Since issue #6613, every run
     that produced a report also carries the additive ``deck_output``
@@ -1524,6 +1503,7 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
+        **({} if top is None else {"top": top}),  # issue #7000: replayed on --rerun
         "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
