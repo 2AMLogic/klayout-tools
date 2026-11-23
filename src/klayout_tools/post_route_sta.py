@@ -308,6 +308,7 @@ from ._sta_period_maps import (
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
+    SPEF_SKIP_DRIVER_ONLY,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
@@ -3386,16 +3387,6 @@ def _constraint_completeness_lines() -> list[str]:
     ]
 
 
-_SPEF_SKIP_DRIVER_ONLY = (
-    "    if {![catch {",
-    "        set klt_pins [get_pins -quiet -of_objects $klt_design_net]",
-    "        expr {[llength $klt_pins] == 1",
-    '            && [get_property [lindex $klt_pins 0] direction] eq "output"',
-    "            && [llength [get_ports -quiet -of_objects $klt_design_net]] == 0}",
-    "    } klt_driver_only] && $klt_driver_only} {continue}",
-)
-
-
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     """Correlate SPEF names with the linked design before reading parasitics.
 
@@ -3417,7 +3408,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
         "set klt_design_missing {}",
         f"set klt_design_missing_limit {_SPEF_MISSING_NETS_SAMPLE_LIMIT}",
         "foreach klt_design_net [get_nets -quiet *] {",
-        *_SPEF_SKIP_DRIVER_ONLY,
+        *SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",

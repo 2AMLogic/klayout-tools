@@ -108,7 +108,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
-from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_text import logical_lines as _logical_lines
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
@@ -322,30 +322,6 @@ class ParsedNetlist:
 
 #: ``--op-lint-corner`` sentinel: bias every expanded corner (issue #4650).
 ALL_CORNERS = "all"
-
-
-def _logical_lines(text: str) -> list[str]:
-    """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines, with inline ``;``/``$`` comments removed by the
-    shared :func:`strip_spice_inline_comment`.
-
-    A leading ``+`` line with nothing preceding it to fold onto (e.g. the
-    very first non-blank/non-comment line of ``text`` starts with ``+``) is
-    dropped, matching this function's pre-#1741 behaviour -- unlike
-    ``pex.py``/``netlist_normalize.py``, which keep such an orphan
-    continuation as a literal line. :func:`fold_spice_continuations` keeps
-    an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
-    post-pass below filters any still-``+``-prefixed entry it returns.
-    """
-    lines: list[str] = []
-    for raw in text.splitlines():
-        line = strip_spice_inline_comment(raw.strip())
-        if not line or line.startswith("*"):
-            continue
-        lines.append(line)
-    return [
-        line for line in fold_spice_continuations(lines) if not line.startswith("+")
-    ]
 
 
 def _positional_tokens(line: str) -> list[str]:
