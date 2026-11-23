@@ -2947,6 +2947,14 @@ changing or removing it flips no item's `met`/`status` and no `tier`. For
 item 2 a disclosure requires `--inventory` (the plain `--attest 2 --input`
 envelope carries none).
 
+An earlier producer can omit `attestation.description` even when it used
+the same inventory. If the builds differ and the inventory binding matches,
+`--check` accepts that omission and returns the fresh disclosure. For item 2
+it compares the inventory binding separately from the stream. An edited
+scope, a changed inventory or check, and an omitted disclosure from the
+same build still appear as drift. `--require-build-match` still gates on
+the producing build.
+
 The text rendering is a courtesy, so a character the terminal's encoding
 cannot represent (a free-text disclosure in Japanese on a Windows-1252
 stdout, say) prints as a `\uXXXX` escape — in the `description:` line and in
