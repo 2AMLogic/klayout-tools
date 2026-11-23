@@ -145,9 +145,10 @@ def _sg13g2_rf_reference(text: str, source: str, binding: Any) -> tuple[str, set
             if model in defined and model != enclosing:
                 continue
             prefix, count = _SG13G2_RF_CARDS[model]
-            if len(positional) - 1 != count:
+            terminals = len(positional) - 1
+            if terminals != count:
                 raise LvsError(
-                    f"SG13G2 {name} requires {count} terminals, got {len(positional) - 1}"
+                    f"SG13G2 {name} requires {count} terminals, got {terminals}"
                 )
             lines[i] = " ".join(
                 [
