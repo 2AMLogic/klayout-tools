@@ -31,18 +31,20 @@ Issue #5749 widened the determination along two axes:
   :func:`~klayout_tools.pdk_models.flavoured_mos_class_name` builds the
   names with, so the layout split and this check cannot drift.
 
-Dependency surface mirrors ``lvs_mismatch.py``'s split discipline: this
-module imports ``_mismatch`` from ``lvs_mismatch`` at module scope (no cycle
--- ``lvs_mismatch`` never imports this module), and everything defined in
-``lvs.py`` (``CATEGORY_DEVICE_BODY_UNVERIFIED``, the ``BODY_STATUS_*``
-constants) is imported *inside* the functions that use it, so ``lvs.py``
-remains free to import this module at its own module scope.
+The body check uses the shared status constants from ``lvs_base`` and builds
+findings with ``lvs_mismatch._mismatch``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .lvs_base import (
+    BODY_STATUS_UNCHECKED,
+    BODY_STATUS_UNVERIFIED,
+    BODY_STATUS_VERIFIED,
+    CATEGORY_DEVICE_BODY_UNVERIFIED,
+)
 from .lvs_mismatch import _mismatch
 from .pdk_models import flavoured_mos_class_name
 
@@ -263,7 +265,6 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     convention -- curated-deck extraction never nests MOS devices inside a
     subcircuit.
     """
-    from .lvs import CATEGORY_DEVICE_BODY_UNVERIFIED
 
     entries: list[dict[str, Any]] = []
 
@@ -331,8 +332,6 @@ def _body_verification_unchecked(reason: str) -> dict[str, Any]:
     make explicit.
     """
 
-    from .lvs import BODY_STATUS_UNCHECKED
-
     return {
         "status": BODY_STATUS_UNCHECKED,
         "reason": reason,
@@ -382,11 +381,6 @@ def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
     should also block a verdict is a separate policy question, deliberately
     left to the consumer (see ``docs/design-evidence-tiers.md`` item 7).
     """
-
-    from .lvs import (
-        BODY_STATUS_UNVERIFIED,
-        BODY_STATUS_VERIFIED,
-    )
 
     inspected, unverified = _body_inspected_and_unverified_counts(layout_circuit, deck)
     inspected_count = sum(inspected.values())

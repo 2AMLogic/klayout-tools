@@ -207,46 +207,49 @@ def test_override_at_the_mt4_floor_is_accepted():
         assert sizes[(_MET5, (41, 0))] == pytest.approx(0.75)
 
 
-def test_override_below_the_mt4_floor_is_rejected_naming_the_rule():
-    # The #5803 validation now includes the #6645 floor: a sub-0.75
-    # `routing.landing_pad_size_um` on gf180mcuC/D Metal5 is an
-    # application error naming MT.4 (the binding -- largest -- floor),
-    # not a silently smaller drawn pad.
+@pytest.mark.parametrize("variant", ["gf180mcuC", "gf180mcuD"])
+@pytest.mark.parametrize("with_area", [True, False], ids=["MT4", "MT1"])
+def test_small_override_identifies_the_native_runset(variant, with_area, monkeypatch):
+    if not with_area:
+        monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
+    rule = "MT.4" if with_area else "MT.1"
+    minimum = "0.75um" if with_area else "0.44um"
     with pytest.raises(GenComposeError) as excinfo:
         _resolve_landing_pad_sizes(
-            _gf180_drop(_MET5, (41, 0)), "gf180mcuD", {}, override_um=0.74
+            _gf180_drop(_MET5, (41, 0)), variant, {}, override_um=0.43
         )
     message = str(excinfo.value)
-    assert "routing.landing_pad_size_um" in message
-    assert top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID in message
-    assert ">= 0.75um" in message
+    assert "0.43um" in message and f"{rule} (native runset, 9K/11K)" in message
+    assert f">= {minimum}" in message
+    assert f"request at least {minimum}" in message
+    assert "omit routing.landing_pad_size_um" in message
+    assert "klt drc" not in message and "deck's own floor" not in message
 
 
-def test_override_below_the_mt1_floor_alone_names_mt1(monkeypatch):
-    # Retain the #6612 coverage: with MT.4 out of the picture, the
-    # sub-0.44 rejection still names MT.1.
-    monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
-    with pytest.raises(GenComposeError) as excinfo:
-        _resolve_landing_pad_sizes(
-            _gf180_drop(_MET5, (41, 0)), "gf180mcuD", {}, override_um=0.43
-        )
-    message = str(excinfo.value)
-    assert "routing.landing_pad_size_um" in message
-    assert top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID in message
-    assert ">= 0.44um" in message
+def _check_mt1_width(region, dbu):
+    assert not region.is_empty(), "expected drawn geometry on gf180mcu Metal5"
+    return region.width_check(round(0.44 / dbu), False, kdb.Metrics.Euclidian)
 
 
-def test_composed_gf180mcuD_top_metal_landing_pad_is_drawn_at_the_mt4_floor(
-    both_pdk_root, tmp_path
+@pytest.mark.parametrize(("side_nm", "violations"), [(420, 1), (440, 0)])
+def test_mt1_checks_the_exposed_width_of_a_merged_tab(side_nm, violations):
+    region = kdb.Region(kdb.Box(0, 0, 1000, 1000))
+    region.insert(kdb.Box(1000, 200, 1000 + side_nm, 200 + side_nm))
+    region.merge()
+    assert region.count() == 1
+    assert _check_mt1_width(region, 0.001).count() == violations
+
+
+@pytest.mark.parametrize("floor", ["MT4-and-MT1", "MT1-only", "former-pad"])
+def test_composed_gf180mcuD_top_metal_landing_pad_width(
+    both_pdk_root, tmp_path, monkeypatch, floor
 ):
-    # End to end (#6612 review, re-floored by #6645): a real `compose()`
-    # on gf180mcuD whose via-drop ladder lands on the top metal. The
-    # ladder's Metal5 landing pad is the only shape on (81, 0) here --
-    # genuinely isolated, i.e. exactly the pad the native metaltop deck's
-    # MT.4 = 0.5625um^2 area rule flags at the 0.44um width-only floor.
-    # A resolver-value test cannot tell a floor on the wrong path from a
-    # working fix; this one measures the geometry compose() actually
-    # drew.
+    if floor != "MT4-and-MT1":
+        monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
+    if floor == "former-pad":
+        monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_WIDTH_FLOOR_UM", {})
+
+    # Read the actual GDS written by compose, including any pads merged into routes.
     def genblock(generator, cell):
         output = tmp_path / f"{cell}.gds"
         return gen.generate(
@@ -297,16 +300,8 @@ def test_composed_gf180mcuD_top_metal_landing_pad_is_drawn_at_the_mt4_floor(
     top = layout.cell("comp")
     region = kdb.Region(top.shapes(layout.layer(*_MET5)))
     region.merge()
-    polygons = list(region.each())
-    assert polygons, "expected drawn geometry on gf180mcu Metal5"
-    for polygon in polygons:
-        bbox = polygon.bbox()
-        width_um = (bbox.right - bbox.left) * layout.dbu
-        height_um = (bbox.top - bbox.bottom) * layout.dbu
-        # MT.4 (native metaltop runset, 9K/11K): every side of every
-        # drawn Metal5 shape -- the via ladder's isolated landing pad
-        # included -- must clear 0.75um (sqrt of the 0.5625um^2 floor).
-        assert min(width_um, height_um) >= 0.75 - 1e-6
+    violations = _check_mt1_width(region, layout.dbu)
+    assert violations.is_empty() == (floor != "former-pad")
 
 
 def test_composed_isolated_top_metal_landing_pad_meets_mt4_area(tmp_path):

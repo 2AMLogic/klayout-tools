@@ -14,13 +14,16 @@ suggestion changes the measured value.
 from __future__ import annotations
 
 import ast
+import json
 import math
 import random
 import re
+import subprocess
 
 import pytest
 
-from klayout_tools import sim
+from helpers.tool_probes import SKIP_NO_NGSPICE
+from klayout_tools import sim, sim_steps
 from test_sim_meas_lint import _file_scope_rewrite
 
 
@@ -241,3 +244,113 @@ def test_validate_meas_card_fuzz_finds_no_value_changing_suggestion():
         checked += 1
     # the corpus must actually exercise refused shapes, not skip them all
     assert checked > 200
+
+
+@pytest.mark.parametrize("operator", ["+", "-", "*", "/"])
+@pytest.mark.parametrize("signs", ["--", "+-", "-+", "++"])
+@pytest.mark.parametrize(
+    ("space", "between_signs"), [("", ""), (" ", ""), ("", " "), (" ", " ")]
+)
+@pytest.mark.parametrize("left", ["(v(a)-v(b))", "abs(v(a)-v(b))", "abs(v(a,b))"])
+def test_chained_signs_on_right_operand(left, operator, signs, space, between_signs):
+    right = between_signs.join(signs) + "v(a)"
+    expression = f"{left}{space}{operator}{space}{right}"
+    quoted = expression.replace("v(a,b)", "v(a)-v(b)")
+    rewrite = _file_scope_rewrite(f".meas tran t when {expression}=0.1")
+    assert rewrite == f".meas tran t when par('{quoted}')=0.1"
+    sim._validate_meas_card("t", rewrite)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (" * --v(a)", -3),
+        (" / --v(a)", 7 / 3),
+        (" * +-v(a)", 9),
+        (" * -+v(a)", 9),
+        (" * ++v(a)", -3),
+        (" * - - v(a)", -3),
+        (" * ---v(a)", 9),
+        (" * --(v(a)+v(b))", -7),
+        (" * --2", -1),
+    ],
+)
+def test_chained_signs_preserve_precedence_in_first_suggestion(
+    suffix, expected, monkeypatch
+):
+    monkeypatch.setitem(_FUZZ_NODES, "a", 3)
+    monkeypatch.setitem(_FUZZ_NODES, "b", 2)
+    expression = "v(a)-v(b)" + suffix
+    card = f".meas tran t when {expression}=0.1"
+    rewrite = _file_scope_rewrite(card)
+    assert rewrite == f".meas tran t when par('{expression}')=0.1"
+    assert _fuzz_value(expression) == pytest.approx(expected)
+    sim._validate_meas_card("t", rewrite)
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t", card, control_scope=True)
+    assert _fuzz_value(_control_suggestion(card)["expr"]) == pytest.approx(expected)
+    assert "`.meas tran t when vdiff=0.1`" in str(excinfo.value)
+
+
+def _control_suggestion(card):
+    with pytest.raises(sim.SimError) as exc:
+        sim._validate_meas_card("t", card, control_scope=True)
+    message = str(exc.value)
+    spec, _ = json.JSONDecoder().raw_decode(
+        message[message.index('{"name": "vdiff"') :]
+    )
+    return spec
+
+
+def test_control_suggestion_keeps_signs_in_names_and_exponents():
+    expr = "v(net+-x)-v(b) * +-par('v(a)*1e-3')"
+    assert _control_suggestion(f".meas tran t find {expr} at=2u")["expr"] == (
+        "v(net+-x)-v(b) * -(v(a)*1e-3)"
+    )
+
+
+@SKIP_NO_NGSPICE
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("v(a)-v(b) * ++v(a,b)", 1),
+        ("v(a)-v(b) * - - v(a,b)", 1),
+        ("v(a)-v(b) + --v(a,b)", 2),
+        ("v(a)-v(b) - +-v(a,b)", 2),
+        ("v(a)-v(b) * ---v(a,b)", 5),
+        ("v(a)-v(b) * -+v(a,b)", 5),
+        ("(v(a)-v(b)) / --par('v(a)*v(b)')", 1 / 6),
+        ("(v(a)-v(b)) / --par('v(a)/v(b)')", 2 / 3),
+        ("v(a)-v(b) * ++v(a)", -3),
+        ("v(a)-v(b) * +-v(a)", 9),
+        ("v(a)-v(b) * -+v(a)", 9),
+        ("max(v(a), +-v(b))", 3),
+        ("abs(+-v(a))*v(b)", 6),
+        ("+-v(a)*v(b)", -6),
+        ("v(a)*(+-v(b))", -6),
+        ("--v(a)*v(b)", 6),
+        ("v(a)*(++v(b))", 6),
+        ("max(+ - v(a), - - v(b))", 2),
+    ],
+)
+def test_engine_agrees_with_file_and_control_suggestions(tmp_path, expr, expected):
+    card = f".meas tran t find {expr} at=2u"
+    suggestion = _file_scope_rewrite(card)
+    sim._validate_meas_card("t", suggestion)
+    (let,) = sim_steps._flatten_step_measurement(
+        _control_suggestion(card), {"name": "probe"}, {}
+    )["deck_lines"]
+    deck = tmp_path / "probe.cir"
+    deck.write_text(
+        "signed measurement\nVa a 0 3\nVb b 0 2\n.tran 1u 4u\n"
+        f"{suggestion}\n.control\nrun\n{let}\nprint vdiff[0]\nquit\n.endc\n.end\n"
+    )
+    result = subprocess.run(
+        ["ngspice", "-n", "-b", str(deck)], capture_output=True, text=True, check=True
+    )
+    for name in ("t", "vdiff[0]"):
+        match = re.search(
+            rf"^{re.escape(name)}\s*=\s*([-+0-9.eE]+)", result.stdout, re.M
+        )
+        assert match, result.stdout + result.stderr
+        assert float(match[1]) == pytest.approx(expected, rel=1e-5)

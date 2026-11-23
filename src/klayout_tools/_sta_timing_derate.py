@@ -13,14 +13,9 @@ from __future__ import annotations
 from typing import Any
 
 from ._jsonnum import is_finite_number
+from .post_route_sta_errors import PostRouteStaError
 
 TIMING_DERATE_KEYS = ("early", "late")
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
 
 
 def validate_timing_derate(
@@ -42,19 +37,19 @@ def validate_timing_derate(
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise _error(
+        raise PostRouteStaError(
             "constraints.timing_derate must be an object with 'early' and/or "
             f"'late' factors, got {type(value).__name__}"
         )
     unknown = sorted(set(value) - set(TIMING_DERATE_KEYS))
     if unknown:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.timing_derate has unknown key(s): "
             + ", ".join(unknown)
             + " (allowed: early, late)"
         )
     if not value:
-        raise _error(
+        raise PostRouteStaError(
             "constraints.timing_derate must give at least one of 'early' and 'late'"
         )
     derate: dict[str, float | None] = {}
@@ -65,9 +60,9 @@ def validate_timing_derate(
         factor = value[key]
         name = f"constraints.timing_derate.{key}"
         if not is_finite_number(factor):
-            raise _error(f"{name} must be a finite number, got {factor!r}")
+            raise PostRouteStaError(f"{name} must be a finite number, got {factor!r}")
         if factor <= 0:
-            raise _error(f"{name} must be > 0, got {factor!r}")
+            raise PostRouteStaError(f"{name} must be > 0, got {factor!r}")
         derate[key] = float(factor)
     return derate
 
