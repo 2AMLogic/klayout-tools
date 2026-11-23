@@ -45,7 +45,7 @@ from typing import Any
 
 from . import env_provenance
 from ._drc_edge_pair_hull import _edge_pair_hull_points
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -100,7 +100,6 @@ from .drc_layer_selection import (
 )
 from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
 from .drc_text_exempt import text_exempt
-from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -1444,22 +1443,21 @@ def _prepare_drc(
     dbu_scale = nominal_dbu_um / layout.dbu
 
     top_cells = _select_top_cells(layout, top, DrcError)
+    if top is not None:
+        # Each rule looks up its inputs in this private layout. Remove layers
+        # absent from the selected hierarchy so execution and coverage share
+        # the same presence test, including for missing enclosure layers.
+        scope_cells = cells_in_hierarchy(layout, top_cells[0])
+        for index in layout.layer_indexes():
+            if all(cell.shapes(index).is_empty() for cell in scope_cells):
+                layout.delete_layer(index)
     tile_windows: dict[str, tuple[str, Any]] = {}
     if tile is not None:
         top_cells, tile_windows = _tile_top_cells(layout, top_cells, tile)
 
     deck_layer_tuples = _deck_layer_tuples(deck)
 
-    # Reuse layers.py's existing per-layer enumeration (used today by
-    # `klt layers`) for stream-layer enumeration, rather than a second
-    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
-    # same cells `top_cells` above was just restricted to, so a scoped run's
-    # `coverage` reflects only what was actually checked, not the whole
-    # stream's layer usage.
-    stream_layer_tuples = {
-        (entry["layer"], entry["datatype"])
-        for entry in layers_report(path, top=top)["layers"]
-    }
+    stream_layer_tuples = {(info.layer, info.datatype) for info in layout.layer_infos()}
     return _DrcSetup(
         deck_name=deck_name,
         deck=deck,
@@ -2388,11 +2386,8 @@ def run_drc(
     ``nominal_dbu_um / layout.dbu`` so the same physical geometry produces
     identical violations regardless of the input stream's database unit.
 
-    ``top`` (issue #554) restricts the cells checked -- and the
-    ``coverage.layers_in_stream_without_rules``/``layers_checked``
-    denominator, which is recomputed from the same scope via
-    ``layers_report(path, top=top)`` -- to one named top cell, instead of
-    every top cell in the stream (today's default, unchanged when omitted).
+    ``top`` (issue #554) restricts rule evaluation and coverage to the named
+    cell and its descendants. When omitted, every top cell is checked.
     A named cell absent from the stream is a :class:`DrcError`, matching
     ``klt ring-check --top``.
 
