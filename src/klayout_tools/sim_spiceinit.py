@@ -21,6 +21,7 @@ import os
 from typing import Any
 
 from . import _warn
+from .sim_batch_hints import is_model_selection_abort
 
 #: ``source`` values. ``runner`` is for off-host backends: the init file is
 #: resolved by the worker, which this client cannot observe.
@@ -28,6 +29,7 @@ SOURCES = ("request", "thread_pin", "home", "none", "runner")
 
 
 BATCH_INIT_UNVERIFIED = "batch_ngspice_init_unverified"
+MODEL_SELECTION_INIT_HINT = "ngspice_model_selection_init_hint"
 
 
 def home_spiceinit_path() -> str:
@@ -194,5 +196,38 @@ def batch_init_diagnostic(
             "Worker reports do not confirm that ngspice applied options.ngspice_init. "
             "Jobs marked digest_reported reported the requested init contents. "
             "For jobs marked unverified, the request identity is also unknown."
+        ),
+    }
+
+
+def report_init_diagnostic(
+    backend: str,
+    engine: str,
+    declared: tuple[str, ...],
+    remote: dict[str, Any] | None,
+    corners: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Explain a declared batch init or suggest one on a model-selection abort."""
+    if declared:
+        return batch_init_diagnostic(backend, engine, declared, remote)
+    if engine != "ngspice" or backend not in ("local", "local-parallel", "batch"):
+        return None
+    aborted = any(
+        is_model_selection_abort(diagnostic)
+        for corner in corners
+        if corner.get("status") == "error"
+        for diagnostic in corner.get("diagnostics", [])
+    )
+    if not aborted:
+        return None
+    return {
+        "code": MODEL_SELECTION_INIT_HINT,
+        "severity": "warning",
+        "feature": "options.ngspice_init",
+        "message": (
+            "ngspice could not select a model. If this library needs a "
+            "compatibility mode, declare the required lines in options.ngspice_init "
+            "(for example, set ngbehavior=hsa for an HSPICE-style library). "
+            "See docs/cli/sim.md under ngspice's working directory and .spiceinit."
         ),
     }

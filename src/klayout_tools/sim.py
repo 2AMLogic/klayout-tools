@@ -584,6 +584,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
+        sim_spiceinit.MODEL_SELECTION_INIT_HINT,
         # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
         "expr_no_value",
@@ -4365,9 +4366,6 @@ def _run_sim_corners(
 
     remote = environment.get("remote")
     remote_diagnostics = pop_remote_diagnostics(remote)
-    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
-        backend, engine, ngspice_init_lines, remote
-    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4419,7 +4417,9 @@ def _run_sim_corners(
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     diag_candidates = (
         *remote_diagnostics,
-        init_diagnostic,
+        sim_spiceinit.report_init_diagnostic(
+            backend, engine, ngspice_init_lines, remote, corners
+        ),
         bin_diagnostic,
         save_diagnostic,
     )
