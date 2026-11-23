@@ -235,7 +235,7 @@ from . import synthesize_abc_stages as abc_stages
 from . import synthesize_timeout as ytimeout
 from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_int
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -298,6 +298,16 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_constrained_timing import (
+    _resolve_clocks as _resolve_clocks,
+)
+from .synthesize_constrained_timing import (
+    _validate_clock_entry as _validate_clock_entry,
+)
+from .synthesize_constrained_timing import (
+    constrained_timing_fields,
+    mapped_sta_constraints,
+)
 from .synthesize_driving_cell import (
     ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
 )
@@ -1095,6 +1105,7 @@ def run_synthesize(
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
     delay_target_ps = _resolve_delay_target_ps(constraints)
+    sta_constraints = mapped_sta_constraints(constraints)
     # Issue #2382: request shape is validated here -- before any PDK
     # resolution or run-directory creation -- so a malformed exclusion list
     # fails as cheaply as a malformed `clock_period_ns` does. The
@@ -1493,6 +1504,16 @@ def run_synthesize(
         # Additive field, no `schema_version` bump (docs/json-contract.md).
         "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
+        **constrained_timing_fields(
+            sta_constraints,
+            netlist_path=netlist_path,
+            hdl_toplevel=hdl_toplevel,
+            cell_library=cell_library,
+            corner=corner,
+            macros=macros,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+        ),
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
         # "STA not applicable to this netlist/liberty pair". `null` exactly
@@ -2137,7 +2158,7 @@ def _resolve_liberty(
     ``corner`` (explicit or nominal-default) liberty view -- the "liberty
     not found for deck" posture this module's docstring describes.
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``place_and_route.py`` and ``post_route_sta.py``'s own
@@ -2148,68 +2169,6 @@ def _resolve_liberty(
     return resolve_liberty_for_cell_library(
         cell_library, requested_corner, SynthesizeError, variant=variant, root=root
     )
-
-
-def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The validated ``constraints.clocks`` list as ``[{port, period_ns}]``
-    (issue #2883), empty when omitted/``null``.
-
-    Each entry must be an object with a non-empty string ``port`` (unique
-    across the list) and a positive numeric ``period_ns``. Unknown entry keys
-    and a non-array / empty list are errors -- a request that means to
-    constrain several clocks but expresses it wrongly must not be silently
-    downgraded, exactly as for ``clock_period_ns``.
-    """
-    if not constraints:
-        return []
-    raw = constraints.get("clocks")
-    if raw is None:
-        return []
-    if not isinstance(raw, list) or not raw:
-        raise SynthesizeError(
-            "request.constraints.clocks must be a non-empty array of "
-            "{port, period_ns} objects or null"
-        )
-    clocks: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        where = f"request.constraints.clocks[{index}]"
-        clock = _validate_clock_entry(entry, where)
-        port = clock["port"]
-        if port in seen:
-            raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
-        seen.add(port)
-        clocks.append(clock)
-    return clocks
-
-
-def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
-    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
-    (issue #2883).
-
-    Checks the entry in isolation -- object shape, no unknown keys, a
-    non-empty string ``port`` and a positive numeric ``period_ns``. The
-    list-level checks (array type, non-empty, unique ports) stay in
-    :func:`_resolve_clocks`. ``where`` prefixes every error message.
-    """
-    if not isinstance(entry, dict):
-        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
-    unknown = sorted(set(entry) - {"port", "period_ns"})
-    if unknown:
-        raise SynthesizeError(
-            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
-            "(allowed: port, period_ns)"
-        )
-    port = entry.get("port")
-    if not isinstance(port, str) or not port.strip():
-        raise SynthesizeError(f"{where}.port must be a non-empty string")
-    if not is_number(period := entry.get("period_ns")):
-        raise SynthesizeError(
-            f"{where}.period_ns must be a positive number (nanoseconds)"
-        )
-    if period <= 0:
-        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
-    return {"port": port, "period_ns": period}
 
 
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:

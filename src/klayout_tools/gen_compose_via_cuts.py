@@ -10,8 +10,14 @@ from typing import Any
 
 from .gen import GenError, _cut_fixed_size_um, _fixed_cut_side_um
 from .gen_compose_base import _VIA_DROP_SIZE_UM, _drop_array_extra_um
-from .gen_compose_layer_rules import _min_width_um_for_layer, _pdk_family
+from .gen_compose_layer_rules import (
+    _landing_pad_side_um_for_pair,
+    _min_width_um_for_layer,
+    _pdk_family,
+)
 from .gen_compose_plane_change import RouteConflict
+
+_LayerPair = tuple[int, int]
 
 
 def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
@@ -26,6 +32,28 @@ def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
     except GenError:
         return 0.0
     return _cut_fixed_size_um(family, via_layer)
+
+
+def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
+    """How much wider than one cut the (square-bounded) array footprint is."""
+    return (max(array) - 1) * pitch_um
+
+
+def _stack_sizes(
+    variant: str,
+    ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...],
+    pad_override_um: float | None = None,
+) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
+    """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
+    as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
+    cuts = {via: via_drop_cut_side_um(variant, via) for via, _, _ in ladder}
+    pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
+    for via, lower, upper in ladder:
+        for metal in (lower, upper):
+            pads[metal, via] = _landing_pad_side_um_for_pair(
+                variant, metal, via, cuts[via], pad_override_um
+            )
+    return pads, cuts
 
 
 def _insert_via_cuts(

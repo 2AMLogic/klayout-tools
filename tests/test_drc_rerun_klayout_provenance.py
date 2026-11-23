@@ -62,17 +62,18 @@ def _stub_klayout(monkeypatch) -> None:
 
 
 def _committed_report(
-    tmp_path, monkeypatch, capsys, extra_argv=()
+    tmp_path, monkeypatch, capsys, extra_argv=(), *, cells=("TOP",)
 ) -> tuple[Path, dict]:
     """Run ``klt drc --engine klayout`` once and return the report written to
     disk (a repo-scoped input, so ``--check``/``--rerun`` can locate it)."""
     _stub_klayout(monkeypatch)
-    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git").mkdir(exist_ok=True)
     layout = kdb.Layout()
     layout.dbu = 0.001
-    layout.create_cell("TOP").shapes(layout.layer(1, 0)).insert(
-        kdb.Box(0, 0, 100, 1000)
-    )
+    for cell in cells:
+        layout.create_cell(cell).shapes(layout.layer(1, 0)).insert(
+            kdb.Box(0, 0, 100, 1000)
+        )
     gds = str(tmp_path / "test.gds")
     layout.write(gds)
     deck = tmp_path / "deck.lydrc"

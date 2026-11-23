@@ -173,7 +173,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2238
+      "lines": 2236
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 2134
+      "lines": 1942
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -333,7 +333,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2672
+      "lines": 2656
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -393,11 +393,11 @@
     },
     {
       "path": "src/klayout_tools/liberty_writer.py",
-      "lines": 544
+      "lines": 530
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5990
+      "lines": 5887
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1825
+      "lines": 1799
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10835
+      "lines": 10827
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -597,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1227
+      "lines": 1222
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/size.py",
-      "lines": 2115
+      "lines": 2113
     },
     {
       "path": "src/klayout_tools/size_topology.py",
@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4411
+      "lines": 4370
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",

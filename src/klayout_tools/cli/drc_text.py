@@ -36,6 +36,8 @@ def _print_coverage_gaps(coverage: dict) -> None:
         for record in skipped_requested:
             print(f"  {record['id']}: {record['reason']}")
 
+    for warning in coverage.get("implant_warnings", []):
+        print(f"warning: {warning['cell']}: {warning['description']}")
     unchecked_layers = coverage["layers_in_stream_without_rules"]
     if unchecked_layers:
         print(f"unchecked layers in stream: {len(unchecked_layers)}")
