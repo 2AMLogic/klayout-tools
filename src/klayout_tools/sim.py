@@ -3982,8 +3982,7 @@ def _run_sim_corners(
             staged_model_environment=staged_model_environment,
         )
 
-    def shard_fingerprint() -> str:
-        return _checkpoint_fingerprint(**fingerprint_inputs)
+    shard_fingerprint = functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
 
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
