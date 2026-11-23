@@ -49,9 +49,8 @@
 # and re-ported again (pr-worktree, claim-staleness + test, builder-pr both
 # copies); see the per-entry notes below and docs/loom-pin-drift.md. The fence
 # files were left alone here — their v0.19.1306 re-port (LOOM_LEASE_HOST_ID)
-# is #6108 / PR #6222. Each retained delta needs an upstream issue so its pin
-# has a retirement path; none exists yet and none can be filed from this repo,
-# so the filings are tracked in #6306.
+# is #6108 / PR #6222. The four upstream issues filed for #6306 are linked
+# at the relevant pins below. Each pin requires equivalent upstream behavior.
 
 # #668 (RETIRED by #1966 PR 2): commands/loom/{curator,judge,doctor}.md used to
 # be pinned whole-file to protect an inline "Frozen-Timeline Fallback" (the
@@ -189,7 +188,7 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # as T34 (nine assertion sites, eleven checks), preserving local T23-T33;
 # test-claim-staleness.sh now passes 115/115. The #11947 behaviour is ported
 # AND covered locally. Delta remaining: the #1966 frozen-timeline protection
-# only. Upstream issue for the delta: pending, tracked in #6306.
+# only. Upstream tracks this guard at https://github.com/2AMLogic/loom/issues/15044.
 scripts/claim-staleness.sh
 scripts/tests/test-claim-staleness.sh
 
@@ -213,8 +212,9 @@ scripts/tests/test-claim-staleness.sh
 # remainder-hold wording and the Loom-Issue trailer note. Delta remaining:
 # the #1674 quoted-keyword section plus the #2237 --sweep-id call site (both
 # hunks verified as the only local-vs-v0.19.1306 differences; the sweep-id
-# contract is asserted by test-sweep-lease-publish.sh 81/81). Upstream issues
-# for the deltas: pending, tracked in #6306.
+# contract is asserted by test-sweep-lease-publish.sh 81/81). Upstream tracks
+# the quoted-keyword guidance at https://github.com/2AMLogic/loom/issues/15046
+# and the sweep-id call at https://github.com/2AMLogic/loom/issues/15043.
 commands/loom/builder-pr.md
 
 # #2128 (commit d0b770ad): verify-proposal-refs.sh and
@@ -264,7 +264,7 @@ scripts/tests/test-verify-proposal-refs.sh
 # cfcb24902; nothing else here referenced it). Delta remaining: the #2020
 # hook call only (verified: local vs v0.19.1306 differs by nothing else;
 # test-pr-worktree-post-hook.sh 14/14, test-pr-worktree-isolation.sh 38/38).
-# Upstream issue for the delta: pending, tracked in #6306.
+# Upstream tracks the hook at https://github.com/2AMLogic/loom/issues/15045.
 scripts/pr-worktree.sh
 
 # #2237 (2026-09-21): sweep-lease-fence.sh's `check` subcommand (and its test
@@ -313,7 +313,8 @@ scripts/pr-worktree.sh
 # files received the LOOM_LEASE_HOST_ID fix in #6108 / PR #6222.
 # After #6222 merged, test-sweep-lease-fence.sh passed 110/110 on the updated
 # audit branch, completing the #6236 fence drift check.
-# Upstream issue for the sweep-id delta: pending, tracked in #6306.
+# Upstream tracks the sweep-id delta at https://github.com/2AMLogic/loom/issues/15043
+# and the Builder prompt's quoting guidance at https://github.com/2AMLogic/loom/issues/15046.
 scripts/sweep-lease-fence.sh
 scripts/tests/test-sweep-lease-fence.sh
 roles/builder-pr.md

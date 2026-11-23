@@ -24,7 +24,11 @@ from helpers.sim_regrade_bench import (
     _request,
     _stub_engine,
 )
-from helpers.subprocess_fakes import fake_completed, uploaded_request_of
+from helpers.subprocess_fakes import (
+    fake_completed,
+    inputs_upload_of,
+    uploaded_request_of,
+)
 from klayout_tools import cli, sim, sim_regrade_run
 from klayout_tools import sim_batch as sb
 from klayout_tools.sim_errors import SimError
@@ -193,7 +197,7 @@ def _batch_source_report(corner_ids: list[str]) -> dict:
         "corners": [
             {
                 "corner_id": cid,
-                "status": "fail" if cid.endswith("1.620V/27C") else "pass",
+                "status": "fail" if cid == corner_ids[-1] else "pass",
                 "measurements": [
                     {
                         "name": "vout",
@@ -202,7 +206,7 @@ def _batch_source_report(corner_ids: list[str]) -> dict:
                         "status": "fail",
                         "margin": -0.1,
                     }
-                    if cid.endswith("1.620V/27C")
+                    if cid == corner_ids[-1]
                     else {
                         "name": "vout",
                         "value": 1.5,
@@ -236,10 +240,20 @@ def _netlist_identity_of_body() -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def test_batch_baseline_dispatches_a_one_unit_subset_on_batch(tmp_path, monkeypatch):
-    ids = ["default/1.800V/27C", "default/1.620V/27C"]
-    runner = _FakeBatchRunner({"report.json": _worker_report(ids[1:])})
-    monkeypatch.setattr(sb, "_run_subprocess", runner)
+@pytest.mark.parametrize(
+    "mc_settings",
+    [
+        None,
+        {},
+        {"seed_scope": "point"},
+        {"seed_mode": "sequential"},
+        {"mismatch_scale": 2},
+    ],
+    ids=["plain", "default-mc", "point-scope", "sequential", "mismatch-scale"],
+)
+def test_batch_baseline_dispatches_a_one_unit_subset_on_batch(
+    tmp_path, monkeypatch, mc_settings
+):
     monkeypatch.setattr(sb.time, "sleep", lambda _s: None)
     # The host default must not pull a single-unit run back on-host.
     monkeypatch.setenv(sim.BACKEND_ENV, "batch")
@@ -266,13 +280,18 @@ def test_batch_baseline_dispatches_a_one_unit_subset_on_batch(tmp_path, monkeypa
         ],
         "options": {"tightened_rerun": TIGHTENED},
     }
+    if mc_settings is not None:
+        request["monte_carlo"] = {"n": 2, "seed": 7, "vary": "mismatch", **mc_settings}
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(request))
+    baseline = sim.run_sim(str(request_path), backend="local", dry_run=True)
+    ids = [unit["corner_id"] for unit in baseline["units"]]
+    selected = ids[-1]
+    runner = _FakeBatchRunner({"report.json": _worker_report([selected])})
     source_path = tmp_path / "report.json"
     source_path.write_text(json.dumps(_batch_source_report(ids)))
 
     uploaded: dict[str, Any] = {}
-    real_call = runner
 
     def capturing(argv, timeout_s):
 
@@ -280,19 +299,29 @@ def test_batch_baseline_dispatches_a_one_unit_subset_on_batch(tmp_path, monkeypa
         if captured is not None:
             uploaded["request"] = captured[0]
             uploaded["job_id"] = captured[1]
-        return real_call(argv, timeout_s)
+            stage, _ = inputs_upload_of(argv)
+            uploaded["units"] = sim.run_sim(
+                str(Path(stage) / "request.json"), dry_run=True
+            )["units"]
+        return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", capturing)
 
     record = sim_regrade_run.run_regrade(
-        str(request_path), str(source_path), "brown_out_curve", [ids[1]]
+        str(request_path), str(source_path), "brown_out_curve", [selected]
     )
 
     # The pushed job request carries the selection, the merged solver
     # options and the pinned netlist identity of the source report.
     document = uploaded["request"]
+    assert ("_explicit_points" in document) == bool(mc_settings)
+    assert uploaded["units"] == [
+        {**baseline["units"][-1], "analysis_args": TIGHTENED_ARGS}
+    ]
+    if mc_settings and "mismatch_scale" in mc_settings:
+        assert document["_explicit_points"][0]["mc_seed"]["mismatch_scale"] == 2
     assert document["_regrade"] == {
-        "select_corner_ids": [ids[1]],
+        "select_corner_ids": [selected],
         "tmax": "25p",
         "ngspice_options": {"reltol": 0.0001},
     }
@@ -305,7 +334,7 @@ def test_batch_baseline_dispatches_a_one_unit_subset_on_batch(tmp_path, monkeypa
     # The record grades from the tightened observation and carries the job.
     assert record["status"] == "pass"
     (unit,) = record["units"]
-    assert unit["corner_id"] == ids[1]
+    assert unit["corner_id"] == selected
     assert unit["first"]["measurements"][0]["value"] == pytest.approx(0.9)
     assert unit["tightened"]["measurements"][0]["value"] == pytest.approx(1.5)
     assert unit["job"]["job_id"].startswith("klt-sim-")
