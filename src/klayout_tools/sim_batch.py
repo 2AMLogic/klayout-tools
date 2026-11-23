@@ -3283,7 +3283,7 @@ def _run_batch(
     request_dir: str | None = None,
     attach_job_id: str | None = None,
     collect_partial: bool = False,
-    shard_fingerprint: str | None = None,
+    shard_fingerprint: str | Callable[[], str] | None = None,
     netlist_sha256: str | None = None,
     explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
@@ -3330,6 +3330,8 @@ def _run_batch(
     launch. The request supplies the corner list and measurement grading, so
     it must be the request the job was submitted from.
     """
+    from . import sim_batch_shards as shards
+
     del analysis, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, probe_abort  # not honored
 
@@ -3337,9 +3339,7 @@ def _run_batch(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     if attach_job_id is not None and attach_job_id.endswith(".json"):
-        from . import sim_batch_shards
-
-        return sim_batch_shards.attach_batch_shards(
+        return shards.attach_batch_shards(
             manifest_path=attach_job_id,
             config=config,
             corner_points=corner_points,
@@ -3395,7 +3395,7 @@ def _run_batch(
                 measurements_spec=measurements_spec,
                 request_dir=request_dir,
                 config=config,
-                shard_fingerprint=shard_fingerprint
+                shard_fingerprint=shards.resolve_fingerprint(shard_fingerprint)
                 or (None if checkpoint is None else checkpoint.fingerprint),
                 resume=checkpoint is not None,
             )
