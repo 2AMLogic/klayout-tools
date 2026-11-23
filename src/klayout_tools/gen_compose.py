@@ -242,7 +242,7 @@ from .gen_compose_draw import (
 from .gen_compose_draw import (
     _insert_via_cuts as _insert_via_cuts,
 )
-from .gen_compose_footprints import _bbox_contains
+from .gen_compose_footprints import _bbox_contains, check_composed_footprints
 from .gen_compose_footprints import (
     check_placement_overlap as check_placement_overlap,
 )
@@ -3076,20 +3076,20 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         notes.extend(abutment_notes)
 
     # The placement gate and the advisory share one measurement for each source.
-    real_placed_bboxes_um = _measure_placed_bboxes(order, blocks, offsets_um)
     if check_placement:
-        gate_declared_um = placed_bboxes_um
-        if strategy == "array":
-            # Compare the base tile to its own declaration.
-            tile = order[0]
-            gate_declared_um = {
-                tile: _translate_bbox(bboxes_um[tile], offsets_um[tile])
-            }
-        gate_failures = check_placement_overlap(gate_declared_um, real_placed_bboxes_um)
-        if gate_failures:
-            raise GenComposeError(
-                "options.check_placement failed: " + "; ".join(gate_failures)
-            )
+        local_boxes = _measure_placed_bboxes(
+            order, blocks, {name: {"x": 0.0, "y": 0.0} for name in order}
+        )
+        real_placed_bboxes_um = check_composed_footprints(
+            order,
+            bboxes_um,
+            local_boxes,
+            offsets_um,
+            target_bbox_um,
+            spacing_um if strategy == "row" else None,
+        )
+    else:
+        real_placed_bboxes_um = _measure_placed_bboxes(order, blocks, offsets_um)
 
     warnings.extend(
         _declared_bbox_overlap_warnings(

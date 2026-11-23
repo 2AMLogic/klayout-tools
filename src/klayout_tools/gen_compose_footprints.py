@@ -3,23 +3,98 @@
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 from itertools import combinations
 from typing import Any
+
+from .gen_compose_base import GenComposeError
 
 # Only measurements carry database-unit quantization error.
 _BBOX_REALITY_TOLERANCE_UM = 1e-4
 
 
-def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
-    """Whether ``outer`` fully contains ``inner`` (within
-    :data:`_BBOX_REALITY_TOLERANCE_UM`)."""
+def _outside_edges(outer: dict[str, float], inner: dict[str, float]) -> set[str]:
+    """Measured edges beyond the advisory's inclusive containment tolerance."""
     tol = _BBOX_REALITY_TOLERANCE_UM
-    return (
-        inner["x0"] >= outer["x0"] - tol
-        and inner["y0"] >= outer["y0"] - tol
-        and inner["x1"] <= outer["x1"] + tol
-        and inner["y1"] <= outer["y1"] + tol
-    )
+    return {
+        side
+        for side, contained in (
+            ("left", inner["x0"] >= outer["x0"] - tol),
+            ("right", inner["x1"] <= outer["x1"] + tol),
+            ("bottom", inner["y0"] >= outer["y0"] - tol),
+            ("top", inner["y1"] <= outer["y1"] + tol),
+        )
+        if not contained
+    }
+
+
+def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
+    return not _outside_edges(outer, inner)
+
+
+def _move_box(box: dict[str, float], x: Fraction, y: Fraction) -> dict[str, float]:
+    return {
+        edge: float(Fraction(str(value)) + (x if edge.startswith("x") else y))
+        for edge, value in box.items()
+    }
+
+
+def _placed_gate_footprints(
+    order: list[str],
+    declared: dict[str, dict[str, float]],
+    measured: dict[str, dict[str, float]],
+    offsets: dict[str, dict[str, float]],
+    targets: dict[str, dict[str, float]] | None,
+    row_spacing: float | None,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """Translate both footprints from their local frames for the strict gate.
+
+    JSON dimensions are decimal micrometres. Keep their specified edges exact
+    while anchoring to a row neighbor or a bbox target. Rounding the derived
+    offset before adding it back can turn an abutment into an intersection.
+    Array placements check the base tile at its origin.
+    """
+    placed, drawn = {}, {}
+    right = None
+    for name in order:
+        box = _require_gate_bbox(
+            declared[name], f"declared footprint of block '{name}'"
+        )
+        if targets is not None:
+            x = Fraction(str(targets[name]["x"])) - Fraction(str(box["x0"]))
+            y = Fraction(str(targets[name]["y"])) - Fraction(str(box["y0"]))
+        elif row_spacing is not None and right is not None:
+            x = right + Fraction(str(row_spacing)) - Fraction(str(box["x0"]))
+            y = Fraction(0)
+        else:
+            x = Fraction(str(offsets[name]["x"]))
+            y = Fraction(str(offsets[name]["y"]))
+        right = Fraction(str(box["x1"])) + x
+        placed[name] = _move_box(box, x, y)
+        if name in measured:
+            drawn[name] = _move_box(measured[name], x, y)
+    return placed, drawn
+
+
+def check_composed_footprints(
+    order: list[str],
+    declared: dict[str, dict[str, float]],
+    measured: dict[str, dict[str, float]],
+    offsets: dict[str, dict[str, float]],
+    targets: dict[str, dict[str, float]] | None,
+    row_spacing: float | None,
+) -> dict[str, dict[str, float]]:
+    """Check the placement and return placed measurements for the advisory."""
+    try:
+        placed, drawn = _placed_gate_footprints(
+            order, declared, measured, offsets, targets, row_spacing
+        )
+        failures = check_placement_overlap(placed, drawn)
+    except (ValueError, OverflowError) as exc:
+        raise GenComposeError(f"options.check_placement failed: {exc}") from exc
+    if failures:
+        raise GenComposeError("options.check_placement failed: " + "; ".join(failures))
+    return drawn
 
 
 def _require_gate_bbox(value: Any, where: str) -> dict[str, float]:
@@ -29,8 +104,7 @@ def _require_gate_bbox(value: Any, where: str) -> dict[str, float]:
 
     The gate is a library entry point for merge scripts with no request
     document at all, so its input errors are plain ``ValueError`` s rather
-    than :class:`GenComposeError` (compose itself validates its own request
-    boxes through :func:`_require_bbox` before any box ever gets here)."""
+    than :class:`GenComposeError`. Compose translates them at its gate boundary."""
     if not isinstance(value, dict):
         raise ValueError(f"{where} must be a JSON object with x0/y0/x1/y1 (um)")
     missing = [key for key in ("x0", "y0", "x1", "y1") if key not in value]
@@ -129,11 +203,8 @@ def check_placement_overlap(
                 f"; '{block_id}' measured {_format_bbox(measured)} um, declared "
                 f"{_format_bbox(box)} um, edge deltas: {_describe_deltas(changes)}"
             )
-        growth = {
-            side: delta
-            for side, delta in deltas.items()
-            if delta > _BBOX_REALITY_TOLERANCE_UM
-        }
+        outside = _outside_edges(box, measured)
+        growth = {side: delta for side, delta in deltas.items() if side in outside}
         if growth:
             growth_failures.append(
                 f"block '{block_id}' measured footprint {_format_bbox(measured)} um "
