@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1593
+      "lines": 1586
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3314
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4535
+      "lines": 4532
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11622
+      "lines": 11445
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26043
+      "lines": 26034
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
