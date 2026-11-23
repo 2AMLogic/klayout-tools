@@ -340,12 +340,20 @@ def require_regrade_echo(
     actual = [c.get("corner_id") for c in corners if isinstance(c, dict)]
     if actual == expected:
         return
+    if len(actual) != len(expected):
+        problem = (
+            f"it returned {len(actual)} corner report(s) for the {len(expected)} "
+            "selected unit(s)"
+        )
+    else:
+        index = next(i for i, cid in enumerate(actual) if cid != expected[i])
+        problem = (
+            f"at corners[{index}] the client expected {expected[index]!r} "
+            f"and received {actual[index]!r}"
+        )
     raise SimError(
-        f"the {backend} worker did not apply the regrade selection -- it "
-        f"returned {len(actual)} corner report(s) for the {len(expected)} "
-        "selected unit(s). A runner built before the `--regrade` feature "
-        "runs the whole matrix instead of the selected units; update the "
-        "runner image to this klt release. No result was reported",
+        f"the {backend} worker did not apply the regrade selection -- {problem}. "
+        "Check that the runner image matches this klt release. No result was reported",
         code=REGRADE_UNSUPPORTED_WORKER_CODE,
     )
 
