@@ -51,11 +51,11 @@ def _first_failure(corners: list[dict[str, Any]], silent: list[str]) -> str:
     prefixes = {f"measurement {name!r}" for name in silent}
     for corner in corners:
         for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("code") != "measurement":
+                continue
             message = diagnostic.get("message", "")
-            if (
-                diagnostic.get("code") == "measurement"
-                and message.partition(" produced no value")[0] in prefixes
-            ):
+            subject, separator, _ = message.partition(" produced no value:")
+            if separator and subject.removeprefix("derived ") in prefixes:
                 corner_id = corner.get("corner_id", "unknown corner")
                 return f" First failure in {corner_id}: {message}"
     return ""

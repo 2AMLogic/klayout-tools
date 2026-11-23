@@ -5,7 +5,14 @@ import pytest
 from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools import sim
 from klayout_tools import sim_batch_hints as hints
-from test_sim_steps import _resolve, _write_body, _write_request
+from test_sim_steps import (
+    _grade,
+    _resolve,
+    _step_log,
+    _two_point_request,
+    _write_body,
+    _write_request,
+)
 
 
 @pytest.mark.parametrize("version", ["0.7.0", "0.9.0", "0.9.0.dev3+gabc"])
@@ -87,3 +94,42 @@ def test_reversed_edge_keeps_the_step_measurement_failure_on_a_supporting_runner
     [warning] = report["diagnostics"]
     assert warning["code"] == "expr_no_value"
     assert corner["diagnostics"][0]["message"] in warning["message"]
+
+
+def test_derived_expression_failure_keeps_first_matching_corner_evidence():
+    request = _two_point_request()
+    _, specs = _resolve(request)
+    results, diagnostics, _ = _grade(
+        request, _step_log(steps=2, values={"lo__vout": 2.0, "hi__vout": 2.2})
+    )
+    [failure] = diagnostics
+    assert failure["code"] == "measurement"
+    assert failure["message"].startswith(
+        "derived measurement 'line_sens' produced no value: every input"
+    )
+    corners = [
+        {
+            "corner_id": "ss",
+            "measurements": results,
+            "diagnostics": [
+                {"code": "worker", "message": failure["message"]},
+                {"code": "measurement", "message": "derived measurement 'line_sens'"},
+                {
+                    "code": "measurement",
+                    "message": failure["message"].replace("line_sens", "other"),
+                },
+                {
+                    "code": "measurement",
+                    "message": "measurement 'line_sens' target not reached",
+                },
+            ],
+        },
+        {"corner_id": "tt", "measurements": results, "diagnostics": diagnostics},
+    ]
+    report = {"environment": {"remote": {"runner_klt_version": "0.9.0"}}}
+    hints.attach_runner_hints(report, specs, corners, backend="batch")
+    [warning] = report["diagnostics"]
+    assert warning["code"] == "expr_no_value"
+    assert warning["measurements"] == ["line_sens"]
+    assert warning["message"].endswith(f"First failure in tt: {failure['message']}")
+    assert corners[1]["diagnostics"] == [failure]
