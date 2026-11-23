@@ -75,6 +75,7 @@ real failure.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import math
