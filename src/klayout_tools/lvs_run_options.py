@@ -45,6 +45,7 @@ class _LvsRunOptions:
 
     deck_options: Any
     label_layers: Any
+    join_same_named_nets: bool
     layout_abstraction: Any
     def_net_names: Any
     def_pins: Any
@@ -91,6 +92,18 @@ def _parse_flatten_reference(
             )
         return list(value) if value else False
     return bool(value)
+
+
+def _parse_join_same_named_nets(layout_spec: dict[str, Any]) -> bool:
+    value = layout_spec.get("join_same_named_nets", False)
+    if not isinstance(value, bool):
+        raise LvsError("request.layout.join_same_named_nets must be a boolean")
+    if value and not (layout_spec.get("file") and layout_spec.get("deck")):
+        raise LvsError(
+            "request.layout.join_same_named_nets requires inline extraction "
+            "with request.layout.file and request.layout.deck"
+        )
+    return value
 
 
 def _parse_lvs_run_options(
@@ -247,6 +260,7 @@ def _parse_lvs_run_options(
     return _LvsRunOptions(
         deck_options=deck_options,
         label_layers=label_layers,
+        join_same_named_nets=_parse_join_same_named_nets(layout_spec),
         layout_abstraction=layout_abstraction,
         def_net_names=def_net_names,
         def_pins=def_pins,

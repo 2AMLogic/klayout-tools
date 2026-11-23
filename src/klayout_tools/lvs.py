@@ -2023,8 +2023,8 @@ def _reconstruct_lvs_request(
         # Issue #2686: replay the applied label-purpose override, `null`
         # roles included; a report without the echo replays without one.
         layout_spec.update(_label_layers_replay(committed))
-        # Issue #4347: replay the DEF-name options too.
-        layout_spec.update(_def_options_replay(committed))
+        # Replay the applied connectivity and DEF naming options.
+        layout_spec.update(_layout_connectivity_replay(committed))
         # Issue #2853: replay the cell-level black-box abstraction too.
         layout_spec.update(_layout_abstraction_replay(committed))
     else:
@@ -2552,12 +2552,11 @@ def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return replay
 
 
-def _def_options_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """The ``request.layout`` keys that rebuild a committed report's
-    ``def_net_names``/``def_pins`` echo (issue #4347), or ``{}`` for a report
-    without one. Passed through verbatim, so a malformed recorded value is
-    rejected by the request parsers on replay."""
+def _layout_connectivity_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the layout-side DEF and implicit-connect options for replay."""
     replay: dict[str, Any] = {}
+    if "join_same_named_nets" in committed:
+        replay["join_same_named_nets"] = committed["join_same_named_nets"]
     if committed.get("def_net_names") is True:
         replay["def_net_names"] = True
     if committed.get("def_pins") is not None:
@@ -2708,6 +2707,8 @@ def _resolve_layout(
     def_pins: frozenset[str] | None = None,
     progress: bool | str = False,
     coverage: dict[str, Any] | None = None,
+    *,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2944,13 +2945,11 @@ def _resolve_layout(
                 layout_file,
                 deck_name,
                 layout_coverage=coverage,
+                join_same_named_nets=join_same_named_nets,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
-                # Issue #1513: `request.layout.pin_source_cells` -- the
-                # positional counterpart to `declared_pins` above. `None`
-                # when the field was never given, unchanged from every
-                # request that predates it.
+                # The source cells locate the declared pins in the layout (#1513).
                 pin_source_cells=pin_source_cells,
                 # Issue #2854: `request.layout.rename_declared_pins` --
                 # validated by `_parse_layout_rename_declared_pins` above;

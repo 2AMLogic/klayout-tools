@@ -4299,6 +4299,7 @@ def extract_netlist_from_layout(
     unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
     layout_coverage: dict[str, Any] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4492,24 +4493,9 @@ def extract_netlist_from_layout(
     skips the lateral pass entirely, byte-identical to before this feature
     existed.
 
-    ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net
-    <net>``, issue #798) forward straight to :func:`_extract_netlist`, which
-    computes ``mom_crosscheck`` alongside ``parasitic_nets`` for the same
-    "``l2n`` must still be alive" reason -- see its docstring. ``None`` (the
-    default) skips the cross-check entirely, ``mom_crosscheck`` is then
-    always ``None`` too, byte-identical to before this feature existed.
-
-    Shared by :func:`run_extract` (this module, which additionally writes the
-    netlist to disk and builds the ``devices``/``nets`` convenience view) and
-    ``klt lvs``'s inline-extraction path (``lvs.py``'s ``layout.file`` +
-    ``layout.deck`` request shape, per
-    ``docs/design/lvs-extraction-spike.md`` section 2b), which composes this
-    with ``NetlistComparer`` instead of ``NetlistSpiceWriter`` -- no need to
-    round-trip through a written SPICE file just to compare it.
-
-    Raises :class:`ExtractError` for a bad file, unknown deck, invalid
-    ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
-    identical error semantics to ``run_extract``.
+    The optional MOM cross-check runs while the extractor still owns its geometry.
+    LVS can request implicit joins between identically labelled top-level nets.
+    This shared entry point raises the same errors as `run_extract`.
     """
     # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
@@ -4690,6 +4676,7 @@ def extract_netlist_from_layout(
         top_cell,
         deck,
         parasitics_deck,
+        join_same_named_nets=join_same_named_nets,
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
@@ -6954,6 +6941,15 @@ def _flavour_mos_regions(
     return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
 
 
+def _extract_connected_netlist(
+    l2n: kdb.LayoutToNetlist, join_same_named_nets: bool
+) -> None:
+    """Apply any requested implicit top-level connections before extracting the nets."""
+    if join_same_named_nets:
+        l2n.join_net_names("*")
+    l2n.extract_netlist()
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6991,6 +6987,7 @@ def _extract_netlist(
     tie_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -8579,7 +8576,7 @@ def _extract_netlist(
                 l2n.connect(terminal_region, contact)
 
     try:
-        l2n.extract_netlist()
+        _extract_connected_netlist(l2n, join_same_named_nets)
     except RuntimeError as exc:
         # KLayout's own `LayoutToNetlist.extract_netlist()` raises a bare
         # `RuntimeError` (not one of *this* module's own exception types) for
