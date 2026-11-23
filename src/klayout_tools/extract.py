@@ -7250,14 +7250,13 @@ def _extract_netlist(
     metal_labels = [_label_texts(layer) for layer in deck.metal_labels]
     vias = [_region(layout, top_cell, layer) for layer in deck.vias]
 
-    # `--def-net-names` (issue #951). Collected here, before
-    # `_resolve_black_box_regions` below can mask `metals[]`: this reads
-    # raw-shape properties straight off `layout`/`top_cell`, independently of
-    # any Region built from them, and is only *applied* (via
-    # `l2n.probe_net`) once extraction has run -- see the
-    # `_apply_def_net_name_overrides` call site further down.
+    # Keep every island’s DEF identity for the abstract-pin short check.
     def_net_name_probes = (
-        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+        _def_net_name_probes(
+            layout, top_cell, deck.metals, all_islands=bool(abstract_instances)
+        )
+        if def_net_names
+        else {}
     )
 
     # Black-box/abstract regions (#293), resolved *before* everything else
@@ -8729,6 +8728,7 @@ def _extract_netlist(
             abstract_cell_local_candidates,
             abstract_cell_global_net_ports,
             abstract_cell_lef_layer_roles,
+            def_net_name_probes,
         )
         warnings = warnings + abstract_cell_warnings
 

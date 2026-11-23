@@ -2206,7 +2206,7 @@ def _run_single_corner(
             "power_net": power["power_net"],
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
-            "tapless": cell_library in _NO_TAPCELL_LIBRARIES,
+            "tapless": tap_master is None,
             "endcap_master": endcap_master,
             "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
