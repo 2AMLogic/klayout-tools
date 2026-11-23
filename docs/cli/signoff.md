@@ -5067,8 +5067,8 @@ every other item grades it `wrong_kind`. It reuses `klt sim`'s
   every `corners[]` point entry (the per-point list, optional) passes.
   Otherwise `partial_coverage` with `detail.uncovered_rows`, or
   `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
-- An envelope with no `limits`-bearing measurement is refused
-  `no_limits_checked`.
+- An envelope with no measurement carrying a recognised, non-null `min`/`max`
+  bound is refused `no_limits_checked`.
 - `provenance.input` (`path` + `content_hash`) names the committed model
   record; it is re-hashed like `generic`'s (`citation.input_verified`), and
   a manifest-pinned `content_hash` that no longer matches renders

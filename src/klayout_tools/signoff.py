@@ -114,6 +114,7 @@ from .signoff_coverage_disclosure import (
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     _maybe_record_failed_sim,
+    _recognised_bound,
     _record_envelope,
     _remember_envelope,
     _sim_coverage_counts,
@@ -2768,8 +2769,7 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
         # Issue #4859: no `coverage` block to count, so read the rollup
         # itself -- a model-run with no limits-bearing measurement applied
         # no bound to anything.
-        raw = envelope.get("measurements")
-        limited = any(isinstance(m, dict) and m.get("limits") for m in (raw or []))
+        limited = any(_recognised_bound(m) for m in envelope.get("measurements") or [])
         return None if limited else _REASON_NO_LIMITS_CHECKED
     if kind == "sim" and refusal is None:
         # Issue #3769: sim coverage counts an unlimited measurement as a
@@ -6844,7 +6844,7 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if isinstance(m, dict)
         and m.get("spec_row") == row
         and m.get("status") == "pass"
-        and m.get("limits")
+        and _recognised_bound(m)
     ]
     if not names:
         return ["*"]

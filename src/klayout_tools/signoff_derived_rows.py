@@ -181,6 +181,14 @@ def _limit_keys(limits: Any) -> list[str]:
     return [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
 
 
+def _recognised_bound(measurement: Any) -> bool:
+    """Whether ``measurement`` is a dict declaring a recognised, non-null
+    ``min``/``max`` bound (#7268 credit test, shared per #7329)."""
+    if not isinstance(measurement, dict):
+        return False
+    return bool(_limit_keys(measurement.get("limits")))
+
+
 def _bounds_checked(
     measurement: dict[str, Any],
     corners: Any,
