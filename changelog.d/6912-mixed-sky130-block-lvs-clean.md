@@ -1,6 +1,6 @@
 - **`klt layout-plan execute` derives a MOS group's `flavor` from its
-  declared `device_class`** (#6912, 2026-11-23): a `mos_array`/`diff_pair`/
-  `esd_device` group whose `params` do not name a `flavor` now reads it
+  declared `device_class`** (#6912, 2026-11-23): a `mos_array`/`diff_pair`
+  group whose `params` do not name a `flavor` now reads it
   from the netlist digest's declared class — `PFET` draws `pfet` (the
   flavor that draws its own well), `NFET` draws `nfet` — mirroring #6919's
   `res_array` derivation. Pre-derivation, a `device_class: "PFET"` group
@@ -8,7 +8,9 @@
   could never LVS-match its netlist. The derivation is recorded in
   `resolved_params` plus one `warnings[]` entry; an explicit
   `params.flavor` still wins; mixed classes in one group warn and use the
-  first; any other class name derives nothing.
+  first; any other class name derives nothing. `esd_device` is left
+  alone: it declares no `flavor` param (always an NMOS-style device), so
+  nothing is derived or injected for it.
 - **The router's automatic plane climb (#6920) now also lifts the
   self-net pad-crossing classes (#433/#453/#1527) and the
   guard/collector-ring classes (#199 case 2 / #434)** (#6912, 2026-11-23):

@@ -130,14 +130,20 @@ def apply_resistor_flavor(
 #: own ``NFET``/``PFET`` primitive classes, what a ``form: "subckt-call"``
 #: reference converts a ``sky130_fd_pr__nfet_*``/``__pfet_*`` subcircuit
 #: call to) mapped to the ``flavor`` request parameter ``mos_array`` /
-#: ``diff_pair`` / ``esd_device`` draw that class with. An explicit
+#: ``diff_pair`` draw that class with. An explicit
 #: ``params.flavor`` always wins; any other class name simply derives
 #: nothing (#6912 -- without this, a ``device_class: "PFET"`` group drew
 #: the ``nfet`` default silently, no well, wrong device polarity).
 _MOS_FLAVOR_FOR_CLASS = {"NFET": "nfet", "PFET": "pfet"}
 
-#: The generators whose ``klt gen`` request carries that ``flavor`` param.
-_MOS_FLAVOR_GENERATORS = ("mos_array", "diff_pair", "esd_device")
+#: The generators whose ``klt gen`` request declares that ``flavor`` param.
+#: ``esd_device`` is deliberately absent: it has no ``flavor`` option (it is
+#: always an NMOS-style device, see ``gen_layer_params.py``), so an injected
+#: ``flavor`` would abort the group with ``unknown params: flavor`` -- and a
+#: ``pfet`` would mis-trigger the ring generators' Nwell-enclosure branch.
+#: It belongs in ``GATE_CONTACT_GENERATORS`` / ``BODY_TIE_GENERATORS`` (it
+#: declares ``gate_contact``), not here.
+_MOS_FLAVOR_GENERATORS = ("mos_array", "diff_pair")
 
 
 def apply_mos_flavor(group: dict[str, Any], params: dict[str, Any]) -> list[str]:

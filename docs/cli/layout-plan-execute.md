@@ -630,8 +630,8 @@ than only in a PR description:
   a `form: "plain-element"` netlist's bare `R1 A B 1k` digests to) — a
   primitive element names a device *kind*, never a PDK device class, so it
   can neither confirm nor contradict what the generator drew.
-- **MOS `flavor` derivation (#6912).** A `mos_array`/`diff_pair`/
-  `esd_device` group whose `params` do not name a `flavor` derives it from
+- **MOS `flavor` derivation (#6912).** A `mos_array`/`diff_pair`
+  group whose `params` do not name a `flavor` derives it from
   its declared `device_class` — `PFET` draws `pfet` (the flavor that draws
   its own well), `NFET` draws `nfet` — exactly the `res_array` pattern
   above (#6919): pre-derivation, a `device_class: "PFET"` group silently
@@ -641,6 +641,9 @@ than only in a PR description:
   `params.flavor` still wins, and devices in one group disagreeing on
   their MOS class warn and use the first, as a mixed-material `res_array`
   group already does. Any other declared class name derives nothing.
+  `esd_device` is excluded: it has no `flavor` param (it is always an
+  NMOS-style device), so nothing is derived or injected for it, whatever
+  its declared class.
 
 ## See also
 
