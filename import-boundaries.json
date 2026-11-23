@@ -294,6 +294,7 @@
         "klayout_tools.extract_fragment_resistance",
         "klayout_tools.extract_mos_capacitor",
         "klayout_tools.extract_hierarchy",
+        "klayout_tools.extract_inductors",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_parasitics_slim",
@@ -318,6 +319,7 @@
         "klayout_tools.extract_layer_coverage",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
+        "klayout_tools.extract_resistance_graph_caps",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
         "klayout_tools.extract_split_terminal",
@@ -381,6 +383,7 @@
         "klayout_tools.gen",
         "klayout_tools.gen_asap7",
         "klayout_tools.gen_asap7_tap",
+        "klayout_tools.gen_base",
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_pdk_cell",
         "klayout_tools.gen_cap_stack",
@@ -426,6 +429,7 @@
       "modules": [
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_base",
         "klayout_tools.gen_compose_boundary",
         "klayout_tools.gen_compose_dbu",
         "klayout_tools.gen_compose_derived_frame",
@@ -603,8 +607,10 @@
         "klayout_tools.netlist_batch",
         "klayout_tools.netlist_batch_select",
         "klayout_tools.netlist_capacitor_recovery",
+        "klayout_tools.netlist_class_registry",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_diagnostics",
+        "klayout_tools.netlist_inductor_recovery",
         "klayout_tools.netlist_instances",
         "klayout_tools.netlist_inputs",
         "klayout_tools.netlist_normalize",
@@ -624,6 +630,7 @@
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
         "klayout_tools.decks.extraction",
+        "klayout_tools.decks.extraction_inductor",
         "klayout_tools.decks.finfet",
         "klayout_tools.decks.gf180mcu",
         "klayout_tools.decks.gf180mcu_bond_pad",
@@ -635,6 +642,7 @@
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sg13g2_cont_grid",
+        "klayout_tools.decks.sg13g2_inductor",
         "klayout_tools.decks.sg13g2_runset_notes",
         "klayout_tools.decks.sg13g2_svaricap",
         "klayout_tools.decks.sg13g2_unmodeled",
@@ -716,6 +724,7 @@
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_power_pins",
         "klayout_tools.place_and_route_reports",
+        "klayout_tools._dont_use",
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
         "klayout_tools.place_and_route_route_overflow",
@@ -1010,6 +1019,7 @@
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_measurement_grading",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
@@ -2571,36 +2581,6 @@
     },
     {
       "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_VIA_DROP_SIZE_UM",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_draw_routed_entry",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_fixed_cut_side_um",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_orient_port",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
-      "exporter": "klayout_tools.gen_compose",
-      "symbol": "_via_fixed_size_um",
-      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
-    },
-    {
-      "consumer": "klayout_tools.route_labelled",
       "exporter": "klayout_tools.gen_compose_routing",
       "symbol": "_min_width_um_for_layer",
       "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
@@ -2849,13 +2829,13 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose",
+        "consumer": "klayout_tools.gen_compose_via_cuts",
         "exporter": "klayout_tools.gen",
         "symbol": "_cut_fixed_size_um",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose",
+        "consumer": "klayout_tools.gen_compose_via_cuts",
         "exporter": "klayout_tools.gen",
         "symbol": "_fixed_cut_side_um",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
@@ -2894,12 +2874,6 @@
         "consumer": "klayout_tools.layout_plan",
         "exporter": "klayout_tools.gen",
         "symbol": "_GENERATOR_SPECS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.layout_plan",
-        "exporter": "klayout_tools.gen_compose",
-        "symbol": "_ORIENTATIONS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3146,12 +3120,6 @@
         "consumer": "klayout_tools.place_and_route_script",
         "exporter": "klayout_tools._openroad_engine",
         "symbol": "_timing_violation_report_lines",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.place_and_route_script",
-        "exporter": "klayout_tools.synthesize",
-        "symbol": "_ABC_DONT_USE_GLOBS",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
