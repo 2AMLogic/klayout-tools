@@ -123,6 +123,7 @@ from .signoff_base import (
 from .signoff_characterization import (
     attach_characterization_attestation as _attach_characterization_attestation,
 )
+from .signoff_composition import compose_rows, composed_count_field
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -4015,10 +4016,9 @@ def build_tier_report(
             not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
             items.append(entry)
 
-    # Issue #5599: justified gaps are counted at the top level, and one
-    # naming no issue is reported as a finding (operator ruling on #5858,
-    # 2026-11-17) -- a declared gap is pending work, so the issue that would
-    # close it should be recorded.
+    composed_count = compose_rows(items, manifest, tiers_doc, repo_root, generator_exec)
+    # Issue #5599: justified gaps are counted at the top level; one naming
+    # no issue is a finding (operator ruling on #5858, 2026-11-17).
     justified_gap_count, findings = justified_gap_report_fields(items)
 
     for ladder_row in doc["ladder"]:
@@ -4068,22 +4068,21 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
-        # Issue #2865: recorded "not applicable" items, never in `t1_met_count`;
-        # omitted when zero (absent means 0).
+        # Issue #2865: recorded "not applicable" items; issue #5599:
+        # justified declared gaps; issue #6927: composed rows
+        # (`signoff_composition.py`) -- all three never in `t1_met_count`,
+        # each omitted when zero (absent means 0).
         **(
             {"t1_not_applicable_count": not_applicable_count}
             if not_applicable_count
             else {}
         ),
-        # Issue #5599: justified declared gaps, counted as the set a reviewer
-        # audits -- omitted when zero so a report declaring none is
-        # byte-identical to this build's previous rendering (absent means 0,
-        # exactly like `t1_not_applicable_count` above).
         **(
             {"t1_justified_gap_count": justified_gap_count}
             if justified_gap_count
             else {}
         ),
+        **composed_count_field(composed_count),
         **({"findings": findings} if findings else {}),
         **unmet_reason_counts(items),  # issue #5903; absent when nothing is unmet
         "source_doc": doc_source_label(tiers_doc),

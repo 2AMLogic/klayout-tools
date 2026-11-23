@@ -160,14 +160,19 @@ from .signoff_flags import (
 )
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
+    _composed_suffix,
     _justified_gap_suffix,
     _not_applicable_suffix,
+    _print_composed_from,
     _print_justified_gaps,
     _print_not_applicable,
     _print_partition_boundary,
     _print_structural_rows,
     input_verified_statement,
     print_upstream_source,
+)
+from .signoff_tier_text import (
+    status_marker as _status_marker,
 )
 
 EXIT_PASS = 0
@@ -705,15 +710,6 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> N
     )
 
 
-def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
-    """The ``(marker, color)`` for an item ``status`` in the text report."""
-    if status == "met":
-        return "MET  ", palette.green
-    if status == "not_applicable":
-        return "N/A  ", palette.green
-    return "UNMET", palette.red
-
-
 def _print_foundry_cell_exceptions(citation: dict) -> None:
     for exception in citation.get("foundry_cell_exceptions") or []:
         rules = ", ".join(
@@ -768,6 +764,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     print(
         f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
         f"{_not_applicable_suffix(result)}{_justified_gap_suffix(result)}"
+        f"{_composed_suffix(result)}"
     )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
@@ -802,6 +799,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
+        _print_composed_from(item)
         # Issue #5599: each justified gap's reason, rationale artifact and
         # closing issue (with the missing-link finding inline). Issue #6985:
         # each structural row's claim and its hash-pinned artifact.
@@ -901,6 +899,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
             f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
+            f"{_composed_suffix(block)}"
         )
         print_upstream_source(block, "        upstream")
         # Issue #2202: same disclosure as tier-report mode, for the same

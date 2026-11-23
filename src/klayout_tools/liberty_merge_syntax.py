@@ -9,8 +9,9 @@ _LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 
 
-def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
-    """``(first top-level cell offset, cell names, closing-brace offset)``."""
+def _scan_cells(text: str) -> tuple[int | None, list[str], int | None, int]:
+    """Locate cells and count top-level operating-condition declarations."""
+    conditions = 0
     first_cell: int | None = None
     cells: list[str] = []
     depth = 0
@@ -20,14 +21,25 @@ def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
         elif kind == "}":
             depth -= 1
             if depth == 0:
-                return first_cell, cells, pos
+                return first_cell, cells, pos, conditions
+        elif depth == 1 and text[pos:end] == "operating_conditions":
+            conditions += _starts_group(text, end)
         elif depth == 1 and text[pos:end] == "cell":
             match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
             if match:
                 cells.append(match.group(1))
                 if first_cell is None:
                     first_cell = pos
-    return first_cell, cells, None
+    return first_cell, cells, None, conditions
+
+
+def _starts_group(text: str, end: int) -> bool:
+    """Whether the identifier ending here opens a named Liberty group."""
+    pos, char = _next_significant(text, end)
+    if char != "(":
+        return False
+    close = _find_matching(text, pos, "(", ")")
+    return _next_significant(text, close + 1)[1] == "{"
 
 
 def _skip_ws(text: str, index: int) -> int:
