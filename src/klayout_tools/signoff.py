@@ -6646,8 +6646,7 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    # The declared-artifact hash checks (#5599/#6985) and the timing-margin
-    # rule (#4314) run after every member graded, before partial coverage.
+    # After all members grade, check artifact hashes and timing margins before partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
     )
