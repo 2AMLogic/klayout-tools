@@ -35,6 +35,7 @@ from . import sim_measurement_kind, sim_raw, sim_snm
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -262,8 +263,6 @@ def snm_measurement_result(
     ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
     ``code: "measurement"`` diagnostic whose message starts with a
     ``[<reason>]`` token from :data:`ERROR_CODES`."""
-    from . import sim as _sim
-
-    return _sim._vector_measurement_result(
+    return _vector_measurement_result(
         spec, outcome, save_mode=save_mode, key="snm", report_with_spec=True
     )
