@@ -41,7 +41,7 @@ def cell_exclusion_fields(
     liberty_path: str,
     *,
     error_cls: type[Exception],
-) -> dict[str, dict[str, list[str]]]:
+) -> dict[str, dict[str, list[str] | bool | None]]:
     """``{"cell_exclusions": {...}}`` -- the response block for a supplied
     ``library.dont_use``, or ``{}`` when the request omitted the field
     (presence-only-when-supplied, unlike ``klt synthesize``'s always-present
