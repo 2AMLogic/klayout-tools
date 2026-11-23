@@ -1676,7 +1676,6 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     equiv_parser.add_argument(
         "--resume",
-        dest="resume",
         action="store_true",
         default=False,
         help=(
@@ -2088,6 +2087,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
     place_and_route_parser.add_argument(
         "request", help="path to a klt place-and-route request JSON file"
     )
+    place_and_route_cmd.add_threads_argument(place_and_route_parser)
     _add_pdk_args(place_and_route_parser)
     place_and_route_parser.add_argument(
         "--backend",
