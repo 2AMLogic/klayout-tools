@@ -294,6 +294,15 @@
         "layers_in_stream_without_rules": {"$ref": "#/$defs/strings"},
         "rules_checked": {"$ref": "#/$defs/strings"},
         "rules_skipped": {"$ref": "#/$defs/strings"},
+        "implant_warnings": {
+          "description": "SG13G2 selected cells with unimplanted source/drain active under the curated well checks.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cell", "description"],
+            "properties": {"cell": {"type": "string"}, "description": {"type": "string"}}
+          }
+        },
         "voltage_domain_warnings": {
           "type": "array",
           "items": {
