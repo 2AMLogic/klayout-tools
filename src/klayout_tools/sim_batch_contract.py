@@ -162,6 +162,8 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "analysis.op_check": "0.9.2",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
+    # Variant-relative object form (#7039). The worker gate is osdi_pdk_relative.
+    "options.osdi_preload[].pdk_relative": None,
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
     "options.stage_model_inputs": "0.7.0",
     # Selected-corner reruns (#6778) have not shipped in a tag.

@@ -923,13 +923,12 @@ def test_spef_reader_warnings_counts_delimited_stdout_region():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
     # Only the two inside the region count -- the reader is the only thing
     # running there, but a liberty/clock warning outside it is not evidence
     # of a failed annotation.
-    assert count == 2
-    assert sample == [line.strip() for line in _READER_WARNINGS]
+    assert warnings == [line.strip() for line in _READER_WARNINGS]
 
 
 def test_spef_reader_warnings_counts_unknown_codes_inside_region():
@@ -938,10 +937,9 @@ def test_spef_reader_warnings_counts_unknown_codes_inside_region():
     the region check is deliberately broader than the STA-1648/1650 pair."""
     stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 1
-    assert sample == ["[WARNING STA-9999] some future reader warning."]
+    assert warnings == ["[WARNING STA-9999] some future reader warning."]
 
 
 def test_spef_reader_warnings_matches_stderr_narrowly():
@@ -956,35 +954,24 @@ def test_spef_reader_warnings_matches_stderr_narrowly():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+    warnings = post_route_sta._spef_reader_warnings(stdout, stderr)
 
-    assert count == 2
-    assert all("STA-16" in line for line in sample)
+    assert len(warnings) == 2
+    assert all("STA-16" in line for line in warnings)
 
 
 def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
     stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
 
-    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 2
-
-
-def test_spef_reader_warnings_sample_is_capped():
-    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
-    stdout = _spef_read_block(*warnings)
-
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
-
-    assert count == 50
-    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+    assert len(warnings) == 2
 
 
 def test_spef_reader_warnings_clean_run_reports_zero():
-    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+    warnings = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
 
-    assert count == 0
-    assert sample == []
+    assert warnings == []
 
 
 def _delay_blocks(pre: str, post: str) -> str:
@@ -2124,16 +2111,11 @@ def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
-    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
-    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
-    design OpenSTA finds no hold path to measure in), the two new fields
-    degrade to ``null`` -- the same null-handling the existing setup-side
-    fields already have, never a ``KeyError``."""
+    """Older engines or unmeasurable paths can omit hold and frequency metrics."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     metrics_without_hold = {
         "timing__setup__ws": -0.15,
         "timing__setup__tns": -1.2,
-        "timing__fmax": 500_000_000.0,
         "power__total": 0.0084,
         "clock__skew__setup": 0.021,
     }
@@ -2142,6 +2124,7 @@ def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     report = run_sta(request_path)
 
     assert report["worst_slack_ns"] == -0.15
+    assert report["fmax_mhz"] is None
     assert report["worst_hold_slack_ns"] is None
     assert report["total_negative_hold_slack_ns"] is None
 
@@ -2857,6 +2840,8 @@ def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
     assert "corner: ss_100C_1v60" in out
     assert "worst_slack_ns: -0.15" in out
     assert "worst_slack_ns: -0.42" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "fmax_mhz: 300.0 (clock estimate excludes opposite-edge paths" in out
     assert "def_path:" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -2872,6 +2857,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "can overstate achievable frequency" in out
     assert "worst_hold_slack_ns: 0.03812" in out
     assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):

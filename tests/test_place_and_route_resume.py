@@ -38,7 +38,7 @@ def _record_stage_runs(monkeypatch) -> list[str]:
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] != ["openroad", "-version"]:
-            name = os.path.basename(cmd[5])
+            name = os.path.basename(cmd[-1])
             for stage in STAGES:
                 if name.endswith(f"_{stage}.tcl"):
                     ran.append(stage)
