@@ -2397,8 +2397,8 @@ live re-measurement above.
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
 | `pin_abutment` (response) | array\<object\> \| null | Additive field (issue #4156). Facing-pin abutment check over `pins[]`; see "Pin placement". `[]` without opposite-edge `io.pin_constraints` entries; `null` at `target_stage: "floorplan"`. |
-| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`), `region_um` (optional `[x0, y0, x1, y1]`, finite, `x0 < x1`, `y0 < y1`), `order` (optional `{axis: "x"\|"y", pitch_um?: number > 0}`; requires exact instance names, no globs, listed in the expected order). Measurement only: it does **not** constrain placement. Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
-| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). With `region_um`: echo plus `within_region` (every placed origin inside the closed rectangle; `null` if no member is placed, any matched member is unplaced, or a listed instance pattern matches nothing). With `order`: `order` block `{axis, members, ordered, pitch_um_measured, pitch_ok}` where `ordered` is strictly monotonic along the axis (either direction), `pitch_um_measured` the successive deltas and `pitch_ok` whether each `abs(delta)` matches `pitch_um` within 0.01 um; `ordered`/`pitch_ok` are `null` (and the deltas `[]`) when a member is unplaced. All additive. The run never fails on a violated extent, region or order; assert on it from the envelope. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
+| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`), `region_um` (optional `[x0, y0, x1, y1]`, finite, `x0 < x1`, `y0 < y1`), `order` (optional `{axis: "x"\|"y", pitch_um?: number > 0, fixed_origin_um?: [x, y]}`; requires exact instance names, no globs, listed in the expected order). Groups measure final placement by default. Supplying `fixed_origin_um` and `pitch_um` also fixes the listed standard cells before global placement. See [Fixed instance groups](#fixed-instance-groups). Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
+| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). With `region_um`: echo plus `within_region` (every placed origin inside the closed rectangle; `null` if no member is placed, any matched member is unplaced, or a listed instance pattern matches nothing). With `order`: `order` block `{axis, members, ordered, pitch_um_measured, pitch_ok}` where `ordered` is strictly monotonic along the axis (either direction), `pitch_um_measured` the successive deltas and `pitch_ok` whether each `abs(delta)` matches `pitch_um` within 0.01 um; `ordered`/`pitch_ok` are `null` (and the deltas `[]`) when a member is unplaced. All additive. A measurement outside a requested extent, region or order is reported in the envelope. An infeasible fixed placement fails the place stage. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
@@ -4086,4 +4086,36 @@ To assert that a delay chain stayed together, name it and bound its footprint:
 ]
 ```
 
-The response's `instance_groups[0]` then reports `matched`, the origin `bbox` and `within_extent`. A `matched` of `0` means the glob names no instance in the DEF; yosys renames and flattens instances, so glob against the post-synthesis names in `verilog_path`. This reports proximity only; it does not steer placement.
+The response's `instance_groups[0]` then reports `matched`, the origin `bbox` and `within_extent`. A `matched` of `0` means the glob names no instance in the DEF; yosys renames and flattens instances, so glob against the post-synthesis names in `verilog_path`. This example measures the placement chosen by OpenROAD.
+
+### Fixed instance groups
+
+Add `order.fixed_origin_um` to place the first listed standard cell at a
+specified DEF coordinate in micrometres. Each subsequent member advances by
+`pitch_um` in positive x for a row or positive y for a column. Use literal
+linked instance names, including any bus brackets. A member may belong to one
+fixed group and any number of measurement groups.
+
+```json
+{
+  "instance_groups": [{
+    "name": "delay_chain",
+    "instances": ["dly[2]", "_298_", "_299_"],
+    "order": {"axis": "x", "pitch_um": 9.2, "fixed_origin_um": [16.1, 5.44]}
+  }]
+}
+```
+
+Choose coordinates from the floorplan's DEF `ROW` and `UNITS DISTANCE MICRONS`
+records. For example, a horizontal row starting at (2300, 5440) DBU with site
+step 460 and 1000 DBU/µm admits x = 16.1 µm and y = 5.44 µm. A 9.2 µm pitch
+advances 20 sites. Leave room for each cell's complete footprint. For a column,
+each y must land on a compatible row at the chosen x.
+
+The place stage uses the receiving row's orientation and fixes each cell
+before global placement. Each subsequent stage verifies the fixed status,
+coordinates and footprint after placement or timing repair. An unknown member,
+overlapping placement, or unrepresentable or illegal site produces an error naming the group and member.
+Duplicate fixed assignments fail request validation. Inspect the routed DEF
+`COMPONENTS` for each member's `FIXED` status and both coordinates.
+The response's `order` and pitch measurements are independently read from that DEF.

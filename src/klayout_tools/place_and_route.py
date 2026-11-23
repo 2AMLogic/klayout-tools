@@ -1790,6 +1790,7 @@ def _run_single_corner(
 
         lines = _stage_script_lines(
             stage=stage,
+            instance_groups=instance_groups,
             checkpoint_in=checkpoint_path,
             checkpoint_out=next_checkpoint,
             tech_lef=tech_lef,
@@ -2376,9 +2377,7 @@ def _run_single_corner(
             if audited_def_path
             else None
         ),
-        # Additive field (issue #4344): placed-origin bbox of each requested
-        # `instance_groups` entry, read from the same DEF (`null` at
-        # "floorplan"; `[]` when none were requested).
+        # Measure instance group positions from the stage DEF (#4344).
         "instance_groups": (
             read_def_instance_groups(audited_def_path, instance_groups)
             if audited_def_path
