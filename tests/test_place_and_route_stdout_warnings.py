@@ -54,6 +54,17 @@ def test_error_restores_stdout_even_with_a_python_only_stream(capfd):
     assert err == "reader warning\n"
 
 
+def test_closed_python_stdout_forwards_native_warnings(tmp_path, capfd):
+    caller_stdout = (tmp_path / "caller.log").open("w")
+    caller_stdout.close()
+    with redirect_stdout(caller_stdout), native_stdout_to_stderr():
+        os.write(1, b"reader warning\n")
+    os.write(1, b"after read\n")
+    out, err = capfd.readouterr()
+    assert out == "after read\n"
+    assert err == "reader warning\n"
+
+
 def test_missing_native_stdout_allows_reader_to_run(monkeypatch):
     import errno
     import sys

@@ -2721,8 +2721,8 @@ def test_container_runtime_hint_none_for_empty_output():
 
 def test_engine_error_message_appends_container_runtime_hint():
     """The hint is appended to -- never a replacement for -- the engine's own
-    captured output, following `place_and_route.py`'s `_mount_namespace_hint`
-    pattern (issue #1868)."""
+    captured output, following the shared `mount_namespace_hint` pattern
+    (issue #1868)."""
     completed = fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
     message = post_route_sta._engine_error_message(completed)
@@ -4404,7 +4404,7 @@ def test_clock_capture_fixture_matches_module_tcl():
     at = stored.index("    incr klt_design_total")
     assert (
         current
-        == stored[:at] + list(post_route_sta._SPEF_SKIP_DRIVER_ONLY) + stored[at:]
+        == stored[:at] + list(post_route_sta.SPEF_SKIP_DRIVER_ONLY) + stored[at:]
     )
 
 

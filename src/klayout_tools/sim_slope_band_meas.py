@@ -42,6 +42,7 @@ from typing import Any
 from . import sim_measurement_kind, sim_raw, sim_slope_band
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``slope_band`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -375,43 +376,6 @@ def slope_band_measurement_result(
     failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from :data:`ERROR_CODES`."""
-    from . import sim as _sim
-
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no slope_band value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "slope_band_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "slope_band_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        diagnostic = {
-            "severity": "error",
-            "code": "measurement",
-            "message": f"[{reason}] {message}",
-        }
-        return result, [diagnostic]
-    m_status, margin, grading = _sim._grade_measurement_value(spec, outcome.value)
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "slope_band": outcome.report(spec),
-    }
-    return result, grading
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="slope_band", report_with_spec=True
+    )

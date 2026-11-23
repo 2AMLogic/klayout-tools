@@ -115,10 +115,26 @@ was already stored.
 
 ## `get`
 
-`REF` is either a sha256, stored under `--repo`, or `MANIFEST[#SELECTOR]`,
-where `SELECTOR` is an entry's `sha256` or `name`. A manifest with a single
-entry needs no selector. For a manifest entry, the repo comes from the stored
-key.
+`REF` is one of:
+
+- a sha256, stored under `--repo`;
+- an `artifact:<key>` URI, exactly as a manifest entry's `uri` publishes it
+  (see [Manifest](#manifest)), so a `uri` copied out of a manifest can be
+  handed straight back:
+  `klt artifact get "artifact:evidence/<OWNER>__<REPO>/fd/fd16...2147" -o -`;
+- `MANIFEST[#SELECTOR]`, where `SELECTOR` is an entry's `sha256` or `name`. A
+  manifest with a single entry needs no selector.
+
+For a manifest entry or an `artifact:` URI, the repo comes from the stored
+key's `evidence/<owner>__<name>/` segment. A URI needs no `--repo`, and
+`--repo` does not override the key's; it is used only when the key has some
+other shape (then `$KLT_ARTIFACT_REPO`, then the git `origin`, as for a bare
+sha256). A URI carries no size, so its fetch is checked against the digest and
+the broker's key but not against a size. A URI whose key does not end in a
+64-digit lowercase hex sha256, a bare `artifact:` included, fails with
+`invalid_manifest` before the broker is asked. Only the `artifact:` scheme is
+a URI REF: any other string (`s3://...`, `https://...`) is read as a manifest
+path.
 
 The bytes are streamed to a temporary file beside `OUT`. They are moved into
 place **only** when the recomputed sha256 matches the requested digest (the
@@ -319,6 +335,12 @@ the first delete call, so nothing is deleted; `--force-referenced` overrides.
 With no `--keep`, the guard cannot run, and the output says so
 (`guard.checked: false`). An object that is already absent is `absent` and a
 success. Duplicate targets are collapsed.
+
+Keys get the same pre-flight: every `REF` is `stat`ed, and the key `stat`
+returns must name the requested digest and, when the `REF` carries one — an
+`artifact:<key>` URI or a `MANIFEST[#SELECTOR]` entry — be that key. If any
+key disagrees, `delete` exits `1` with `error.code: "key_mismatch"` before
+the first delete call, so nothing is deleted, whether or not `--yes` is given.
 
 The broker must implement `POST /v1/delete`. If the delete call itself is
 refused with 404, 405 or 501 — `stat` had already reported the object
