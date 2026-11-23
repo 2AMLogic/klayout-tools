@@ -49,12 +49,17 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from . import env_provenance
 
-if TYPE_CHECKING:
-    from .post_route_sta import _ReportPaths
+
+class _ReportPaths(Protocol):
+    """Path operations used to make a Liberty warning portable."""
+
+    def output_envelope(self, path: str, /) -> dict[str, Any]: ...
+    def scrub(self, text: str, /) -> str: ...
+
 
 #: The two OpenSTA Liberty-reader warnings that discard a timing model:
 #: ``STA-1253`` (``table_template <name> not found`` -- the timing table
