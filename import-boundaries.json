@@ -981,6 +981,7 @@
         "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_corner_point",
+        "klayout_tools.sim_corner_rules",
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
