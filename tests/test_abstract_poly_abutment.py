@@ -6,13 +6,11 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.cli import main
+from klayout_tools.lvs import run_lvs
 from test_extract import _spice_circuits
 
 
-@pytest.mark.parametrize(
-    "mode", ["abut", "gap", "isolated", "strap", "explicit", "mirrored"]
-)
-def test_poly_terminal_continuity_and_top_interface(tmp_path, capsys, mode):
+def _write_array(gds, mode):
     layout = kdb.Layout()
     layout.dbu = 0.001
     leaf = layout.create_cell("LEAF")
@@ -33,8 +31,15 @@ def test_poly_terminal_continuity_and_top_interface(tmp_path, capsys, mode):
         top.insert(kdb.CellInstArray(leaf.cell_index(), transform))
     top.shapes(poly).insert(kdb.Box(-1000, 0, 4000 if mode == "strap" else 600, 500))
     top.shapes(labels).insert(kdb.Text("BUS", -500, 250))
-    gds, spice = tmp_path / "array.gds", tmp_path / "array.sp"
     layout.write(str(gds))
+
+
+@pytest.mark.parametrize(
+    "mode", ["abut", "gap", "isolated", "strap", "explicit", "mirrored"]
+)
+def test_poly_terminal_continuity_and_top_interface(tmp_path, capsys, mode):
+    gds, spice = tmp_path / "array.gds", tmp_path / "array.sp"
+    _write_array(gds, mode)
     args = [
         "extract",
         str(gds),
@@ -69,3 +74,48 @@ def test_poly_terminal_continuity_and_top_interface(tmp_path, capsys, mode):
         assert nodes == ["BUS"] * 4
         assert not any("left unconnected" in warning for warning in report["warnings"])
     assert report["device_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "layout_nets"),
+    [
+        ("abut", "match", 1),
+        ("gap", "mismatch", 2),
+    ],
+)
+def test_gds_to_lvs_with_abstract_leaf_stubs(
+    tmp_path, mode, expected_status, layout_nets
+):
+    gds = tmp_path / "array.gds"
+    _write_array(gds, mode)
+    ref = tmp_path / "reference.spice"
+    ref.write_text(
+        "* four leaves share one wordline\n.subckt LEAF WL\n.ends LEAF\n"
+        ".subckt PROBE BUS\n"
+        + "".join(f"X{i} BUS LEAF\n" for i in range(4))
+        + ".ends PROBE\n"
+    )
+    request = tmp_path / "lvs.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds),
+                    "deck": "gf180mcu",
+                    "top": "PROBE",
+                    "top_cell_pins": True,
+                    "abstract_cells": ["LEAF"],
+                },
+                "reference": {
+                    "netlist": str(ref),
+                    "top": "PROBE",
+                    "form": "subckt-call",
+                },
+                "options": {"flatten_reference": ["LEAF"]},
+            }
+        )
+    )
+    report = run_lvs(str(request))
+    assert report["status"] == expected_status
+    assert report["counts"]["pins"]["layout"] == 1
+    assert report["counts"]["nets"]["layout"] == layout_nets
