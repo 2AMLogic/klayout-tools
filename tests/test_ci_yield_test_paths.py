@@ -7,10 +7,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_MODULE = "klt_yield_native"
-EXEMPT = {
-    "tests/test_design_centering.py",  # Worked examples await CI coverage in #7274.
-    "tests/test_signoff.py",  # #7274 selects the native item-6 test in this suite.
-}
 
 
 def _has_yield_gate(path):
@@ -38,7 +34,5 @@ def test_native_yield_job_covers_gated_test_files():
         for path in (ROOT / "tests").rglob("*.py")
         if _has_yield_gate(path)
     }
-    missing = gated - covered - EXEMPT
+    missing = gated - covered
     assert not missing, f"Add to the native yield job's test_paths: {sorted(missing)}"
-    stale = EXEMPT - (gated - covered)
-    assert not stale, f"Remove stale native yield exemptions: {sorted(stale)}"

@@ -15,17 +15,23 @@ via :func:`_grade_power_delivery`).
 Every name here is private (`_`-prefixed) implementation detail -- none
 appears in ``signoff.py``'s ``__all__``. The single outward call site is
 ``signoff.py``'s ``build_tier_report``, which imports
-:func:`_build_power_delivery_item` back in. The eight reason constants (plus
-:data:`_POWER_DELIVERY_KINDS`) that are specific to this item moved here
+:func:`_build_power_delivery_item` back in. The eight reasons, plus
+:data:`_POWER_DELIVERY_KINDS`, that are specific to this item moved here
 with their functions, since nothing outside this subsystem ever referenced
-them; the generic reasons shared across every tier item
-(:data:`~klayout_tools.signoff._REASON_CHECK_FAILED`,
-:data:`~klayout_tools.signoff._REASON_WRONG_KIND`, etc.) stay in
-``signoff.py`` and are imported back into the functions that need them --
-deferred into each function body, not at module level, because
-``signoff.py`` imports this module at its own top level (the same
-circular-import hazard ``extract_report.py`` documents for its own single
-back-reference into ``extract.py``).
+them; the generic reasons shared across every tier item, the error
+contract, and the JSON reader come from the stdlib-only leaves
+:mod:`.signoff_unmet_reasons` and :mod:`.signoff_base` (issue #7371), and
+the report-relative resolvers and the evidence lookup come from the leaf
+modules that own them (:mod:`.signoff_store_pin`,
+:mod:`.signoff_disclosed_evidence`) -- all imported at module level, since
+none of them imports this module back. Only the genuine orchestrator
+callbacks (:func:`~.signoff._resolve_evidence`,
+:func:`~.signoff._check_passed`,
+:func:`~.signoff._critical_metric_detail`, :func:`~.signoff._citation`)
+stay deferred into each function body, because ``signoff.py`` imports this
+module at its own top level (the same circular-import hazard
+``extract_report.py`` documents for its own single back-reference into
+``extract.py``).
 """
 
 from __future__ import annotations
@@ -37,6 +43,8 @@ from typing import Any, cast
 from ._jsonnum import is_int, is_number
 from ._provenance import content_hash
 from .signoff_artifact import report_artifact_unavailable
+from .signoff_base import SignoffError, _read_json_source
+from .signoff_disclosed_evidence import _lookup_evidence
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,
@@ -44,6 +52,17 @@ from .signoff_power_delivery_substrate import (
     substrate_undecidable_gate,
 )
 from .signoff_runset import check_runset, runset_disclosure
+from .signoff_store_pin import _resolve_relative_to_report, _resolve_relative_to_spec
+from .signoff_unmet_reasons import (
+    _REASON_CHECK_ERRORED,
+    _REASON_CHECK_FAILED,
+    _REASON_INVALID_EVIDENCE,
+    _REASON_NO_EVIDENCE,
+    _REASON_STALE_EVIDENCE,
+    _REASON_UNGRADEABLE_BY_BUILD,
+    _REASON_UNVERIFIABLE_PROVENANCE,
+    _REASON_WRONG_KIND,
+)
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason
@@ -266,8 +285,6 @@ def _erc_supply_spec_hash_reason(
     confirmed mismatch, since no comparison was actually made). Returns
     ``None`` -- proceed -- only when a recorded hash is present and matches.
     """
-    from .signoff import _REASON_STALE_EVIDENCE, _REASON_UNVERIFIABLE_PROVENANCE
-
     provenance = envelope.get("provenance")
     spec_provenance = provenance.get("spec") if isinstance(provenance, dict) else None
     recorded_hash = (
@@ -320,8 +337,6 @@ def _erc_supply_spec_candidates(spec_path: str, spec: dict[str, Any]) -> list[st
     "the envelope points at a second document" site still resolving from
     one directory only.
     """
-    from .signoff import _resolve_relative_to_report, _resolve_relative_to_spec
-
     candidates: list[str] = []
     evidence_relative = _resolve_relative_to_report(spec_path, spec)
     if evidence_relative is not None:
@@ -350,8 +365,6 @@ def _erc_supply_spec_document(
     still fails exactly as it did before this fallback existed. ``(None,
     None)`` only when no candidate could be read and parsed at all.
     """
-    from .signoff import SignoffError, _read_json_source
-
     read_reason: str | None = None
     for candidate in _erc_supply_spec_candidates(spec_path, spec):
         try:
@@ -666,14 +679,7 @@ def _resolve_power_delivery_parts(
     (:func:`~klayout_tools.signoff_grouped_citations.normalize_evidence_groups`)
     gives several streams a shape of their own, the mistake is unambiguous.
     """
-    from .signoff import (
-        _REASON_CHECK_ERRORED,
-        _REASON_INVALID_EVIDENCE,
-        _REASON_STALE_EVIDENCE,
-        _REASON_UNVERIFIABLE_PROVENANCE,
-        _REASON_WRONG_KIND,
-        _resolve_evidence,
-    )
+    from .signoff import _resolve_evidence
 
     by_kind: dict[str, dict[str, Any]] = {}
     for spec in specs:
@@ -718,7 +724,7 @@ def _pdn_branch_reason(
     ``"unchecked"`` does **not** satisfy item 11 even though it satisfies
     item 4.
     """
-    from .signoff import _REASON_CHECK_FAILED, _check_passed
+    from .signoff import _check_passed
 
     if not _check_passed("place-and-route", par["envelope"]):
         return _REASON_CHECK_FAILED
@@ -1032,7 +1038,7 @@ def _resolve_erc_supply_spec(
     unverifiable spec is a different failure than one that was faithfully
     read and simply declares no supply.
     """
-    from .signoff import _REASON_CHECK_FAILED, _critical_metric_detail
+    from .signoff import _critical_metric_detail
 
     erc_metric_detail = _critical_metric_detail(erc["envelope"])
     if erc_metric_detail:
@@ -1131,7 +1137,7 @@ def _failed_lvs_verdict(
     named reason (both branches), its details under
     ``detail.inductor_terminal_order``.
     """
-    from .signoff import _REASON_CHECK_FAILED, _critical_metric_detail
+    from .signoff import _critical_metric_detail
     from .signoff_runset import (
         REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
         mirrored_inductor_limitation,
@@ -1224,8 +1230,6 @@ def _read_power_port_policy(raw: Any) -> dict[str, Any]:
     The returned policy also carries ``source`` (``"manifest"`` when the
     manifest declared the object, else ``"default"``) and ``provisional:
     true`` so a report states which parameters it was graded under."""
-    from .signoff import SignoffError
-
     policy = {
         **_DEFAULT_POWER_PORT_POLICY,
         "edges": list(_DEFAULT_POWER_PORT_POLICY["edges"]),
@@ -1590,7 +1594,7 @@ def _grade_power_ports(
     ERC spec's declared ``kind: "supply"`` nets -- the same names the rest
     of item 11 grades. The LEF half runs only once the GDS half holds.
     """
-    from .signoff import _REASON_CHECK_FAILED, _check_passed
+    from .signoff import _check_passed
 
     block: dict[str, Any] = {"policy": _policy_echo(policy), "findings": []}
     ports, outline, evidence_finding = _socket_port_facts(socket)
@@ -1962,11 +1966,6 @@ def _build_power_delivery_item(
     threaded through rather than hardcoded so the field has exactly one
     source of truth for every rendered item.
     """
-    from .signoff import (
-        _REASON_NO_EVIDENCE,
-        _REASON_UNGRADEABLE_BY_BUILD,
-        _lookup_evidence,
-    )
     from .signoff_grouped_citations import grade_grouped_power_delivery
 
     citation = None
