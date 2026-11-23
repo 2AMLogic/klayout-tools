@@ -223,3 +223,21 @@ def test_in_flow_design_counts_skip_driver_only(tmp_path, nets, spef, counts, co
     assert (design_annotated, design_total) == counts
     assert (nets_annotated, nets_total) == (len(spef), len(spef))
     assert (design_total > 0 and design_annotated == design_total) is complete
+
+
+def test_discarded_net_count_uses_full_reader_output_and_excludes_instances():
+    warnings = ["[WARNING STA-1650] file.spef line 2, net bus[1] not found."] * 6
+    stdout = "\n".join([sta._SPEF_READ_BEGIN, *warnings, sta._SPEF_READ_END])
+    stderr = (
+        "[WARNING STA-1648] file.spef line 3, instance gate:A not found.\n"
+        "[WARNING STA-1650] file.spef line 4, net mod|bus[2] not found."
+    )
+    run = sta._OpenRoadResult(
+        returncode=0, stdout=stdout, stderr=stderr, engine_log=None
+    )
+    block = sta._spef_annotation_block(run, ["bus[1]"])
+    assert block["reader_warning_count"] == 8
+    assert block["reader_warning_sample"] == warnings[:5]
+    assert "2 distinct unresolved net name(s)" in block["annotation_warning"]
+    assert "design_nets_annotated counts name matches" in block["annotation_warning"]
+    assert block["annotation_complete"] is False

@@ -972,7 +972,11 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   then **discarded** because it could not resolve the name against the
   linked design (`STA-1650` `net <name> not found.`, `STA-1648` `instance
   <name>:<pin> not found.`). Any non-zero value forces
-  `annotation_complete: false`: those parasitics are not in the timing.
+  `annotation_complete: false`. The warning also counts distinct net names
+  reported by `STA-1650` across the entire run for this corner. Repeated
+  references to one net count once. Instance warnings still contribute to
+  the record count. The `design_nets_annotated` count measures pre-reader
+  name matches, so it can include nets whose parasitics the reader discarded.
 - `reader_warning_sample` — up to 5 of those warning lines verbatim, so the
   offending name spelling is visible without re-running by hand. The one
   exception (issue #2879): where a line quotes one of this run's three
