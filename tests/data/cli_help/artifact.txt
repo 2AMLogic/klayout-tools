@@ -34,13 +34,13 @@ options:
 
 --- klt artifact get ---
 
-REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. The bytes are
-written only when their recomputed sha256 matches both the manifest's digest
-and the key's. `-o -` writes the verified bytes to stdout instead of a JSON
-envelope.
+REF is a sha256 (stored under --repo), an artifact:<key> URI (a manifest
+entry's `uri`), or MANIFEST[#SHA256|NAME]. The bytes are written only when
+their recomputed sha256 matches both the manifest's digest and the key's. `-o
+-` writes the verified bytes to stdout instead of a JSON envelope.
 
 positional arguments:
-  REF sha256 or MANIFEST[#SELECTOR]
+  REF sha256, artifact:<key>, or MANIFEST[#SELECTOR]
 
 options:
   -h, --help show this help message and exit
@@ -72,14 +72,14 @@ options:
 
 --- klt artifact delete ---
 
-REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for `get`. Without
---yes only `stat` is called and nothing is deleted. Each --keep MANIFEST
-protects the objects it names: a referenced target refuses the whole batch
-unless --force-referenced. An absent object is success. The broker must
-implement POST /v1/delete (else unsupported_operation).
+REF is a sha256 (under --repo), an artifact:<key> URI or MANIFEST[#SELECTOR],
+as for `get`. Without --yes only `stat` is called and nothing is deleted. Each
+--keep MANIFEST protects the objects it names: a referenced target refuses the
+whole batch unless --force-referenced. An absent object is success. The broker
+must implement POST /v1/delete (else unsupported_operation).
 
 positional arguments:
-  REF sha256 or MANIFEST[#SELECTOR]
+  REF sha256, artifact:<key>, or MANIFEST[#SELECTOR]
 
 options:
   -h, --help show this help message and exit
