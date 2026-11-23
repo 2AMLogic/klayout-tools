@@ -109,8 +109,8 @@ def read_joint_grid(raw: Any) -> dict[str, Any] | None:
     """Normalize one declared row's ``joint_grid`` object, or ``None`` when
     it is malformed (the caller degrades its item to ``invalid_evidence``).
     The stored form keeps the declared values verbatim; the request-side
-    axis defaults are applied by :func:`signoff_joint_rows.required_grid_points`, so a reader
-    of the declaration sees what the manifest said."""
+    :func:`signoff_joint_rows.required_grid_points` applies axis defaults
+    when grading the stored declaration."""
     if not isinstance(raw, dict) or set(raw) - _JOINT_KEYS:
         return None
     members = raw.get("members")
