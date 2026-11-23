@@ -7,6 +7,7 @@ see the `#5665` banner below for the defect narrative and
 
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import pytest
@@ -186,3 +187,87 @@ def test_reference_undefined_resistor_x_card_still_recovers_a_device(tmp_path):
     assert devices[0].device_class().name == "res_high_po"
     # And no phantom circuit was synthesised for the undefined call.
     assert [c.name for c in netlist.each_circuit()] == ["TOP"]
+
+
+def test_reference_included_resistor_definition_is_a_top_circuit(tmp_path):
+    from klayout_tools.lvs import _read_reference_netlist
+
+    device = _write(
+        tmp_path / "dev.cdl",
+        ".SUBCKT rppd\nR1 net5 net6 sub 260 rppd l=1.2u w=0.7u\n.ENDS rppd\n",
+    )
+    path = _write(tmp_path / "top.cdl", f".include '{device}'\n")
+    netlist = _read_reference_netlist(path, deck="sg13g2")
+
+    (top,) = netlist.top_circuits()
+    assert top.name == "RPPD"
+    (resistor,) = top.each_device()
+    assert resistor.device_class().name == "RPPD"
+
+
+@pytest.mark.parametrize("side", ["layout", "plain-element", "subckt-call"])
+def test_nested_include_preserves_hierarchy_and_recovers_undefined_device(
+    tmp_path, side
+):
+    from klayout_tools.lvs import _read_reference_netlist, _resolve_layout
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    # KLayout resolves this path against the including file and detects gzip
+    # from the content, even without a .gz suffix.
+    (lib / "devices.cdl").write_text('.InC "MoM cell.cdl"\n')
+    (lib / "MoM cell.cdl").write_bytes(
+        gzip.compress(
+            b".lib unused_corner\n.subckt rppd A B SUB\n.ends\n.endl\n"
+            b".subckt Cap_Cmomi A B\nC1 A B 1f\n.ends\n"
+        )
+    )
+    path = _write(
+        tmp_path / "top.cdl",
+        ".include lib/devices.cdl\n.subckt TOP A B SUB\n"
+        "X1 A B cap_cmomi\nX$2 A B SUB rppd r=260 L=1.2U W=0.7U\n.ends\n",
+    )
+    if side == "layout":
+        netlist = _resolve_layout(
+            {"netlist": path, "deck": "sg13g2"}, str(tmp_path), False
+        )[0]
+    else:
+        netlist = _read_reference_netlist(path, deck="sg13g2", form=side)
+
+    (top,) = netlist.top_circuits()
+    assert top.name == "TOP"
+    (instance,) = top.each_subcircuit()
+    assert instance.circuit_ref().name == "CAP_CMOMI"
+    (capacitor,) = instance.circuit_ref().each_device()
+    assert capacitor.device_class().name == "CAP"
+    (resistor,) = top.each_device()
+    assert resistor.device_class().name.upper() == "RPPD"
+
+
+def test_recovery_scan_skips_cycles_and_leaves_missing_includes_to_klayout(tmp_path):
+    from klayout_tools.lvs import LvsError, _read_reference_netlist
+    from klayout_tools.netlist_normalize_scan import recovery_subckt_names
+
+    path = tmp_path / "top.cdl"
+    text = ".include lib.cdl\n"
+    path.write_text(text)
+    lib = tmp_path / "lib.cdl"
+    lib.write_text(".inc top.cdl\n.subckt rppd\n.ends\n")
+    assert recovery_subckt_names(text, str(path), {"RPPD", "CAP_CMOMI"}) == {"RPPD"}
+
+    lib.unlink()
+    with pytest.raises(LvsError, match=r"could not parse reference netlist.*lib\.cdl"):
+        _read_reference_netlist(str(path), deck="sg13g2")
+
+
+def test_nested_include_in_symlink_uses_real_file_directory(tmp_path):
+    from klayout_tools.lvs import _read_reference_netlist
+
+    lib = tmp_path / "library"
+    lib.mkdir()
+    (lib / "entry.cdl").write_text(".inc leaf.cdl\n")
+    (lib / "leaf.cdl").write_text(".subckt rppd A B\nR1 A B 10\n.ends\n")
+    (tmp_path / "alias.cdl").symlink_to(lib / "entry.cdl")
+    path = _write(tmp_path / "top.cdl", ".include 'alias.cdl'\n")
+    netlist = _read_reference_netlist(path, deck="sg13g2")
+    assert [c.name for c in netlist.top_circuits()] == ["RPPD"]

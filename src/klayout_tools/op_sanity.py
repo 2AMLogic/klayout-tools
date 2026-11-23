@@ -108,7 +108,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
-from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_text import logical_lines as _logical_lines
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
@@ -127,6 +127,7 @@ from .sim import (
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
+from .sim_case_names import validate_request_measurements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -321,30 +322,6 @@ class ParsedNetlist:
 
 #: ``--op-lint-corner`` sentinel: bias every expanded corner (issue #4650).
 ALL_CORNERS = "all"
-
-
-def _logical_lines(text: str) -> list[str]:
-    """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines, with inline ``;``/``$`` comments removed by the
-    shared :func:`strip_spice_inline_comment`.
-
-    A leading ``+`` line with nothing preceding it to fold onto (e.g. the
-    very first non-blank/non-comment line of ``text`` starts with ``+``) is
-    dropped, matching this function's pre-#1741 behaviour -- unlike
-    ``pex.py``/``netlist_normalize.py``, which keep such an orphan
-    continuation as a literal line. :func:`fold_spice_continuations` keeps
-    an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
-    post-pass below filters any still-``+``-prefixed entry it returns.
-    """
-    lines: list[str] = []
-    for raw in text.splitlines():
-        line = strip_spice_inline_comment(raw.strip())
-        if not line or line.startswith("*"):
-            continue
-        lines.append(line)
-    return [
-        line for line in fold_spice_continuations(lines) if not line.startswith("+")
-    ]
 
 
 def _positional_tokens(line: str) -> list[str]:
@@ -1259,13 +1236,11 @@ def _all_measurement_specs(
     request: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
     """``(label, spec)`` for every measurement object the request declares:
-    the top-level ``measurements[]``, then each ``analysis_steps[]`` step's
-    own (labelled ``<step>.<name>``). Malformed entries are skipped -- ``klt
-    sim`` itself owns validating the request's shape."""
+    the top-level ``measurements[]`` (shape-checked by :func:`load_request`),
+    then each ``analysis_steps[]`` step's own (``<step>.<name>``), whose
+    malformed entries are skipped -- ``klt sim`` owns validating those."""
     specs = [
-        (str(spec.get("name", "?")), spec)
-        for spec in request.get("measurements") or []
-        if isinstance(spec, dict)
+        (str(spec.get("name", "?")), spec) for spec in request.get("measurements", [])
     ]
     steps = request.get("analysis_steps")
     for step in steps if isinstance(steps, list) else []:
@@ -1288,16 +1263,17 @@ def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate an op-sanity request JSON file.
 
     The same document ``klt sim`` takes (see ``sim.load_request``), but only
-    ``netlist`` is required: this verb always runs a plain ``op``, so a
-    request's ``analysis``/``measurements`` are not needed for it to work.
+    ``netlist`` is required: this verb always runs a plain ``op``, so
+    ``analysis`` is optional -- but a supplied ``measurements`` is shape-checked.
     """
-    request = _load_request_json(request_path, OpSanityError)
-    return validate_request_shape(
-        request,
+    request = validate_request_shape(
+        _load_request_json(request_path, OpSanityError),
         "request file",
         error_cls=OpSanityError,
         required_fields=("netlist",),
     )
+    validate_request_measurements(request, error_cls=OpSanityError)  # issue #6590
+    return request
 
 
 def _refuse_param_axis(point: Any) -> None:
