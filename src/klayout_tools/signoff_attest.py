@@ -76,7 +76,6 @@ from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
-    _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     _classify,
     _generic_item_binding_refusal,
 )
@@ -88,7 +87,13 @@ from .signoff_attest_input import attestation_block, input_binding
 from .signoff_attest_pins import item9_pin_checks
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
-from .signoff_base import SCHEMA_VERSION, SignoffError
+from .signoff_base import (
+    ATTESTABLE_ITEMS,
+    CHARACTERIZATION_ITEM,
+    SCHEMA_VERSION,
+    SignoffError,
+)
+from .signoff_base import STREAM_ATTESTABLE_ITEM as STREAM_ATTESTABLE_ITEM
 
 #: The attestation-inventory schema version this build mints against. The
 #: inventory is a public, versioned contract (``docs/json-contract.md``);
@@ -114,24 +119,6 @@ PRODUCER = "klt signoff --attest"
 #: part of the evidence, not an implicit convention.
 HASH_ALGORITHM = "sha256-raw-bytes"
 
-#: T1 item 8 (Characterization report, issue #4311): attestable from an
-#: inventory but deliberately *not* in ``_ITEMS_REQUIRING_ATTESTED_EVIDENCE``,
-#: so a bare hand-written generic envelope still grades.
-CHARACTERIZATION_ITEM = 8
-
-#: The T1 items this producer attests from an inventory -- the items whose
-#: evidence :data:`~klayout_tools.signoff._ITEMS_REQUIRING_ATTESTED_EVIDENCE`
-#: restricts to a generic envelope, plus item 8. Item 2 (Layout) stays out of
-#: scope: its binding is the committed stream itself (issue #2718), unchanged
-#: by issue #2844.
-ATTESTABLE_ITEMS: tuple[int, ...] = tuple(
-    sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE | {CHARACTERIZATION_ITEM})
-)
-
-#: The one T1 item attested from a committed layout stream rather than an
-#: inventory (issue #4188): ``--attest 2 --input STREAM``. Item 2's binding is
-#: the stream itself, so there is no inventory to hand-write.
-STREAM_ATTESTABLE_ITEM = 2
 
 _ITEM_TITLES = {
     1: "Design sources",

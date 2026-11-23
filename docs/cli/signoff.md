@@ -4111,6 +4111,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    check its runset is pinned before running `klt lvs --engine
    klayout-runset`.
 
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
+
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`
    outcome to the partitions that may use it (see "Item 6 `not_applicable`").
