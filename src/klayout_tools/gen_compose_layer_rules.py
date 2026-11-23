@@ -8,25 +8,19 @@ and landing-pad sizes that pair implies, all out of the resolved PDK
 family's own curated deck -- it calls nothing else in
 ``gen_compose_routing``, and five functions there call into it.
 
-Same conventions as the module it came from (and as
-``gen_compose_via_cuts.py``, the earlier split of the same file):
-``gen_compose.py``'s own module-scope names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_VIA_DROP_SIZE_UM``) are imported *inside* the
-functions that use them, so this module never has a load-time dependency
-back on ``gen_compose.py``. ``gen_compose_routing`` re-imports every name
-below at module scope, so each pre-existing
-``from klayout_tools.gen_compose_routing import <name>`` path -- and
-``gen_compose``'s own re-export of it -- keeps resolving unchanged.
+The router and composition API re-export these rule lookups for existing callers.
 """
 
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any
 
 from . import gen_compose_top_metal_floors as _top_metal_floors
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
+from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
 
 
 def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
@@ -41,8 +35,6 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     is not a known role, or the resolved family's curated deck has no layer
     for the role (``None`` entry).
     """
-    from .gen_compose import GenComposeError
-
     try:
         family = _pdk_family(variant)
     except GenError as exc:
@@ -64,25 +56,35 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     return pair
 
 
+# Native GF180 metaltop.rb selects the 9K/11K MT.1 and MT.2a rules on
+# these physical planes. Variant A uses a separate 30K rule table.
+def _is_gf180_9k_11k_top(variant: str | None, layer: tuple[int, int] | None) -> bool:
+    return (variant, layer) in {
+        ("gf180mcuB", (46, 0)),
+        ("gf180mcuC", (81, 0)),
+        ("gf180mcuD", (81, 0)),
+    }
+
+
+@lru_cache(maxsize=256)
+def _route_spacing_rule(
+    variant: str, layer: tuple[int, int] | None
+) -> tuple[float, str] | None:
+    if _is_gf180_9k_11k_top(variant, layer):
+        return (0.46, "MT.2a")
+    return _min_rule_um_for_layer(variant, layer, "space")
+
+
 def _min_width_um_for_layer(
     variant: str, layer: tuple[int, int] | None
 ) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum-*width* DRC rule for ``layer``
-    from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
-    with, never a private, hard-coded threshold (issue #1501).
+    return _min_rule_um_for_layer(variant, layer, "width")
 
-    Mirrors ``compose()``'s own same-layer minimum-*spacing* lookup (issue
-    #1386's ``_min_spacing_um_for_layer``), generalised to ``"width"`` rules
-    and lifted to module scope so both the ``routing.width_um`` validation
-    and the via-drop square sizing below can share it. Returns
-    ``(threshold_um, rule_id)`` for the widest matching ``"width"`` rule on
-    ``layer`` (a layer can carry more than one width rule from different DRM
-    sections; the widest is the true floor), or ``None`` when ``layer`` is
-    ``None``, the layer has no such rule in the resolved deck, or the PDK
-    family/deck cannot be resolved at all -- an unresolvable family degrades
-    this check to a no-op, exactly like #1386's spacing lookup does.
-    """
+
+def _min_rule_um_for_layer(
+    variant: str, layer: tuple[int, int] | None, check: str
+) -> tuple[float, str] | None:
+    """Largest plain same-layer width or spacing threshold from the curated deck."""
     if layer is None:
         return None
     try:
@@ -94,7 +96,7 @@ def _min_width_um_for_layer(
     best: tuple[float, str] | None = None
     for rule in deck_rules:
         if (
-            rule.check == "width"
+            rule.check == check
             and rule.layer == layer
             and rule.other_layer is None
             and rule.derived_layer is None
@@ -269,8 +271,6 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     Drawing and the own-block self-notch check use the resolved side. The
     router’s other spacing checks retain their search footprint (#6469).
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
     area_floor = _min_area_um2_for_layer(variant, layer)
     if area_floor is None:
         side_um = _VIA_LANDING_SIZE_UM
@@ -389,8 +389,6 @@ def _landing_pad_side_um_for_pair(
     via_side: float,
 ) -> float:
     """Default drawn side of one landing pad, before via-array growth."""
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
     floor, _ = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
     return max(_VIA_LANDING_SIZE_UM, floor)
 
@@ -421,12 +419,9 @@ def _resolve_landing_pad_sizes(
     shaping rule draws at exactly the override; the default (``None``) is
     byte-for-byte the pre-#5803 resolution.
 
-    Resolve once per distinct pair and pass the result into drawing; the
-    router's existing spacing pre-checks keep their baseline footprint,
-    as with the area and via-width floors described above.
+    Resolve once per distinct pair for drawing. Route conflict checks use
+    the same floors and round the pad onto the output grid.
     """
-    from .gen_compose import _VIA_DROP_SIZE_UM, GenComposeError
-
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
         for drop in route.get("via_drops", []):
@@ -446,17 +441,22 @@ def _resolve_landing_pad_sizes(
                 )
                 if override_um < floor_side - 1e-9:
                     rule_id, needed = max(floors, key=lambda f: f[1])
+                    source = (
+                        "native runset"
+                        if rule_id
+                        in (
+                            _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
+                            _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
+                        )
+                        else "resolved PDK deck"
+                    )
                     raise GenComposeError(
-                        f"request.routing.landing_pad_size_um "
-                        f"({override_um:.4g}um) is below the resolved PDK "
-                        f"deck's own floor for a landing pad on layer "
-                        f"{pad_layer} over via layer {via_layer} -- "
-                        f"'{rule_id}' requires >= {needed:.4g}um. A "
-                        "smaller pad would draw a guaranteed `klt drc` "
-                        "violation; request at least "
-                        f"{floor_side:.4g}um for this deck, or omit "
-                        "routing.landing_pad_size_um to keep the default "
-                        "pads"
+                        f"request.routing.landing_pad_size_um ({override_um:.4g}um) "
+                        f"is below the {source} floor for layer {pad_layer} over "
+                        f"via layer {via_layer}. '{rule_id}' requires "
+                        f">= {needed:.4g}um. "
+                        f"Please request at least {floor_side:.4g}um or omit "
+                        "routing.landing_pad_size_um to keep the default pads"
                     )
                 landing_pad_size_um[pair] = override_um
     return landing_pad_size_um

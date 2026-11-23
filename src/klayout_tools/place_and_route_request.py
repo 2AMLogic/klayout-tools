@@ -23,9 +23,11 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from . import macros as macro_spec
+from ._dont_use import validate_patterns
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
@@ -280,7 +282,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
-        "also_cell_libraries": ("asap7sc7p5t_rvt",),
+        "also_cell_libraries": ("asap7sc7p5t_rvt", "asap7sc7p5t_28_R"),
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -425,10 +427,9 @@ class PlaceAndRouteError(Exception):
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
 
-    ``code``, ``job_id`` and ``details`` are optional and set only by the
-    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
-    machine-readable ``error.code`` for the CLI's error envelope, the batch
-    job id, and extra structured envelope fields.
+    Optional fields carry a machine-readable ``code``, a batch ``job_id``
+    and structured ``details``, such as congestion evidence from a failed
+    local route.
     """
 
     def __init__(
@@ -1646,17 +1647,6 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
-_LIBRARY_KEYS = (
-    "cts_buffer",
-    "power_pins",
-    "wire_rc",
-    "route_layers",
-    "antenna_diode",
-    "tapcell",
-    "filler",
-)
-
-
 def _positive_number(value: Any, where: str) -> float:
     if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
@@ -1799,6 +1789,7 @@ def _validate_library_cts_buffer(buf: Any) -> str:
 
 _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
     "cts_buffer": _validate_library_cts_buffer,
+    "dont_use": partial(validate_patterns, error_cls=PlaceAndRouteError),
     "power_pins": _validate_library_power_pins,
     "wire_rc": _validate_library_wire_rc,
     "route_layers": _validate_library_route_layers,
@@ -1819,13 +1810,13 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
     ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
     the library has no antenna diode, so no antenna repair; issue #4274),
     ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
+    has no tap cells), ``filler`` (tuple of masters), and ``dont_use`` (tuple of globs).
     """
     if library is None:
         return None
     if not isinstance(library, dict):
         raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
+    unknown = sorted(set(library) - _LIBRARY_VALIDATORS.keys())
     if unknown:
         raise PlaceAndRouteError(
             f"request.library has unknown key(s): {', '.join(unknown)}"
@@ -1864,8 +1855,8 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     ``sta::check_percent`` enforces). Omitted/``None`` defaults to ``0``,
     matching ``global_route``'s own default and this module's prior
     behaviour exactly -- the explicit A/B disable path this issue's
-    acceptance criteria require. See this module's own docstring, "Timing-
-    driven global routing + bounded antenna-repair iteration"."""
+    acceptance criteria require. See "Timing-driven/repair-iteration routing flags"
+    in ``docs/cli/place-and-route.md``."""
     if value is None:
         return 0
     if not is_int(value):
@@ -1939,8 +1930,8 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
     Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
-    See this module's own docstring, "Timing-driven
-    global routing + bounded antenna-repair iteration"."""
+    See "Timing-driven/repair-iteration routing flags" in
+    ``docs/cli/place-and-route.md``."""
     if value is None:
         return 1
     if not is_int(value):
@@ -2026,9 +2017,9 @@ def _validate_post_route_spef(value: Any) -> bool:
     ``klt extract --parasitics`` runs against the merged routed GDS, its
     output is written as SPEF, and a fresh OpenSTA session seeded from the
     ``"route"`` stage's own checkpoint re-reports slack/violation counts via
-    ``read_spef`` -- *alongside*, never replacing, that stage's existing
-    ``estimate_parasitics -global_routing``-derived top-level fields (see
-    this module's own docstring and :func:`_post_route_spef_metrics`).
+    ``read_spef`` alongside the top-level fields from
+    ``estimate_parasitics -global_routing``. See "Post-route SPEF STA"
+    in ``docs/cli/place-and-route.md`` and :func:`_post_route_spef_metrics`.
 
     Omitted/``None`` defaults to ``False`` -- this feature adds real
     wall-clock cost on top of every existing ``"route"``-stage caller (a

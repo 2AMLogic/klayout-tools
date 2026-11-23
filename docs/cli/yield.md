@@ -371,6 +371,12 @@ unchanged; grading is untouched.
 
 ### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
 
+Supply `--negative-control control.csv` to attach known-bad draws using the same
+columns and nominal group names. Add `--description` to identify the injected
+fault. The optional `--seed`, `--rng` and `--draws-per-population` flags carry
+run settings into `source.provenance`. [Command example](yield-csv.md#paired-controls-and-run-provenance)
+
+
 A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
 campaign, say) usually persists one CSV row per draw. `klt yield-csv` turns
 that file into the sample-set document above, so nobody hand-writes (and
@@ -395,9 +401,14 @@ klt yield samples.json --format json > yield.json
 | `--draw-col COL` | Optional. A repeated (group, draw) pair is rejected. Without it duplicates are accepted as separate draws. |
 | `--unit U`, `--min`, `--max`, `--target-yield` | Optional, applied to every measurement (`--limits` on `klt yield` still wins). |
 
-Rules: the file is read once and the same bytes are hashed and parsed (UTF-8,
-BOM and CRLF accepted). A passing row whose value is empty, non-numeric or
-non-finite (`nan`, `inf`) counts `errored` — never dropped, never a sample.
+Before the CSV header, lines starting with `#` are harness metadata. The
+source hash covers the complete file, including this preamble, a UTF-8 BOM
+and the original line endings. After the header, an unquoted record starting
+with `#` is an error. Quote a first field that begins with `#`, including a
+header name. A `#` inside a quoted multiline field is ordinary field data.
+
+A passing row whose value is empty, non-numeric or non-finite (`nan`, `inf`)
+counts `errored` — never dropped, never a sample.
 Samples keep file order; the counts `klt yield` grades do not depend on it. A
 missing column, empty file, header-only file or a group with no usable draw is
 exit `1` with the JSON error envelope on stderr and stdout empty.

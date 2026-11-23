@@ -183,6 +183,10 @@ REFUSED_BY_NAME = [
     ({"distributed_rc": True}, "--distributed-rc"),
     ({"resistance_graph": True}, "--resistance-graph"),
     ({"resistance_graph_r_cut_ohm": 1.0}, "--resistance-graph-r-cut"),
+    (
+        {"resistance_graph": True, "resistance_graph_caps": {"max_cells": 8}},
+        "--resistance-graph-max-cells",
+    ),
     ({"parasitic_variants": ["no-coupling"]}, "--parasitic-variant"),
     ({"substrate_tie_ohms": 5.0}, "--substrate-tie-ohms"),
     ({"mom_rlc_net": "n1"}, "--mom-rlc-net"),
