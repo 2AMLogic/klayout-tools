@@ -2048,7 +2048,7 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
 
 
 def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
-    """Secondary and generated clocks and groups, or None for one base clock."""
+    """Return None for one base clock to preserve its original Tcl and JSON (#4241)."""
     clocks = _validate_clocks_list(constraints)
     declared = (
         {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
@@ -2846,7 +2846,7 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
 
 
 def _propagated_clock_lines(clock_port: str) -> list[str]:
-    """Propagate the named clock object this session created."""
+    """Quote the clock name so Tcl preserves literal bus brackets and spaces (#5708)."""
     return [f"set_propagated_clock [get_clocks {_tcl_literal(clock_port)}]"]
 
 

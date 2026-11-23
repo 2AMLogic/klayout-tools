@@ -1,6 +1,7 @@
 {
   "engine_version": "26Q3-1510-g6cb3f2b704",
   "pdk": "sky130_fd_sc_hd tt_025C_1v80",
+  "netlist": "divider.v",
   "source_period_ns": 10,
   "sessions": [
     {

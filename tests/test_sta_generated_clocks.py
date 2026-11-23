@@ -161,6 +161,9 @@ def test_unavailable_measurement_is_distinct_from_a_measured_zero():
 
 def test_captured_divider_sessions():
     capture = json.loads((_FIXTURE / "openroad_26Q3-1510.json").read_text())
+    assert (_FIXTURE / capture["netlist"]).is_file()
+    source = capture["source_clock_probes"]
+    assert source["omitted"] == source["divide"] == ["10.000000", "2"]
     for case in capture["sessions"]:
         stdout = case["stdout"]
         completeness = sta._parse_constraint_completeness(stdout)
