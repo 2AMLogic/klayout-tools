@@ -58,7 +58,7 @@ _CONTROL_TOKENS = re.compile(
 
 
 def control_expression(expression: str) -> str:
-    """Fold signs on right operands because ngspice control rejects unary plus."""
+    """Fold sign chains because ngspice control expressions reject unary plus."""
 
     def fold(match: re.Match[str]) -> str:
         op = match["op"]
@@ -68,10 +68,11 @@ def control_expression(expression: str) -> str:
         minus_count = match["signs"].count("-")
         if op in ("*", "/"):
             return op + gap + ("-" if minus_count % 2 else "")
-        # Only rewrite the right operand of a binary operator.
-        if expression[: match.start()].rstrip()[-1:] in ("", "(", ","):
-            return match[0]
         minus_count += op == "-"
-        return ("-" if minus_count % 2 else "+") + gap
+        if minus_count % 2:
+            return "-" + gap
+        # Even parity needs a plus only between operands.
+        previous = expression[: match.start()].rstrip()[-1:]
+        return ("" if previous in ("", "(", ",") else "+") + gap
 
     return _CONTROL_TOKENS.sub(fold, expression)

@@ -309,17 +309,16 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # Run the yield, campaign (#2675) and sensitivity (#923) suites with
-            # the native engine. The design-centering worked examples use it to
-            # compute sensitivities. The signoff fleet-tier case consumes real yield evidence.
+            # These suites consume native yield results, including the fleet signoff case.
             test_paths: >-
-              tests/test_yield.py tests/test_yield_campaign.py tests/test_yield_sensitivity.py
-              tests/test_design_centering.py
+              tests/test_yield.py tests/test_yield_campaign.py
+              tests/test_yield_sensitivity.py tests/test_yield_provenance.py
+              tests/test_yield_csv_control.py tests/test_design_centering.py
               tests/test_signoff.py::test_fleet_tier_verdict_changes_once_real_yield_evidence_is_bound
             extension_module: klt_yield_native
             no_skip_message: >-
-              klt_yield_native did not install -- the native yield, campaign and sensitivity tests,
-              design-centering worked examples and signoff fleet-tier evidence test would have skipped
+              klt_yield_native did not install -- native yield, campaign, sensitivity,
+              provenance, CSV control, design-centering and fleet-tier signoff tests would have skipped
     defaults:
       run:
         working-directory: ${{ matrix.dir }}

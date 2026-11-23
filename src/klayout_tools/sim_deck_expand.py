@@ -6,8 +6,7 @@ runner-resident file as ``$PDK_ROOT/...`` is expanded here, on the
 executing host, just before ngspice launches. The shipped deck bytes (and
 their recorded ``deck_sha256``) are never modified.
 
-``sim_decks`` imports this module; ``sim.SimError`` is imported inside the
-functions that use it (no load-time cycle).
+Deck expansion raises the shared ``sim_errors.SimError``.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ import shlex
 from typing import Any
 
 from . import sim_staging
+from .sim_errors import SimError
 
 #: A ``pre_osdi <file>`` control command, classified like an include
 #: target. The staged file is a binary shared library, so it is shipped but
@@ -45,8 +45,6 @@ def closure_directive_target(line: str, *, where: str) -> tuple[str, str] | None
     staged, left to the executing host, or rejected exactly like an include
     target. Any other ``.lib`` shape is rejected by name rather than
     guessed at, so it cannot slip past the pre-launch check."""
-    from .sim import SimError
-
     match = sim_staging._INCLUDE_RE.match(line)
     if match is not None:
         return "`.include`", sim_staging._unquote(match.group("target"))
@@ -79,8 +77,6 @@ def expand_directive_line(line: str) -> str:
     <section>``/``pre_osdi`` target on the executing host. A line with
     nothing to expand, or whose variable is unset (the engine then reports
     it), is returned as is."""
-    from .sim import SimError
-
     ending = line[len(line.rstrip("\r\n")) :]
     body = line[: len(line) - len(ending)]
     try:

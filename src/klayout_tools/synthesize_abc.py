@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from ._paths import _reject_unknown_keys
+from .synthesize_timeout import validate_budget
 
 FastMode = Literal["native", "inline"] | None
 
@@ -49,6 +51,7 @@ class AbcMapping:
     fast: bool
     script_name: str | None
     script_bytes: bytes | None
+    timeout_s: float | None = None
 
     def report(self) -> dict[str, Any]:
         script = None
@@ -66,11 +69,10 @@ class AbcMapping:
             "reduced_passes": reduced_passes,
         }
 
-    def record(self, response: dict[str, Any], provenance: dict[str, Any]) -> None:
-        disclosure = self.report()
-        response["synthesis"] = disclosure
-        if disclosure["abc_script"] is not None:
-            provenance["abc_script"] = disclosure["abc_script"]
+    def fast_mode(self, supports_option: Callable[[str], bool]) -> FastMode:
+        if not self.fast:
+            return None
+        return "native" if supports_option("-fast") else "inline"
 
     def stage_script(self, output_dir: str, error_cls: type[Exception]) -> str | None:
         if self.script_bytes is None:
@@ -87,6 +89,22 @@ class AbcMapping:
         return str(target)
 
 
+DEFAULT_MAPPING = AbcMapping(False, None, None)
+
+
+def record_mapping(
+    mapping: AbcMapping | None, response: dict[str, Any], provenance: dict[str, Any]
+) -> None:
+    if mapping is None:
+        return
+    if mapping.timeout_s is not None:
+        provenance["abc_timeout_s"] = mapping.timeout_s
+    disclosure = mapping.report()
+    response["synthesis"] = disclosure
+    if disclosure["abc_script"] is not None:
+        provenance["abc_script"] = disclosure["abc_script"]
+
+
 def resolve_mapping(
     request: dict[str, Any], request_path: str, error_cls: type[Exception]
 ) -> AbcMapping | None:
@@ -96,13 +114,24 @@ def resolve_mapping(
     if not isinstance(spec, dict):
         raise error_cls("request.synthesis must be an object")
     _reject_unknown_keys(
-        spec, ("abc_fast", "abc_script"), request_path, "synthesis", error_cls
+        spec,
+        ("abc_fast", "abc_script", "abc_timeout_s"),
+        request_path,
+        "synthesis",
+        error_cls,
+    )
+    timeout_s = (
+        validate_budget(
+            spec["abc_timeout_s"], "request.synthesis.abc_timeout_s", error_cls
+        )
+        if "abc_timeout_s" in spec
+        else None
     )
     fast = spec.get("abc_fast", False)
     if not isinstance(fast, bool):
         raise error_cls("request.synthesis.abc_fast must be a boolean")
     if "abc_script" not in spec:
-        return AbcMapping(fast, None, None)
+        return AbcMapping(fast, None, None, timeout_s)
     if "abc_fast" in spec:
         raise error_cls(
             "request.synthesis.abc_fast and request.synthesis.abc_script "
@@ -123,14 +152,19 @@ def resolve_mapping(
         raise error_cls(
             f"could not read request.synthesis.abc_script {raw!r}: {exc}"
         ) from exc
-    return AbcMapping(False, os.path.relpath(path, directory), data)
+    return AbcMapping(False, os.path.relpath(path, directory), data, timeout_s)
+
+
+def generic_abc(fast: FastMode) -> str:
+    if fast is None:
+        return "abc"
+    return "abc -fast" if fast == "native" else "abc -script +strash;dretime;map"
 
 
 def synth_lines(top: str, fast: FastMode) -> list[str]:
     if fast is None:
         return [f"synth -top {top}"]
-    flag = "-fast" if fast == "native" else "-script +strash;dretime;map"
-    return [f"synth -noabc -top {top}", f"abc {flag}", "opt -fast"]
+    return [f"synth -noabc -top {top}", generic_abc(fast), "opt -fast"]
 
 
 def liberty_command(
@@ -183,10 +217,9 @@ def _identity(report: Any) -> dict[str, Any] | None:
 def mapping_check(
     committed: dict[str, Any], mapping: AbcMapping | None
 ) -> dict[str, Any]:
-    default = AbcMapping(False, None, None)
-    recorded = committed.get("synthesis", default.report())
+    recorded = committed.get("synthesis", DEFAULT_MAPPING.report())
     expected = _identity(recorded)
-    actual = _identity((mapping or default).report())
+    actual = _identity((mapping or DEFAULT_MAPPING).report())
     return {
         "field": "synthesis",
         "expected": recorded if expected is None else expected,
