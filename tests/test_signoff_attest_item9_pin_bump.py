@@ -55,7 +55,8 @@ def test_equal_pin_preserves_bytes_and_mtime(tmp_path, capsys, monkeypatch):
 def test_failed_attestation_leaves_both_files_intact(tmp_path, monkeypatch):
     _set_version(monkeypatch, "0.9.1")
     args, inventory, out = _case(tmp_path)
-    next(inventory.parents[1].glob("tb/*.spice")).unlink()
+    (bench,) = json.loads(inventory.read_bytes())["testbenches"]
+    (inventory.parents[1] / bench).unlink()
     out.write_bytes(b"previous envelope")
     original = inventory.read_bytes()
     assert main([*args, "--update-tool-pin", "-o", str(out)]) == 3
