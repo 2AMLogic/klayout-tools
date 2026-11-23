@@ -71,7 +71,12 @@ def _gated_functions(nodes, *, prefix="", class_gated=False):
         if isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef)
         ) and node.name.startswith("test"):
-            if class_gated or _references_gate([*node.decorator_list, *node.body]):
+            kw_defaults = [
+                value for value in node.args.kw_defaults if value is not None
+            ]
+            if class_gated or _references_gate(
+                [*node.decorator_list, *node.args.defaults, *kw_defaults, *node.body]
+            ):
                 yield prefix + node.name, node.lineno
 
 
@@ -300,7 +305,15 @@ import pytest
 _live_sky130_env = lambda: False
 _LIVE_ONLY = pytest.mark.skipif(not _live_sky130_env(), reason="fixture")
 
+def test_positional_default(pdk=_live_sky130_env()):
+    if not pdk:
+        pytest.skip("live PDK unavailable")
+
 class TestMethods:
+    def test_keyword_default(self, *, pdk=_live_sky130_env()):
+        if not pdk:
+            pytest.skip("live PDK unavailable")
+
     def test_unmarked(self):
         _live_sky130_env()
 
@@ -309,7 +322,7 @@ class TestMethods:
         _live_sky130_env()
 
     def test_ordinary(self):
-        def test_helper():
+        def test_helper(pdk=_live_sky130_env()):
             _live_sky130_env()
 
 @_LIVE_ONLY
@@ -331,6 +344,8 @@ class Uncollected:
     monkeypatch.syspath_prepend(str(tmp_path))
     found = _live_gated_tests(tmp_path)
     expected = (
+        "test_positional_default",
+        "TestMethods.test_keyword_default",
         "TestMethods.test_unmarked",
         "TestMethods.test_marked",
         "TestClassGate.test_inherits",
@@ -339,5 +354,10 @@ class Uncollected:
     assert set(found) == {f"{module}.{name}" for name in expected}
     assert _unmarked_gated_tests(found) == [
         f"{module}.{name}: gate present but live_openroad mark missing"
-        for name in ("TestBodyGate.test_unmarked", "TestMethods.test_unmarked")
+        for name in (
+            "TestBodyGate.test_unmarked",
+            "TestMethods.test_keyword_default",
+            "TestMethods.test_unmarked",
+            "test_positional_default",
+        )
     ]
