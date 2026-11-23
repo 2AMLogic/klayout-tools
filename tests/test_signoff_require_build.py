@@ -484,7 +484,7 @@ def test_repin_with_grading_pin_refuses_before_reading_manifest(tmp_path):
             grading_ruleset_id(),
         ]
     )
-    assert rc == 1
+    assert rc == 2
     assert out == ""
     assert (
         "--repin cannot be combined with --require-grading-ruleset"
