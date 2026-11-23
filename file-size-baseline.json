@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9154
+      "lines": 9157
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
-      "lines": 1065
+      "lines": 1066
     },
     {
       "path": "src/klayout_tools/extract_hierarchy.py",
@@ -397,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5886
+      "lines": 5887
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
