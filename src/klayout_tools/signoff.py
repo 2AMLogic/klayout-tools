@@ -371,6 +371,7 @@ from .signoff_unmet_reasons import (
 from .signoff_unmet_reasons import (
     _REASON_WRONG_ITEM as _REASON_WRONG_ITEM,
 )
+from .signoff_upstream_source import read_upstream_source
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
 # this file for its size-ratchet ceiling (issue #5815) and re-imported by
@@ -3382,6 +3383,8 @@ def build_tier_report(
                 "analog": "bandgap + LDO: nets vref/vbg, cells bg_core, ota",
                 "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl",
             },
+            # Optional upstream design source pin, reported for all block kinds.
+            "upstream_source": {"repository": "...", "commit": "<full Git object ID>"},
             "evidence": {                      # optional, default {}
                 "3": "drc.json",
                 "4": {"file": "lvs.json", "content_hash": "sha256:..."},
@@ -3921,6 +3924,7 @@ def build_tier_report(
     disclosed_evidence = read_disclosed_evidence(manifest)
 
     partition_boundary = _read_partition_boundary(manifest, kind)
+    upstream_source = read_upstream_source(manifest, SignoffError)
     spec_rows_by_item = _read_spec_rows(manifest)
     na_scope = digital_na_scope(spec_rows_by_item) if kind == "mixed-signal" else None
     # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
@@ -4046,13 +4050,9 @@ def build_tier_report(
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
         "block": manifest.get("block"),
         "kind": kind,
-        # Issue #2278: the manifest's own statement of what its two
-        # partitions denote, echoed verbatim -- present only when the
-        # manifest declared one, so a report from a manifest that declares
-        # nothing is byte-identical to the one this build rendered before the
-        # field existed (and therefore does not read as `--check` drift on an
-        # upgrade alone). Never graded: see `_read_partition_boundary`.
+        # Include only declared metadata so older reports still reproduce.
         **({"partition_boundary": partition_boundary} if partition_boundary else {}),
+        **({"upstream_source": upstream_source} if upstream_source else {}),
         # Additive (#5691), gated the same way as the echo above: present
         # only when the manifest declared a top-level `spec_rows` map.
         **({"spec_rows": spec_row_records} if spec_row_records else {}),

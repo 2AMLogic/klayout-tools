@@ -166,8 +166,10 @@ from .signoff_tier_text import (
     _print_composed_from,
     _print_justified_gaps,
     _print_not_applicable,
+    _print_partition_boundary,
     _print_structural_rows,
     input_verified_statement,
+    print_upstream_source,
 )
 from .signoff_tier_text import (
     status_marker as _status_marker,
@@ -708,30 +710,6 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> N
     )
 
 
-def _print_partition_boundary(result: dict) -> None:
-    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
-    #2278) under the `block:`/`kind:` header, or nothing when it declared
-    none.
-
-    Printed **once per declared partition**, not on each of that partition's
-    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
-    beside the citation they qualify), the boundary is one constant statement
-    per partition, and restating it eleven times would bury the checklist it
-    qualifies. The JSON carries it per row as well, where a consumer
-    filtering `.items[]` needs each row to be self-contained.
-
-    Absent entirely when nothing was declared -- "no statement" must not read
-    as "the partitions were defined" -- exactly as an undeclared boundary is
-    absent from the JSON rather than rendered `null`.
-    """
-    boundary = result.get("partition_boundary") or {}
-    if not boundary:
-        return
-    print("partition boundary:")
-    for partition, text in boundary.items():
-        print(f"  {partition}: {text}")
-
-
 def _print_foundry_cell_exceptions(citation: dict) -> None:
     for exception in citation.get("foundry_cell_exceptions") or []:
         rules = ", ".join(
@@ -780,6 +758,7 @@ def _print_coverage_undisclosed(item: dict) -> None:
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
+    print_upstream_source(result, "upstream source")
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
     print(
@@ -922,6 +901,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
             f"{_composed_suffix(block)}"
         )
+        print_upstream_source(block, "        upstream")
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render
         # what that count is short of. `source_doc` is the roll-up's one
