@@ -591,7 +591,7 @@ def _post_route_spef_metrics(
     flow's original names verbatim). Passed through as ``run_extract``'s
     ``def_net_connections``, this makes every real design pin on an
     unambiguously-named net a genuine, resolvable node in the written
-    SPEF's RC network -- see :func:`~klayout_tools.extract._write_spef`'s
+    SPEF's RC network -- see :func:`~klayout_tools.extract_spef._write_spef`'s
     docstring for the exact ``*CONN``/``*RES`` shape and the duplicate-net-
     name guard (a net name shared by several un-strapped islands, e.g.
     `gcd`'s 105 ``VGND`` islands, is skipped rather than asserting
