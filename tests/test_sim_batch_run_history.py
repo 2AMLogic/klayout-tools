@@ -4,8 +4,22 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from klayout_tools import sim, sim_batch_resume, sim_batch_shards
 from klayout_tools import sim_batch_history as history
-from klayout_tools import sim_batch_shards
+
+# The "Units that never ran" block of `sim.DIAGNOSTIC_CODES`.
+NEVER_RAN = (
+    "budget_exceeded",
+    "orphaned",
+    "lost_shard",
+    "timeout_budget_unreachable",
+    "batch_job_failed",
+    "batch_job_timeout",
+    "batch_poll_timeout",
+    "batch_job_interrupted",
+)
 
 
 def test_submitted_jobs_and_unrelated_receipts_do_not_count(tmp_path):
@@ -64,3 +78,25 @@ def test_legacy_checkpoint_only_and_unsharded_modes(tmp_path):
     policy = {"batch": {"job_ceiling_check": "split"}}
     optional = history.begin(str(tmp_path), "fp", policy, 1, False, False, None)
     assert history.finish(optional, single, [{"diagnostics": []}], 1) is single
+
+
+def test_never_ran_vocabulary_matches_the_diagnostic_codes():
+    assert set(NEVER_RAN) == sim_batch_resume.NEVER_RAN_CODES
+    assert sim_batch_resume.NEVER_RAN_CODES <= sim.DIAGNOSTIC_CODES
+
+
+@pytest.mark.parametrize("code", NEVER_RAN)
+def test_a_unit_that_never_ran_is_not_completed_and_keeps_history_open(tmp_path, code):
+    state = history.begin(str(tmp_path), "fp", {}, 2, False, False, None)
+    corners = [
+        {"status": "pass", "diagnostics": []},
+        {"status": "error", "diagnostics": [{"code": code}]},
+    ]
+    run = history.finish(state, None, corners, 2)["run"]
+    assert run["completed_units"] == 1 and run["total_units"] == 2
+    assert run["complete"] is False
+    # `--resume` only reuses a history that is still open.
+    on_disk = json.loads((tmp_path / "batch-run-history.json").read_text())
+    assert on_disk["closed"] is False
+    resumed = history.begin(str(tmp_path), "fp", {}, 2, True, False, None)
+    assert resumed.from_start and resumed.rounds == 2 and resumed.declared_hosts == 2

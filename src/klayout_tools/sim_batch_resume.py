@@ -37,6 +37,17 @@ UNRUN_BATCH_CODES = frozenset(
 )
 
 
+#: Every code that marks a unit that never started: the synthesized batch ones
+#: above plus the budget, orphan and fail-fast-probe ones, i.e. the "Units that
+#: never ran" block of ``sim.DIAGNOSTIC_CODES``. Deliberately not folded into
+#: ``UNRUN_BATCH_CODES``, which also decides what a checkpoint records and what
+#: counts as an attempted corner. ``timeout_budget_unreachable`` can arrive in a
+#: worker report adopted verbatim (``_BATCH_SIM_SUCCESS_EXIT_CODES`` holds 4).
+NEVER_RAN_CODES = UNRUN_BATCH_CODES | frozenset(
+    {"budget_exceeded", "orphaned", "timeout_budget_unreachable"}
+)
+
+
 def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
     """True when a corner report is a synthesized batch one (never ran)."""
     return any(diag["code"] in UNRUN_BATCH_CODES for diag in corner["diagnostics"])

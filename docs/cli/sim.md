@@ -2207,9 +2207,15 @@ observed terminal state, in UTC. Re-reading the same state leaves the span
 unchanged. Missing timestamps are null.
 
 `completed_units` counts requested units with a result, including electrical
-failures. Lost, interrupted and budget-skipped units remain outstanding.
+failures. Units that never ran remain outstanding: lost, interrupted,
+budget-skipped, orphaned, or aborted by the fail-fast probe
+(`timeout_budget_unreachable`).
 `complete` means `completed_units == total_units`. The existing
 `unlaunched_shards` and `resumable` fields describe the current dispatch.
+A sharded `--resume` that dispatches and harvests nothing, because every unit
+came from `checkpoint.json`, still reports the summary: `environment.remote`
+then holds only `run`, and `environment.models_lib_sha256_scope` reads
+`"client"` as on any other batch run, not `"local"`.
 
 The client stores observations in `batch-run-history.json` under the artifact
 directory before replacing the shard map. It binds them to the checkpoint

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import sim_batch, sim_batch_shards
-from .sim_batch_resume import UNRUN_BATCH_CODES
+from .sim_batch_resume import NEVER_RAN_CODES
 
 _FILENAME = "batch-run-history.json"
 
@@ -220,9 +220,8 @@ def finish(
         history.write(closed=True)
         return environment
     history.observe_environment(remote)
-    unrun = UNRUN_BATCH_CODES | {"budget_exceeded", "orphaned"}
     completed = sum(
-        not any(diag["code"] in unrun for diag in corner["diagnostics"])
+        not any(diag["code"] in NEVER_RAN_CODES for diag in corner["diagnostics"])
         for corner in corners
     )
     complete = completed == total
