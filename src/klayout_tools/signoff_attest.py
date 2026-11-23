@@ -182,12 +182,8 @@ class AttestationError(SignoffError):
 # --------------------------------------------------------------------------- #
 
 
-def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
-    """Read ``path`` once and return ``(inventory, content_hash)``.
-
-    The hash and the parse are taken from the **same** bytes, so the
-    envelope can never record the hash of one revision of the inventory and
-    the checks of another."""
+def _read_inventory(path: str, raw: bytes | None = None) -> tuple[dict[str, Any], str]:
+    """Hash and parse the same inventory bytes, including a proposed tool-pin edit."""
     if path == "-":
         raise AttestationError(
             "--inventory must be a file path, not '-': the inventory is the "
@@ -203,8 +199,9 @@ def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
     if not os.path.isfile(path):
         raise AttestationError(f"inventory is not a file: {path}")
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
+        if raw is None:
+            with open(path, "rb") as handle:
+                raw = handle.read()
     except OSError as exc:
         raise AttestationError(f"could not read inventory '{path}': {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
@@ -835,6 +832,8 @@ def build_attestation(
     item: int,
     inventory_path: str,
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    inventory_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --attest ITEM --inventory PATH``: run every check
     ``PATH`` declares for T1 item ``item`` and return the artifact-anchored
@@ -854,7 +853,7 @@ def build_attestation(
             f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
             f"got {item}"
         )
-    inventory, inventory_hash = _read_inventory(inventory_path)
+    inventory, inventory_hash = _read_inventory(inventory_path, inventory_bytes)
     absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
     if root is None:

@@ -197,6 +197,8 @@ def drift_result(
         ("attestation", "checks", str(index), "raw_content_hash")
         for index in range(len(checks))
     }
+    if fresh.get("t1_item") == 9:
+        exclude |= {("provenance", "tool_pin_bump")}
     # An unknown running build can only disclose that it could not verify the
     # klt pin. Keep comparing the pin and verdict across builds.
     exclude |= {

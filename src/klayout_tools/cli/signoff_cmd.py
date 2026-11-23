@@ -136,6 +136,7 @@ from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
 from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
+from ..signoff_attest_pin_bump import ToolPinUsageError, update_tool_pin
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
@@ -152,12 +153,13 @@ from ..signoff_grouped_citations import print_power_delivery as _print_power_del
 from ..signoff_output import non_attest_problem, write_output_or_message
 from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
 from .signoff_flags import (
     artifact_manifest_problem,
     describe_grader_problem,
     mode_flag_problem,
 )
+from .signoff_flags import attest_flag_problem as _attest_flag_problem
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
     _composed_suffix,
@@ -191,6 +193,15 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    if getattr(args, "update_tool_pin", False) and (
+        args.attest != 9 or args.check or args.repin
+    ):
+        return emit_error(
+            "signoff",
+            "--update-tool-pin requires --attest 9 and excludes --check and --repin",
+            args.format,
+            EXIT_USAGE_ERROR,
+        )
     problem = artifact_manifest_problem(args, manifest_source, fleet_source)
     if problem:
         return emit_error("signoff", problem, args.format)
@@ -249,34 +260,6 @@ def _run_describe_grader(
     return EXIT_PASS
 
 
-def _attest_flag_problem(
-    args: argparse.Namespace, inventory: str | None, stream: list[str] | None
-) -> str | None:
-    """The refusal message for an invalid ``--attest`` flag combination, else
-    ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
-    declared checks; items 1, 8, 9 and 10 take ``--inventory``."""
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        if not stream:
-            return (
-                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
-                "layout stream; see docs/cli/signoff.md)"
-            )
-        return None
-    attrs = ("generator", "regenerated_hash", "hash_kind")
-    if stream or any(getattr(args, attr, None) is not None for attr in attrs):
-        return (
-            "--input/--generator/--regenerated-hash/--hash-kind only apply "
-            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
-            "--inventory)"
-        )
-    if not inventory:
-        return (
-            "--attest requires --inventory <file> (the versioned attestation "
-            "inventory; see docs/cli/signoff.md)"
-        )
-    return None
-
-
 def _run_attest(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -315,7 +298,13 @@ def _run_attest(
     if problem is not None:
         return emit_error("signoff", problem, args.format)
     try:
-        result = _compute_attestation(args, inventory, stream, committed)
+        if getattr(args, "update_tool_pin", False):
+            assert inventory is not None  # _attest_flag_problem requires it for item 9
+            result = update_tool_pin(args, inventory)
+        else:
+            result = _compute_attestation(args, inventory, stream, committed)
+    except ToolPinUsageError as exc:
+        return emit_error("signoff", str(exc), args.format, EXIT_USAGE_ERROR)
     except SignoffError as exc:
         return emit_error("signoff", str(exc), args.format)
 
@@ -326,7 +315,11 @@ def _run_attest(
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
 
-    if result["status"] == "pass" and output:
+    if (
+        result["status"] == "pass"
+        and output
+        and not getattr(args, "update_tool_pin", False)
+    ):
         try:
             envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
             write_attestation(envelope, output)

@@ -920,6 +920,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_item9_depends_on",
         "klayout_tools.signoff_attest_live",
+        "klayout_tools.signoff_attest_pin_bump",
         "klayout_tools.signoff_attest_pins",
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
