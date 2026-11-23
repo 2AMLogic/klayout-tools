@@ -124,6 +124,7 @@ def _members_rows_declared(
         and declared[row_id]["gap"] is None
         and declared[row_id]["justified_gap"] is None
         and declared[row_id]["joint_grid"] is None
+        and declared[row_id].get("structural") is None
         for _, rows in members
         for row_id in rows or []
     )

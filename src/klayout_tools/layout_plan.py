@@ -174,7 +174,7 @@ from typing import Any
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
-from .gen_compose import _ORIENTATIONS
+from .gen_compose_base import ORIENTATIONS as _ORIENTATIONS
 from .layout_plan_fields import (
     ingest_netlist,
     net_echo,

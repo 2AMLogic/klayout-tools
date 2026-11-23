@@ -323,13 +323,27 @@ def test_a_malformed_joint_grid_degrades_item5_alone(tmp_path, bad):
     assert item["detail"]["problem"] == "'spec_rows' for this item is malformed"
 
 
-def test_gap_and_joint_grid_are_mutually_exclusive(tmp_path):
+@pytest.mark.parametrize(
+    "disposition",
+    [
+        {"gap": "why"},
+        {
+            "structural": {
+                "claim": "constant",
+                "artifact": {"file": "ref", "content_hash": "sha256:" + "0" * 64},
+            }
+        },
+    ],
+)
+def test_other_dispositions_and_joint_grid_are_mutually_exclusive(
+    tmp_path, disposition
+):
     a = _write(tmp_path, "a.json", _grid_envelope())
     b = _write(tmp_path, "b.json", _grid_envelope())
 
     item = _item5(
         {"5": [{"file": a}, {"file": b}]},
-        [{"id": "pvt_grid", "gap": "why", "joint_grid": _joint_members(a, b)}],
+        [{"id": "pvt_grid", **disposition, "joint_grid": _joint_members(a, b)}],
     )
 
     assert item["reason"] == "invalid_evidence"

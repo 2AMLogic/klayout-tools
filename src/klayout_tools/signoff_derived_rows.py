@@ -72,6 +72,7 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
 )
+from .signoff_justified_gap import justified_gap_entries, structural_row_entries
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
@@ -441,6 +442,13 @@ def multi_row_info(
 
     Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
     ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
+
+    Issue #6985: a row carrying the ``structural`` disposition is listed
+    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
+    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
+    covered nor a gap: its claim is evidenced by inspecting the pinned
+    artifact, not by a measurement). The key is omitted when no structural
+    row is declared, keeping a disposition-free report byte-identical.
     """
     if spec_rows is None:
         return {}
@@ -462,16 +470,8 @@ def multi_row_info(
     covered.update(joint_covered)
     row_sources.update(dict.fromkeys(joint_covered, "derived"))
     failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
-    justified = [
-        {
-            "id": row["id"],
-            "reason": row["justified_gap"]["reason"],
-            "rationale": dict(row["justified_gap"]["rationale"]),
-            "issue": row["justified_gap"].get("issue"),
-        }
-        for row in spec_rows
-        if row["justified_gap"] is not None
-    ]
+    justified = justified_gap_entries(spec_rows)
+    structural = structural_row_entries(spec_rows)
     return {
         "failed_rows": failed_rows,
         "uncovered_rows": [
@@ -479,6 +479,7 @@ def multi_row_info(
             for row in spec_rows
             if row["gap"] is None
             and row["justified_gap"] is None
+            and row.get("structural") is None
             and row["id"] not in covered
             and row["id"] not in failed_rows
         ],
@@ -488,11 +489,13 @@ def multi_row_info(
             if row["gap"] is not None
         ],
         **({"justified_gaps": justified} if justified else {}),
+        **({"structural_rows": structural} if structural else {}),
         "unratified_rows": [
             row["id"]
             for row in spec_rows
             if row["gap"] is None
             and row["justified_gap"] is None
+            and row.get("structural") is None
             and not row["ratified"]
         ],
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},

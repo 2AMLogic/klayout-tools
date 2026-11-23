@@ -54,7 +54,7 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
-from ._git_tracked import is_untracked_yield_sample
+from ._git_tracked import is_untracked_working_tree_file
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -186,6 +186,7 @@ from .signoff_envelopes import _YieldRequired as _YieldRequired
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
+    common_input_hash,
     content_hash_pin_state,
     declared_hash_unbound_disclosure,
     generic_binding_check,
@@ -235,7 +236,8 @@ from .signoff_joint_rows import (
 )
 from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
-    _justified_gap_rationale_outcome,
+    _check_justified_gap_rationales,
+    _check_structural_artifacts,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -3619,11 +3621,9 @@ def _check_input_hashes(
     comparison exactly as before instead of dropping into a bucket of its
     own and quietly weakening the gate.
 
-    The emitted ``field`` stays ``"input.content_hash"`` for every role (the
-    value ``docs/cli/signoff.md`` documents and consumers match on); the
-    disagreeing role is carried in the additive ``role`` key beside it, so a
-    bundle that disagrees on two roles at once produces two distinguishable
-    entries.
+    A merged sim report compares on its common shard digest. Mixed or
+    missing shard hashes produce a mismatch even within one report.
+    The mismatch preserves the original values and their artifact role.
     """
     by_role: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
@@ -3644,8 +3644,8 @@ def _check_input_hashes(
         )
 
     for role, entries in sorted(by_role.items()):
-        distinct = {entry["value"] for entry in entries}
-        if len(distinct) > 1:
+        distinct = {common_input_hash(entry["value"]) for entry in entries}
+        if None in distinct or len(distinct) > 1:
             mismatches.append({"field": _INPUT_HASH, "role": role, "values": entries})
 
 
@@ -4833,7 +4833,7 @@ def _yield_samples_content_hash(
     disclosure with the manifest path and a named ``reason`` (issue #5963).
 
     Drop untracked candidates before hashing and from ``searched`` so both
-    disclosures use the same git-index basis (issue #6139). A future
+    disclosures use the one git-index basis (#6139, #7195). A future
     ``provenance.input.content_hash`` takes precedence in :func:`_grade_evidence`.
     """
     samples = envelope.get("samples")
@@ -4847,7 +4847,7 @@ def _yield_samples_content_hash(
     cwd_relative = _resolve_relative_to_spec(samples, spec)
     if cwd_relative not in candidates:
         candidates.append(cwd_relative)
-    candidates = [c for c in candidates if not is_untracked_yield_sample(c)]
+    candidates = [c for c in candidates if not is_untracked_working_tree_file(c)]
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
@@ -6084,7 +6084,7 @@ def _resolve_evidence(
 
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
-    actual_hash = input_block.get("content_hash")
+    actual_hash = common_input_hash(input_block.get("content_hash"))
     content_hash_unresolved: dict[str, Any] | None = None
     yield_samples_source: str | None = None
     samples_basis: str | None = None
@@ -6574,11 +6574,10 @@ def _grade_multi_citation(
       undeclared (or declared-``gap``) row -> ``unmet``/``invalid_evidence``;
     - any failing member -> ``unmet`` with that member's reason, the failing
       envelopes named under ``detail.failed_citations``;
-    - all members pass but a declared row is uncovered or a declared gap ->
-      ``unmet``/``partial_coverage`` with ``failed_rows``, ``uncovered_rows``
-      and ``declared_gaps`` listed separately under ``detail``; a declared
-      row with ``ratified: false`` (``unratified_rows``) is likewise
-      provisional and never ``met`` (issue #2908);
+    - all members pass but a declared row is uncovered or dispositioned (a
+      gap, justified gap, structural row #6985) or unratified -> ``unmet``/
+      ``partial_coverage`` with ``failed_rows``, ``uncovered_rows``,
+      ``declared_gaps`` and ``unratified_rows`` under ``detail`` (#2908);
     - ``required_kind_pair`` (issue #3741): when every member passed and the
       passing kinds include any kind of the pair, all of them must be
       present, else ``unmet``/``partial_coverage`` with
@@ -6665,9 +6664,8 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    # Issue #5599 + #4314: the justified-gap declaration check and the
-    # timing-margin rule are the two outcomes decided after every member has
-    # graded but before partial coverage.
+    # The declared-artifact hash checks (#5599/#6985) and the timing-margin
+    # rule (#4314) run after every member graded, before partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra, joint
     )
@@ -6679,9 +6677,10 @@ def _grade_multi_citation(
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
-        # Issue #5599: a justified gap is still a gap -- it forces
-        # `partial_coverage` exactly as the free-text form does.
+        # Issues #5599 + #6985: a justified gap and a structural row are
+        # dispositions, not coverage -- each forces `partial_coverage`.
         or row_info.get("justified_gaps")
+        or row_info.get("structural_rows")
         or row_info["unratified_rows"]
         or asserted
     ):
@@ -6750,6 +6749,22 @@ def _grade_required_kinds(
     )
 
 
+def _declared_artifact_outcome(
+    failure: tuple[str, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet`` outcome for a failing declared-artifact hash check (a
+    justified gap's rationale, issue #5599, or a structural row's artifact,
+    #6985); ``None`` when it passed. A broken declaration is a distinct
+    documented reason -- never silently demoted to a lesser form, whose
+    reason would be ``partial_coverage``."""
+    if failure is None:
+        return None
+    reason, detail = failure
+    return "unmet", reason, None, {**row_info, **detail}, extra
+
+
 def _post_member_outcome(
     spec_rows: list[dict[str, Any]] | None,
     required_kind_pair: tuple[str, ...] | None,
@@ -6760,16 +6775,15 @@ def _post_member_outcome(
     joint: JointOutcome | None = None,
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
-    before partial coverage: the joint-grid declaration check (issue #6969
-    -- a member no citation names, or a Monte Carlo one) first, then the
-    justified-gap declaration check (issue #5599), then the timing-margin
-    rule (issue #4314). ``None`` when none applies."""
+    before partial coverage: the joint-grid declaration, declared-artifact
+    hashes and timing margin, in that order. Return ``None`` if none applies."""
     problem = joint.problem if joint is not None else None
     if problem is not None:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
-    rationale_unmet = _justified_gap_rationale_outcome(spec_rows, row_info, extra)
-    if rationale_unmet is not None:
-        return rationale_unmet
+    for check in (_check_justified_gap_rationales, _check_structural_artifacts):
+        declared_unmet = _declared_artifact_outcome(check(spec_rows), row_info, extra)
+        if declared_unmet is not None:
+            return declared_unmet
     return _grade_timing_margin(
         required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
     )
