@@ -348,6 +348,11 @@ def grading_ruleset_id() -> str | None:
     files then agree, while a change to a grading leaf or its name changes the
     digest. Reading the files directly also avoids importing the grader here.
 
+    Modules outside the ``signoff*.py`` family (``design_evidence_tiers.py``,
+    ``coverage.py``, ``metrics.py``, ...) are deliberately not covered; the
+    T1 checklist doc itself is covered separately by the report's
+    ``source_doc_content_hash``.
+
     Return None if the orchestrator is missing or any grading file is unreadable.
     """
     paths = _grading_module_paths()

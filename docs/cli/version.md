@@ -149,7 +149,7 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   changes the id too): identical between two installs of byte-identical
   grading code regardless of how each was installed, and different whenever
   the grading logic changes — see [`signoff.md`'s "Identifying the grading
-  build`](signoff.md#identifying-the-grading-build) for the full mechanism,
+  build"](signoff.md#identifying-the-grading-build) for the full mechanism,
   including `klt signoff --describe-grader`. `null` only if this install's
   `signoff*.py` grading modules cannot be read at all (never fabricated).
 - `klayout_version` (issue #1490) — the KLayout engine actually resolved
