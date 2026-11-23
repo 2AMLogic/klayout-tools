@@ -59,7 +59,7 @@ REASON_RUNSET_INDUCTOR_TERMINAL_ORDER = "runset_inductor_terminal_order"
 #: (:data:`klayout_tools.lvs_runset_ports.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER`).
 #: Duplicated as a literal contract value here so the signoff group needs
 #: no lvs-group import (the report's ``mismatches[]`` is the contract
-#: between them); ``tests/test_signoff_runset.py`` pins the two equal.
+#: between them); ``tests/test_signoff_runset_inductor.py`` pins the two equal.
 LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER = "mirrored-inductor2-terminal-order"
 
 #: The ``mismatches[]`` category that carries the token (issue #4819's

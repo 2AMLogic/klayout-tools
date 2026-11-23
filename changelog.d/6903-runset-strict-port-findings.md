@@ -1,5 +1,3 @@
-# klayout-tools issue #6903
-
 - **`klt lvs --engine klayout-runset` never reports `match` beside a runset
   failure, the runset's strict top-port findings are first-class, and the
   mirrored-`inductor2` terminal-order defect is named** (#6903, 2026-11-21).

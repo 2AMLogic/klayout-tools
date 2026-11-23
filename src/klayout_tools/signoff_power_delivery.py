@@ -159,8 +159,8 @@ from .signoff_unmet_reasons import (
 #:   ``net_correspondence`` lists only *matched* nets, so the
 #:   supply-pairing predicate is destroyed by **any** mismatch (see
 #:   :func:`_failed_lvs_verdict` for the full distinction). Fix: the LVS
-#:   is blocked on it too) -- never the ERC spec, which already asked and
-#:   answered.
+#:   defect (item 4 is blocked on it too) -- never the ERC spec, which
+#:   already asked and answered.
 _REASON_NO_PDN = "no_pdn"
 _REASON_NO_TAPCELL_MASTER = "no_tapcell_master"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
