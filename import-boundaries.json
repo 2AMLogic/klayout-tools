@@ -189,6 +189,7 @@
         "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_rerun_replay",
+        "klayout_tools.drc_sg13g2_implant",
         "klayout_tools.drc_text_exempt"
       ]
     },
