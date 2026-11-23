@@ -396,7 +396,9 @@ def _repair_m3_stubs(
     if stack_v3.is_empty():
         return
     counts = report["m3_stub_spacing"]
-    for stub in m3.interacting(stack_v3).each():
+    # Earlier strips constrain later ones. KLayout region traversal can vary
+    # with insertion order, so process the placed stubs in geometric order.
+    for stub in sorted(m3.interacting(stack_v3).each(), key=lambda poly: poly.bbox()):
         if stub.bbox().height() > short_max:
             # Side edges are already long: no tip-to-side classification to
             # escape, and the 18 nm adjacent-track gap already passes.
