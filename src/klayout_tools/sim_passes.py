@@ -226,6 +226,13 @@ def validate_alter_targets(
     dc_targets = sorted(
         {t for p in analysis["passes"] for t, _v, f in p["alter"] if f == "dc"}
     )
+    ac_targets = [
+        (target, f"pass {passed['name']!r}: alter target {target!r}")
+        for passed in analysis["passes"]
+        for target, _value, field in passed["alter"]
+        if field == "ac"
+    ]
+    sim_steps.check_ac_alter_targets_exist(netlist_path, ac_targets)
     params = _param_only_targets(netlist_path, dc_targets) if dc_targets else {}
     for passed in analysis["passes"]:
         for target, _value, field in passed["alter"]:

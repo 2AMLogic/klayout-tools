@@ -309,13 +309,16 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # All three files share this one crate (issue #923, Phase 3 of the
-            # statistical/yield epic #710, added `klt yield-sensitivity` to
-            # the same `klt_yield_native` extension `klt yield` uses; issue
-            # #2675 added the `klt yield-campaign` native end-to-end tests).
-            test_paths: tests/test_yield.py tests/test_yield_campaign.py tests/test_yield_sensitivity.py
+            # These suites consume native yield results, including the fleet signoff case.
+            test_paths: >-
+              tests/test_yield.py tests/test_yield_campaign.py
+              tests/test_yield_sensitivity.py tests/test_yield_provenance.py
+              tests/test_yield_csv_control.py tests/test_design_centering.py
+              tests/test_signoff.py::test_fleet_tier_verdict_changes_once_real_yield_evidence_is_bound
             extension_module: klt_yield_native
-            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's, tests/test_yield_campaign.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
+            no_skip_message: >-
+              klt_yield_native did not install -- native yield, campaign, sensitivity,
+              provenance, CSV control, design-centering and fleet-tier signoff tests would have skipped
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
@@ -2006,11 +2009,18 @@ jobs:
       - name: Fetch this run's job and run timings
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # These two payloads are the one input the budget check below has no
+        # fallback for, so unlike the history fetch they are allowed to fail
+        # the step: a transient API failure is retried a bounded number of
+        # times first (#6439), and one that survives exits nonzero here, the
+        # check step is skipped, and nobody judges a run whose timings could
+        # not be read.
         run: |
-          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            > /tmp/ci-jobs.json
-          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            > /tmp/ci-run.json
+          python3 scripts/fetch_ci_wall_clock_timings.py \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.run_id }}" \
+            --jobs-out /tmp/ci-jobs.json \
+            --run-out /tmp/ci-run.json
 
       - name: Fetch the rolling comparison window
         env:

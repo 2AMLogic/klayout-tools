@@ -217,6 +217,40 @@ def region(
     return kdb.Region(cell.begin_shapes_rec(layer_index))
 
 
+class ActiveIndex:
+    """Bbox-indexed copy of a whole-layout region (issue #2751).
+
+    ``(net_poly & whole_active).merged()`` visits every active polygon in the
+    chip once per candidate net -- candidates x active polygons, quadratic in
+    design size. Here the active polygons are loaded once into a scratch
+    cell, and :meth:`intersect` pulls only those whose bounding box touches
+    the net's own poly bbox through the shape tree's spatial query before
+    intersecting. Active polygons outside that window cannot intersect the
+    net's poly, so the result is geometrically identical to the whole-layout
+    boolean (same merged polygons, same area, same ``gates[]``).
+
+    Lives here, not in ``erc.py``, so ``erc_antenna_gf180mcu`` can share it
+    without importing back into ``erc`` (issue #6975).
+    """
+
+    def __init__(self, active_region: kdb.Region) -> None:
+        import klayout.db as kdb
+
+        self._kdb = kdb
+        self._layout = kdb.Layout()
+        self._cell = self._layout.create_cell("ACTIVE")
+        self._layer = self._layout.layer(0, 0)
+        self._cell.shapes(self._layer).insert(active_region)
+
+    def intersect(self, poly_region: kdb.Region) -> kdb.Region:
+        if poly_region.is_empty():
+            return poly_region
+        local = self._kdb.Region(
+            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
+        )
+        return (poly_region & local).merged()
+
+
 def region_expr(
     layout: kdb.Layout,
     cell: kdb.Cell,

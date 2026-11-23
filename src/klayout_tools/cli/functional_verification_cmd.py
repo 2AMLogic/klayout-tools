@@ -40,6 +40,7 @@ reuses this exact 0/1/2/3 trichotomy: exit 3 means "ran fine, found
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..functional_verification import (
     FunctionalVerificationError,
     _log_tail,
@@ -180,11 +181,10 @@ def _print_text(report: dict) -> None:
         for key in ("line_pct", "toggle_pct", "branch_pct", "expr_pct"):
             value = coverage.get(key)
             print(f"  {key}: {'n/a' if value is None else value}")
-        print(f"  info_path: {coverage['info_path']}")
+        info_path = getattr(report, "local_paths", {}).get("coverage_info_path")
+        print(f"  info_path: {info_path or render_path_field(coverage['info_path'])}")
 
-    # Printed only when `options.trace` was requested (Epic #1585 Phase 3,
-    # issue #1845) -- the artifact `klt wave build`'s own `trace` field
-    # accepts unchanged (docs/cli/wave.md).
+    # wave build consumes the path and format. The size describes the response.
     trace = report.get("trace")
     if trace is not None:
         print()
@@ -213,7 +213,12 @@ def _print_text(report: dict) -> None:
         entries_note = (
             "" if sdf.get("entries", "all") == "all" else f"  entries: {sdf['entries']}"
         )
-        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}{entries_note}")
+        # `file` is the committable {path, scope} envelope (#5784), so the
+        # absolute path comes from the run's own `local_paths` side-channel,
+        # like `test_log`/`results_xml` above.
+        print(
+            f"sdf: {_local_path(report, 'sdf')}  corner: {sdf['corner']}{entries_note}"
+        )
         # Printed only when a benign diagnostic class was dropped (issue
         # #1102): `annotated: true` alone cannot distinguish "every check in
         # the SDF applied" from "every TIMINGCHECK section was dropped" --

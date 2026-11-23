@@ -9,6 +9,7 @@ import os
 from typing import Any
 
 from . import _batch_common, sim_batch
+from .sim_errors import SimError
 
 #: ``request.batch`` fields that steer submission only (how long to wait for
 #: spot capacity, how many jobs to keep in flight) and never change what a
@@ -40,7 +41,7 @@ def receipt_request_sha256(request: dict[str, Any]) -> str:
     """:func:`request_sha256` that also drops a ``batch`` block the exclusion
     emptied, so a request that never had one (``--wait-for-capacity`` folds
     ``batch.capacity_wait_s`` in) hashes the same as the original file
-    (issue #5194). Used by the synchronous submit receipt."""
+    (issue #5194). Used by single-job corner receipts."""
     return _canonical_sha256(_without_submission_only(request, drop_empty=True))
 
 
@@ -48,6 +49,8 @@ def _without_submission_only(
     request: dict[str, Any], *, drop_empty: bool
 ) -> dict[str, Any]:
     batch = request.get("batch")
+    if drop_empty and batch == {}:
+        return {k: v for k, v in request.items() if k != "batch"}
     if not (
         isinstance(batch, dict)
         and any(k in batch for k in _SUBMISSION_ONLY_BATCH_FIELDS)
@@ -160,10 +163,7 @@ def mismatch_error(
     """Refusal for a shard map written for a different request. Issue #4979:
     a ``--submit-only`` caller passed no ``--resume``, so name what they ran
     and keep the first request's map (and its ``--attach`` path) intact."""
-    hosts = stored["hosts"]
-    difference = sim_batch._manifest_difference(
-        stored["fingerprint"], fingerprint, hosts, hosts
-    )
+    difference = sim_batch._manifest_difference(stored["fingerprint"], fingerprint)
     if submit_only:
         message = (
             f"--submit-only: shard map {path} belongs to a different request "
@@ -176,8 +176,6 @@ def mismatch_error(
             f"--resume: shard map {path} was written for a different request "
             f"({difference}); delete it or drop --resume"
         )
-    from .sim import SimError
-
     return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
 
 
@@ -252,8 +250,6 @@ def attach_batch_shards(
     sharded run does. The map must belong to this request (digest and
     fingerprint); a shard whose job is gone is reported lost, never
     resubmitted."""
-    from .sim import SimError
-
     if os.path.basename(manifest_path) != sim_batch.BATCH_SHARDS_FILENAME:
         raise SimError(
             f"--attach {manifest_path}: expected a job id or a "

@@ -104,10 +104,16 @@ def _seam_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def synthesis_disclosure(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
+    if kind == "synthesize" and "synthesis" in envelope:
+        return {"synthesis": envelope["synthesis"]}
+    return {}
+
+
 def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     """:func:`_detail`'s ``"synthesize"`` excerpt (issue #4015)."""
     structural = envelope.get("structural") or {}
-    return {
+    detail = {
         "netlist_path": envelope.get("netlist_path"),
         "netlist_sha256": envelope.get("netlist_sha256"),
         "structural": {
@@ -120,6 +126,7 @@ def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
             )
         },
     }
+    return {**detail, **synthesis_disclosure("synthesize", envelope)}
 
 
 def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +237,12 @@ def _format_pex_extraction(pex_extraction: dict) -> str:
             for device_class, params in uncarried.items()
         )
         parts.append(f"params_not_carried=[{shown}]")
+    substrate = pex_extraction.get("substrate_return")
+    if substrate:
+        match = substrate.get("runset")
+        parts.append(
+            f"substrate return {substrate.get('node')} (runset {match or 'unmatched'})"
+        )
     line = ", ".join(parts)
     if carried is False:
         line += (

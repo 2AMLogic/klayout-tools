@@ -2,26 +2,12 @@
 own KLayout LVS runset in batch and take the **extracted netlist** out of the
 ``.lvsdb`` it writes.
 
-This is the ``klt extract`` sibling of ``klt lvs --engine klayout-runset``
-(:func:`klayout_tools.lvs_runset.run_lvs_klayout_runset`, issue #2849), and it
-drives the very same launcher: binary resolution, ``-rd`` construction,
-timeout, "no database written" and non-zero-exit error text all come from
-``lvs_runset`` itself, never from a copy. Those helpers are still private
-names there (``_run_runset`` and friends): ``lvs_runset.py`` sits exactly on
-its file-size ceiling, so this module reaches them through
-``import-boundaries.json``'s ``shared_private_permissions`` -- the convention
-``lvs_runset_reference`` already uses for ``netlist_normalize`` -- and they
-should be promoted to public when that file is next split. Calling them
-*through the module* (never ``from ... import``) is also what keeps the
-existing tests that monkeypatch those names covering both engines.
+The engine shares the launcher, timeout handling and error reporting of
+``klt lvs --engine klayout-runset`` through :mod:`.lvs_runset`.
 
-**Why this engine exists.** ``klt extract``'s default engine runs a *curated*
-deck (``decks/``), so a device family that deck declares no class for is simply
-not extracted: IHP's ``pnpMPA`` on ``sg13cmos5l`` comes back
-``device_count: 0``. ``klt lvs`` could already reach such a family by running
-the PDK's own runset -- but a *verdict* is not a netlist, so there was no way
-to get a simulatable extracted netlist for a block whose core devices live in
-such a family. This engine closes exactly that gap.
+A vendor runset can extract device families outside the curated decks, such
+as IHP's ``pnpMPA`` on ``sg13cmos5l``. Its extracted circuit feeds the same
+device and net report as a curated run.
 
 **What it does NOT do.** No parasitics (``--parasitics`` and everything built
 on it is refused by name, not silently ignored): joining runset devices with
@@ -83,10 +69,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
 
-# This module is the engine's public face: `extract.py` and `cli/extract_cmd.py`
-# import every one of these from here, so the two sibling modules below stay an
-# internal split (file-size ratchet, `scripts/README.md`) rather than a second
-# import surface callers have to know about.
+# Public face: callers import from here; sibling modules are an internal split only.
 from .extract_runset_flags import (
     DEFAULT_ENGINE as DEFAULT_ENGINE,
 )
@@ -112,6 +95,9 @@ from .extract_runset_flags import (
     provenance_hash_check as provenance_hash_check,
 )
 from .extract_runset_flags import (
+    refuse_batch_for_runset_engine as refuse_batch_for_runset_engine,
+)
+from .extract_runset_flags import (
     refuse_unsupported as refuse_unsupported,
 )
 from .extract_runset_flags import (
@@ -126,12 +112,18 @@ from .extract_runset_flags import (
 from .extract_runset_flags import (
     validate_engine as validate_engine,
 )
+from .extract_runset_labels import (
+    NumberedLabels,
+    numbered_label_net_ids,
+    numbered_labels,
+)
 from .extract_runset_spice import (
     DeviceParams,
     _check_device_params,
     _device_params_echo,
     _dropped_parameter_warnings,
     _instantiated_device_counts,
+    _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
 )
@@ -286,6 +278,7 @@ def run_extract_klayout_runset(
     runset_timeout_s: float | None = None,
     klayout_binary: str | None = None,
     request_dir: str | None = None,
+    lvsdb_out: str | None = None,
 ) -> dict[str, Any]:
     """Extract ``path`` by running the PDK runset ``deck_file`` and return the
     ``klt extract`` report. See this module's docstring for the mechanism and
@@ -295,6 +288,11 @@ def run_extract_klayout_runset(
     binary, a runset that wrote no database, a timeout, an unreadable
     database -- reusing ``klt lvs``'s own message text wherever the shared
     launcher produces it.
+
+    ``lvsdb_out`` (issue #6606, internal -- no CLI flag) copies the runset's
+    ``.lvsdb`` to that path before the scratch work directory is removed, so
+    a caller (:mod:`klayout_tools.pex_net_correspondence`) can read the
+    database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
     from .extract import _build_metrics, _normalized_netlist_sha256, _staged
@@ -318,7 +316,7 @@ def run_extract_klayout_runset(
     # The top cell has to be known before the runset runs: the stub schematic
     # is named after it, and the runset is told which cell to extract.
     with stage("layout_load"):
-        top_cell_name, dbu_um = _layout_identity(path, top)
+        top_cell_name, dbu_um, labels = _layout_identity(path, top)
 
     binary = _resolve_binary(klayout_binary, base_dir)
 
@@ -333,6 +331,8 @@ def run_extract_klayout_runset(
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
+        if lvsdb_out is not None:
+            shutil.copy2(lvsdb_path, lvsdb_out)
 
         with stage("lvsdb_read"):
             # `lvsdb` is the owner of `netlist`; it must stay referenced for
@@ -356,6 +356,7 @@ def run_extract_klayout_runset(
 
         # Checked before anything is written: an unknown `--device-param`
         # parameter is an error, never a device silently left at its default.
+        aliases = _prepare_merged_node_names(circuit) if lvsdb_out else []
         declared_warnings = _check_device_params(netlist, declared)
         uncarried = _uncarried_parameters(netlist, declared)
         reported_netlist_path, netlist_sha256 = _write_netlist(
@@ -371,7 +372,12 @@ def run_extract_klayout_runset(
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
         instantiated = _instantiated_device_counts(circuit)
-        nets = _staged("describe_nets", _describe_nets, circuit)
+        nets = _staged(
+            "describe_nets",
+            _describe_nets,
+            circuit,
+            runset_label_ids=numbered_label_net_ids(lvsdb, circuit, labels),
+        )
         runset_block = {
             "deck_file": deck_file,
             "deck_vars": vars_,
@@ -446,6 +452,7 @@ def run_extract_klayout_runset(
         "device_classes": sorted(device_counts),
         "devices": devices,
         "nets": nets,
+        **({"runset_node_renames": aliases} if aliases else {}),
         "device_models": dict(sorted(models.items())) if models else None,
         # Additive (issue #5513): present only when `--device-param` was given.
         **_device_params_echo(declared),
@@ -473,14 +480,13 @@ def run_extract_klayout_runset(
     return result
 
 
-def _layout_identity(path: str, top: str | None) -> tuple[str, float]:
-    """``(top cell name, dbu in um)`` for ``path``, resolving ``top`` the same
-    way the curated engine does."""
+def _layout_identity(path: str, top: str | None) -> tuple[str, float, NumberedLabels]:
+    """Resolve the top, units and labels which can resemble serialized net numbers."""
     from ._layout import load_layout, resolve_top_cell
 
     layout = load_layout(path, ExtractError)
     cell = resolve_top_cell(layout, top, ExtractError, path=path)
-    return cell.name, layout.dbu
+    return cell.name, layout.dbu, numbered_labels(layout, cell)
 
 
 def _schema_version() -> int:

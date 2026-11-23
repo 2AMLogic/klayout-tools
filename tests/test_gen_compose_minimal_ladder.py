@@ -144,7 +144,7 @@ def test_collision_footprints_measure_the_shrunk_pads(pdk_root):
     box = regions[_MET1].bbox()
     assert (box.right - box.left) * dbu == pytest.approx(0.32)
     # ...and so does the #1520 pad-box loop the own-block checks read.
-    boxes = pads._landing_and_widen_pad_boxes([drop], [], _MET2, minimal)
+    boxes = pads._landing_and_widen_pad_boxes([drop], [], _MET2, minimal, dbu)
     pad_box = next(b for b in boxes if b[0] == _MET1)
     assert pad_box[2] == pytest.approx((0.84, 0.84, 1.16, 1.16))
     # A pad on the leg's own route layer is terminal: unchanged footprint.
@@ -283,7 +283,7 @@ def test_shrunk_footprints_include_the_cut_array_extent(pdk_root):
     regions = pads._drawn_leg_intermediate_pad_regions([drop], dbu, _MET2, minimal)
     box = regions[_MET1].bbox()
     assert (box.right - box.left) * dbu == pytest.approx(0.32 + extra)
-    boxes = pads._landing_and_widen_pad_boxes([drop], [], _MET2, minimal)
+    boxes = pads._landing_and_widen_pad_boxes([drop], [], _MET2, minimal, dbu)
     terminal = next(b for b in boxes if b[0] == _MET2)
     assert (terminal[2][2] - terminal[2][0]) == pytest.approx(
         _VIA_LANDING_SIZE_UM + extra

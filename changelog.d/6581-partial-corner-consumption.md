@@ -1,0 +1,1 @@
+- `klt pdk corners` reports an undecidable GF180 device flavour as `unknown` when a missing sub-library could consume a changed parameter (#6581).
