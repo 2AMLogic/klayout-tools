@@ -11,44 +11,20 @@ module scope, so every pre-existing
 ``klt route``'s own writer included -- keeps resolving unchanged, the
 same convention the earlier splits of this family established.
 
-Same conventions as ``gen_compose.py`` itself:
-``gen_compose.py``'s module-scope names (``_VIA_DROP_SIZE_UM``,
-``_VIA_LANDING_SIZE_UM``) are imported *inside* the functions that use
-them, so this module never has a load-time dependency back on it.
+Drawing uses the dimensions and cut geometry shared with the route planner.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM
 from .gen_compose_routing import _polyline_midpoint_um as _polyline_midpoint_um
+from .gen_compose_via_cuts import _insert_via_cuts as _insert_via_cuts
 from .gen_compose_via_cuts import drawn_landing_box
 
 
-def _insert_via_cuts(
-    shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
-) -> None:
-    """Draw a via-drop's cut(s) centred on ``(cx, cy)`` (dbu): one square, or
-    -- when ``drop["array"]`` is set by a label-derived port's
-    ``access.via_array`` (#2927) -- the rows x cols array at its deck pitch."""
-    import klayout.db as kdb
-
-    array = drop.get("array")
-    if not array:
-        shapes.insert(kdb.Box(cx - half, cy - half, cx + half, cy + half))
-        return
-    pitch = int(round(array["pitch_um"] / dbu))
-
-    def axis(count: int) -> list[int]:
-        return [int(round((i - (count - 1) / 2.0) * pitch)) for i in range(count)]
-
-    for dy in axis(array["rows"]):
-        for dx in axis(array["cols"]):
-            x, y = cx + dx, cy + dy
-            shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
-
-
-def _draw_routed_entry(
+def draw_routed_entry(
     layout: Any,
     top: Any,
     route: dict[str, Any],
@@ -70,8 +46,6 @@ def _draw_routed_entry(
     pre-#6058 caller) keeps today's terminal sizing, unchanged.
     """
     import klayout.db as kdb
-
-    from .gen_compose import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM
 
     points = route["points_um"]
     if not points or len(points) < 2:
@@ -199,3 +173,6 @@ def _draw_routed_entry(
         else:  # 270
             widen_box = kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy)
         top.shapes(layer_index).insert(widen_box)
+
+
+_draw_routed_entry = draw_routed_entry

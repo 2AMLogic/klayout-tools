@@ -6904,7 +6904,7 @@ def test_run_sim_attach_requires_batch_backend(tmp_path):
     request = _batch_request(tmp_path)
     request["backend"] = "local"
     path = _write_request(tmp_path, request)
-    with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
 
 

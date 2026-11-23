@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_base import GenError
+
 
 def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mark: Any):
     """MOS-capacitor marker ``LayerInfo`` (issue #3283), or ``None``.
@@ -24,7 +26,6 @@ def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mar
         return None
     import klayout.db as kdb
 
-    from .gen import GenError
     from .gen_layer_params import _PDK_MOS_CAP_MARK_LAYERS, _mos_cap_min_width_um
 
     pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
@@ -88,7 +89,6 @@ def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
     is the ``w_um`` floor (below the generator-side enclosed-contact floor)."""
     if not params.get("dogbone_terminals") or params.get("mos_cap"):
         return
-    from .gen import GenError
     from .gen_layer_params import _PDK_ROLE_LAYERS, _deck_min_width_um
 
     active_layer = _PDK_ROLE_LAYERS[family]["active"]
@@ -111,7 +111,6 @@ def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
 def validate_mos_array_width(params: dict[str, Any]) -> None:
     """Generator-side ``w_um`` floor for ``mos_array`` (moved from
     ``gen_describe`` for the file-size ratchet)."""
-    from .gen import GenError
     from .gen_describe import UNIT_MIN_W_UM
 
     if params["mos_cap"]:
