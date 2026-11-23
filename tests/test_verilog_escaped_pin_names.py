@@ -29,6 +29,6 @@ endmodule
 
 @pytest.mark.parametrize("bad_pin", ["1bad", "", "DOUT[0]", r"\DOUT[0]"])
 def test_invalid_pin_name_explains_identifier_syntax(bad_pin):
-    text = f"module top (i); input i; macro u1 (.{bad_pin}(i)); endmodule"
+    text = f"module top (i); input i; macro u1 (.{bad_pin}(i) ); endmodule"
     with pytest.raises(VerilogNetlistError, match=r"instance 'u1'.*pin.*identifier"):
         parse_gate_level_verilog(text)
