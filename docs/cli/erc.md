@@ -734,6 +734,11 @@ draws that the spec never declared" below.
     through SDT -> LISD -> V0); a genuinely untied block can legitimately
     carry both the skip and the findings, so the skip alone is not a
     verdict of "untied".
+    The skipped record names the missing physical contact in `missing`.
+    A tap qualifier that removes no geometry retains the primary reason
+    `degenerate_tap_declaration`. On the ASAP7 tap cell, that reason applies
+    to both M1 and LISD when layer 12/0 covers the entire well. Only the M1
+    record lists `"tap-site contact with connect_to 'M1'"`.
   - `through` (optional string) names a `vias[]` entry whose `between`
     includes `connect_to`. For example, a tie with `"connect_to": "met1"`
     and `"through": "cont"` reaches Metal1 only through a drawn `cont` cut

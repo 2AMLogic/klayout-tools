@@ -111,6 +111,7 @@ from .erc_ties import (
     _degenerate_tie_reasons,
     _register_tie_join,
     _tie_findings,
+    _tie_skip_record,
 )
 from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported for tests
     _boxes_region,
@@ -718,7 +719,7 @@ def _connectivity_coverage(
     checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
     if keepouts is not None:
         checked.extend(keepouts.checked)
-    skipped: list[dict[str, str]] = list(keepouts.skipped) if keepouts else []
+    skipped: list[dict[str, Any]] = list(keepouts.skipped) if keepouts else []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
@@ -739,7 +740,7 @@ def _connectivity_coverage(
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
         if tie["name"] in degenerate:
-            skipped.append({"id": identity, "reason": degenerate[tie["name"]]})
+            skipped.append(_tie_skip_record(identity, degenerate[tie["name"]], tie))
         else:
             checked.append(identity)
             if tie["name"] in asserted:
@@ -2438,9 +2439,7 @@ def _extract_connectivity(
         if tie["tap_boxes"]:
             tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
-        # Issue #7419: the join (and its connect-target degeneracy
-        # measurement) lives in `erc_ties.py`, beside the grading that
-        # reads it.
+        # Measure disjointness on the same regions used for connectivity.
         tap_index, connect_target_disjoint = _register_tie_join(
             l2n, regions, tie, tap_sites
         )
@@ -3030,6 +3029,7 @@ def run_erc(
 
     # Extract the tap conductors in a separate graph (#2169) so ties cannot
     # affect gates, antenna ratios or the net findings already computed.
+    tie_layers: list[dict[str, Any]] = []
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3169,7 +3169,7 @@ def run_erc(
     erc_coverage = _connectivity_coverage(
         gates,
         nets_decl,
-        ties,
+        tie_layers,
         degenerate_ties,
         asserted_ties,
         ties_disclosure,

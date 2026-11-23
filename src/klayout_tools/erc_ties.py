@@ -101,6 +101,17 @@ REASON_EMPTY_WELL_REGION = "empty_well_region"
 REASON_DEGENERATE_CONNECT_TARGET = "degenerate_connect_target"
 
 
+def _tie_skip_record(identity: str, reason: str, tie: dict[str, Any]) -> dict[str, Any]:
+    """Keep the primary skip reason and identify the missing physical contact."""
+    record: dict[str, Any] = {"id": identity, "reason": reason}
+    if tie.get("connect_target_disjoint") and reason in (
+        REASON_DEGENERATE_TAP_DECLARATION,
+        REASON_DEGENERATE_CONNECT_TARGET,
+    ):
+        record["missing"] = [f"tap-site contact with connect_to {tie['connect_to']!r}"]
+    return record
+
+
 def _register_tie_join(
     l2n: Any, regions: dict[str, Any], tie: dict[str, Any], tap_sites: Any
 ) -> tuple[int, bool]:

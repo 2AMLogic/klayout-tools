@@ -94,6 +94,9 @@ def test_zero_overlap_tie_is_skipped_but_still_finds_the_well(tmp_path):
     assert report["erc_status"] == "violations"
     # ... and the envelope now says the join could never have fired.
     assert _skips(report) == {_ID: "degenerate_connect_target"}
+    assert report["erc_coverage"]["skipped"][0]["missing"] == [
+        "tap-site contact with connect_to 'met1'"
+    ]
     assert _ID not in report["erc_coverage"]["checked"]
     assert report["erc_coverage"]["missing_tie_checked"] is False
 
@@ -191,3 +194,17 @@ def test_a_merely_touching_landing_counts_as_interaction(tmp_path):
 
     assert _skips(report) == {}
     assert _ID in report["erc_coverage"]["checked"]
+
+
+def test_tap_degeneracy_preserves_evidence_of_a_disjoint_target(tmp_path):
+    tie = _tie(tap_is_dedicated=False, tap_requires=["12/0"])
+    for reaches_tap in (False, True):
+        layout, cell = _layout(landing_over_tap=reaches_tap)
+        cell.shapes(layout.layer(12, 0)).insert(kdb.Box(0, 0, 3000, 3000))
+        report = _run(tmp_path, layout, _spec([tie]), deck="sg13g2")
+        [record] = report["erc_coverage"]["skipped"]
+        assert record["id"] == _ID
+        assert record["reason"] == "degenerate_tap_declaration"
+        expected = [] if reaches_tap else ["tap-site contact with connect_to 'met1'"]
+        assert record.get("missing", []) == expected
+        assert bool(_missing_ties(report)) == (not reaches_tap)
