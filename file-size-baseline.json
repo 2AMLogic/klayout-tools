@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4184
+      "lines": 3931
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -361,11 +361,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3128
+      "lines": 2986
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2831
+      "lines": 2800
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
