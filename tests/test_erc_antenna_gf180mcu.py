@@ -9,6 +9,8 @@ import json
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import erc_antenna_gf180mcu as gf180
+from klayout_tools._layout import ActiveIndex
 from klayout_tools.cli import main
 from klayout_tools.erc import run_erc
 
@@ -172,3 +174,143 @@ def test_pdk_rule_available_for_both_spellings_in_one_stackup(capsys):
     assert "ungraded" not in result
     assert match_antenna_layers(rules, [], "gf180mcu") == rules
     assert not capsys.readouterr().err
+
+
+def _diffusion_fixture(path, mode):
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("GATE")
+
+    def box(layer, coords):
+        top.shapes(layout.layer(layer, 0)).insert(kdb.Box(*map(_um, coords)))
+
+    box(30, (0, 0, 1, 3))
+    box(22, (-1, 0, 2, 1))
+    box(32, (-1.2, -0.2, 2.2, 1.2))
+    box(34, (0, 2, 450, 3))
+    box(33, (0.3, 2.2, 0.55, 2.45))
+    if mode != "under_gate":
+        box(22, (10, 1, 12, 4))
+        box(32, (9.8, 0.8, 12.2, 4.2))
+    if mode == "contacted":
+        box(33, (10.5, 2.2, 10.75, 2.45))
+    if mode == "other_net":
+        box(34, (10, 3.3, 12, 3.8))
+        box(33, (10.5, 3.4, 10.75, 3.65))
+    if mode == "under_gate":
+        box(33, (0.3, 0.2, 0.55, 0.45))
+        box(34, (0.1, 0.1, 0.8, 2.1))
+    layout.write(str(path))
+
+
+def _diffusion_spec(path, active="22/0", contact="33/0"):
+    gate = {"name": "poly", "role": "gate", "layer": "30/0"}
+    if active:
+        gate["active_layer"] = active
+    path.write_text(
+        json.dumps(
+            {
+                "stackup": [gate, {"name": "Metal1", "layer": "34/0"}],
+                "vias": [
+                    {
+                        "name": "whatever",
+                        "layer": contact,
+                        "between": ["Metal1", "poly"],
+                    }
+                ],
+                # A custom limit can make the fallback raw-poly denominator violate too.
+                **(
+                    {
+                        "antenna_limits": [
+                            {"layer": "Metal1", "max_ratio": 1, "source": "control"}
+                        ]
+                    }
+                    if active is None
+                    else {}
+                ),
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("contacted", True),
+        ("uncontacted", False),
+        ("other_net", False),
+        ("under_gate", False),
+    ],
+)
+def test_contacted_diffusion_on_violating_final_net(tmp_path, capsys, mode, expected):
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _diffusion_fixture(gds, mode)
+    _diffusion_spec(spec)
+    args = ["erc", str(gds), str(spec), "--pdk", "gf180mcu", "--format", "json"]
+    assert main(args) == 3
+    report = json.loads(capsys.readouterr().out)
+    (gate,) = report["gates"]
+    assert gate["has_contacted_diffusion"] is expected
+    assert report["status"] == "violations"
+    assert gate["antenna_verdict"] == gate["levels"][1]["verdict"] == "violate"
+    if mode != "under_gate":
+        assert gate["levels"][1]["antenna_ratio"] == pytest.approx(453)
+    assert main(
+        ["erc", str(gds), str(spec), "--findings-only", "--format", "json"]
+    ) in (0, 4)
+    (gate,) = json.loads(capsys.readouterr().out)["gates"]
+    assert "has_contacted_diffusion" not in gate
+
+
+def test_missing_active_declaration_is_unknown(tmp_path):
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _diffusion_fixture(gds, "contacted")
+    _diffusion_spec(spec, active=None)
+    (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
+    assert gate["antenna_verdict"] == "violate"
+    assert gate["has_contacted_diffusion"] is None
+
+
+def test_incompatible_layer_identities_are_unknown(tmp_path):
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _fixture(gds, metal1_um2=450)
+    _spec(spec)
+    (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
+    assert gate["antenna_verdict"] == "violate"
+    assert gate["has_contacted_diffusion"] is None
+
+
+def test_wrong_contact_layer_on_an_otherwise_measurable_gate(tmp_path):
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _diffusion_fixture(gds, "contacted")
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    top = layout.top_cell()
+    # Sustain the same routing connection through a caller's alternate layer.
+    top.shapes(layout.layer(99, 0)).insert(kdb.Box(300, 2200, 550, 2450))
+    layout.write(str(gds))
+    _diffusion_spec(spec, contact="99/0")
+    (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
+    assert gate["levels"][1]["antenna_ratio"] == 453
+    assert gate["has_contacted_diffusion"] is None
+
+
+def test_contacted_diffusion_goes_through_the_bbox_index(tmp_path, monkeypatch):
+    # A bare `net_geometry & outside_channel` visits every active polygon in
+    # the chip once per violating gate -- quadratic in design size (measured:
+    # 7.5 s at 2000 gates vs 0.1 s indexed). Wall-clock is flaky in CI, so pin
+    # the property structurally: every net goes through `ActiveIndex`.
+    windows = []
+
+    class Spy(ActiveIndex):
+        def intersect(self, poly_region):
+            windows.append(poly_region.bbox())
+            return super().intersect(poly_region)
+
+    monkeypatch.setattr(gf180, "ActiveIndex", Spy)
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _diffusion_fixture(gds, "contacted")
+    _diffusion_spec(spec)
+    (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
+    assert gate["has_contacted_diffusion"] is True
+    assert len(windows) == 1 and not windows[0].empty()
