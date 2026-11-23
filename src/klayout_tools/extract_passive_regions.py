@@ -32,6 +32,11 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
 from .decks import CapacitorDevice, ExtractionDeck, ResistorDevice
+from .extract_base import MOM_FEED_DOUBLE as MOM_FEED_DOUBLE
+from .extract_base import MOM_FEED_NONE as MOM_FEED_NONE
+from .extract_base import MOM_FEED_SAME as MOM_FEED_SAME
+from .extract_base import MOM_FEED_TOKENS as MOM_FEED_TOKENS
+from .extract_base import MOM_FEED_UNMEASURED as MOM_FEED_UNMEASURED
 from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
 from .extract_split_terminal import resistor_body_region as _resistor_body_region
@@ -598,27 +603,6 @@ def _exclude_capacitor_top_via_overlap(
         for index, region in enumerate(vias)
     ]
 
-
-#: ``FEED`` parameter codes (issue #2445) -- the ``cap_cmomi`` PCell's
-#: feed-structure variant carried through a KLayout ``DeviceParameterDefinition``
-#: (a ``double``) as a small integer enum, mapped back to the upstream
-#: ``.subckt``'s own ``none``/``same``/``double`` token only when a card is
-#: written (:data:`MOM_FEED_TOKENS`, consumed by ``pdk_models.py``) and when
-#: ``devices[].feed`` is reported. ``0`` is **not** a variant: it is the
-#: class's own default and means "this side never measured/stated the feed"
-#: (the same sentinel role ``0`` plays for ``MMIN``/``MMAX``, issue #2435),
-#: so an unrecognised port layout is left off the card rather than guessed
-#: at. The codes are deliberately *not* the ``.lib``'s own ``none/same/double
-#: -> 0/1/2`` numbering, precisely so ``0`` stays free for "unmeasured".
-MOM_FEED_UNMEASURED = 0
-MOM_FEED_NONE = 1
-MOM_FEED_SAME = 2
-MOM_FEED_DOUBLE = 3
-MOM_FEED_TOKENS: dict[int, str] = {
-    MOM_FEED_NONE: "none",
-    MOM_FEED_SAME: "same",
-    MOM_FEED_DOUBLE: "double",
-}
 
 #: Device-class names whose upstream ``.subckt`` declares a ``feed``
 #: parameter. Exactly ``cap_cmomi`` -- ``cap_cmomf`` has no ``feed`` at all

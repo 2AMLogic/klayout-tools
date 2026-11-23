@@ -459,6 +459,10 @@ def _compose_ring_poisoned(tmp_path, pdk_root, value, port_name, key):
             "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
             "connectivity": [
                 {
+                    # Pinned to the net's own plane (#1655): no automatic
+                    # climb (#6920/#6912), so the poisoned-opening "closed
+                    # ring" outcome this helper's callers pin stays.
+                    "layer_role": "metal",
                     "net": "N1",
                     "pins": [
                         {"block": "a", "port": "M1_1_D"},

@@ -40,12 +40,9 @@ defines/imports them itself (the same "own same-name function" case
 ``_endpoint_stub_widen_um``) -- the test suite monkeypatches both by their
 ``klayout_tools.sim`` re-export (predating this split), and only a call
 routed back through ``sim`` at call time still observes that patch.
-``CornerPoint``, ``_Checkpoint``, and ``RemoteLauncher`` (the last also
-defined in ``sim.py``, re-exported by it) appear only in type annotations
-here -- ``from __future__ import annotations`` defers them to strings, so
-none needs a *runtime* import, but they are still imported under
-``TYPE_CHECKING`` below so static analysis (ruff's F821, mypy) can resolve
-them without creating a load-time cycle. ``sim.py`` in turn imports this
+``TYPE_CHECKING`` imports ``CornerPoint``, ``_Checkpoint``, and
+``RemoteLauncher`` from their defining modules for type annotations.
+``sim.py`` in turn imports this
 module's entry points back (module scope, no cycle -- this module never
 imports ``sim`` at its own module scope) to preserve
 ``klayout_tools.sim.<name>`` as a working import path for every name the
@@ -68,7 +65,9 @@ from .sim_echo_checks import check_ngspice_options_echo
 from .sim_errors import SimError
 
 if TYPE_CHECKING:
-    from .sim import CornerPoint, RemoteLauncher, _Checkpoint
+    from .remote_launcher import RemoteLauncher
+    from .sim_checkpoint import _Checkpoint
+    from .sim_corner_point import CornerPoint
 
 # --------------------------------------------------------------------------- #
 # Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS

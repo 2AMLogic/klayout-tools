@@ -47,6 +47,7 @@ import shutil
 from collections.abc import Mapping
 from typing import Any
 
+from .extract_netlist_target import _finish_netlist_write, _resolve_netlist_target
 from .extract_runset_flags import RUNSET_ENGINE
 from .extract_spef import ExtractError
 
@@ -293,7 +294,6 @@ def _write_netlist(
     ``no_netlist``."""
     import klayout.db as kdb
 
-    from .extract import _finish_netlist_write, _resolve_netlist_target
     from .extract_netlist_write import write_spice_netlist
     from .extract_progress import stage
 
