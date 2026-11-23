@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -48,20 +49,6 @@ EXAMPLE_DIR = (
     / "examples"
     / "functional-verification"
     / "verilog-tb"
-)
-
-
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-needs_icarus = pytest.mark.skipif(
-    not _have_cocotb() or shutil.which("iverilog") is None,
-    reason="cocotb and iverilog are not both installed on this machine",
 )
 
 
@@ -141,7 +128,8 @@ def test_a_longer_name_that_contains_the_reserved_one_is_fine(tmp_path, monkeypa
     assert report["environment"]["plusargs"] == ["+klt_init_seed_extra=1"]
 
 
-@needs_icarus
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_verilog_bench_path_keeps_no_reservation(tmp_path):
     """Decision from the curation: the Verilog-bench path has no reserved
     names (`options.initial_state` is refused there), so `+klt_init_seed`
@@ -431,7 +419,8 @@ def _stage_lut(tmp_path: Path) -> str:
     )
 
 
-@needs_icarus
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_plusarg_fed_rom_fails_without_and_passes_with(tmp_path):
     """The gap this issue closes: a DUT that loads its ROM through
     `$value$plusargs` runs unedited -- it fails without the plusarg (the
@@ -450,7 +439,8 @@ def test_integration_plusarg_fed_rom_fails_without_and_passes_with(tmp_path):
     assert absolute["environment"]["plusargs"] == [f"+lut={tmp_path / 'rom.hex'}"]
 
 
-@needs_icarus
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_plusarg_relative_to_the_output_dir(tmp_path):
     """The cocotb simulator cwd is `output_dir` (default
     `<request_dir>/.klt/functional-verification`), so a committed,
