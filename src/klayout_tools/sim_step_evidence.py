@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .sim_measurement_grading import SAVE_MODE_NETLIST_NO_VALUE_HINT
+
 #: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
 #: unknown1`` / ``klt_step_end 0 op1``.
 _STEP_MARKER_RE = re.compile(
@@ -219,8 +221,6 @@ def not_reached_result(
 def no_value_message(spec: dict[str, Any], save_mode: str) -> str:
     """The ``code: "measurement"`` message for a step-sequence result that
     printed no value (moved from ``sim_steps._no_value_message``)."""
-    from .sim import SAVE_MODE_NETLIST_NO_VALUE_HINT
-
     if "step" in spec:
         form = (
             f"its .meas card ({spec['meas_card']!r})"

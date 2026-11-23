@@ -281,6 +281,7 @@ def _worker_view(entry: dict[str, Any], fleet_index: int | None) -> dict[str, An
             else None
         ),
         "omp_num_threads": worker.get("omp_num_threads"),
+        "threads_per_worker": worker.get("threads_per_worker"),
     }
 
 
@@ -304,6 +305,7 @@ def _render_values(view: dict[str, Any]) -> str:
         ("ngspice_init.source", init.get("source")),
         ("ngspice_init.sha256", init.get("sha256")),
         ("omp_num_threads", view["omp_num_threads"]),
+        ("threads_per_worker", view["threads_per_worker"]),
     )
     return ", ".join(
         f"{name}={json.dumps(value, default=str)}" for name, value in fields
