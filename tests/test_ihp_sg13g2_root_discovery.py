@@ -121,3 +121,15 @@ def test_model_only_override_and_incomplete_corner_fall_back(tmp_path, monkeypat
     assert find_ihp_sg13g2(checkout, require_stdcell=False) == model_only
     (model_only / CORNER_MOS_LIB).unlink()
     assert find_ihp_sg13g2(checkout, require_stdcell=False) == vendor
+
+
+def test_model_only_shared_checkout_requires_git_metadata(main_checkout, monkeypatch):
+    monkeypatch.delenv("KLT_IHP_SG13G2_ROOT", raising=False)
+    repo = main_checkout / ".loom/worktrees/worker"
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(repo))
+    shared = _install(main_checkout / VARIANT)
+    (shared / STDCELL_LIB).rmdir()
+    assert find_ihp_sg13g2(repo, require_stdcell=False) == shared
+
+    monkeypatch.setenv("PATH", "")
+    assert find_ihp_sg13g2(repo, require_stdcell=False) is None
