@@ -2,6 +2,7 @@
 
 import pytest
 
+from klayout_tools._dont_use import cell_exclusion_fields
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
 from klayout_tools.place_and_route_request import _validate_library
 from test_place_and_route import (
@@ -79,11 +80,38 @@ def test_zero_matches_in_resolved_liberty(tmp_path, monkeypatch):
         run_place_and_route(path)
 
 
+def test_validated_true_when_liberty_cell_list_read(tmp_path):
+    liberty = tmp_path / "cells.lib"
+    liberty.write_text(
+        'library (test) {\n  cell ("AOI1") { }\n  cell ("AOI2") { }\n}\n'
+    )
+    fields = cell_exclusion_fields(
+        SKY, {"dont_use": ["AOI[12]"]}, str(liberty), error_cls=PlaceAndRouteError
+    )
+    assert fields["cell_exclusions"]["validated"] is True
+
+
+@pytest.mark.parametrize("liberty_text", ["not a liberty at all", ""])
+def test_validated_null_when_cell_list_not_established(tmp_path, liberty_text):
+    liberty = tmp_path / "broken.lib"
+    liberty.write_text(liberty_text)
+    fields = cell_exclusion_fields(
+        SKY, {"dont_use": ["AOI[12]"]}, str(liberty), error_cls=PlaceAndRouteError
+    )
+    assert fields["cell_exclusions"]["validated"] is None
+
+
 @pytest.mark.parametrize(
-    "known_cells", [None, [SKY + "__diode_2", "AOI2", SKY + "__probe1"]]
+    ("known_cells", "validated"),
+    [
+        # No readable cell list in the Liberty -> check skipped, disclosed
+        # as `null` rather than passed off as checked (issue #7388).
+        (None, None),
+        ([SKY + "__diode_2", "AOI2", SKY + "__probe1"], True),
+    ],
 )
 def test_successful_response_reports_only_requested_exclusions(
-    tmp_path, monkeypatch, known_cells
+    tmp_path, monkeypatch, known_cells, validated
 ):
     patterns = [DEFAULTS[1], "AOI[12]", "*diode_?", "AOI[12]"]
     library = {"dont_use": patterns, "antenna_diode": None}
@@ -94,6 +122,7 @@ def test_successful_response_reports_only_requested_exclusions(
         "requested": patterns[:-1],
         "library_defaults": DEFAULTS,
         "effective": [*DEFAULTS, "AOI[12]", "*diode_?"],
+        "validated": validated,
     }
 
 

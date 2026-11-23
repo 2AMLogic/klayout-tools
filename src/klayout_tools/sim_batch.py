@@ -151,7 +151,8 @@ from .sim_remote import (
 )
 
 if TYPE_CHECKING:
-    from .sim import CornerPoint, _Checkpoint
+    from .sim_checkpoint import _Checkpoint
+    from .sim_corner_point import CornerPoint
 
 # Keep the contract names that callers import from sim_batch (issue #4065).
 from .sim_batch_contract import (  # noqa: F401
@@ -2777,11 +2778,10 @@ class _ShardManifest:
     """The persisted shard-to-job-id map of a sharded batch run (issues #3300,
     #3896).
 
-    ``<artifacts_dir>/batch-shards.json`` holds the request fingerprint (the
-    resume checkpoint's own, :func:`sim._checkpoint_fingerprint`), the shard
-    count, where the jobs live (``jobs_prefix``/``region``/``profile``,
-    like ``batch-receipt.json``; never the bucket, issue #4079), and one entry
-    per shard: its index, the job id it was submitted as, a digest of the corner ids it
+    ``<artifacts_dir>/batch-shards.json`` records the resume fingerprint from
+    :func:`sim_checkpoint._checkpoint_fingerprint`, shard count, and job location
+    (``jobs_prefix``, ``region``, ``profile``; the bucket is omitted, issue #4079).
+    Each shard entry records its index, submitted job ID, a digest of the corner IDs it
     carries, and its client-side lifecycle -- ``state`` is ``pending`` (id
     minted, not yet submitted), ``submitted``, ``launching`` (``launch_job``
     started, outcome unknown), ``launched`` or ``collected``, with the

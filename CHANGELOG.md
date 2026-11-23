@@ -27,6 +27,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   bump (the `build.grading_ruleset_id` hash moves, which is what it is
   for).
 
+- **`klt place-and-route` warns on two deck-known gf180mcu power configurations**
+  (issue #7311, 2026-11-23): a `request.power` on `gf180mcu_fd_sc_mcu9t5v0`/
+  `gf180mcu_fd_sc_mcu7t5v0` that applies `power.connects[].split_cuts`
+  (explicitly, or by overriding a preset's `connects`), or whose effective
+  `power.tapcell_distance_um` exceeds 15 µm (the libraries' 100 µm default
+  included), now adds a `warnings[]` string beginning `gf180mcu deck warning
+  (issue #7311)`. The `split_cuts` entry names the applied value and strap
+  pair, the seven `klt drc --deck gf180mcu` rule ids it was measured to trip
+  (#4301) and that other values are unverified; the tap entry names
+  `comp.tap_distance.{nwell,psub}.mv.1`, the effective pitch and whether it is
+  the per-library default or a `power.tapcell.distance_um` override (the 15 µm
+  limit is read from the deck's own rule table). Both are derived from the
+  request alone — no DRC runs inside place-and-route — and go to stderr like
+  every other `warnings` entry. **Additive — `schema_version` unchanged:**
+  `status`, the exit code and `route_drc_violation_count` keep their meanings
+  and no existing field changes, but a full-PDN gf180mcu run's `warnings` is
+  no longer `[]` by default; a consumer asserting an exact empty list on such
+  a run must expect the tap-distance entry. The `split_cuts` field, the
+  presets and the default tapcell pitch are unchanged.
 - **`klt version --format json` lists the install's commands** (#7324): the
   payload gains an additive `commands` field — one `{"name", "summary"}`
   object per top-level verb, sorted by `name`, derived from the live parser
@@ -38,6 +57,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   probe). Verbs hidden from `klt --help` are hidden here too; nested
   subcommands are not listed. `--format text`, `klt --version`, and
   `schema_version` are unchanged.
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
 
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
@@ -1290,7 +1311,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `foo.sim`, `sim_request.json` -> `sim_request`). `requests[].report` and
   `set-manifest.json`'s per-request `dir` are unchanged in shape and always
   name the directory actually written -- read them from the envelope rather
-  than re-deriving the path. **Migration:** a set started on 0.9.2 or
+  than re-deriving the path. Consumers spanning 0.9.2 and later can resolve
+  each member report through `set-manifest.json`’s `requests[].dir`, written
+  since 0.8.0. **Migration:** a set started on 0.9.2 or
   earlier and resumed with the new version finds no `batch-shards.json` in
   the renamed directory and re-runs every member from scratch; move the old
   directory first (`mv <outdir>/<stem>.request <outdir>/<stem>`) to resume
