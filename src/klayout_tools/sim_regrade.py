@@ -288,12 +288,17 @@ def prepare_regrade(
     spec = request.get(REGRADE_REQUEST_FIELD)
     if spec is None:
         return corner_points
-    if request.get("_explicit_points") is not None:
-        raise SimError(
-            f"{REGRADE_REQUEST_FIELD} cannot be combined with _explicit_points "
-            "(an internal fleet-shard field)"
-        )
     spec = validate_regrade_field(spec)
+    # Non-default Monte Carlo seeds and scales travel as resolved points.
+    # The worker must receive the entire ordered selection before tightening.
+    if (
+        request.get("_explicit_points") is not None
+        and [p.corner_id for p in corner_points] != spec["select_corner_ids"]
+    ):
+        raise SimError(
+            "the explicit worker points do not match the regrade selection: "
+            "their corner IDs must match select_corner_ids exactly and in order"
+        )
     by_id: dict[str, Any] = {}
     for point in corner_points:
         by_id.setdefault(point.corner_id, point)
