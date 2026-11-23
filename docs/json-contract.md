@@ -106,6 +106,12 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+When a `klt sim` measurement declares a supply-relative `limits.min` or
+`limits.max`, its per-corner result gains `limits_resolved` containing
+the numeric bounds for that corner. The aggregate measurement retains the
+declared `limits`, including its `{"frac_of": "<rail>", "fraction": k}`
+object. A measurement with only literal bounds keeps its existing shape.
+
 `measurements[].optional` (issue #2925) is an opt-in boolean (default
 `false`) that extends the per-measurement `status` vocabulary with an
 additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
@@ -388,6 +394,31 @@ omitted), and absent otherwise -- so an existing graph-enabled envelope is
 unchanged. `klt extract` adds no field for the caps: its per-net
 `graph_too_large` diagnostic names the cap that was exceeded and the value
 applied. No `schema_version` bump.
+
+**A *derived* per-entry identity field, present on every entry and
+`null` when not derivable, is additive the same way — flag-gated or not.**
+`klt extract` now annotates every `nets[]` entry with `structural_id`
+(issue #5735): the net's numbering-independent `$anon<...>` structural
+handle, the same identity `netlist_normalized_sha256` (issue #3407) and
+`--check --rerun` already derive to canonicalize anonymous `\$N` spellings,
+now emitted per net so a testbench probing an unlabeled internal node can
+address it across re-extractions. It is `null` exactly when no identity is
+derivable — a named net (its `name` is the label a consumer already joins
+on; where names collide across internally-repeated sub-cells no unique
+per-net identity would be sound, so none is minted) or an anonymous net
+with zero device terminals — so no consumer ever sees the member appear or
+disappear; its stability bound is exactly #3407's (equal across builds that
+only renumber anonymous nets, not a promise that device instance names are
+stable). Two constraints made this land without invalidating any committed
+evidence: `--check --rerun`'s canonicalization strips the field alongside
+`net_id` — not because it is unstable (it is *content* class, a
+deterministic function of the same numbering-normalized connectivity) but
+because a report committed before the field existed lacks the key and must
+not diff against a fresh one on it — which also keeps
+`netlist_normalized_sha256` byte-identical across the field's introduction.
+No `schema_version` bump; recorded in `CHANGELOG.md` and documented in
+`docs/cli/extract.md`'s `nets[]` schema table and "Anonymous net numbering"
+section.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
