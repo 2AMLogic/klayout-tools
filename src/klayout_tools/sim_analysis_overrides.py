@@ -6,16 +6,19 @@ and per-point resolution as ``options.nodeset``, but the selected value is an
 ``uic`` start-state helpers of ``options.initial_conditions`` (issue #3881)
 live here too: both edit the analysis command line of one point.
 
-The rule validator needs ``sim``'s nodeset-match grammar, so it is imported
-lazily; ``sim`` re-exports every name below under its historical spelling.
+The rule validator shares its corner-selector grammar with nodesets and
+initial conditions. The runner re-exports these helpers for existing callers.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from . import sim_steps
+from .sim_corner_rules import _apply_nodeset_rules, _validate_nodeset_match
+from .sim_echo_checks import _require_nodeset_echo
 from .sim_errors import SimError
 
 AO_LABEL = "analysis_overrides"
@@ -60,14 +63,30 @@ def ic_analysis_args(point: Any, args: str) -> str:
     return f"{args} uic".strip()
 
 
+def _reject_param_braces(analysis: dict[str, Any], engine: str) -> None:
+    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
+    (issue #2846). ngspice emits the analysis as a ``.control`` command and
+    does not expand ``.param`` braces in control mode, so ``tran 2e-06
+    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
+    braces are valid, so this check is skipped for ``engine == "xyce"``."""
+    args = analysis.get("args")
+    if engine != "xyce" and isinstance(args, str) and re.search(r"[{}]", args):
+        raise SimError(
+            f"request.analysis.args {args!r} contains a '{{...}}' brace "
+            "reference: ngspice runs the analysis as a .control command, "
+            "which does not expand .param braces (the analysis aborts with "
+            "'TSTOP is invalid'), and klt does not expand them. Write the "
+            "numeric value literally in analysis.args (or use engine 'xyce', "
+            "whose .tran card accepts braces)"
+        )
+
+
 def validate_analysis_overrides(
     value: Any, analysis: dict[str, Any], engine: str
 ) -> list[dict[str, Any]]:
     """Validate ``request.analysis_overrides`` into normalized rules
     ``[{"match": {...}, "values": "<args>"}]``; ``[]`` when omitted/empty.
     Overrides replace ``analysis.args`` only, never ``kind``."""
-    from . import sim  # lazy: sim imports this module
-
     if value is None:
         return []
     if not isinstance(value, list):
@@ -97,10 +116,10 @@ def validate_analysis_overrides(
         args = rule["args"]
         if not isinstance(args, str) or not args.strip():
             raise SimError(f"{where}.args must be a non-empty string")
-        sim._reject_param_braces({"args": args}, engine)
+        _reject_param_braces({"args": args}, engine)
         rules.append(
             {
-                "match": sim._validate_nodeset_match(rule["match"], f"{where}.match"),
+                "match": _validate_nodeset_match(rule["match"], f"{where}.match"),
                 "values": args.strip(),
             }
         )
@@ -126,16 +145,12 @@ def deck_args(point: Any, analysis: dict[str, Any]) -> str:
 
 def resolve(points: list[Any], rules: list[dict[str, Any]]) -> None:
     """Select each point's window from ``rules`` (the nodeset resolution)."""
-    from . import sim  # lazy: sim imports this module
-
-    sim._apply_nodeset_rules(points, rules, label=AO_LABEL, attr="analysis_args")
+    _apply_nodeset_rules(points, rules, label=AO_LABEL, attr="analysis_args")
 
 
 def require_echo(points: list[Any], corners: list[Any], backend: str) -> None:
     """Refuse a remote/batch worker that did not echo each point's window."""
-    from . import sim  # lazy: sim imports this module
-
-    sim._require_nodeset_echo(
+    _require_nodeset_echo(
         points,
         corners,
         backend=backend,

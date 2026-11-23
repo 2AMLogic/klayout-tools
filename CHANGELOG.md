@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt version --format json` lists the install's commands** (#7324): the
+  payload gains an additive `commands` field — one `{"name", "summary"}`
+  object per top-level verb, sorted by `name`, derived from the live parser
+  so it cannot drift from what `klt <cmd>` actually accepts. A downstream
+  toolchain pin check can now verify which subcommands an install provides
+  from the JSON contract instead of scraping `klt --help`'s argparse
+  rendering (coupled to argparse's formatting, and silently empty on
+  formatting drift — which reads as a pin violation rather than as a broken
+  probe). Verbs hidden from `klt --help` are hidden here too; nested
+  subcommands are not listed. `--format text`, `klt --version`, and
+  `schema_version` are unchanged.
+
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
   typical model when only its include tokens are unchanged. gf180mcuD's

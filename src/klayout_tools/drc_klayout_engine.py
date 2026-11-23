@@ -55,6 +55,7 @@ from .drc_klayout_app import (
 )
 from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
+from .drc_klayout_rdb_values import rdb_item_evidence
 from .drc_klayout_selection import (
     native_selection,
     selection_coverage,
@@ -218,16 +219,12 @@ def _parse_klayout_rdb_report(
 
         points_um: list[tuple[float, float]] = []
         polygon_points_um: list[tuple[float, float]] | None = None
-        values_el = item_el.find("values")
-        if values_el is not None:
-            for value_el in values_el.findall("value"):
-                if not value_el.text:
-                    continue
-                value_text = value_el.text
-                value_points = _rdb_value_points_um(value_text)
-                points_um.extend(value_points)
-                if value_text.lstrip().startswith("polygon:") and value_points:
-                    polygon_points_um = value_points
+        values = [el.text for el in item_el.findall("values/value") if el.text]
+        for value_text in values:
+            value_points = _rdb_value_points_um(value_text)
+            points_um.extend(value_points)
+            if value_text.lstrip().startswith("polygon:") and value_points:
+                polygon_points_um = value_points
 
         if points_um:
             xs = [round(x / dbu) for x, _ in points_um]
@@ -258,6 +255,7 @@ def _parse_klayout_rdb_report(
                 "source_path": None,
                 "bbox": bbox,
                 "polygon": polygon,
+                **rdb_item_evidence(values),
             }
         )
         rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1

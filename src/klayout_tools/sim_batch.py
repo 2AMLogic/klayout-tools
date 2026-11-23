@@ -724,20 +724,18 @@ def dry_run_runner_check(
     runner_out: dict[str, Any] | None = None,
     config_out: dict[str, BatchConfig] | None = None,
 ) -> dict[str, Any] | None:
-    """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
-    (issue #4120): the same :func:`_resolve_batch_config` comparison a real
-    submit makes, so a request using a feature every published image predates
-    is refused (or, under ``warn``, diagnosed) without any S3 write or launch.
+    """Run submit preflight for batch dry runs before upload or launch (#4120).
 
-    :func:`_validate_batch_request_knobs` checks request values even on an
-    unconfigured host. The polling fields ``poll_interval_s`` and
-    ``poll_timeout_s`` are parsed only after the provision script and bucket
-    resolve.
+    :func:`_validate_batch_request_knobs` checks request values before a dry run
+    can return None for missing host configuration. Polling fields
+    ``poll_interval_s`` and ``poll_timeout_s`` are parsed only after the provision
+    script and bucket resolve.
 
-    With a resolvable configuration, populate the supplied runner/config
-    outputs, return any feature warning and propagate version, feature,
-    engine and job-size refusals.
-    """
+    Return a warned or unverified feature diagnostic, otherwise None. runner_out stores
+    status, client_klt_version and images for match, unknown and warn-mode mismatch
+    (#4675). An enforce mismatch raises BATCH_RUNNER_MISMATCH_CODE first (#4680).
+    Feature, engine-pin and job-size refusals propagate. config_out saves the resolved
+    configuration so the caller avoids resolving and warning twice (#5674)."""
     from .sim import ENGINE_VERSION_UNMET_CODE
 
     _validate_batch_request_knobs(request.get("batch") or {})
@@ -879,8 +877,11 @@ def _feature_diagnostic(
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Check mandatory features before upload. A missing candidate list warns;
-    a known unsupported mandatory feature refuses submission under either policy."""
+    """Check all features before upload or launch (#3249). A legacy entry, unknown
+    runner version or capable image defers to runner preflight. With no images,
+    warn_unverified_features warns for mandatory features (#7062). If all images lack
+    features, mandatory gaps always refuse. Other gaps refuse under enforce or warn
+    on stderr and return the _feature_diagnostic result under warn (#2901)."""
     features = _request_features(request)
     images = assessment["images"]
     if not images:

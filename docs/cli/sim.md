@@ -1498,8 +1498,14 @@ Right after `launch` succeeds — before the first poll — the client writes
 `batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
 default `<request dir>/.klt/sim`; a sharded run writes
 `batch-receipt-<job-id>.json` per shard). It holds `job_id`,
-`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
-`state`. `state` is `null` until the job reaches a terminal state, so a receipt
+`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256`,
+`netlist_sha256` (present only when a netlist digest is recorded),
+`unit_count`, `units_sha256` and `state`. `unit_count` is the number of
+dispatched units ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+`units_sha256` is the ordered digest over the dispatched units' corner ids,
+present only when every dispatched point carries one
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208)). `state` is
+`null` until the job reaches a terminal state, so a receipt
 that still has `state: null` means the client died (or timed out polling) while
 the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
@@ -1510,7 +1516,16 @@ an unsharded request, `--resume` re-attaches to the `job_id` the receipt
 records when its `request_sha256`, `unit_count`, and (when recorded)
 `netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
-any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+any mismatch, or no receipt, submits afresh. When the run resumes a **partial
+slice** of the expanded grid -- a subset of the points dispatched as explicit
+points through the single-job path -- a fourth criterion applies: the
+receipt's `units_sha256` must equal that slice's ordered-unit digest, because
+the unit count alone cannot distinguish two same-sized slices
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208), merged as PR
+#7228). A receipt written before that field carries no `units_sha256`: a
+whole-grid `--resume` of it still re-attaches, but a partial one is not
+re-attached -- the run submits afresh, a billable new job rather than a
+re-attach. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
 after Spot reclaimed it -- is **submitted again under a new job id**, and the
 fresh launch rewrites `batch-receipt.json` with it
@@ -1794,6 +1809,17 @@ margin worst, ties to the first corner in merged order) and `coverage`
 whose ids carry corner indices local to each report and are re-based to the
 merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
+
+Sibling requests may use different model libraries for the same netlist.
+Each shard must declare the same measurement names, units, limits and
+provenance, including `spec_row` and `case` whenever present. A disagreement
+returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
+those row and case labels and grades limits over every declared corner.
+
+You can cite the merged report for item 5 of a `klt signoff` manifest.
+List the intended rows on the citation. Passing tagged measurements with
+limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
+digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -4656,6 +4682,47 @@ byte-identical. A changed `save_vectors` invalidates a `--resume`
 checkpoint. It rides the forwarded request document to `remote`/`batch`
 workers, so the worker image must include this implementation.
 
+#### PSP103 device currents inside a subcircuit
+
+ngspice exposes an OSDI device under the `n.` prefix. Include each enclosing
+subcircuit instance and the name of the actual device element inside the PDK
+wrapper. For example, suppose `XDUT` contains `XM1`, which instantiates the
+IHP SG13G2 `sg13_lv_nmos` wrapper. That wrapper declares an element named
+`Nsg13_lv_nmos`. With the PSP103 model loaded, this request fragment measures
+its drain current at the operating point.
+
+```json
+{
+  "analysis": {"kind": "op", "args": ""},
+  "options": {
+    "osdi_preload": ["$PDK_ROOT/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi"],
+    "save_vectors": ["@n.xdut.xm1.nsg13_lv_nmos[ids]"]
+  },
+  "measurements": [
+    {"name": "itail", "unit": "A", "expr": "@n.xdut.xm1.nsg13_lv_nmos[ids]"}
+  ]
+}
+```
+
+To derive the inner name for a different wrapper, open its `.subckt` in the
+PDK model library and find the device line beginning with `N`. In ngspice,
+`show n.xdut.xm1.nsg13_lv_nmos` lists this instance's operating-point
+parameters. PSP103 exposes `ids` and `ide`, and has no `id`. A request that
+names `[id]` anyway errors the corner (exit 4) with the generic
+`measurement '<name>' produced no value: its 'expr' (...) printed no
+'<name> = <value>' line` diagnostic, not a message naming the missing vector —
+so confirm an unfamiliar parameter name with `show` rather than reading that
+diagnostic as a plumbing fault.
+
+With a 1 µm × 0.13 µm NMOS at 27 °C, a 0.7 V gate and a 0.6 V drain,
+ngspice 46 reported 44.56219 µA for both parameters and for the independent
+drain supply measurement `-i(vdrain)`. On a DC sweep of that supply from
+0.2 to 0.8 V in 0.1 V steps, `vecmax(@n.xdut.xm1.nsg13_lv_nmos[ids])`
+reported 48.23553 µA. The SPICE measurement
+`.meas dc itail FIND @n.xdut.xm1.nsg13_lv_nmos[ids] AT=0.6` returned
+44.5622 µA. Include the instance vector in `save_vectors` for these DC
+measurements as well.
+
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
 `options.complex_vectors` is a non-empty array of single-ended `v(node)`
@@ -5313,8 +5380,10 @@ runs -- `--dry-run` included), quoting the expression and the exact
 `measurements[].crossings` for the cases that form serves better: a whole
 crossing *series*, or a supply-relative `level`
 (`{"frac_of": "vdd", "fraction": 0.5}`) resolved per corner. Note a
-`crossings` entry's `value` is the **count** of crossings, not a time; the
-times are on its `crossings.times[]` array.
+`crossings` entry's `value` is the **count** of crossings, not a time (unless
+`crossings.value_from` grades a period/frequency reduction instead — see
+"Threshold-crossing time series"); the times are on its `crossings.times[]`
+array.
 
 The suggested `par('...')` span always holds the author's *whole* local
 expression, outer operators and enclosing calls included
@@ -5844,6 +5913,7 @@ declaration returns the whole ordered list instead:
 | `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
 | `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
 | `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+| `value_from` | no   | `"period.mean"` or `"frequency"` (issue #6913): the entry's graded `value` becomes that reduction of the series instead of the crossing count. Refused on `dc` and for any other value, before any run — see "Grading a reduction (`crossings.value_from`)". |
 
 **Sampled-offset `level`.** `{"sample_at": "50n", "offset": -0.9}` is the
 signal's own value at `sample_at` (a number of seconds or a SPICE time literal),
@@ -5926,7 +5996,9 @@ member:
 - `value` is the **number of crossings found inside the window**, before the
   `max` cap — still a number, so `limits` grade it like any scalar
   (`"limits": {"min": 40}` = "at least 40 edges were observed"), and Monte
-  Carlo statistics and coverage need nothing new. Zero crossings (the level is
+  Carlo statistics and coverage need nothing new — unless
+  `crossings.value_from` selects a reduction as the graded value (see
+  "Grading a reduction" below). Zero crossings (the level is
   never reached) is `value: 0`, `times: []`, not an error. A
   crossings-only request is therefore a checked request: it never degrades to
   `status: "not_checked"` / exit 4.
@@ -5947,9 +6019,10 @@ Add `"reduce": ["period", "cycle_to_cycle", "tie"]` (any subset; unknown names
 are refused by name) to a `crossings` object and the entry gains
 `crossings.reductions`, computed over the returned (interpolated) `times`. The
 member is absent when `reduce` is not requested; `value` stays the crossing
-count. With `k` = 1 for `edge` `rise`/`fall` and 2 for `either` (a full cycle
-spans two edges), and `t` the returned `times` (so a `truncated` series is
-reduced over the returned part only):
+count unless `value_from` selects a reduction (next section). With `k` = 1
+for `edge` `rise`/`fall` and 2 for `either` (a full cycle spans two edges),
+and `t` the returned `times` (so a `truncated` series is reduced over the
+returned part only):
 
 | Name | Definition | Fields |
 |------|------------|--------|
@@ -5960,6 +6033,69 @@ reduced over the returned part only):
 A reduction without enough crossings (`period` needs `k+1`, `cycle_to_cycle`
 `k+2`, `tie` 3) is `{"omitted": "<reason>"}`, never zeros. For `either`, a
 duty cycle away from 50 % appears as TIE. All values are seconds.
+
+### Grading a reduction (`crossings.value_from`)
+
+Issue [#6913](https://github.com/2AMLogic/klayout-tools/issues/6913). An
+oscillator's spec quantity is a **frequency** (or period), not an edge count:
+the count is quantised to whole edges and biased by start-up, so `limits`, the
+Monte Carlo rollup and `klt pex`'s delta would otherwise grade a proxy. A
+transient `crossings` entry may declare which reduction its graded `value`
+reads:
+
+```json
+{
+  "name": "f_ro1",
+  "unit": "Hz",
+  "limits": {"min": 40e6, "max": 60e6},
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "200n",
+    "value_from": "frequency"
+  }
+}
+```
+
+| `value_from`     | graded `value` |
+|------------------|----------------|
+| (absent)         | crossing count (unchanged default; every existing request and committed record is byte-identical) |
+| `"period.mean"`  | `crossings.reductions.period.mean`, seconds |
+| `"frequency"`    | `1 / reductions.period.mean`, Hz |
+
+- `value_from` **implies** the `period` reduction is computed and reported on
+  the entry (`crossings.reductions.period` appears as evidence even when
+  `reduce` does not list it); a declared `reduce` list is still honoured
+  alongside. The window is the existing `from`/`to` — that is where
+  start-up edges are excluded — and the existing `max` cap applies (a
+  `truncated` series is reduced over the returned edges only, so size `max`
+  above the edge count you intend to grade).
+- `limits`, `plausible_range`, Monte Carlo statistics and `spec_row` all read
+  the entry's `value`, so they grade the period/frequency with no further
+  declaration. The entry's `unit` stays whatever the request declared — set
+  `"unit": "Hz"` (or `"s"`) yourself; it is not overwritten.
+- **Too few edges** for the period reduction (fewer than `k+1` crossings in
+  the window, including a non-oscillating cell's 0 or 1 edges) is `status:
+  "error"`, `value: null`, `margin: null`, no `crossings` member, with a
+  `code: "measurement"` diagnostic whose message starts with the stable
+  `[crossings_insufficient_edges]` token — never a small number that could
+  pass a `limits.min`. In a `klt pex` report this surfaces as an error row
+  on that side (see [`pex.md`](pex.md) → "Oscillators: a `crossings`
+  measurement is delta'd on its `value`").
+- **Refused before any run** (exit 1, `--dry-run` included): a `value_from`
+  that is not exactly `"period.mean"` or `"frequency"` (by name), and any
+  `value_from` on a `dc` analysis (next to the `crossings.reduce`-on-dc
+  refusal; the dc `value` stays the first crossing abscissa).
+- **Runner version:** `value_from` first ships in `klt` v0.9.3 (it is not in
+  v0.9.2). On the `batch` backend it is a mandatory runner feature
+  (`crossings_value_from`): a fleet runner older than v0.9.3 is refused
+  pre-launch with the standard `batch_runner_request_feature_predated`
+  diagnostic. Before running the user deck, batch and remote workers also
+  dry-run a minimal local request to verify that the installed CLI understands
+  the selector. This distinguishes development builds with the same version prefix.
+- Additive request field reading the existing `value` slot: no
+  `schema_version` bump.
 
 ### How times are computed
 
