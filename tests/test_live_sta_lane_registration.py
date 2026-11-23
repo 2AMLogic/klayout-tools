@@ -18,10 +18,13 @@ These tests close that gap from the ordinary `test` job, without openroad:
 2. **Non-vacuity** -- the shared gate names still exist and the decorator
    still applies both the marker and the skipif, so a rename that silently
    emptied the scan in (1) fails loudly here instead of passing vacuously.
-3. **Lane wiring** -- the workflow still selects by `-m live_openroad` and
-   does not narrow the selection back down to hand-listed node IDs, and the
-   marker stays registered in `pyproject.toml` (without registration the
-   mark is only an untyped warning).
+3. **Lane wiring** -- the workflow derives its node IDs from a
+   `--collect-only -m live_openroad` pass and runs exactly those (never a
+   bare `-m` run over the whole `tests/` tree, whose collection-time skips
+   in unrelated modules would trip the lane's own SKIPPED gate; never
+   hand-listed node IDs), and the marker stays registered in
+   `pyproject.toml` (without registration the mark is only an untyped
+   warning).
 
 The one in-body gate among the marked tests
 (`test_pinned_engine_wire_capacitance_with_and_without_liberty_default`
@@ -133,23 +136,66 @@ def test_LIVE_ONLY_applies_both_the_marker_and_the_skipif():
     assert "skipif" in marks
 
 
-def test_the_live_lane_selects_by_marker_and_not_by_node_ids():
-    workflow = LANE_WORKFLOW.read_text()
+def _live_lane_run_commands() -> list[str]:
+    """Logical shell command lines of the lane's "Run the live ..." step.
+
+    Comment lines are dropped (a comment must never satisfy a wiring
+    check) and ``\\``-continued lines are joined, so each pipeline is one
+    string regardless of how the workflow wraps it.
+    """
     match = re.search(
         r"- name: Run the live klt sta engine tests\n(.*?)(?=\n {6}- name: )",
-        workflow,
+        LANE_WORKFLOW.read_text(),
         re.DOTALL,
     )
     assert match, "the 'Run the live klt sta engine tests' step is gone"
-    run_step = match.group(1)
-    assert re.search(r"pytest[^\n]*-m live_openroad", run_step), (
-        "post-route-sta-live.yml no longer selects by -m live_openroad; "
-        "hand-listed selections are exactly the drift issue #7541 fixed"
+    code = "\n".join(
+        line
+        for line in match.group(1).splitlines()
+        if not line.lstrip().startswith("#")
     )
-    assert "::" not in run_step, (
-        "the live lane narrows its selection to explicit node IDs; every "
-        "unlisted live test runs in no lane again (issue #7541)"
+    return [line.strip() for line in code.replace("\\\n", " ").splitlines()]
+
+
+def test_the_live_lane_selects_by_marker_and_not_by_node_ids():
+    commands = _live_lane_run_commands()
+    pytest_cmds = [c for c in commands if re.search(r"\bpytest\b", c)]
+    collect = [c for c in pytest_cmds if "--collect-only" in c]
+    run = [c for c in pytest_cmds if "--collect-only" not in c]
+
+    # The selection is *derived from the marker*: a collect-only pass with
+    # `-m live_openroad` yields the node IDs the lane then runs.
+    assert any("-m live_openroad" in c for c in collect), (
+        "post-route-sta-live.yml no longer derives its selection from "
+        "`pytest --collect-only -m live_openroad`; hand-listed selections "
+        "are exactly the drift issue #7541 fixed"
     )
+    # An empty selection must fail the step, not run nothing / run all.
+    assert any(re.match(r"test -s \S+", c) for c in commands), (
+        "the lane no longer fails loudly when the marker selects nothing "
+        "(`test -s <node-id file>`)"
+    )
+    # The real run executes exactly the derived IDs. A bare `-m` run over
+    # `testpaths` collects the whole tree, so unrelated modules'
+    # module-level skips land in the log and trip the lane's own SKIPPED
+    # gate on a fully successful run (PR #7550 review, run 45197663830);
+    # a run with no selection argument would run all 30k tests.
+    assert run, "the lane no longer runs pytest after the collect-only pass"
+    for cmd in run:
+        assert "-m live_openroad" not in cmd, (
+            "the live run selects with a bare `-m live_openroad` over the "
+            f"whole tests/ tree; collection-time skips of unrelated modules "
+            f"then fail the SKIPPED gate: {cmd!r}"
+        )
+        assert '"${nodes[@]}"' in cmd, (
+            f"the live run does not consume the derived node IDs: {cmd!r}"
+        )
+    # No hand-listed node IDs anywhere in the step (the #7541 drift).
+    for cmd in commands:
+        assert not re.search(r"tests/\S+\.py::\w", cmd), (
+            "the live lane lists explicit node IDs; every unlisted live "
+            f"test runs in no lane again (issue #7541): {cmd!r}"
+        )
 
 
 def _registered_marker_entries(pyproject_text: str) -> list[str]:
