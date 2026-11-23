@@ -220,7 +220,12 @@ def _limits(limits: Any) -> str:
         if limits.get(key) is None:
             continue
         op = exclusive if limits.get(f"exclusive_{key}") else inclusive
-        bounds.append(op + _fixed(limits[key], ".6g"))
+        bound = limits[key]
+        if isinstance(bound, dict) and set(bound) == {"frac_of", "fraction"}:
+            rendered = f"{_fixed(bound['fraction'], '.6g')}*{bound['frac_of']}"
+        else:
+            rendered = _fixed(bound, ".6g")
+        bounds.append(op + rendered)
     return ", ".join(bounds) if bounds else _ABSENT
 
 
