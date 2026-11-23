@@ -50,6 +50,7 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._sta_multicycle import multicycle_lines
 from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from ._tcl import tcl_literal as _tcl_literal
 
@@ -66,6 +67,7 @@ def _corner_sweep_script_lines(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    multicycle: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
@@ -75,26 +77,9 @@ def _corner_sweep_script_lines(
     already written its checkpoint, deliberately never folded into that
     script's own OpenSTA session.
 
-    Why a separate session, not more Tcl appended to the route stage's own
-    script: OpenSTA's ``define_corners`` must run before *any*
-    ``read_liberty`` in a session (``STA-482``), and the route stage's own
-    script already runs one bare (un-corner-tagged) ``read_liberty`` for its
-    existing single-corner report calls. Loading additional corners into
-    *that* session would not just be disallowed by that ordering rule -- it
-    would silently change ``report_worst_slack_metric``'s own result even if
-    the ordering were reworked around it: that proc (and the ``worst_slack``
-    primitive it calls) reports the worst value across **every corner
-    currently loaded** with no way to scope it back to one corner, live-
-    verified against a real ``openroad/orfs:latest`` container over a real
-    volare-fetched ``sky130A`` install (2026-08-13, issue #949) -- loading a
-    second corner into the main script's session would silently turn the
-    existing ``worst_slack_ns``/``total_negative_slack_ns``/
-    ``setup_violation_count``/``hold_violation_count`` fields from
-    nominal-corner-only into swept-worst-case, breaking the
-    backward-compatibility this change must preserve
-    (``docs/json-contract.md``'s additive posture). A wholly separate
-    session sidesteps that risk entirely, at the cost of a second OpenROAD
-    process launch per ``"route"``-stage run.
+    OpenSTA requires ``define_corners`` before any ``read_liberty``
+    (STA-482). Its slack metrics aggregate every loaded corner. A separate
+    process keeps the route stage's slack and violation metrics nominal-only.
 
     Reads the checkpoint the route stage's own ``write_db`` already
     produced -- no ``read_lef``/``read_verilog``/``link_design`` needed,
@@ -191,13 +176,9 @@ def _corner_sweep_script_lines(
         for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
-    # Issue #1865: the same `set_input_delay`/`set_output_delay` pair the
-    # `"route"` stage's own script already emitted. `read_db` does not carry
-    # SDC state across the process boundary (see this function's own
-    # docstring), so without re-emitting them here every swept corner would
-    # report the unconstrained sentinel for a design whose only paths are
-    # input-port -> register / register -> output-port.
+    # read_db restores no SDC, including the boundary delays (#1865).
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += multicycle_lines(multicycle, mode="apply")
     lines += [
         *_wire_rc_lines(io_spec, library),
         "estimate_parasitics -global_routing",
@@ -244,6 +225,7 @@ def _spef_sta_script_lines(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    multicycle: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the second, ``post_route_spef``-only
     ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
@@ -324,6 +306,7 @@ def _spef_sta_script_lines(
     # is -- this is a fresh OpenSTA session seeded from a `read_db`, which
     # carries no SDC state of its own.
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += multicycle_lines(multicycle, mode="apply")
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -481,6 +464,7 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    multicycle: list[dict[str, Any]] | None = None,
     threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -633,6 +617,7 @@ def _post_route_spef_metrics(
         _SPEF_NET_CHECK_END,
         _SPEF_NET_CHECK_RE,
         PlaceAndRouteError,
+        _check_multicycle_error,
         _engine_error_message,
         _read_metrics,
         _require_extract_deck_for_cell_library,
@@ -718,6 +703,7 @@ def _post_route_spef_metrics(
         max_fanout=max_fanout,
         input_delay_ns=input_delay_ns,
         output_delay_ns=output_delay_ns,
+        multicycle=multicycle,
     )
     _write_script(script_path, lines)
 
@@ -728,6 +714,7 @@ def _post_route_spef_metrics(
         threads=threads,
         engine_logs=engine_logs,
     )
+    _check_multicycle_error(completed)
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
             raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
@@ -825,6 +812,7 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    multicycle: list[dict[str, Any]] | None = None,
     threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
@@ -949,6 +937,7 @@ def _run_corner_sweep(
         _MAX_TRANSITION_VIOLATIONS_BEGIN,
         _MAX_TRANSITION_VIOLATIONS_END,
         PlaceAndRouteError,
+        _check_multicycle_error,
         _engine_error_message,
         _read_metrics,
         _write_script,
@@ -972,6 +961,7 @@ def _run_corner_sweep(
         max_fanout=max_fanout,
         input_delay_ns=input_delay_ns,
         output_delay_ns=output_delay_ns,
+        multicycle=multicycle,
         library=library,
     )
     _write_script(script_path, lines)
@@ -983,6 +973,7 @@ def _run_corner_sweep(
         threads=threads,
         engine_logs=engine_logs,
     )
+    _check_multicycle_error(completed)
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
             raise PlaceAndRouteError(
@@ -1085,6 +1076,7 @@ def _run_corner_sweep(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            multicycle=multicycle,
             library=library,
         )
         _write_script(corner_script_path, corner_lines)
@@ -1097,6 +1089,7 @@ def _run_corner_sweep(
             threads=threads,
             engine_logs=engine_logs,
         )
+        _check_multicycle_error(corner_completed)
         with corner_completed.diagnostics(PlaceAndRouteError):
             if corner_completed.returncode != 0:
                 raise PlaceAndRouteError(

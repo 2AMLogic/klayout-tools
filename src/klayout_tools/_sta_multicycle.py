@@ -37,7 +37,7 @@ rules -- is parsed and assembled by
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from ._tcl import tcl_literal as _tcl_literal
 from .post_route_sta_errors import PostRouteStaError
@@ -163,7 +163,27 @@ def validate_multicycle_paths(
 # --------------------------------------------------------------------------- #
 
 
-def multicycle_lines(entries: list[dict[str, Any]] | None) -> list[str]:
+# Inside the selector-resolution catch, before any physical floorplan work.
+# One path on either side suffices; P&R never enumerates endpoint slacks.
+_CHECK_CONNECTED = (
+    "        set klt_args [list -from $klt_mcp_from($klt_i) -to $klt_mcp_to($klt_i)]",
+    '        if {$klt_thr ne ""} { lappend klt_args -through $klt_mcp_thr($klt_i) }',
+    "        foreach klt_side {max min} {",
+    "            set klt_paths [find_timing_paths {*}$klt_args -path_delay $klt_side "
+    "-group_path_count 1 -endpoint_path_count 1]",
+    "            if {[llength $klt_paths]} { break }",
+    "        }",
+    "        if {![llength $klt_paths]} {",
+    '            error "no timed path connects the selection"',
+    "        }",
+)
+
+
+def multicycle_lines(
+    entries: list[dict[str, Any]] | None,
+    *,
+    mode: Literal["measure", "validate", "apply"] = "measure",
+) -> list[str]:
     """The complete multicycle block for one OpenSTA session, emitted after
     the I/O-delay/false-path lines and before the report block:
 
@@ -183,6 +203,8 @@ def multicycle_lines(entries: list[dict[str, Any]] | None) -> list[str]:
     3. **Measure**: per entry, ``find_timing_paths`` over the identical
        selection, ``max`` and ``min`` separately, one row per endpoint.
 
+    P&R uses ``validate`` to check for a connecting timed path at floorplan,
+    then ``apply`` to restore the paired constraints in later sessions.
     ``None``/``[]`` emit nothing at all, so a request without entries
     generates a byte-identical script."""
     if not entries:
@@ -240,6 +262,7 @@ def multicycle_lines(entries: list[dict[str, Any]] | None) -> list[str]:
         '            error "to matched_nothing"',
         "        }",
         "        set klt_mcp_to($klt_i) [concat $klt_regs $klt_pins]",
+        *(_CHECK_CONNECTED if mode == "validate" else ()),
         "    } klt_mcp_msg]} {",
         "        lappend klt_mcp_errors [list $klt_i $klt_mcp_msg]",
         "    }",
@@ -264,6 +287,8 @@ def multicycle_lines(entries: list[dict[str, Any]] | None) -> list[str]:
                 f"-from $klt_mcp_from({index}){through} "
                 f"-to $klt_mcp_to({index}){_mcp_tag(index)}"
             )
+    if mode != "measure":
+        return lines
     lines.append(f'puts "{MCP_BEGIN}"')
     for entry in entries:
         index = entry["index"]
