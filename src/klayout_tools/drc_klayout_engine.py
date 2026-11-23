@@ -1255,16 +1255,15 @@ def run_drc_klayout_engine(
     temporary stream holding only that cell's subtree (the input file is not
     modified). A multi-top stream without ``top`` raises :class:`DrcError`
     (``code="multiple_top_cells"``) before KLayout is launched; a single-top
-    stream is passed through unchanged.
+    stream is passed through unchanged. A given ``top`` is recorded as the
+    report's ``top`` field (issue #7000), replayed by ``--check --rerun``.
 
     The returned dict matches :func:`run_drc`'s documented top-level shape
     (``schema_version``, ``file``, ``deck``, ``dbu_um``, ``status``,
     ``violation_count``, ``rule_counts``, ``violations``, ``coverage``,
-    ``provenance``) plus one additive field, ``"engine": "klayout"`` (the
-    curated engine's own output carries no ``engine`` key at all, unchanged,
-    since it has always been the sole engine until this issue) -- and, only
-    on a run that actually tolerated deck errors via ``allow_deck_errors``,
-    a second additive ``engine_deck_errors`` field (issue #1941):
+    ``provenance``) plus the additive ``"engine": "klayout"`` (the curated
+    engine predates one) and, only on a tolerated deck-error run
+    (``allow_deck_errors``), ``engine_deck_errors`` (issue #1941):
     ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
     That key is omitted entirely otherwise. Since issue #6613, every run
     that produced a report also carries the additive ``deck_output``
@@ -1520,6 +1519,7 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
+        **({} if top is None else {"top": top}),  # issue #7000: replayed on --rerun
         "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's

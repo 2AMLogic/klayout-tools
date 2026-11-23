@@ -12,11 +12,7 @@ summary (issue #948, Epic #700 Phase 3; survey doc:
 ``docs/design/post-route-sta-survey.md`` sections 3.1/4.1), not a second
 extraction pass.
 
-:class:`ExtractError` lives here rather than in ``extract.py`` purely to keep
-the dependency one-directional: :func:`_write_spef` raises it, and
-``extract.py`` re-exports it (``from klayout_tools.extract_spef import
-ExtractError``) so every existing ``from klayout_tools.extract import
-ExtractError`` / ``except ExtractError`` call site keeps working unchanged.
+The writer and its callers share :class:`~klayout_tools.extract_base.ExtractError`.
 """
 
 from __future__ import annotations
@@ -25,32 +21,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-
-class ExtractError(Exception):
-    """Raised when a layout cannot be extracted: bad file, unknown deck,
-    unresolvable PDK, missing/ambiguous top cell, or an engine error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback.
-
-    ``code`` / ``job_id`` / ``details`` are optional and set only by the
-    ``--backend batch`` path (:mod:`klayout_tools.extract_batch`), exactly as
-    :class:`klayout_tools.netlist.NetlistError` carries them: ``code`` becomes
-    the error envelope's ``error.code``, ``details`` is merged into it.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
-
+from .extract_base import ExtractError as ExtractError
 
 #: Standard Parasitic Exchange Format version this writer declares in its
 #: ``*SPEF`` header line (``klt extract --spef``, issue #948, Epic #700
@@ -266,10 +237,10 @@ def _renamed_def_name(name: str, original: str) -> str:
 
 
 def _def_name_to_spef(raw: str) -> str:
-    """``raw`` (a DEF identifier as spelled in the file) rendered as a SPEF
-    identifier: identical to ``_spef_name(_unescape_def_name(raw))`` except a
-    bare, unescaped ``/`` -- DEF's hierarchy divider -- stays ``/`` (SPEF
-    declares the same ``*DIVIDER /``). An escaped ``\\/`` stays escaped."""
+    """Keep the DEF's hierarchy and bus delimiters in SPEF. An escaped slash
+    or bracket is literal, while a bare slash or bracket is structural.
+    For example, a DEF memory word can have a literal index followed by a
+    bus bit. OpenSTA needs both spellings preserved in the same name."""
     out: list[str] = []
     i = 0
     while i < len(raw):
@@ -278,7 +249,7 @@ def _def_name_to_spef(raw: str) -> str:
             out.append(_spef_name(raw[i + 1]))
             i += 2
             continue
-        out.append("/" if char == "/" else _spef_name(char))
+        out.append(char if char in "/[]" else _spef_name(char))
         i += 1
     return "".join(out)
 

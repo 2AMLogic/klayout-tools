@@ -277,3 +277,116 @@ def test_outer_report_keeps_client_runner_label_and_worker_observation(
         "lines": None,
         "sha256": _sha("set wnflag=1\n"),
     }
+
+
+def _init_job_files(index, observed, lines):
+    block = {"source": "request", "lines": lines, "sha256": _sha(lines[0] + "\n")}
+    if observed == "pinned_request":
+        pinned = ["set num_threads=2", *lines]
+        block.update(lines=pinned, sha256=_sha("\n".join(pinned) + "\n"))
+    elif observed == "malformed":
+        block["sha256"] = "truncated"
+    elif observed == "different_request":
+        block.update(lines=["set wnflag=0"], sha256=_sha("set wnflag=0\n"))
+    elif observed == "home":
+        block.update(source="home", lines=None)
+    return {
+        "report.json": _sim_report(
+            corner_ids=(f"tt_1.800_{index}",),
+            **({"ngspice_init": block} if observed is not None else {}),
+            threads_per_worker=2 if observed == "pinned_request" else None,
+        ),
+        "runner_identity.json": json.dumps({"runner_klt_version": "0.9.0"}),
+    }
+
+
+@pytest.mark.parametrize(
+    "observations,explicit",
+    [
+        ([None], True),
+        ([None, "request"], True),
+        (["malformed", "pinned_request"], True),
+        (["home", "different_request"], True),
+        ([None, "request"], False),
+    ],
+)
+def test_collected_init_diagnostic_by_job(
+    tmp_path, monkeypatch, observations, explicit
+):
+    _pin_client_version(monkeypatch, "0.9.3.dev1")
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    lines = ["set wnflag=1"]
+
+    def transport(argv, timeout_s):
+        upload = uploaded_request_of(argv)
+        if upload is not None:
+            document, job_id = upload
+            points = document.get("_explicit_points")
+            index = int(points[0]["temperature_c"]) if points else 0
+            runner.outputs_by_job[job_id] = _init_job_files(
+                index, observations[index], lines
+            )
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", transport)
+    _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "models.lib"},
+            "backend": "batch",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {
+                "process": ["tt"],
+                "supply_v": {"vdd": [1.8]},
+                "temperature_c": list(range(len(observations))),
+            },
+            "options": {"ngspice_init": lines} if explicit else {},
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+    )
+    report = sim.run_sim(str(request), hosts=len(observations))
+    assert report["status"] == "not_checked"
+    env = report["environment"]
+    assert env["ngspice_init"] == {"source": "runner", "lines": None, "sha256": None}
+    warnings = [
+        d
+        for d in report.get("diagnostics", [])
+        if d["code"] == "batch_ngspice_init_unverified"
+    ]
+    if not explicit:
+        assert not warnings
+        return
+    remote = env["remote"]
+    members = remote.get("fleet", [remote])
+    (warning,) = warnings
+    assert warning["severity"] == "warning"
+    assert warning["feature"] == "options.ngspice_init"
+    assert warning["simulator_application"] == "unverified"
+    by_job = {row["job_id"]: row for row in warning["jobs"]}
+    for i, member in enumerate(members):
+        assert member["runner_compatibility"] == "match"
+        assert member["runner_request_features"]["status"] == "supported"
+        row = by_job[member["job_id"]]
+        assert row["fleet_index"] == (i if len(observations) > 1 else None)
+        worker = member["worker_environment"]["ngspice_init"]
+        observation = observations[i]
+        if observation in (None, "malformed"):
+            assert worker is None
+        else:
+            assert worker["source"] == ("home" if observation == "home" else "request")
+        expected = (
+            "digest_reported"
+            if observation in ("request", "pinned_request")
+            else "unverified"
+        )
+        assert row["request_identity"] == expected
+    assert len(by_job) == len(observations)
