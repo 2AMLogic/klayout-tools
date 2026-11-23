@@ -1549,6 +1549,12 @@ candidate, and the results are ranked. The ranking is deliberately narrow
   label, or its first-declared LEF `PORT`) rather than a fragment discovered
   by walking the cell's internal connectivity.
 
+Library authors place the pin label before the router chooses which of the
+LEF pin's disjoint `PORT` rectangles receives an external via. In the GF180
+`clkload13/I` case (#1183), the labeled pad and routed pad are connected
+through the master's own conductors. Discovering both before cell abstraction
+preserves that access.
+
 In particular, the ranking never counts how many abstracted-cell pins have
 already been wired onto a candidate net. That count grows as the wiring pass
 itself runs, so ranking on it made the outcome a function of the order pins
@@ -1572,7 +1578,9 @@ to `VGND`) through a plain poly strip, so walking out from the `HI` label
 reaches the cell's own supply rail. Offered that candidate, the ranking has no
 way to refuse it: a supply rail always carries a name, and a genuinely
 *unused* tie output's own island never does, so every unused `HI` bound
-straight onto `VPWR`.
+straight onto `VPWR`. Candidate discovery therefore removes the unrelated
+rail before `_abstract_pin_net_score` runs. At scoring time, a genuine
+connection to that same rail has the same name and connectivity.
 
 The practical failure that produced was backwards — a design extracted
 `match` while its power grid was **missing** (no rail geometry, so no named

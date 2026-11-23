@@ -1669,6 +1669,52 @@ instead. (`examples/design-pipeline/12-pex-external.probe.py` inlines the
 netlist it is handed — that still works, and is still the simplest thing a
 harness can do.)
 
+## Oscillators: a `crossings` measurement is delta'd on its `value`
+
+Issue [#6913](https://github.com/2AMLogic/klayout-tools/issues/6913). A
+`measurements[].crossings` entry in a testbench request is compared like any
+other measurement: each `delta[]` row's `schematic_value` /
+`extracted_value` are that side's entry **`value`**, and `delta_pct` is
+computed from the two. There is no special crossings handling — which is
+exactly why the *graded quantity* matters: by default a transient crossings
+entry's `value` is the **crossing count**, a quantised edge number that also
+carries start-up bias, so an oscillator would be delta'd on "177 vs 139
+edges" instead of its frequency.
+
+The fix lives in the request, not in `klt pex`: declare
+`crossings.value_from` (see [`sim.md`](sim.md) → "Grading a reduction
+(`crossings.value_from`)") and both sides' `value` becomes the selected
+reduction — `"period.mean"` in seconds, or `"frequency"` = `1/period.mean`
+in Hz — so `delta_pct` is a real schematic-vs-extracted frequency shift.
+Exclude start-up with the existing `from` window:
+
+```json
+{
+  "name": "f_ro1",
+  "unit": "Hz",
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "200n",
+    "value_from": "frequency"
+  }
+}
+```
+
+A side with too few edges for the reduction (a non-oscillating extracted
+cell reporting 0 or 1 edges, for instance) is an ordinary `status: "error"`
+`klt sim` measurement — its diagnostic message starts with the stable
+`[crossings_insufficient_edges]` token — so the `delta[]` row is an **error
+row** blaming that side (`error.side`), `delta_pct: null`: distinguishable
+from a small value, never a frequency that quietly passes a floor.
+
+`klt pex` itself needed no code change for this (the delta reads `value` as
+of #2872's per-side evidence), and no `schema_version` bump: `value_from` is
+an additive request field into the existing `value` slot. It first ships in
+`klt` v0.9.3, and is a mandatory runner feature on the `batch` backend — an
+older fleet runner is refused pre-launch instead of returning counts.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -2010,7 +2056,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `reference_netlist_sha256` | string | Issue #2875 (additive). `sha256:<64 lowercase hex>` of the exact bytes of `reference_netlist` — the schematic DUT (testbench mode) or `--reference-netlist` (`--measure-command` mode). `null` only if the file was unreadable. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
-| `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
+| `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`. Issue #6990: a `"skipped"` row (a schematic-only observation, `sides: "schematic"`, that did not error on the schematic side) is counted in none of the three; it is reported under `coverage.inapplicable` with reason `schematic_only_measurement` instead. |
 | `schematic_failed`   | integer           | Issue #2989 (additive). Count of `delta[]` rows whose `schematic_status` is `"fail"`. Reported, not enforced: it never feeds `status`, `coverage` or the exit code, so a response can read `pass` while this is non-zero — check it when the limits are a contract both sides must meet. |
 | `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
