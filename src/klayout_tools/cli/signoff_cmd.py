@@ -892,7 +892,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
 
     # Issue #5691: the per-spec-row table, when the manifest declared a
     # top-level `spec_rows` map (silent otherwise, like every disclosure).
-    print_spec_row_table(result.get("spec_rows"), palette)
+    print_spec_row_table(result.get("spec_rows"), palette, result["items"])
 
     print()
     print(

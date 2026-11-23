@@ -3043,6 +3043,38 @@ The 0.00025 um dbu from `asap7.lyt` represents every DRM value.
 drawing - 2/0`, ...), which equal the DRM mask IDs (Tables 2.1.1-2.4.1). A
 test cross-checks the deck against the fetched `.lyp`.
 
+**M1–M3 spacing in the deck and routing LEF.** On all three layers the
+packaged deck applies Table 3.12.1 according to the lengths and orientation
+of the facing edges. For the projected rules the lengths below are edge
+lengths, and the minimum is the gap between those edges.
+[Packaged deck predicates](../../src/klayout_tools/decks/asap7.drc)
+
+| Rule on each layer | Edge condition | Minimum |
+| --- | --- | --- |
+| S.2 | One edge ≤ 36 nm and the other > 36 nm | 25 nm projected |
+| S.4 | Both edges < 24 nm | 31 nm projected |
+| S.5 | One edge < 24 nm and the other 24–36 nm inclusive | 31 nm projected |
+| S.6 | Less than one database unit of projected overlap (0.25 nm) | 20 nm Euclidean corner distance |
+
+The public ORFS ASAP7 platform selects a 1× tech LEF with a plain
+`SPACING 0.018` (18 nm) on M1, M2 and M3. The end-of-line and corner
+clauses further qualify that spacing. The values in the next table are
+in **µm**, as written in the LEF. [Pinned platform configuration](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/82ac25be57125cc724388ef89f01ce65f9ba3dcc/flow/platforms/asap7/config.mk#L12)
+
+| Layer | End-of-line spacing and keepout | Convex-corner spacing |
+| --- | --- | --- |
+| M1 | `EOLKEEPOUT 0.01825 EXTENSION 0.0 0.0 0.031`. The first value selects the end width. The forward extension is 0.031. | `CORNERONLY 0.01 WIDTH 0.018 SPACING 0.018` |
+| M2 | `SPACING 0.018 ENDOFLINE 0.025 WITHIN 0.02 ENDTOEND 0.031 PARALLELEDGE 0.025 WITHIN 0.02` and `EOLKEEPOUT 0.025 EXTENSION 0.0 0.0125 0.031 CORNERONLY` | `WIDTH 0.0 SPACING 0.02` |
+| M3 | `SPACING 0.018 ENDOFLINE 0.025 WITHIN 0.0125 ENDTOEND 0.031 PARALLELEDGE 0.025 WITHIN 0.02` and the same `CORNERONLY` keepout as M2 | `WIDTH 0.0 SPACING 0.02` |
+
+To assess router legality, apply the full LEF clauses to the particular
+geometry, including the end-width threshold, extensions and parallel-edge
+conditions. For example, in the rectangle fixture two wire ends have an
+18 nm lateral gap and a 7 nm longitudinal offset. Their corner distance is
+√(18² + 7²) ≈ 19.31 nm, which triggers S.6. KLayout reported 15 markers
+on the fixture across M1–M3. OpenROAD routing acceptance requires a separate
+router measurement. [Pinned M1–M3 LEF declarations](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/82ac25be57125cc724388ef89f01ce65f9ba3dcc/flow/platforms/asap7/lef/asap7_tech_1x_201209.lef#L111-L242) · [Rectangle fixture](https://github.com/2AMLogic/klayout-tools/issues/7532)
+
 **PAD (`96/0`) and the PAD layer's rules (#3807).** PAD is the one layer the
 deck reads that `asap7.lyp` does not name. The deck reads it as DRM mask `96`
 (Table 2.3.1, cited from the deck; not re-read against the PDF for #3807),
@@ -4120,6 +4152,7 @@ for which skipped rules make a run partial and which do not.
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
+| `implant_warnings` | array of objects, optional | On SG13G2, names each selected cell with gate-crossed source/drain Activ inside NWell that lacks both drawn implants. Inspect pSD (14/0) and nSD (7/0) before relying on the well checks. Each entry gives `cell` and `description`. This advisory leaves the DRC violation count unchanged. |
 | `unchecked_rules`                  | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "description": string}` — foundry rules the deck knows about but cannot evaluate (issue #3012; `sg13cmos5l`'s net-aware `NW.b1` was the first, now checked by `net_space`, #3572, so the map is currently empty), listed only when the rule's layer is in the stream, so a `clean` is not read as covering them. Purely informational: does not change `status`. Sorted by rule id. Additive; `[]` for decks that declare none. |
 | `isolation_only_rules`             | array\<object\> | `{"rule": string, "layer": "<layer>/<datatype>", "reason": "isolation_only", "description": string}` — `--engine klayout` with the packaged `asap7.drc` only (issue #4029): boundary-sensitive rules (`FIN.W.2`, `GATE.S.3`, `NSELECT.W.1`, `PSELECT.W.1`, `WELL.W.1`) whose layer is in the stream. `klt drc` judges the top cell in free space, so a shape ending at the cell outline can trip them for a cell built to be abutted; see "Checking abutment-designed cells". Describes the check, not the outcome: listed on `clean` and `violations` runs alike, and purely informational (does not change `status`, violations or the exit code). Sorted by rule id; `[]` for any other deck or a byte-different deck file. Additive. |
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |

@@ -327,3 +327,34 @@ def test_live_engine_paramod_toplevel(tmp_path):
         "b_in",
         "ff_b/D",
     )
+
+
+def test_multicycle_selectors_are_literal_data():
+    """Issue #6921: every `constraints.multicycle_paths` selector is quoted
+    as one literal Tcl word -- a bus name's brackets are escaped (never a
+    command substitution, never a character class), and no selector
+    character can split the word or trigger `$` substitution."""
+    from klayout_tools._sta_multicycle import (
+        multicycle_lines,
+        validate_multicycle_paths,
+    )
+
+    entries = validate_multicycle_paths(
+        {
+            "multicycle_paths": [
+                {
+                    "from": "q[0]",
+                    "through": "u_mux/A1",
+                    "to": "ff_?/D",
+                    "setup": 4,
+                    "hold": 3,
+                },
+            ]
+        }
+    )
+    lines = multicycle_lines(entries)
+    resolved = next(line for line in lines if line.startswith("foreach {klt_i"))
+    assert " q\\[0\\] u_mux/A1 ff_?/D] {" in resolved
+    assert "$" not in resolved
+    for applied in (line for line in lines if line.startswith("set_multicycle_path")):
+        assert "$klt_mcp_" in applied  # objects, never re-parsed names

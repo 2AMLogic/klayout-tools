@@ -106,12 +106,17 @@ this document (and the code) win.
   preflight" below.
 - `--dry-run` — validate the request and report its expansion without
   simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
-  Every pre-dispatch check a real run performs still runs (request shape,
-  Monte Carlo spec, measurement forms, model/OSDI resolution, the
-  `stage_model_inputs` closure, the off-host PDK check and, on `batch`, the
-  whole-job ceiling/split plan
-  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674))), and a failure
-  exits 1 with the same message a real run gives. It then returns before
+  It checks the request shape, Monte Carlo spec, measurement forms,
+  model/OSDI resolution, the `stage_model_inputs` closure and the off-host
+  PDK. On `batch`, malformed ceiling, split, concurrency, runner policy,
+  capacity and job timing settings produce the submit path's error and exit 1
+  even without fleet configuration.
+  Parsing `batch.poll_interval_s` and `batch.poll_timeout_s` requires a
+  provision script and bucket, so a dry run without them can report
+  `status: "valid"` with a malformed polling value. When the configuration
+  resolves, the dry run also checks the whole-job ceiling/split plan
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674),
+  [#6437](https://github.com/2AMLogic/klayout-tools/issues/6437)). It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
   ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
   way ([#4543](https://github.com/2AMLogic/klayout-tools/issues/4543)): deck,
@@ -2612,8 +2617,16 @@ the packaged `data/` copy. See
   `batch_max_units_per_job_invalid` and an over-ceiling request behaves
   exactly as a submit would — refused under `"enforce"`, warned under the
   default `"warn"`, planned under `"split"` — and the assessment is
-  reported as `job_ceiling` (see the `--dry-run` flag above). A configless
-  host skips the plan too, staying dry-run clean.
+  reported as `job_ceiling` (see the `--dry-run` flag above). The dry run
+  checks `job_ceiling_check`, `max_concurrent_jobs`, `runner_version_check`,
+  `max_job_seconds`, `capacity_wait_s`, `capacity_retries`, `job_timeout_s`
+  and `interrupted_grace_s` before resolving fleet configuration. An invalid
+  value produces the submit path's error even without a bucket or provision
+  script (for example, `batch_max_concurrent_jobs_invalid`)
+  ([#6437](https://github.com/2AMLogic/klayout-tools/issues/6437)).
+  A host without fleet configuration skips the plan and can report
+  `status: "valid"` with malformed `poll_interval_s` or `poll_timeout_s`.
+  These two fields are parsed only after the provision script and bucket resolve.
   `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
   stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
