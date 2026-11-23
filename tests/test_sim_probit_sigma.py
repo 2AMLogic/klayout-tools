@@ -7,6 +7,7 @@ import pytest
 
 from klayout_tools import sim, sim_probit_sigma
 from klayout_tools.cli import main
+from klayout_tools.cli.sim_measurement_text import print_measurement_head
 from klayout_tools.coverage import work_id
 from klayout_tools.sim_corner_point import CornerPoint
 from test_signoff_derived_rows import _item5
@@ -49,6 +50,21 @@ def _grade(points, corners, **overrides):
         {"probit_sigma": {**SPEC, **overrides}}, points, corners
     )
     return entry
+
+
+def test_text_reports_each_probit_fit_or_its_failure_reason(capsys):
+    points, corners = _samples()
+    for corner in corners[:10]:
+        corner["measurements"][0]["value"] = 0
+    entry = _grade(points, corners)
+
+    print_measurement_head(entry, corners)
+
+    assert capsys.readouterr().out.splitlines() == [
+        "  noise_sigma [inconclusive]  mean=None mV (max=2.5, source=grid)",
+        "    A/novdd/27C: saturated_fraction",
+        f"    B/novdd/27C: {entry['by_corner'][1]['sigma']}",
+    ]
 
 
 def test_equal_corner_weight_and_inclusive_limit():
