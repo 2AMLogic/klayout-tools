@@ -24,6 +24,21 @@ ratchet, following the same precedent as :mod:`.signoff_derived_rows` and
     refused. Neither form ever counts as coverage; the roll-up is
     deliberately unchanged (that question is #5858, settled by the ruling:
     gaps keep blocking T1).
+
+``structural`` row dispositions (issue #6985)
+    A row whose claim is a **design constant** the bench itself wires in, or
+    a **structural property** checked by inspecting a deck or layout, is not
+    a measured quantity: no producible envelope can ever carry a covering
+    measurement, so it could only be asserted through some envelope's
+    ``rows`` (a false claim) or declared a ``gap`` -- and a gap reads
+    identically whether the row is unevidenced or evidenced by a real
+    structural check the grader cannot see. The ``structural`` disposition
+    makes such a row representable and distinct: a claim plus the inspected
+    artifact, freshness-pinned by content hash through the same
+    :func:`_na_document` binding. It never counts as coverage and is never
+    covered by a citation; like a gap it keeps the item ``unmet`` /
+    ``partial_coverage`` (the roll-up is deliberately unchanged -- whether
+    it may ever satisfy the item is an operator-level ruling, out of scope).
 """
 
 from __future__ import annotations
@@ -43,6 +58,11 @@ _REASON_JUSTIFIED_GAP_RATIONALE_UNREADABLE = "justified_gap_rationale_unreadable
 #: The rationale artifact is present but its content hash does not match the
 #: declared one.
 _REASON_JUSTIFIED_GAP_RATIONALE_STALE = "justified_gap_rationale_stale"
+#: A structural row's artifact (issue #6985) is missing or unreadable.
+_REASON_STRUCTURAL_ARTIFACT_UNREADABLE = "structural_artifact_unreadable"
+#: The artifact is present but its content hash does not match the declared
+#: one.
+_REASON_STRUCTURAL_ARTIFACT_STALE = "structural_artifact_stale"
 #: A justified gap that names no issue (operator ruling on #5858,
 #: 2026-11-17: a declared gap is pending work -- the open issue that would
 #: close it should be recorded; its absence is a finding, never a refusal).
@@ -103,6 +123,15 @@ def _read_spec_rows(
     :func:`_check_justified_gap_rationales`. An object that does not
     validate degrades the item to ``invalid_evidence`` -- never silently to
     the free-text form.
+
+    Issue #6985: a row may instead carry ``structural`` --
+    ``{"claim": str, "artifact": {"file", "content_hash"}}`` -- the
+    disposition for a claim that is a design constant or a structural
+    property, not a measured quantity. Normalized by :func:`_read_structural`
+    here and hash-checked at grading time by
+    :func:`_check_structural_artifacts`; mutually exclusive with ``gap``
+    (either form). A malformed object degrades the item to
+    ``invalid_evidence`` -- never silently to an undispositioned row.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -126,6 +155,9 @@ def _read_spec_rows(
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else None
                 gap = row.get("gap") if isinstance(row, dict) else None
+                raw_structural = (
+                    row.get("structural") if isinstance(row, dict) else None
+                )
                 ratified = row.get("ratified", True) if isinstance(row, dict) else True
                 margin = (
                     row.get("timing_margin", False) if isinstance(row, dict) else False
@@ -136,6 +168,13 @@ def _read_spec_rows(
                 justified_gap = (
                     _read_justified_gap(gap) if isinstance(gap, dict) else None
                 )
+                # Issue #6985: ``structural`` must normalize, and is mutually
+                # exclusive with ``gap`` (either form).
+                structural = (
+                    _read_structural(raw_structural)
+                    if raw_structural is not None
+                    else None
+                )
                 if (
                     not isinstance(row_id, str)
                     or not row_id
@@ -143,6 +182,8 @@ def _read_spec_rows(
                     or (gap is not None and not isinstance(gap, (str, dict)))
                     or (isinstance(gap, str) and not gap)
                     or (isinstance(gap, dict) and justified_gap is None)
+                    or (raw_structural is not None and gap is not None)
+                    or (raw_structural is not None and structural is None)
                     or not isinstance(ratified, bool)
                     or not isinstance(margin, bool)
                 ):
@@ -154,6 +195,7 @@ def _read_spec_rows(
                         "id": row_id,
                         "gap": gap if isinstance(gap, str) else None,
                         "justified_gap": justified_gap,
+                        "structural": structural,
                         "ratified": ratified,
                         "timing_margin": margin,
                     }
@@ -189,6 +231,28 @@ def _read_justified_gap(gap: Any) -> dict[str, Any] | None:
     return out
 
 
+def _read_structural(raw: Any) -> dict[str, Any] | None:
+    """Normalize the ``structural`` disposition of a ``spec_rows[]`` row
+    (issue #6985): ``{"claim": str, "artifact": {"file", "content_hash"}}``
+    -> the normalized object, or ``None`` when it does not validate. The
+    artifact reference is normalized by :func:`_na_document` -- the same
+    hash-binding shape the justified-gap rationale and the item-6
+    ``not_applicable`` form use; its file is hash-checked at grading time.
+    The hash pin proves the artifact is unchanged, not that the claim holds:
+    ``klt`` records and freshness-pins the artifact, it does not execute any
+    check. Unknown keys are rejected so a typo (``"artifacts"``,
+    ``"claime"``) can never silently drop the binding."""
+    if not isinstance(raw, dict) or set(raw) - {"claim", "artifact"}:
+        return None
+    claim = raw.get("claim")
+    if not isinstance(claim, str) or not claim:
+        return None
+    artifact, _bad = _na_document(raw.get("artifact"), "artifact")
+    if artifact is None:
+        return None
+    return {"claim": claim, "artifact": artifact}
+
+
 def _check_justified_gap_rationales(
     spec_rows: list[dict[str, Any]] | None,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -221,6 +285,75 @@ def _check_justified_gap_rationales(
                 "actual_content_hash": actual,
             }
     return None
+
+
+def _check_structural_artifacts(
+    spec_rows: list[dict[str, Any]] | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Hash-check every structural row's artifact (issue #6985) ->
+    ``(reason, detail)`` naming the first row whose artifact fails, or
+    ``None`` when every one checks. Checked at grading time like any cited
+    artifact: a missing or unreadable file is
+    ``structural_artifact_unreadable``, a mismatched content hash
+    ``structural_artifact_stale``. The pin proves the artifact is
+    unchanged, not that the claimed property holds."""
+    for row in spec_rows or []:
+        structural = row.get("structural")
+        if not structural:
+            continue
+        ref = structural["artifact"]
+        digest = sha256_file(ref["file"])
+        if digest is None:
+            return _REASON_STRUCTURAL_ARTIFACT_UNREADABLE, {
+                "row": row["id"],
+                "document": "artifact",
+                "file": ref["file"],
+            }
+        actual = f"sha256:{digest}"
+        if actual != ref["content_hash"]:
+            return _REASON_STRUCTURAL_ARTIFACT_STALE, {
+                "row": row["id"],
+                "document": "artifact",
+                "file": ref["file"],
+                "expected_content_hash": ref["content_hash"],
+                "actual_content_hash": actual,
+            }
+    return None
+
+
+def justified_gap_entries(
+    spec_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The ``[{id, reason, rationale, issue}]`` entries for a spec-row set's
+    justified gaps (issue #5599), in declaration order."""
+    return [
+        {
+            "id": row["id"],
+            "reason": row["justified_gap"]["reason"],
+            "rationale": dict(row["justified_gap"]["rationale"]),
+            "issue": row["justified_gap"].get("issue"),
+        }
+        for row in spec_rows or []
+        if row["justified_gap"] is not None
+    ]
+
+
+def structural_row_entries(
+    spec_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The ``[{id, claim, artifact}]`` entries for a spec-row set's
+    ``structural`` dispositions (issue #6985), in declaration order. Reads
+    the key defensively so a hand-built row set predating the key (direct
+    ``multi_row_info`` callers in tests) keeps working."""
+    return [
+        {
+            "id": row["id"],
+            "claim": row["structural"]["claim"],
+            "artifact": dict(row["structural"]["artifact"]),
+        }
+        for row in spec_rows or []
+        if row.get("structural") is not None
+    ]
 
 
 def justified_gap_report_fields(

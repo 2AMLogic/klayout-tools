@@ -1493,8 +1493,14 @@ Right after `launch` succeeds — before the first poll — the client writes
 `batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
 default `<request dir>/.klt/sim`; a sharded run writes
 `batch-receipt-<job-id>.json` per shard). It holds `job_id`,
-`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
-`state`. `state` is `null` until the job reaches a terminal state, so a receipt
+`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256`,
+`netlist_sha256` (present only when a netlist digest is recorded),
+`unit_count`, `units_sha256` and `state`. `unit_count` is the number of
+dispatched units ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+`units_sha256` is the ordered digest over the dispatched units' corner ids,
+present only when every dispatched point carries one
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208)). `state` is
+`null` until the job reaches a terminal state, so a receipt
 that still has `state: null` means the client died (or timed out polling) while
 the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
@@ -1505,7 +1511,16 @@ an unsharded request, `--resume` re-attaches to the `job_id` the receipt
 records when its `request_sha256`, `unit_count`, and (when recorded)
 `netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
-any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+any mismatch, or no receipt, submits afresh. When the run resumes a **partial
+slice** of the expanded grid -- a subset of the points dispatched as explicit
+points through the single-job path -- a fourth criterion applies: the
+receipt's `units_sha256` must equal that slice's ordered-unit digest, because
+the unit count alone cannot distinguish two same-sized slices
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208), merged as PR
+#7228). A receipt written before that field carries no `units_sha256`: a
+whole-grid `--resume` of it still re-attaches, but a partial one is not
+re-attached -- the run submits afresh, a billable new job rather than a
+re-attach. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
 after Spot reclaimed it -- is **submitted again under a new job id**, and the
 fresh launch rewrites `batch-receipt.json` with it
@@ -1547,6 +1562,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   aggregate envelope (and each request's `dir` in `set-manifest.json`) is
   the authoritative path to a member's `report.json` -- read it from the
   envelope rather than re-deriving the stem.
+- **Netlist identity.** For each corner batch job, collection compares the
+  runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
+  bytes, including rewritten include paths. A mismatch rejects the result
+  and marks that set member as an error (exit code 4). Older runners that
+  omit the digest remain supported. The outer report records the original
+  request netlist's digest.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -1783,6 +1804,17 @@ margin worst, ties to the first corner in merged order) and `coverage`
 whose ids carry corner indices local to each report and are re-based to the
 merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
+
+Sibling requests may use different model libraries for the same netlist.
+Each shard must declare the same measurement names, units, limits and
+provenance, including `spec_row` and `case` whenever present. A disagreement
+returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
+those row and case labels and grades limits over every declared corner.
+
+You can cite the merged report for item 5 of a `klt signoff` manifest.
+List the intended rows on the citation. Passing tagged measurements with
+limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
+digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -2459,6 +2491,13 @@ established. `runner_compatibility` itself stays a major.minor gate.
   `runner_version_check: "warn"` reports without refusing.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
+
+When the AMI manifest has no candidate images, the client cannot verify
+mandatory features before launch. A configured batch dry-run reports
+`batch_runner_request_feature_unverified` with the affected feature names.
+Submission prints the warning before upload and proceeds under either
+`enforce` or `warn`. The worker can then refuse an unsupported request after
+the instance launches.
 
 **Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
@@ -3646,7 +3685,9 @@ not just equivalent.
   whether it failed mid-run or was submitted but never launched (an
   unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
   see "Unlaunched shards are a resumable signal" above). The array is
-  positional: index *i* is shard *i*, in the shard map's order, so a client
+  positional: index *i* is shard *i*, in the shard map's order. On the batch
+  backend, a null slot has only unrun error corners, even if the collector
+  returned measurements without a remote block. A client
   collecting per-job metadata across `fleet[]` must skip the `null` slots
   rather than dereference them, and read job identity and runner skew from
   the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
@@ -4628,6 +4669,47 @@ byte-identical. A changed `save_vectors` invalidates a `--resume`
 checkpoint. It rides the forwarded request document to `remote`/`batch`
 workers, so the worker image must include this implementation.
 
+#### PSP103 device currents inside a subcircuit
+
+ngspice exposes an OSDI device under the `n.` prefix. Include each enclosing
+subcircuit instance and the name of the actual device element inside the PDK
+wrapper. For example, suppose `XDUT` contains `XM1`, which instantiates the
+IHP SG13G2 `sg13_lv_nmos` wrapper. That wrapper declares an element named
+`Nsg13_lv_nmos`. With the PSP103 model loaded, this request fragment measures
+its drain current at the operating point.
+
+```json
+{
+  "analysis": {"kind": "op", "args": ""},
+  "options": {
+    "osdi_preload": ["$PDK_ROOT/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi"],
+    "save_vectors": ["@n.xdut.xm1.nsg13_lv_nmos[ids]"]
+  },
+  "measurements": [
+    {"name": "itail", "unit": "A", "expr": "@n.xdut.xm1.nsg13_lv_nmos[ids]"}
+  ]
+}
+```
+
+To derive the inner name for a different wrapper, open its `.subckt` in the
+PDK model library and find the device line beginning with `N`. In ngspice,
+`show n.xdut.xm1.nsg13_lv_nmos` lists this instance's operating-point
+parameters. PSP103 exposes `ids` and `ide`, and has no `id`. A request that
+names `[id]` anyway errors the corner (exit 4) with the generic
+`measurement '<name>' produced no value: its 'expr' (...) printed no
+'<name> = <value>' line` diagnostic, not a message naming the missing vector —
+so confirm an unfamiliar parameter name with `show` rather than reading that
+diagnostic as a plumbing fault.
+
+With a 1 µm × 0.13 µm NMOS at 27 °C, a 0.7 V gate and a 0.6 V drain,
+ngspice 46 reported 44.56219 µA for both parameters and for the independent
+drain supply measurement `-i(vdrain)`. On a DC sweep of that supply from
+0.2 to 0.8 V in 0.1 V steps, `vecmax(@n.xdut.xm1.nsg13_lv_nmos[ids])`
+reported 48.23553 µA. The SPICE measurement
+`.meas dc itail FIND @n.xdut.xm1.nsg13_lv_nmos[ids] AT=0.6` returned
+44.5622 µA. Include the instance vector in `save_vectors` for these DC
+measurements as well.
+
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
 `options.complex_vectors` is a non-empty array of single-ended `v(node)`
@@ -4917,9 +4999,46 @@ missing vector, or a failed solve still grades `error` even with
 byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
-and for any value other than `"error"`/`"null"`. It is not applied to
-`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+and for any value other than `"error"`/`"null"`. It is not applied to the
+Xyce engine (no ngspice `.meas` evidence to read).
 `"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
+### Step-scoped cards (`analysis_steps[].measurements[].spice`)
+
+A step-scoped `.meas` card gets the same opt-in
+([#7072](https://github.com/2AMLogic/klayout-tools/issues/7072)). `klt sim`
+evaluates the card as a `meas` control command right after that step's own
+analysis, so ngspice prints both evidence lines *after* the step's
+`klt_step_end` marker and before the next step's `klt_step_begin` — and the
+classification is scoped to exactly that log region, matched under the
+card's **local** name. Two steps may therefore reuse a local measurement
+name: a miss confirmed in one step's region never classifies the other
+step's card, and a sibling measurement in the same step is unaffected. The
+graded result carries the qualified name (`edge.missing`) with its `step`
+provenance field, `value: null`, `margin: null`, `status: "not_reached"`,
+and the same `measurement_not_reached` info diagnostic, top-level count,
+skipped-limit coverage and rollup semantics as the scalar form above —
+including `pass_partial` for a run that mixes checked bounds with unreached
+ones, and `not_checked` (exit `4`) when every requested bound was unreached.
+
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
+What stays an error on the step path, even with the opt-in:
+
+- a step that failed or never ran (`step_failed`): its measurements keep
+  `status: "error"`, and a value is never read from a step that produced no
+  plot of its own;
+- a derived measurement (or a later step's `${...}` sweep window) reading
+  the unreached result: `derived_input_unavailable`, and the corner grades
+  `error` while the source keeps `not_reached`;
+- a `.meas` failure whose logged reason is anything other than
+  `out of interval`, an engine echo without the matching `failed!` line (or
+  vice versa), an error-severity engine diagnostic (diverged solve,
+  timeout, …), or a request without the opt-in — each keeps today's
+  `measurement` error and exit `4`.
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
@@ -5248,8 +5367,10 @@ runs -- `--dry-run` included), quoting the expression and the exact
 `measurements[].crossings` for the cases that form serves better: a whole
 crossing *series*, or a supply-relative `level`
 (`{"frac_of": "vdd", "fraction": 0.5}`) resolved per corner. Note a
-`crossings` entry's `value` is the **count** of crossings, not a time; the
-times are on its `crossings.times[]` array.
+`crossings` entry's `value` is the **count** of crossings, not a time (unless
+`crossings.value_from` grades a period/frequency reduction instead — see
+"Threshold-crossing time series"); the times are on its `crossings.times[]`
+array.
 
 The suggested `par('...')` span always holds the author's *whole* local
 expression, outer operators and enclosing calls included
@@ -5779,6 +5900,7 @@ declaration returns the whole ordered list instead:
 | `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
 | `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
 | `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+| `value_from` | no   | `"period.mean"` or `"frequency"` (issue #6913): the entry's graded `value` becomes that reduction of the series instead of the crossing count. Refused on `dc` and for any other value, before any run — see "Grading a reduction (`crossings.value_from`)". |
 
 **Sampled-offset `level`.** `{"sample_at": "50n", "offset": -0.9}` is the
 signal's own value at `sample_at` (a number of seconds or a SPICE time literal),
@@ -5861,7 +5983,9 @@ member:
 - `value` is the **number of crossings found inside the window**, before the
   `max` cap — still a number, so `limits` grade it like any scalar
   (`"limits": {"min": 40}` = "at least 40 edges were observed"), and Monte
-  Carlo statistics and coverage need nothing new. Zero crossings (the level is
+  Carlo statistics and coverage need nothing new — unless
+  `crossings.value_from` selects a reduction as the graded value (see
+  "Grading a reduction" below). Zero crossings (the level is
   never reached) is `value: 0`, `times: []`, not an error. A
   crossings-only request is therefore a checked request: it never degrades to
   `status: "not_checked"` / exit 4.
@@ -5882,9 +6006,10 @@ Add `"reduce": ["period", "cycle_to_cycle", "tie"]` (any subset; unknown names
 are refused by name) to a `crossings` object and the entry gains
 `crossings.reductions`, computed over the returned (interpolated) `times`. The
 member is absent when `reduce` is not requested; `value` stays the crossing
-count. With `k` = 1 for `edge` `rise`/`fall` and 2 for `either` (a full cycle
-spans two edges), and `t` the returned `times` (so a `truncated` series is
-reduced over the returned part only):
+count unless `value_from` selects a reduction (next section). With `k` = 1
+for `edge` `rise`/`fall` and 2 for `either` (a full cycle spans two edges),
+and `t` the returned `times` (so a `truncated` series is reduced over the
+returned part only):
 
 | Name | Definition | Fields |
 |------|------------|--------|
@@ -5895,6 +6020,69 @@ reduced over the returned part only):
 A reduction without enough crossings (`period` needs `k+1`, `cycle_to_cycle`
 `k+2`, `tie` 3) is `{"omitted": "<reason>"}`, never zeros. For `either`, a
 duty cycle away from 50 % appears as TIE. All values are seconds.
+
+### Grading a reduction (`crossings.value_from`)
+
+Issue [#6913](https://github.com/2AMLogic/klayout-tools/issues/6913). An
+oscillator's spec quantity is a **frequency** (or period), not an edge count:
+the count is quantised to whole edges and biased by start-up, so `limits`, the
+Monte Carlo rollup and `klt pex`'s delta would otherwise grade a proxy. A
+transient `crossings` entry may declare which reduction its graded `value`
+reads:
+
+```json
+{
+  "name": "f_ro1",
+  "unit": "Hz",
+  "limits": {"min": 40e6, "max": 60e6},
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "200n",
+    "value_from": "frequency"
+  }
+}
+```
+
+| `value_from`     | graded `value` |
+|------------------|----------------|
+| (absent)         | crossing count (unchanged default; every existing request and committed record is byte-identical) |
+| `"period.mean"`  | `crossings.reductions.period.mean`, seconds |
+| `"frequency"`    | `1 / reductions.period.mean`, Hz |
+
+- `value_from` **implies** the `period` reduction is computed and reported on
+  the entry (`crossings.reductions.period` appears as evidence even when
+  `reduce` does not list it); a declared `reduce` list is still honoured
+  alongside. The window is the existing `from`/`to` — that is where
+  start-up edges are excluded — and the existing `max` cap applies (a
+  `truncated` series is reduced over the returned edges only, so size `max`
+  above the edge count you intend to grade).
+- `limits`, `plausible_range`, Monte Carlo statistics and `spec_row` all read
+  the entry's `value`, so they grade the period/frequency with no further
+  declaration. The entry's `unit` stays whatever the request declared — set
+  `"unit": "Hz"` (or `"s"`) yourself; it is not overwritten.
+- **Too few edges** for the period reduction (fewer than `k+1` crossings in
+  the window, including a non-oscillating cell's 0 or 1 edges) is `status:
+  "error"`, `value: null`, `margin: null`, no `crossings` member, with a
+  `code: "measurement"` diagnostic whose message starts with the stable
+  `[crossings_insufficient_edges]` token — never a small number that could
+  pass a `limits.min`. In a `klt pex` report this surfaces as an error row
+  on that side (see [`pex.md`](pex.md) → "Oscillators: a `crossings`
+  measurement is delta'd on its `value`").
+- **Refused before any run** (exit 1, `--dry-run` included): a `value_from`
+  that is not exactly `"period.mean"` or `"frequency"` (by name), and any
+  `value_from` on a `dc` analysis (next to the `crossings.reduce`-on-dc
+  refusal; the dc `value` stays the first crossing abscissa).
+- **Runner version:** `value_from` first ships in `klt` v0.9.3 (it is not in
+  v0.9.2). On the `batch` backend it is a mandatory runner feature
+  (`crossings_value_from`): a fleet runner older than v0.9.3 is refused
+  pre-launch with the standard `batch_runner_request_feature_predated`
+  diagnostic. Before running the user deck, batch and remote workers also
+  dry-run a minimal local request to verify that the installed CLI understands
+  the selector. This distinguishes development builds with the same version prefix.
+- Additive request field reading the existing `value` slot: no
+  `schema_version` bump.
 
 ### How times are computed
 
@@ -6335,7 +6523,7 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
     "limits": {"min": 0.1}}]}
 ```
 
-- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+- **Form.** `eye` is an object `{signal, ui, uis, from?, phase?, level?, metric?}`.
   `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
   works); `ui` is the unit interval (seconds or a SPICE literal such as
   `"100p"`); `uis` is the integer number of unit intervals in the window
@@ -6350,13 +6538,16 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   folded to its phase within a unit interval. `width` is the widest circular
   gap between folded crossing phases (the UI minus the crossing spread -- the
   horizontal opening at the level), `best_phase` is the middle of that gap
-  (seconds from the start of a UI), and `height` is read there: the minimum of
-  the samples above the level minus the maximum of those at or below it, one
-  sample per UI. The data pattern is not known, so decisions are threshold
-  decisions at the sampling phase.
+  (seconds from the start of a UI). Folded width describes the whole pattern.
+  Individual edges can be several UIs apart. For height, omit `phase` to sample
+  at `best_phase`, or supply an offset in seconds or SPICE time with
+  `0 <= phase < ui`. Height is the minimum high sample minus the maximum low
+  sample, interpolating once per UI at `from + k * ui + phase`. Width and
+  best phase use all folded crossings for either choice.
 - **Value.** `value` is the selected metric, graded against `limits` like any
   scalar. An additive `eye` sibling carries
-  `{height, width, best_phase, level, ui, uis}`.
+  `{height, width, best_phase, level, ui, uis}`. Explicit phase also records
+  `sampling_phase` in seconds.
 - **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
   diagnostic whose message starts with a reason token:
 
@@ -6364,12 +6555,15 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   |---|---|
   | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
   | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
-  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the sampling phase |
 - **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
   and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
   and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
   first `klt` release segment `0.8.1`): see "Mandatory features" under
   "Runner/client `klt` version skew".
+  Step eyes and explicit phase require the `eye_step_or_phase` runner capability
+  (release segment `0.9.3`). The worker preflight exercises its installed CLI
+  on a small request to distinguish development builds.
 - **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Edge-window step report (`measurements[].step_resolution`)
@@ -6961,6 +7155,40 @@ top-level `measurements[]` then become **derived** expressions over
 step-qualified results, graded through `limits` like any other measurement.
 `klt` composes the deck itself. There is no raw `.control` escape hatch.
 
+A transient step can measure the eye on its own waveform. Save this circuit
+as `eye.sp` and the request below as `steps.json`, then run
+`klt sim steps.json --backend local --format json`.
+
+```spice
+Vpattern data 0 PULSE(0 1 0 100p 100p 900p 2n)
+Vrail rail 0 1
+Breceive rx 0 V=V(data)*V(rail)
+Rload rx 0 1k
+```
+
+```json
+{
+  "netlist": "eye.sp",
+  "options": {"ngspice_init": []},
+  "analysis_steps": [
+    {"name": "low", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 1},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]},
+    {"name": "high", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 2},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]}
+  ]
+}
+```
+
+`low.opening` measures 1 V and `high.opening` measures 2 V. Both report a
+folded width of 1 ns. Each result records its step. A failed solve returns a
+null measurement for that step. Python reduces these waveforms after
+ngspice finishes, so a deck expression or a later step's analysis arguments
+can reference only measurements computed within ngspice.
+
 Worked example: a two-point load-regulation figure:
 
 ```json
@@ -7087,7 +7315,11 @@ error, exit 1).
     read an **earlier** step's result as `<step>.<name>`.
   - `spice`: a `.meas` card whose type matches the step's `kind` and whose
     card name equals the measurement `name`. It runs as a `meas` control
-    command right after that step's analysis.
+    command right after that step's analysis. It may declare `on_unreached:
+    "null"`: a target the step's completed analysis never reaches then
+    grades `not_reached` under the qualified name, on evidence scoped to
+    that step's own log region — see
+    [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached).
 
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
@@ -9514,11 +9746,12 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `singular_matrix`  | A `Warning: singular matrix` line.                                          |
 | `timestep_too_small` | ngspice's own transient abort, `Timestep too small; time = <t>, timestep = <dt>: trouble with node "<node>"` (issue [#2918](https://github.com/2AMLogic/klayout-tools/issues/2918)). Carries additional `time_s` (number \| null: simulation time of the abort), `timestep_s` (number \| null: the timestep ngspice had shrunk to) and `node` (string \| null: the node/branch ngspice blamed, e.g. `"vctl#branch"`) fields — each `null` when ngspice's line omitted that part — repeated in `message`. Surfaced from the log the classifier already reads, so `keep_artifacts` is not needed to see it. Always `error`, **never** downgraded by the stepping-recovery rule below: it is a terminal abort, not recovery narration. Previously such a run surfaced only as one `measurement` diagnostic per `.meas`. See "Known limitation: `trnoise()` with non-DC control sources" below for the commonest trigger. |
 | `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text (Xyce's `Time step too small`; ngspice's own `Timestep too small` abort is `timestep_too_small` above). |
+| `dc_homotopy_recovery` | ngspice explicitly completed a DC operating-point stepping method. The `recovered_via` field names the last completed method (`dynamic_gmin_stepping`, `true_gmin_stepping`, `spice3_gmin_stepping`, or `source_stepping`). Its message lists the attempts since the previous completed method, in engine order. This informational diagnostic is appended after grading, so it never changes status and cannot be selected in `options.fail_on_diagnostic`. |
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `netlist_title_line` | [#5433](https://github.com/2AMLogic/klayout-tools/issues/5433). The request's `netlist` starts with a SPICE **title line**, which `.include` parses as circuit content (see "Netlist convention" above). Classified from the log after the fact: ngspice echoes the offending source line under its `Error on line N ...` location line, and this code is emitted when that echo is the netlist's own first non-blank line (compared case-insensitively, with internal whitespace folded the way ngspice folds it) and that line is not a `*`/`.`/`+` card. The message names the netlist **file and the line number in it** — not the composed deck's `line N`, which is what ngspice reports — and gives the fix (prefix the line with `*`). Being a deck abort it also carries `analysis_started: false` and collapses the measurement cascade, and it replaces the `ngspice_fatal` and `model_bin_range` readings of the same abort (a title beginning with `m` otherwise surfaces as a BSIM bin-range problem). Never fires when the netlist is unreadable where classification runs, when the echo is some other line, or when line 1 is a comment/dot/continuation card — each falls through to the classification it had before. A title that parses as a *valid* card is undetectable by construction: there is no abort to classify. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). The `Error in netlist line no. N` reading is dropped when that alternative is the log's only fatal evidence *and* the run demonstrably completed (an analysis banner plus the `ngspice-N done` exit banner): ngspice-47 prints that line mid-analysis for a `.meas ... param='...'` whose referenced measure produced no value ("Cannot compute substitute"), so the corner fails only through its per-measurement diagnostics ([#6401](https://github.com/2AMLogic/klayout-tools/issues/6401)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
@@ -9544,10 +9777,11 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
-| `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
+| `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`, `threads_per_worker`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
@@ -9600,18 +9834,21 @@ measurement that produced no value, or that trailer, keeps
 `singular_matrix`/`nonconvergence` at `severity: "error"` and the corner at
 `status: "error"`, exactly as before.
 
-A waveform-capture-only request (no `measurements[]`, issue #3246) has no
-measurement to confirm completion, so the captured waveform is the recovery
-basis instead: for a `tran` analysis with `options.waveforms: true`, the
-downgrade applies when the trailer is absent *and* the parsed waveform's last
-time point reaches the `tran` stop time (the second `analysis.args` token). A
-missing or truncated waveform, an unparseable `args`, or any non-`tran`
-analysis keeps the diagnostic at `severity: "error"`. When the waveform was
-the basis, the downgraded diagnostic's `message` says so. Declaring a dummy
-completion measurement is no longer needed to get this behavior.
-`options.fail_on_diagnostic` is unaffected (it matches on `code`).
-`netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
-downgraded.
+For waveform capture without `measurements[]`, the original `waveform.raw`
+can establish that the analysis completed. A transient must reach the stop
+time in `analysis.args`. For ngspice AC, the frequency samples must cover the
+requested linear, decade or octave grid. For example, `oct 3 10 850` ends at
+approximately 806.35 Hz. For logarithmic grids, the check uses the length of
+ngspice’s original frequency vector, including any extra points selected by
+the effective `reltol`. It works with or without `complex_vectors`.
+A missing, unreadable, wrong-axis or truncated waveform leaves the stepping
+errors fatal. The abort trailer also keeps them fatal.
+
+The warning message identifies the completed analysis. Other errors, including
+a missing requested vector, still fail the corner. The `netlist`, `timeout`,
+`measurement`, `unknown`, and `timestep_too_small` errors remain fatal. An
+explicit `options.fail_on_diagnostic` selection still grades an otherwise
+recovered corner as inconclusive.
 
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`
@@ -10041,7 +10278,13 @@ A sizing pass (issue #1718).
 It takes the **same request document** the sweep takes — only `netlist` is
 required; `models`/`corners` are read exactly as documented above;
 `analysis`/`measurements` are not needed for the analysis itself (this mode
-always runs a plain `op`). A `--op-lint` run never runs the corner matrix,
+always runs a plain `op`). A `measurements` that *is* supplied must still be
+an array of objects, as in the sweep (issue #6590): `null`, a scalar, a
+string, an object, or a non-object entry is refused with the error envelope
+(exit `1`, no ngspice launch) naming `request.measurements` or
+`measurements[<i>]` and the offending Python type, instead of being skipped
+or escaping as a traceback. An absent key or `[]` is still accepted.
+A `--op-lint` run never runs the corner matrix,
 never writes artifacts, and emits its own envelope (below) instead of the
 sweep response.
 
@@ -10497,7 +10740,7 @@ corner-sweep rollup fields above are declared.
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` for an `optional` measurement with no value — issue #2925, `value`/`margin` `null`, info diagnostic `measurement_absent` — and `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #5731): a measurement expanded from a `{case}` template (`options.measurement_cases`) carries `case` (its scope string) on every result entry; absent for every request that declares neither the option nor a placeholder. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #2947): an entry declared with `cycle_mean` carries `value` = the cycle-aligned mean and a `cycle_mean` object `{t_start, t_end, cycles_used}` (see "Cycle-aligned mean" above); absent on every other entry and when no mean was computed. Additive/optional (issue #3033): an entry declared with `energy` carries `value` = the net energy (J) and an `energy` object `{net, gross, recovered, charge, from, to}` (see "Source energy over a transient window" above); absent on every other entry and when nothing was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. `waveform_too_large` (issue #3211) and `noise_mechanism_incomplete` (issue #5553) are also always warnings. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning"\|"info", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. `waveform_too_large` (issue #3211) and `noise_mechanism_incomplete` (issue #5553) are also always warnings. `dc_homotopy_recovery` records a completed DC stepping method at `"info"` severity. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #5622): `raw_bytes` (integer, the rawfile's size in bytes) is present only when a rawfile was kept. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` (plus `seed_scope`/`seed_mode`/`mismatch_scale` when the request declared them) — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 

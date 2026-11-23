@@ -104,10 +104,16 @@ def _seam_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def synthesis_disclosure(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
+    if kind == "synthesize" and "synthesis" in envelope:
+        return {"synthesis": envelope["synthesis"]}
+    return {}
+
+
 def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     """:func:`_detail`'s ``"synthesize"`` excerpt (issue #4015)."""
     structural = envelope.get("structural") or {}
-    return {
+    detail = {
         "netlist_path": envelope.get("netlist_path"),
         "netlist_sha256": envelope.get("netlist_sha256"),
         "structural": {
@@ -120,6 +126,7 @@ def _synthesize_detail(envelope: dict[str, Any]) -> dict[str, Any]:
             )
         },
     }
+    return {**detail, **synthesis_disclosure("synthesize", envelope)}
 
 
 def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:

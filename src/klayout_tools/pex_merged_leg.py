@@ -40,8 +40,8 @@ from ._provenance import sha256_file
 from .extract import ExtractError, run_extract
 from .extract_netlist_target import resolve_netlist_target
 from .extract_preflight import preflight_layout
+from .pex_errors import PexError
 from .pex_net_correspondence import (
-    _pex_error,
     build_probes,
     correspondence,
     preferred_renames,
@@ -211,7 +211,7 @@ def _circuit_bounds(lines: Sequence[str], top: str) -> tuple[int, int]:
                 start = i
         elif words[0].upper() == ".ENDS" and start is not None:
             return start, i
-    raise _pex_error(f"merged leg: missing complete .SUBCKT block for '{top}'")
+    raise PexError(f"merged leg: missing complete .SUBCKT block for '{top}'")
 
 
 def _rename_nodes(card: str, renames: Mapping[str, str]) -> str:
@@ -316,6 +316,7 @@ def merged_runset_extract(
     distributed_rc: bool,
     resistance_graph: bool,
     resistance_graph_r_cut_ohm: float | None,
+    resistance_graph_caps: Mapping[str, int] | None,
     parasitic_variants: Sequence[str] | None,
     substrate_tie_ohms: float | None,
     mom_rlc_net: str | None,
@@ -351,6 +352,7 @@ def merged_runset_extract(
             "distributed_rc": distributed_rc,
             "resistance_graph": resistance_graph,
             "resistance_graph_r_cut_ohm": resistance_graph_r_cut_ohm,
+            "resistance_graph_caps": resistance_graph_caps,
             "parasitic_variants": parasitic_variants,
             "substrate_tie_ohms": substrate_tie_ohms,
             "mom_net": mom_rlc_net,

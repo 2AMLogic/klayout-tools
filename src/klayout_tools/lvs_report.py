@@ -2,19 +2,45 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+from .place_and_route_portable import PDK_ROOT_TOKEN, path_under_root
+
+
+def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
+    """Issue #5812: ``pin_order_sources[].path`` for a file under the resolved
+    PDK root is recorded as ``"$PDK_ROOT/<relative>"`` (the token
+    ``portable_paths`` already produces) rather than an absolute host path, so
+    a committed report does not leak the PDK's install location. Paths outside
+    the PDK root (caller-supplied ``reference.pin_order_files``) are left
+    absolute -- ``portable_paths: true`` still handles those. Same type, no new
+    fields; the compare itself already ran on the real paths."""
+    if not pdk_root or not isinstance(sources, list):
+        return sources
+    out: list[Any] = []
+    for entry in sources:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and os.path.isabs(path):
+            relative = path_under_root(path, pdk_root)
+            if relative is not None and relative != ".":
+                entry = {**entry, "path": f"{PDK_ROOT_TOKEN}/{relative}"}
+        out.append(entry)
+    return out
 
 
 def assemble_lvs_report(
     *,
     mismatches: Any,
     omit_mismatches: bool = False,
+    passive_pairing: dict[str, Any] | None = None,
     status: Any,
     engine: Any,
     engine_version: Any,
     netgen_binary: Any,
     layout_deck_name: Any,
     layout_hash_source: Any,
+    layout_coverage: dict[str, Any],
     layout_input_role: Any,
     layout_circuit: Any,
     layout_abstracted_cells: Any,
@@ -66,6 +92,7 @@ def assemble_lvs_report(
         _reference_conversion_echo,
     )
     from .lvs_finfet_power import derive_finfet_gate_level_power
+    from .lvs_label_coverage import pin_set_difference
     from .verilog_module_names import reference_module_names
 
     category_counts: dict[str, int] = {}
@@ -146,7 +173,9 @@ def assemble_lvs_report(
         # "where did this cell's pin order come from". Omitted entirely for
         # every other `reference.form`, which reads no pin-order source at
         # all -- never a spuriously present empty list.
-        provenance["pin_order_sources"] = reference_pin_order_sources
+        provenance["pin_order_sources"] = _tokenise_pdk_pin_order_sources(
+            reference_pin_order_sources, (reference_pdk_info or {}).get("root")
+        )
 
     repo_root = common_repo_root(
         [layout_hash_source, reference_netlist_path],
@@ -349,6 +378,19 @@ def assemble_lvs_report(
         "category_counts": dict(sorted(category_counts.items())),
         "category_error_counts": dict(sorted(category_error_counts.items())),
         "counts": counts,
+        "pin_set_difference": pin_set_difference(
+            layout_circuit,
+            reference_circuit,
+            layout_coverage.get("substrate_net"),
+            mismatches,
+        ),
+        "ignored_layers": layout_coverage.get("ignored_layers", []),
+        "warnings": layout_coverage.get("warnings", []),
+        **(
+            {"sg13g2_passive_pairing": passive_pairing}
+            if passive_pairing is not None
+            else {}
+        ),
         "device_classes": device_classes,
         "environment": {
             "engine": engine,

@@ -236,7 +236,9 @@ Array instances contribute one child per element.
 | Field | Meaning |
 | ----- | ------- |
 | `children[]` | One entry per direct instance: `name` (`<cell>[<n>]`, ordinal by position), `cell`, `bbox_um`, `bbox_area_um2`, `own_whitespace_um2` (instance bbox area minus the child's flattened drawn area). Sorted by `bbox_area_um2` descending, then name. |
-| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`. Zero-area gaps are dropped. Sorted by area descending. |
+| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`, `drawn_area_um2`, `drawn_components[]`. Zero-area gaps are dropped. Sorted by area descending. |
+| `gap_components[].drawn_area_um2` | Coverage of the actual gap polygon (holes respected) by geometry drawn directly in the top cell, merged across eligible layers so overlaps count once. `0.0` when the gap carries no direct top-cell drawing. |
+| `gap_components[].drawn_components[]` | Connected components of that coverage: `bbox_um`, `drawn_area_um2`, `piece_count`. Sorted by drawn area descending, then bbox position (deterministic for equal-area components). |
 | `unattributed_um2` | `bbox_area - (sum(children) - overlap) - sum(gaps)`; expected `0`. |
 | `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
 | `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
@@ -247,6 +249,33 @@ Array instances contribute one child per element.
 right, top) when the gap touches the top bbox boundary; otherwise
 `between:<a>,<b>` (names sorted) when it abuts two or more instances, or
 `left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
+
+#### Gap drawn coverage and components (issue #6941)
+
+A hand-placed analog top cell draws real structure *inside* its gaps --
+guard rings, reserved-but-empty regions, top-level strap corridors -- and a
+single `area_um2` cannot tell a ring from dead whitespace. Each gap row
+therefore also reports its drawn contents, sourced from exactly the
+non-recursive, annotation-filtered top-cell geometry that
+`top_level_drawn_area_um2` totals (with `--flatten-wrappers`, still the top
+cell only: a wrapper's own drawing between its leaves is not top-level
+drawing). The coverage is intersected with the gap polygon *before*
+connectivity, so a structure a child footprint crosses (a strap running
+over a placed block) splits into one component per side, and each original
+shape with positive-area overlap counts once as a `piece` per component it
+lands in -- a split shape contributes to both.
+
+`piece_count` references the original top-cell shapes because the merged
+coverage alone loses that information: two overlapping rectangles on
+different layers are one physical footprint (overlaps count once) with two
+contributing pieces, and a reserved annotation-layer shape contributes
+neither area nor pieces.
+
+The two drawn-area totals relate as: `top_level_drawn_area_um2` counts all
+direct drawing including the part over child bboxes, while
+`sum(gap_components[].drawn_area_um2)` counts only the part inside gaps.
+Component areas describe a gap's *contents* and never enter the bbox
+partition -- `sums_to_total` stays child bboxes plus gap areas only.
 
 #### P&R decomposition (`--pnr-report`)
 

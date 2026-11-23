@@ -1,0 +1,1 @@
+- **Synthesis requests can select fast ABC mapping on both passes or provide a content-hashed Liberty mapping script.** Reports, replay checks and signoff citations record the requested mapping effort (#6915, 2026-11-21).

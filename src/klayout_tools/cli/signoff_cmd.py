@@ -170,6 +170,7 @@ from .signoff_tier_text import (
     _not_applicable_suffix,
     _print_justified_gaps,
     _print_not_applicable,
+    _print_structural_rows,
     input_verified_statement,
 )
 
@@ -666,12 +667,11 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
-    # this build grades renders a shorter checklist, so `11/11 items met`
-    # and `9/9 items met` read identically though the second is a weaker
-    # claim. No per-row note can say this -- the missing items are not rows
-    # -- so it is said beside the count it qualifies. Absent (as before)
-    # whenever the two counts agree, and when this build cannot read its own
-    # doc to compare against.
+    # this build grades renders a shorter checklist, so `11/11` and `9/9`
+    # read identically though the second is a weaker claim; the missing
+    # items are not rows, so it is said beside the count it qualifies.
+    # Absent (as before) whenever the two counts agree, and when this build
+    # cannot read its own doc to compare against.
     _print_t1_scope_shortfall(result, result["source_doc"], palette)
     print()
 
@@ -688,9 +688,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         # Issue #2176: a row this build has no grading rules for at all --
         # an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
         # lists. Shown for every such row, met/unmet and cited/uncited
-        # alike, because the whole failure this prevents is a row that
-        # *looks* exactly like a graded one. Absent for every item of the
-        # shipped doc, which renders exactly as before.
+        # alike, because the failure this prevents is a row that *looks*
+        # exactly like a graded one; absent for every item of the shipped
+        # doc, which renders exactly as before.
         if item.get("graded_by_build") is False:
             print(
                 f"        {palette.red}not graded by this build{palette.reset} "
@@ -698,27 +698,28 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
-        # Issue #5599: each justified declared gap, its rationale artifact
-        # and its closing issue -- with the missing-link finding inline.
+        # Issue #5599: each justified gap's reason, rationale artifact and
+        # closing issue (with the missing-link finding inline). Issue #6985:
+        # each structural row's claim and its hash-pinned artifact.
         _print_justified_gaps(item)
+        _print_structural_rows(item)
         _print_group_coverage(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)
             # Issue #2196: whether that `content_hash` was checked against
             # the input artifact itself or only against the envelope's own
-            # claim about it. Shown beside the hash it qualifies, because a
-            # freshness claim verified against a file and one verified
-            # against another claim are otherwise indistinguishable to a
-            # reader. Disclosure only -- the verdict above is unaffected.
+            # claim about it. A freshness claim verified against a file and
+            # one verified against another claim are otherwise
+            # indistinguishable; disclosure only, the verdict is unaffected.
             _print_input_verified(citation)
             # Issue #2718: items 1/2/9/10 -- bound artifact, or "not bound".
             _print_artifact_binding(item, citation)
             # Issue #2002: a `drc` citation's own coverage statement, shown
-            # beside the "clean" it qualifies -- item 3's doc text requires
-            # the claim to disclose these, and `klt signoff` does not grade
-            # them, so a reviewer needs them in the artifact they read. Absent
-            # for evidence committed before `klt drc` reported coverage.
+            # beside the "clean" it qualifies -- item 3's doc requires the
+            # claim to disclose these and `klt signoff` does not grade them,
+            # so a reviewer needs them in the artifact they read; absent for
+            # evidence committed before `klt drc` reported coverage.
             coverage = citation.get("coverage")
             if coverage:
                 print(f"        coverage: {_format_coverage(coverage)}")
@@ -737,8 +738,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # Issue #2025: T1 item 11's citation is compound -- the `cite:`
             # line above names its leading (`erc`) part, so every other
             # cited artifact gets its own line rather than being reachable
-            # only through the JSON. Absent for every single-artifact item,
-            # which renders exactly as before.
+            # only through the JSON; absent for every single-artifact item.
             for part in citation.get("parts") or []:
                 if part is citation or part.get("kind") == citation["kind"]:
                     continue

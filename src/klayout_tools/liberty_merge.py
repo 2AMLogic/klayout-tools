@@ -24,18 +24,24 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import tempfile
 
 from .liberty_header_diff import header_mismatch
+from .liberty_merge_syntax import (
+    _CELL_NAME_RE,
+    _find_matching,
+    _find_terminator,
+    _next_significant,
+    _normalize_header,
+    _scan_cells,
+    _skip_ws,
+    _tokens,
+)
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
 
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
-_LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
-_CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
 #: Header attributes ignored when comparing files for a merge: free text with
@@ -122,7 +128,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            mismatch = header_mismatch(first_path, header_fields, path, fields)
+            mismatch = header_mismatch(
+                first_path, header_fields, texts[0], path, fields, text
+            )
             if mismatch:
                 raise LibertyMergeError(mismatch)
         for name, raw in file_templates:
@@ -266,31 +274,6 @@ def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
     return " ".join(stripped), found
 
 
-def _normalize_header(header: str) -> str:
-    """Header text with comments, whitespace and the library name ignored."""
-    parts: list[str] = []
-    i, n = 0, len(header)
-    while i < n:
-        if header[i] == '"':
-            j = i + 1
-            while j < n and header[j] != '"':
-                j += 2 if header[j] == "\\" else 1
-            parts.append(header[i : j + 1])
-            i = j + 1
-        elif header.startswith("/*", i):
-            stop = header.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-            parts.append(" ")
-        elif header.startswith("//", i):
-            stop = header.find("\n", i)
-            i = n if stop < 0 else stop
-        else:
-            parts.append(header[i])
-            i += 1
-    text = _LIBRARY_NAME_RE.sub("library ()", "".join(parts), count=1)
-    return " ".join(text.split())
-
-
 def _write_atomic(out_path: str, merged: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(out_path), suffix=".tmp")
@@ -325,137 +308,3 @@ def _split(path: str, text: str) -> tuple[str, str, list[str]]:
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
     return text[:first_cell], text[first_cell:close], cells
-
-
-def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
-    """``(first top-level cell offset, cell names, closing-brace offset)``."""
-    first_cell: int | None = None
-    cells: list[str] = []
-    depth = 0
-    for kind, pos, end in _tokens(text):
-        if kind == "{":
-            depth += 1
-        elif kind == "}":
-            depth -= 1
-            if depth == 0:
-                return first_cell, cells, pos
-        elif depth == 1 and text[pos:end] == "cell":
-            match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
-            if match:
-                cells.append(match.group(1))
-                if first_cell is None:
-                    first_cell = pos
-    return first_cell, cells, None
-
-
-def _skip_ws(text: str, index: int) -> int:
-    while index < len(text) and text[index].isspace():
-        index += 1
-    return index
-
-
-def _next_significant(text: str, start: int) -> tuple[int, str]:
-    """``(index, char)`` of the next char that is neither whitespace nor a
-    comment; ``(len(text), "")`` at end of text."""
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch.isspace():
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        else:
-            return i, ch
-    return n, ""
-
-
-def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
-    """Index of the ``close_ch`` matching the ``open_ch`` at ``start`` (strings
-    and comments skipped), or ``len(text)`` when it never closes."""
-    depth = 0
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch == open_ch:
-            depth += 1
-            i += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-            i += 1
-        else:
-            i += 1
-    return n
-
-
-def _find_terminator(text: str, start: int) -> int:
-    """Index of the ``;`` ending the statement whose value begins at ``start``
-    (strings and comments skipped), or ``len(text)`` when it never ends.
-
-    Unlike :func:`_find_matching` this does not nest: a ``:`` inside the value
-    is ordinary text, so the first unquoted ``;`` always ends the statement.
-    """
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch == ";":
-            return i
-        else:
-            i += 1
-    return n
-
-
-def _tokens(text: str):
-    """Yield ``(kind, start, end)`` for identifiers and braces, skipping
-    strings and comments."""
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch in "{}":
-            yield ch, i, i + 1
-            i += 1
-        else:
-            match = _IDENT_RE.match(text, i)
-            if match:
-                yield "ident", i, match.end()
-                i = match.end()
-            else:
-                i += 1

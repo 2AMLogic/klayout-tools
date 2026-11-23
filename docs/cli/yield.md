@@ -371,6 +371,12 @@ unchanged; grading is untouched.
 
 ### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
 
+Supply `--negative-control control.csv` to attach known-bad draws using the same
+columns and nominal group names. Add `--description` to identify the injected
+fault. The optional `--seed`, `--rng` and `--draws-per-population` flags carry
+run settings into `source.provenance`. [Command example](yield-csv.md#paired-controls-and-run-provenance)
+
+
 A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
 campaign, say) usually persists one CSV row per draw. `klt yield-csv` turns
 that file into the sample-set document above, so nobody hand-writes (and
