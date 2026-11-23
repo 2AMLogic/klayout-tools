@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.pdk_install_fixtures import isolate_pdk_search_space
 from klayout_tools import _drc_gf180_3lm
 from klayout_tools.cli import main
 from test_drc_gf180mcu_moscap import _SKIP_NO_NATIVE_TIER
@@ -153,6 +154,7 @@ def test_zero_findings_stay_unknown_after_passing_wide_metal_control(tmp_path, c
 
 
 def test_rerun_preserves_install_with_symlinked_decks(tmp_path, monkeypatch, capsys):
+    isolate_pdk_search_space(monkeypatch, tmp_path)
     variant = "gf180mcu-local"
     root = _stub_family_install(tmp_path, monkeypatch, variant)
     deck_dir = Path(root, variant, "libs.tech/klayout/tech/drc")
