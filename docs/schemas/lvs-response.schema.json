@@ -10,12 +10,12 @@
     "power_connectivity", "body_verification", "device_parameter_coverage",
     "mismatch_count", "error_count", "category_counts", "category_error_counts",
     "counts", "device_classes", "environment", "provenance", "mismatches",
-    "net_correspondence"
+    "mismatches_omitted", "net_correspondence"
   ],
   "properties": {
     "schema_version": {"type": "integer", "const": 3},
     "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
-    "layout": {"$ref": "#/$defs/path_value", "description": "Echo of layout.file or layout.netlist."},
+    "layout": {"$ref": "#/$defs/path_value", "description": "Resolved layout.file or layout.netlist used for the layout digest. By default, reports encode it as {path, scope}, with a repository-relative path for scope 'repo' or a null path for scope 'external'. Legacy reports can carry the request path as a string."},
     "label_layers": {
       "type": "object",
       "description": "Present only when a non-empty layout.label_layers override was applied: {role: [layer, datatype] | null}.",
@@ -73,7 +73,26 @@
       "items": {"$ref": "#/$defs/device_parameter_coverage_entry"}
     },
     "mismatch_count": {"type": "integer", "minimum": 0},
+    "mismatches_omitted": {"type": "boolean"},
     "error_count": {"type": "integer", "minimum": 0},
+    "sg13g2_passive_pairing": {
+      "type": "object",
+      "required": ["status", "findings"],
+      "properties": {
+        "status": {"enum": ["discrepancy_observed", "insufficient_evidence", "all_devices_paired"]},
+        "findings": {"type": "array", "items": {
+          "type": "object",
+          "required": ["differences", "evidence", "layout_model", "reference_model", "layout_terminals", "reference_terminals"],
+          "properties": {
+            "differences": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["class_model", "terminal_list"]}},
+            "evidence": {"enum": ["compare_event", "unmatched_classes"]},
+            "layout_model": {"type": "string"}, "reference_model": {"type": "string"},
+            "layout_terminals": {"type": "array", "items": {"type": "string"}},
+            "reference_terminals": {"type": "array", "items": {"type": "string"}}
+          }
+        }}
+      }
+    },
     "category_counts": {"$ref": "#/$defs/count_map"},
     "category_error_counts": {"$ref": "#/$defs/count_map"},
     "counts": {
@@ -85,6 +104,33 @@
         "pins": {"$ref": "#/$defs/count_triple"}
       },
       "additionalProperties": true
+    },
+    "ignored_layers": {
+      "type": "array",
+      "description": "Inline extraction coverage, using the same full-stream counts as klt extract. Empty for pre-extracted netlists.",
+      "items": {
+        "type": "object",
+        "properties": {"layer": {"type": "integer"}, "datatype": {"type": "integer"}, "shapes": {"type": "integer", "minimum": 1}},
+        "required": ["layer", "datatype", "shapes"]
+      }
+    },
+    "warnings": {
+      "type": "array", "items": {"type": "string"},
+      "description": "Advisory extraction coverage messages. A top cell with text exclusively outside its effective label layers names those layer/datatype pairs."
+    },
+    "pin_set_difference": {
+      "type": "object",
+      "description": "Top-level pin-name differences after case and applied reference-port alias normalization. Each list of one-sided ports is sampled to 20 entries.",
+      "required": ["layout_only_pins", "layout_only_pins_count", "layout_only_pins_truncated", "reference_only_pins", "reference_only_pins_count", "reference_only_pins_truncated", "deck_synthesized_layout_pins"],
+      "properties": {
+        "layout_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "layout_only_pins_count": {"type": "integer", "minimum": 0},
+        "layout_only_pins_truncated": {"type": "boolean"},
+        "reference_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "reference_only_pins_count": {"type": "integer", "minimum": 0},
+        "reference_only_pins_truncated": {"type": "boolean"},
+        "deck_synthesized_layout_pins": {"type": "array", "items": {"type": "string"}}
+      }
     },
     "device_classes": {
       "type": ["array", "null"],
@@ -106,7 +152,7 @@
   "additionalProperties": true,
   "$defs": {
     "path_value": {
-      "description": "A path string, or under request.portable_paths (issue #3798) a {path, scope} object (scope 'repo' or 'external'); PDK files become '$PDK_ROOT/...' strings.",
+      "description": "A path string, or when request.portable_paths is true (issue #3798), a {path, scope} object with scope 'repo' or 'external'. PDK-rooted paths use '$PDK_ROOT/...' strings when portable_paths is true. PDK-rooted provenance.pin_order_sources[].path entries use that form even when portable_paths is false or omitted (issue #5812).",
       "oneOf": [
         {"type": "string"},
         {
@@ -375,12 +421,13 @@
     "body_verification": {
       "type": "object",
       "description": "Whether MOS body terminals were resolved from real tap geometry; reported beside (never folded into) status.",
-      "required": ["status", "reason", "device_classes", "device_count", "findings", "finding_count"],
+      "required": ["status", "reason", "device_classes", "device_count", "inspected_count", "findings", "finding_count"],
       "properties": {
         "status": {"enum": ["verified", "unverified", "unchecked"]},
         "reason": {"type": ["string", "null"]},
         "device_classes": {"type": "array", "items": {"type": "string"}},
         "device_count": {"type": "integer", "minimum": 0},
+        "inspected_count": {"type": "integer", "minimum": 0},
         "findings": {
           "type": "array",
           "items": {
@@ -413,7 +460,7 @@
             "required": ["parameter", "reason"],
             "properties": {
               "parameter": {"type": "string"},
-              "reason": {"enum": ["secondary", "placeholder_value", "compare_parameters"]}
+              "reason": {"enum": ["secondary", "placeholder_value", "compare_parameters", "deck"]}
             },
             "additionalProperties": true
           }
@@ -431,12 +478,23 @@
       "properties": {
         "category": {
           "type": "string",
-          "description": "Stable category id. Documented values: net.unmatched, net.merged, net.split, net.supply_fragmented, device.unmatched, device.class, device.class_arity, device.class_family_unsatisfiable, device.bulk_reconciled, device.finfet_bulk_tied, device.bulk_ignored, device.placeholder_value, device.property, device.parameter_tolerated, device.parameter_excluded, device.geometry_not_compared, device.body_unverified, device.combine_incomplete, device.combine_parameter_corrected, pin.unmatched, pin.count, pin.declared_short, reference.gate_level_pin_case_folded, topology, topology.flattened, topology.known_limitation, topology.power_only_pruned, topology.dangling_output_ambiguous, topology.reference_port_alias_joined, topology.top_level_pins_anchored, hints.rejected, hints.short_nets_applied, combine_devices_per_circuit.unmatched, compare.timeout. Not an enum: new categories are additive."
+          "description": "Stable category id. The authoritative list is `CHANGELOG.md` (guarded by `tests/test_lvs_category_changelog.py`); per-category meaning is in `docs/cli/lvs.md`. Not an enum: new categories are additive."
         },
         "severity": {"enum": ["error", "warning"]},
         "description": {"type": "string"},
         "side": {"enum": ["layout", "reference", "both"]},
-        "net": {"$ref": "#/$defs/name_pair"},
+        "net": {
+          "type": ["object", "null"],
+          "description": "{layout, reference} names plus (klayout engine, issue #5833) each side's per-report stable net id — null on a side with no net, or naming a supply group for net.supply_fragmented. Ids are unique within one report and side only; the klayout-runset engine's objects carry the two name keys only.",
+          "required": ["layout", "reference"],
+          "properties": {
+            "layout": {"type": ["string", "null"]},
+            "layout_id": {"type": ["integer", "null"], "minimum": 0},
+            "reference": {"type": ["string", "null"]},
+            "reference_id": {"type": ["integer", "null"], "minimum": 0}
+          },
+          "additionalProperties": true
+        },
         "device": {
           "type": ["object", "null"],
           "required": ["layout", "reference", "class"],
@@ -474,7 +532,9 @@
       "required": ["layout", "reference", "pin"],
       "properties": {
         "layout": {"type": ["string", "null"], "description": "Layout net name; aliases are |-joined and anonymous nets backslash-escaped."},
+        "layout_id": {"type": ["integer", "null"], "minimum": 0, "description": "Layout net's per-report stable id (issue #5833, klayout engine; null when the event carried no layout net)."},
         "reference": {"type": ["string", "null"], "description": "Paired reference net; null for e.g. layout-only supply pins of a gate-level-verilog run."},
+        "reference_id": {"type": ["integer", "null"], "minimum": 0, "description": "Reference net's per-report stable id (issue #5833, klayout engine; null when the event carried no reference net)."},
         "pin": {"type": "boolean"},
         "heuristic": {"type": "boolean", "description": "Present only for gate-level-verilog runs with a derivable supply universe."}
       },

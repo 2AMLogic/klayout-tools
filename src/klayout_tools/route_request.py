@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from ._paths import _resolve_relative
 from ._request_fields import check_known_fields
+from .gen_compose_base import GenComposeError
 
 #: Top-level request fields (``schema`` is accepted by ``check_known_fields``).
 _KNOWN_FIELDS = ("layout", "pdk", "routing", "nets", "options")
@@ -63,7 +64,6 @@ def _check_keys(raw: dict[str, Any], known: tuple[str, ...], where: str) -> None
 
 
 def _parse_pin(raw: Any, where: str) -> dict[str, Any]:
-    from .gen_compose import GenComposeError
     from .gen_compose_port_access import parse_ports_from_labels
 
     pin = _require_object(raw, where)
@@ -82,7 +82,8 @@ def _parse_pin(raw: Any, where: str) -> dict[str, Any]:
     assert spec is not None
     direction = pin.get("direction_deg")
     if direction is not None and (
-        not is_number(direction) or float(direction) not in (0.0, 90.0, 180.0, 270.0)
+        not is_finite_number(direction)
+        or float(direction) not in (0.0, 90.0, 180.0, 270.0)
     ):
         raise RouteError(f"{where}.direction_deg must be one of 0, 90, 180, 270")
     return {
@@ -113,7 +114,7 @@ def parse_request(request: Any, request_dir: str) -> dict[str, Any]:
     _check_keys(routing, ("layer_role", "width_um"), "request.routing")
     layer_role = _require_str(routing, "layer_role", "request.routing")
     width_um = routing.get("width_um")
-    if not is_number(width_um) or float(width_um) <= 0:
+    if not is_finite_number(width_um) or float(width_um) <= 0:
         raise RouteError("request.routing.width_um is required (a number > 0)")
 
     raw_nets = request.get("nets")

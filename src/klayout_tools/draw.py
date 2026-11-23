@@ -22,7 +22,15 @@ import os
 from typing import Any
 
 from ._jsonnum import is_int, is_number
-from ._layout import load_layout, resolve_top_cell, write_layout
+from ._layout import write_layout
+from .draw_base import (
+    _base_report_fields,
+    _erase_base,
+    _parse_base_params,
+    _seed_layout,
+)
+from .draw_validation import ANNOTATION_KEY_PREFIX as ANNOTATION_KEY_PREFIX
+from .draw_validation import DrawError, _reject_unknown_keys
 
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
 REQUEST_SCHEMA = "klt.draw.request/1"
@@ -45,29 +53,24 @@ NOT_DESIGN_LEGAL_WARNING = (
     "were applied; this cell is not guaranteed to be design-legal"
 )
 
-#: Prefix reserved for caller annotations. JSON has no comment syntax, so a
-#: request file checked into a repository (the motivating case: a known-bad DRC
-#: fixture whose dimensions must stay "wrong") has nowhere to record *why* it is
-#: shaped the way it is. Any key beginning with this prefix -- ``_purpose``,
-#: ``_expected_rules``, a per-shape ``_rule`` note -- is accepted and ignored
-#: everywhere in the request, at every nesting level, and is guaranteed never to
-#: be given meaning by a future version. Every *other* unrecognised key is an
-#: application error (issue #950), so a typo in a real key (``rect_nm`` for
-#: ``rect_um``) is caught instead of silently dropped. Same posture as
-#: ``klt gen-compose``'s ``request.pdk`` (``gen_compose._ALLOWED_PDK_KEYS``).
-ANNOTATION_KEY_PREFIX = "_"
-
 #: Allowed keys per request object, enforced by :func:`_reject_unknown_keys`.
 #: See ``docs/cli/draw.md`` -> "Unrecognised keys".
 _ALLOWED_REQUEST_KEYS = frozenset({"schema", "params", "options"})
 _ALLOWED_PARAMS_KEYS = frozenset(
-    {"dbu_um", "shapes", "labels", "base_gds", "base_cell", "erase_um"}
+    {
+        "dbu_um",
+        "shapes",
+        "labels",
+        "base_gds",
+        "base_cell",
+        "erase_um",
+        "keep_hierarchy",
+    }
 )
 _ALLOWED_OPTIONS_KEYS = frozenset({"cell_name", "output"})
 _ALLOWED_SHAPE_KEYS = frozenset({"layer", "name", "rect_um", "polygon_um", "array"})
 _ALLOWED_ARRAY_KEYS = frozenset({"pitch_um", "count"})
 _ALLOWED_LABEL_KEYS = frozenset({"layer", "text", "at_um"})
-_ALLOWED_ERASE_KEYS = frozenset({"rect_um", "layer"})
 
 #: Allow-list per ``_shape_layer``/``draw`` entry kind, so shapes and labels are
 #: each held to their own key set rather than a permissive union.
@@ -75,40 +78,6 @@ _ALLOWED_ENTRY_KEYS: dict[str, frozenset[str]] = {
     "shape": _ALLOWED_SHAPE_KEYS,
     "label": _ALLOWED_LABEL_KEYS,
 }
-
-
-def _is_annotation_key(key: Any) -> bool:
-    """True for a reserved caller-annotation key (see :data:`ANNOTATION_KEY_PREFIX`)."""
-    return isinstance(key, str) and key.startswith(ANNOTATION_KEY_PREFIX)
-
-
-def _reject_unknown_keys(
-    mapping: dict[Any, Any], allowed: frozenset[str], context: str
-) -> None:
-    """Raise :class:`DrawError` if ``mapping`` carries an unrecognised key.
-
-    Keys beginning with :data:`ANNOTATION_KEY_PREFIX` are the documented escape
-    hatch and are always accepted. Everything else must be in ``allowed``.
-    """
-    unknown = [k for k in mapping if k not in allowed and not _is_annotation_key(k)]
-    if not unknown:
-        return
-    raise DrawError(
-        f"{context} has unknown key(s): {', '.join(sorted(str(k) for k in unknown))}"
-        f" -- allowed: {', '.join(sorted(allowed))}"
-        f" (keys beginning with '{ANNOTATION_KEY_PREFIX}' are reserved for "
-        "caller annotations and ignored)"
-    )
-
-
-class DrawError(Exception):
-    """A ``klt draw`` request could not be satisfied.
-
-    Raised for a malformed request (bad shape/label description, empty
-    ``shapes``, an unwritable output path, ...). The CLI layer turns it into
-    the documented error envelope; it is importable so callers embedding the
-    library can ``except DrawError``.
-    """
 
 
 def load_params_arg(value: str | None) -> dict[str, Any]:
@@ -136,7 +105,7 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise DrawError(f"could not read params file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise DrawError(f"params file '{value}' is not valid JSON: {exc}") from exc
@@ -177,18 +146,17 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
             "options": {"cell_name": "TOP", "output": "out.gds"},
         }
 
-    ``params.dbu_um`` and ``options`` are optional; ``params.shapes`` is
-    required and must be non-empty -- unless ``params.base_gds`` is given
-    (issue #3378), which seeds the output from an existing stream: the base
-    cell is flattened into the output cell, every ``params.erase_um`` window
-    (``{"rect_um": [x0, y0, x1, y1], "layer": [L, D]}``, ``layer`` optional =
-    all layers) is subtracted from it, and ``shapes``/``labels`` are then added
-    on top. ``params.base_cell`` selects the base cell (default: its sole top
-    cell). With ``base_gds`` set, ``shapes`` may be empty if ``erase_um`` is
-    not. Omitting ``base_gds``/``base_cell``/``erase_um`` leaves the original
-    behaviour untouched. Returns a dict matching the documented
-    response schema (see ``docs/cli/draw.md``). Raises :class:`DrawError` for a
-    malformed request or a write failure.
+    Supply ``params.base_gds`` to start from an existing stream.
+    ``params.base_cell`` selects the input cell and defaults to its sole top
+    cell. By default, draw flattens that cell and subtracts any
+    ``params.erase_um`` windows before adding shapes and labels. Set
+    ``params.keep_hierarchy`` to preserve child instances and add shapes and
+    labels directly to the output top cell. Erase windows require flattening.
+    ``params.shapes`` must be non-empty unless the request specifies at least one
+    erase window.
+
+    Returns the response documented in ``docs/cli/draw.md``. Raises
+    :class:`DrawError` for a malformed request or a write failure.
 
     Unrecognised keys are **rejected** at every level of the request, so a typo
     in an optional key is an error rather than a silently-dropped value. Keys
@@ -210,7 +178,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         raise DrawError("request.options must be a JSON object")
     _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
-    base_gds, base_cell, erase_windows = _parse_base_params(params)
+    base_gds, base_cell, erase_windows, keep_hierarchy = _parse_base_params(params)
 
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
@@ -237,7 +205,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
 
     layout = kdb.Layout()
     top, base_name, dbu_um = _seed_layout(
-        layout, kdb, cell_name, dbu_um, params, base_gds, base_cell
+        layout, cell_name, dbu_um, params, base_gds, base_cell, keep_hierarchy
     )
 
     # Track per-(layer, datatype) shape counts and names for the response, in
@@ -331,26 +299,6 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
-def _parse_base_params(params: dict[str, Any]) -> tuple[Any, Any, list]:
-    """Validate ``base_gds``/``base_cell``/``erase_um``; return them parsed.
-
-    Returns ``(base_gds, base_cell, erase_windows)``; ``base_gds`` is ``None``
-    (and the windows empty) when no base was requested.
-    """
-    base_gds = params.get("base_gds")
-    base_cell = params.get("base_cell")
-    if base_gds is None:
-        for key in ("base_cell", "erase_um"):
-            if params.get(key) is not None:
-                raise DrawError(f"params.{key} requires params.base_gds")
-        return None, base_cell, []
-    if not isinstance(base_gds, str) or not base_gds:
-        raise DrawError("params.base_gds must be a non-empty string")
-    if base_cell is not None and (not isinstance(base_cell, str) or not base_cell):
-        raise DrawError("params.base_cell must be a non-empty string")
-    return base_gds, base_cell, _parse_erase(params.get("erase_um"))
-
-
 def _resolve_shapes(params: dict[str, Any], base_gds: Any, erase_windows: list) -> list:
     """Return ``params.shapes``, enforcing the non-empty rule (relaxed for erases)."""
     shapes = params.get("shapes")
@@ -369,139 +317,6 @@ def _resolve_shapes(params: dict[str, Any], base_gds: Any, erase_windows: list) 
         "params.shapes must not be empty -- `klt draw` will not write an "
         "empty layout (nothing to prove a DRC flow against)"
     )
-
-
-def _seed_layout(layout, kdb, cell_name, dbu_um, params, base_gds, base_cell):
-    """Create the output top cell; return ``(top, base_cell_name, dbu_um)``.
-
-    Without a base this is an empty cell at ``dbu_um`` (``base_cell_name`` is
-    ``None``). With a base, the base cell is flattened into the new top cell and
-    the base's dbu wins (an explicit, differing ``params.dbu_um`` is an error).
-    The base cell's *name* is returned, not the cell: the base layout dies with
-    this call.
-    """
-    if base_gds is None:
-        layout.dbu = dbu_um
-        return layout.create_cell(cell_name), None, dbu_um
-    base = load_layout(base_gds, DrawError)
-    if params.get("dbu_um") is not None and abs(base.dbu - dbu_um) > 1e-12:
-        raise DrawError(
-            f"params.dbu_um ({dbu_um}) differs from the base layout's "
-            f"dbu ({base.dbu}) -- omit it to use the base's"
-        )
-    base_top = resolve_top_cell(base, base_cell, DrawError, path=base_gds)
-    layout.dbu = base.dbu
-    top = layout.create_cell(cell_name)
-    top.copy_tree(base_top)
-    top.flatten(True)
-    return top, base_top.name, base.dbu
-
-
-def _erase_base(
-    top, layout, erase_windows, to_dbu, kdb, layer_order, layer_counts, layer_names
-) -> tuple[int, int]:
-    """Apply every erase window, then seed the per-layer report from what remains.
-
-    Returns ``(erased_shapes, erased_labels)``. A no-op (``(0, 0)``) when there
-    is no base -- the top cell is empty -- so the caller needs no branch.
-    """
-    erased_shapes = 0
-    erased_labels = 0
-    for window, scope in erase_windows:
-        n_shapes, n_labels = _erase(top, layout, window, scope, to_dbu, kdb)
-        erased_shapes += n_shapes
-        erased_labels += n_labels
-    for idx in layout.layer_indexes():
-        info = layout.get_info(idx)
-        count = sum(1 for sh in top.shapes(idx).each() if not sh.is_text())
-        if count:
-            pair = (info.layer, info.datatype)
-            layer_order.append(pair)
-            layer_counts[pair] = count
-            layer_names[pair] = info.name or None
-    return erased_shapes, erased_labels
-
-
-def _base_report_fields(base_gds, base_name, erased_shapes, erased_labels) -> dict:
-    """Additive response fields for a base run; ``{}`` when no base was used."""
-    if base_gds is None:
-        return {}
-    return {
-        "base_gds": base_gds,
-        "base_cell": base_name,
-        "erased_shape_count": erased_shapes,
-        "erased_label_count": erased_labels,
-    }
-
-
-def _parse_erase(raw: Any) -> list[tuple[tuple[float, float, float, float], Any]]:
-    """Validate ``params.erase_um`` into ``[((x0, y0, x1, y1), layer_or_None)]``."""
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise DrawError("params.erase_um must be a list")
-    windows = []
-    for i, entry in enumerate(raw):
-        if not isinstance(entry, dict):
-            raise DrawError(f"erase_um[{i}] must be a JSON object")
-        _reject_unknown_keys(entry, _ALLOWED_ERASE_KEYS, f"erase_um[{i}]")
-        rect = entry.get("rect_um")
-        if (
-            not isinstance(rect, list)
-            or len(rect) != 4
-            or any(not is_number(v) for v in rect)
-        ):
-            raise DrawError(
-                f"erase_um[{i}].rect_um must be [x0, y0, x1, y1] of numbers"
-            )
-        layer = entry.get("layer")
-        if layer is not None and (
-            not isinstance(layer, list)
-            or len(layer) != 2
-            or any(not is_int(v) or v < 0 for v in layer)
-        ):
-            raise DrawError(
-                f"erase_um[{i}].layer must be a [layer, datatype] pair of "
-                "non-negative integers when present"
-            )
-        x0, x1 = sorted((rect[0], rect[2]))
-        y0, y1 = sorted((rect[1], rect[3]))
-        windows.append(((x0, y0, x1, y1), None if layer is None else tuple(layer)))
-    return windows
-
-
-def _erase(top, layout, window, scope, to_dbu, kdb) -> tuple[int, int]:
-    """Subtract one ``window`` (microns) from ``top``; return (shapes, labels) hit.
-
-    Only shapes whose interior overlaps the window are touched: each is replaced
-    by its boolean difference with the window (a straddling polygon is clipped,
-    not dropped). Texts whose anchor lies inside the closed window are removed.
-    ``scope`` is a ``(layer, datatype)`` pair or ``None`` for all layers.
-    """
-    box = kdb.Box(*(to_dbu(v) for v in window))
-    win = kdb.Region(box)
-    erased_shapes = 0
-    erased_labels = 0
-    for idx in layout.layer_indexes():
-        info = layout.get_info(idx)
-        if scope is not None and (info.layer, info.datatype) != scope:
-            continue
-        shapes = top.shapes(idx)
-        for shape in list(shapes.each_touching(box)):
-            if shape.is_text():
-                if box.contains(shape.text_trans.disp.to_p()):
-                    shapes.erase(shape)
-                    erased_labels += 1
-                continue
-            region = kdb.Region()
-            region.insert(shape.polygon)
-            if (region & win).is_empty():
-                continue
-            shapes.erase(shape)
-            for poly in (region - win).each():
-                shapes.insert(poly)
-            erased_shapes += 1
-    return erased_shapes, erased_labels
 
 
 def _resolve_dbu(value: Any) -> float:

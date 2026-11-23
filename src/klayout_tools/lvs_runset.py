@@ -31,8 +31,8 @@ each side. A runset that recognizes no device on either side yields
 ``status: "inconclusive"`` (exit 4) with ``coverage.nothing_checked`` set --
 a clean-looking empty compare is not evidence.
 
-This module has no load-time dependency on ``lvs.py`` (it imports from it
-inside functions), mirroring ``lvs_netgen.py``.
+Runset validation uses the shared errors and categories from ``lvs_base``.
+The compare path imports runner helpers when it needs them.
 """
 
 from __future__ import annotations
@@ -46,8 +46,14 @@ from typing import TYPE_CHECKING, Any
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
 from .env_provenance import repo_relative_path, repo_root_for
+from .lvs_base import (
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
-from .lvs_runset_census import _build_coverage, _class_census
+from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
+from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -63,9 +69,8 @@ _KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
 #: ``-rd`` names this engine sets itself; ``deck_vars`` may not override them.
 RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
 
-#: Request ``options`` keys this engine understands. Anything else is refused
-#: rather than silently ignored (an option the caller believes is in force
-#: but is not would be worse than not supporting it).
+#: Request ``options`` keys this engine understands; anything else is refused,
+#: not silently ignored -- an option believed in force but absent is worse.
 _ALLOWED_OPTIONS = ("runset_timeout_s", "klayout_binary")
 
 _ERROR_LINE_RE = re.compile(r"^\s*ERROR\b", re.IGNORECASE)
@@ -89,36 +94,7 @@ def _sha_prefixed(path: str | None) -> str | None:
     return f"sha256:{digest}" if digest is not None else None
 
 
-def _status_name(status: Any) -> str:
-    """Stable name of a ``NetlistCrossReference.Status`` value."""
-    return str(status)
-
-
-def _name(obj: Any) -> str | None:
-    if obj is None:
-        return None
-    name = getattr(obj, "name", None)
-    if callable(name):
-        name = name()
-    if name:
-        return str(name)
-    return None
-
-
-def _net_label(net: Any) -> str | None:
-    if net is None:
-        return None
-    return _name(net) or f"${net.cluster_id}"
-
-
-def _device_label(device: Any) -> str | None:
-    if device is None:
-        return None
-    return _name(device) or str(device.id())
-
-
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
-    from .lvs import LvsError
 
     if not isinstance(raw, str) or not raw:
         raise LvsError(f"engine '{RUNSET_ENGINE}' requires {label}")
@@ -129,7 +105,6 @@ def _existing_file(raw: Any, request_dir: str, label: str) -> str:
 
 
 def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
-    from .lvs import LvsError
 
     raw_vars = raw_vars or {}
     if not isinstance(raw_vars, dict):
@@ -148,7 +123,6 @@ def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
 
 
 def _parse_options(raw: Any) -> dict[str, Any]:
-    from .lvs import LvsError
 
     options = raw or {}
     if not isinstance(options, dict):
@@ -185,7 +159,6 @@ def _validate_request(
 
 
 def _resolve_klayout_binary(options: dict[str, Any], request_dir: str) -> str:
-    from .lvs import LvsError
 
     resolved = resolve_tool_binary(
         "klayout",
@@ -220,7 +193,6 @@ def _run_runset(
     """Launch the runset; return ``(lvsdb_path, completed)``. Raises
     ``LvsError`` for a launch failure, timeout, or no database written (a
     non-zero exit that did write one is returned; the caller reads it)."""
-    from .lvs import LvsError
 
     # The app runs with cwd=work_dir (below), so path arguments must not
     # depend on klt's own cwd.
@@ -246,8 +218,8 @@ def _run_runset(
     for name, value in deck_vars.items():
         cmd.extend(["-rd", f"{name}={value}"])
     try:
-        # cwd=work_dir: the runset writes side files (``<top>_extracted.cir``)
-        # into its cwd; keep them in the temp dir that is removed afterwards.
+        # cwd=work_dir catches only *cwd-relative* side files; it is NOT
+        # where ``<top>_extracted.cir`` lands (#5481; see extract_runset.py).
         completed = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s, cwd=work_dir
         )
@@ -290,182 +262,6 @@ def _nonzero_exit_message(
     )
 
 
-def _device_params(device: Any) -> dict[str, float]:
-    cls = device.device_class()
-    return {
-        p.name: device.parameter(p.id())
-        for p in cls.parameter_definitions()
-        if p.is_primary
-    }
-
-
-def _ok_statuses() -> tuple[Any, Any]:
-    import klayout.db as kdb
-
-    x = kdb.NetlistCrossReference
-    return (x.Match, x.MatchWithWarning)
-
-
-def _paired_ok(pair: Any) -> bool:
-    return (
-        pair.first() is not None
-        and pair.second() is not None
-        and pair.status() in _ok_statuses()
-    )
-
-
-def _device_findings(xref: Any, cp: Any, cname: dict[str, Any]) -> list[dict[str, Any]]:
-    out = []
-    for dp in xref.each_device_pair(cp):
-        d1, d2 = dp.first(), dp.second()
-        if _paired_ok(dp):
-            continue
-        dev = d1 if d1 is not None else d2
-        dev_echo = {
-            "layout": _device_label(d1),
-            "reference": _device_label(d2),
-            "class": dev.device_class().name,
-        }
-        if d1 is None or d2 is None:
-            side = "reference" if d1 is None else "layout"
-            out.append(
-                _mismatch(
-                    "device.unmatched",
-                    "error",
-                    f"{side} device '{_device_label(dev)}' (class "
-                    f"'{dev.device_class().name}') has no counterpart",
-                    side,
-                    device=dev_echo,
-                    circuit=cname,
-                )
-            )
-        else:
-            out.append(
-                _mismatch(
-                    "device.property",
-                    "error",
-                    f"devices '{_device_label(d1)}' / '{_device_label(d2)}' "
-                    "were paired but do not compare equal",
-                    "both",
-                    device=dev_echo,
-                    details={
-                        "layout_parameters": _device_params(d1),
-                        "reference_parameters": _device_params(d2),
-                    },
-                    circuit=cname,
-                )
-            )
-    return out
-
-
-def _net_findings(xref: Any, cp: Any, cname: dict[str, Any]) -> list[dict[str, Any]]:
-    out = []
-    for np_ in xref.each_net_pair(cp):
-        n1, n2 = np_.first(), np_.second()
-        if _paired_ok(np_):
-            continue
-        side = (
-            "both"
-            if n1 is not None and n2 is not None
-            else ("reference" if n1 is None else "layout")
-        )
-        what = (
-            f"{side} net '{_net_label(n2 if n1 is None else n1)}' has no counterpart"
-            if side != "both"
-            else f"nets '{_net_label(n1)}' / '{_net_label(n2)}' were paired but "
-            "their connectivity differs"
-        )
-        out.append(
-            _mismatch(
-                "net.unmatched",
-                "error",
-                what,
-                side,
-                net={"layout": _net_label(n1), "reference": _net_label(n2)},
-                circuit=cname,
-            )
-        )
-    return out
-
-
-def _pin_findings(xref: Any, cp: Any, cname: dict[str, Any]) -> list[dict[str, Any]]:
-    out = []
-    for pp in xref.each_pin_pair(cp):
-        p1, p2 = pp.first(), pp.second()
-        if _paired_ok(pp):
-            continue
-        side = (
-            "both"
-            if p1 is not None and p2 is not None
-            else ("reference" if p1 is None else "layout")
-        )
-        out.append(
-            _mismatch(
-                "pin.unmatched",
-                "error",
-                f"pin '{_name(p1) or _name(p2)}' of circuit "
-                f"'{cname['layout']}' is not matched",
-                side,
-                net={"layout": _name(p1), "reference": _name(p2)},
-                circuit=cname,
-            )
-        )
-    return out
-
-
-def _circuit_findings(xref: Any, cp: Any) -> tuple[list[dict[str, Any]], bool]:
-    """Findings for one circuit pair and whether the runset left it
-    uncompared."""
-    import klayout.db as kdb
-
-    x = kdb.NetlistCrossReference
-    first, second = cp.first(), cp.second()
-    cname = {"layout": _name(first), "reference": _name(second)}
-    status = cp.status()
-    if first is None or second is None:
-        side = "layout" if second is None else "reference"
-        return [
-            _mismatch(
-                "topology",
-                "error",
-                f"circuit '{cname[side]}' exists only on the {side} side",
-                side,
-                circuit=cname,
-            )
-        ], False
-    if status in (x.Skipped, x.None_):
-        return [
-            _mismatch(
-                CATEGORY_RUNSET_INCOMPLETE,
-                "error",
-                f"circuit '{cname['layout']}' was not compared by the runset "
-                f"(status {_status_name(status)})",
-                "both",
-                circuit=cname,
-            )
-        ], True
-    found = (
-        _device_findings(xref, cp, cname)
-        + _net_findings(xref, cp, cname)
-        + _pin_findings(xref, cp, cname)
-    )
-    if not found and status not in _ok_statuses():
-        # The circuit's own status says no-match but no finer-grained pair
-        # explains it: still a mismatch, and say so.
-        found.append(
-            _mismatch(
-                "topology",
-                "error",
-                f"circuit '{cname['layout']}' does not match (status "
-                f"{_status_name(status)}) with no finer-grained pair "
-                "reporting why",
-                "both",
-                circuit=cname,
-            )
-        )
-    return found, False
-
-
 def _classify(
     xref: kdb.NetlistCrossReference,
 ) -> tuple[list[dict[str, Any]], bool, bool]:
@@ -506,7 +302,6 @@ def _pair_counts(xref: Any) -> dict[str, dict[str, int]]:
 def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     """Every net the runset's compare paired successfully, in ``klt lvs``'s
     documented ``net_correspondence[]`` shape (issue #2870).
-
     Item 11's LVS half proves a supply "took part in the compare" by finding
     it paired here (``signoff_power_delivery._lvs_reference_carries_supplies``),
     so this lists only *matched* nets -- same rule as the curated engine's
@@ -537,22 +332,19 @@ def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     )
 
 
-#: ``power_pins_derivation.rule`` for this engine: the runset has no library
-#: pin-order data, so the power/ground universe is the pins the extracted
-#: subcircuits declare whose *names* classify as supplies.
+#: ``power_pins_derivation.rule`` for this engine: no library pin-order data,
+#: so the power/ground universe is the extracted subcircuits' supply-named pins.
 POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS = "named-power-ground-pin-of-extracted-subcircuit"
 
 
 def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
-    """The ``power_connectivity`` block for the runset's own extracted
-    netlist (``LayoutVsSchematic.netlist()``, issue #3206), via the same
-    :mod:`.lvs_power` walk the ``klayout`` engine uses: every extracted
-    subcircuit instance's power/ground pins must reach one consistent net.
-
-    ``unchecked`` (with a reason) when there is no extracted netlist, or it
-    holds no subcircuit instance with a supply-named pin -- a flat
-    transistor-level extraction has no instance pins to walk, and "no
-    evidence" is never reported as a clean verdict.
+    """The ``power_connectivity`` block for the runset's own extracted netlist
+    (``LayoutVsSchematic.netlist()``, issue #3206), via the same :mod:`.lvs_power` walk
+    the ``klayout`` engine uses: every extracted subcircuit instance's power/ground pins
+    must reach one consistent net. ``unchecked`` (with a reason) when there is no
+    extracted netlist, or it holds no subcircuit instance with a supply-named pin -- a
+    flat transistor-level extraction has no instance pins to walk, and "no evidence" is
+    never reported as a clean verdict.
     """
     from .lvs_power import (
         _power_connectivity_findings,
@@ -593,7 +385,6 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
             "instance-level power connectivity to check",
             derivation if universe else None,
         )
-    from .lvs import POWER_STATUS_MATCH, POWER_STATUS_MISMATCH
 
     findings = _power_connectivity_findings(rows, None)
     return {
@@ -611,14 +402,12 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
 
 
 def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str, Any]:
-    """Verdict for a db with no cross-reference whose extracted netlist holds
-    no devices: the runset recognized nothing, so its compare step never ran.
-
-    The layout side is empty and every reference device is an unmatched
-    ``device.unmatched`` finding (issue #4081). The reference netlist is the
-    one stored in the db when present, else ``reference_path`` parsed as SPICE.
-    ``{}`` when no reference netlist can be obtained (the caller then raises
-    its "no cross-reference" error).
+    """Verdict for a db with no cross-reference whose extracted netlist holds no
+    devices: the runset recognized nothing, so its compare step never ran. The layout
+    side is empty and every reference device is an unmatched ``device.unmatched``
+    finding (issue #4081). The reference netlist is the one stored in the db when
+    present, else ``reference_path`` parsed as SPICE. ``{}`` when no reference netlist
+    can be obtained (the caller then raises its "no cross-reference" error).
     """
     import klayout.db as kdb
 
@@ -697,20 +486,16 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
 
 
 def read_lvsdb_verdict(
-    lvsdb_path: str, reference_path: str | None = None
+    lvsdb_path: str, reference_path: str | None = None, *, sg13g2: bool = False
 ) -> dict[str, Any]:
-    """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
-    coverage from its cross-reference. Raises ``LvsError`` when the database
-    is unreadable or carries no cross-reference.
-
-    A db with no cross-reference *and no extracted layout devices* (the runset
-    recognized nothing, so it never compared) is graded instead: see
-    :func:`_empty_extraction_verdict`. ``reference_path`` is the reference
-    SPICE, used when the db does not carry the reference netlist.
+    """Read ``lvsdb_path`` and derive the verdict, mismatches, census and coverage from
+    its cross-reference. Raises ``LvsError`` when the database is unreadable or carries
+    no cross-reference. A db with no cross-reference *and no extracted layout devices*
+    (the runset recognized nothing, so it never compared) is graded instead: see
+    :func:`_empty_extraction_verdict`. ``reference_path`` is the reference SPICE, used
+    when the db does not carry the reference netlist.
     """
     import klayout.db as kdb
-
-    from .lvs import LvsError
 
     l2n = kdb.LayoutVsSchematic()
     try:
@@ -752,7 +537,15 @@ def read_lvsdb_verdict(
         status = STATUS_INCONCLUSIVE
     else:
         status = STATUS_MATCH
+    from .lvs_passive_pairing import runset_pairing
+
+    counts = _pair_counts(xref)
     return {
+        **(
+            {"sg13g2_passive_pairing": runset_pairing(xref, counts["devices"], status)}
+            if sg13g2
+            else {}
+        ),
         "status": status,
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(l2n.netlist()),
@@ -764,7 +557,7 @@ def read_lvsdb_verdict(
             layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
-        "counts": _pair_counts(xref),
+        "counts": counts,
         "net_correspondence": _net_correspondence(xref),
         "top": _first_circuit_name(xref, "first"),
         "reference_top": _first_circuit_name(xref, "second"),
@@ -790,9 +583,8 @@ _DEVICE_LIST_ITEM_RE = re.compile(r"""["']([^"']+)["']""")
 def _deck_device_list(deck_file: str) -> set[str]:
     """Upper-cased names in the runset's ``DEVICE_LIST = [...]`` -- the
     subcircuits its SPICE reader delegate converts to devices, including ones
-    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``) so that no
-    declared device class carries the called name. ``set()`` when the deck
-    has no such list or cannot be read."""
+    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``). ``set()`` when
+    the deck has no such list or cannot be read."""
     try:
         with open(deck_file, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -805,41 +597,19 @@ def _deck_device_list(deck_file: str) -> set[str]:
     return {n.upper() for n in _DEVICE_LIST_ITEM_RE.findall(body)}
 
 
-def _unresolved_reference_calls(
-    reference_path: str, top: str | None, converted_names: set[str]
-) -> list[dict[str, Any]]:
-    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
-    calls the runset neither converted nor could resolve.
-
-    The reference is re-read with the plain SPICE reader (hierarchy intact).
-    A callee the runset itself converts (``converted_names``, upper-cased:
-    its declared device classes plus the deck's ``DEVICE_LIST``) is not
-    reported. ``[]`` when the reference cannot be re-read: the
-    runset's own verdict stands."""
-    import klayout.db as kdb
-
-    from .lvs import _unresolved_reference_subckt_calls
-
-    netlist = kdb.Netlist()
-    try:
-        netlist.read(reference_path, kdb.NetlistSpiceReader())
-    except Exception:
-        return []
-    return _unresolved_reference_subckt_calls(
-        netlist,
-        converted_names,
-        form="spice",
-        top=top,
-        reference_path=reference_path,
-    )
-
-
 def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION, LvsError, _reference_conversion_echo
+    from .lvs import (
+        _DECK_FILE_GIVEN_KEY,
+        SCHEMA_VERSION,
+        _reference_conversion_echo,
+        _unresolved_reference_subckt_calls,
+    )
 
+    # Issue #5795: the caller's own --deck-file form, stashed by _merge_deck_flags.
+    deck_file_echo = request.pop(_DECK_FILE_GIVEN_KEY, None) or request.get("deck_file")
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
     )
@@ -847,7 +617,8 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs_runset_reference import convert_reference
+    from .lvs_passive_pairing import runset_report_field
+    from .lvs_runset_reference import _unresolved_reference_calls, convert_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
@@ -864,7 +635,13 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             work_dir=work_dir,
         )
         try:
-            verdict = read_lvsdb_verdict(lvsdb_path, runset_reference)
+            diagnose_passives = (
+                request["reference"].get("deck") == "sg13g2"
+                or os.path.basename(deck_file) == "sg13g2.lvs"
+            )
+            verdict = read_lvsdb_verdict(
+                lvsdb_path, runset_reference, sg13g2=diagnose_passives
+            )
         except LvsError as exc:
             if completed.returncode == 0:
                 raise
@@ -872,12 +649,14 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
         # Checked on the file the runset saw, before work_dir goes away.
+        _attach_reference_source(verdict, runset_reference, deck_file)
         declared = verdict["coverage"]["declared_device_classes"]
         unresolved = _unresolved_reference_calls(
             runset_reference,
             request["reference"].get("top") and (top or request["reference"]["top"]),
             {str(n).upper() for side in declared.values() for n in side or []}
             | _deck_device_list(deck_file),
+            _unresolved_reference_subckt_calls,
         )
     finally:
         import shutil
@@ -903,7 +682,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "released": None,
     }
     runset_block = {
-        "deck_file": request["deck_file"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "content_hash": _sha_prefixed(deck_file),
         "klayout_application_version": _application_version(binary),
@@ -924,7 +703,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
-        "deck_file": request["deck_file"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "options": {k: options[k] for k in _ALLOWED_OPTIONS if k in options},
         "hints_applied": None,
@@ -934,6 +713,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "device_parameter_coverage": None,
         "coverage": verdict["coverage"],
         "device_census": verdict["device_census"],
+        **runset_report_field(verdict, diagnose_passives),
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -943,7 +723,9 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "environment": {
             "engine": RUNSET_ENGINE,
             "engine_version": runset_block["klayout_application_version"],
-            "klayout_binary": binary,
+            # Issue #5795: basename in both modes (#3991 chose it for
+            # portable only); the version stays in engine_version above.
+            "klayout_binary": os.path.basename(binary),
             "netgen_binary": None,
             "layout_sha256": sha256_file(layout),
             "reference_sha256": sha256_file(reference),

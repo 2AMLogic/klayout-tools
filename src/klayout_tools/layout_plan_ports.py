@@ -1,13 +1,29 @@
 """Port-name and pin/unrouted-reason helpers for ``layout_plan_execute``
-(#4966): device-owned port lookup, netlist-port pin promotion, and parsing
-of ``compose()``'s unrouted-net notes. Split out to keep
-``layout_plan_execute.py`` under its file-size ceiling.
+(#4966): device-owned port lookup, netlist-port pin promotion, parsing
+of ``compose()``'s unrouted-net notes, the per-group param-resolution
+helpers (netlist-derived size params, #5765) and the ``diff_pair``
+distinct-legs guard (#5765). Split out to keep ``layout_plan_execute.py``
+under its file-size ceiling.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from ._jsonnum import is_number
+from .layout_plan_flavors import (
+    _MOS_FLAVOR_GENERATORS as _MOS_FLAVOR_GENERATORS,
+)
+from .layout_plan_flavors import (
+    apply_derived_flavors as apply_derived_flavors,
+)
+from .layout_plan_flavors import (
+    apply_mos_flavor as apply_mos_flavor,
+)
+from .layout_plan_flavors import (
+    apply_resistor_flavor as apply_resistor_flavor,
+)
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -73,6 +89,93 @@ def apply_gate_contact(
     if "gate_contact" in overrides:
         return []
     return [gate_contact_warning(group["id"])]
+
+
+#: Digest dimensions accepted by each generator, in micrometres.
+_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
+    "mos_array": {"L": "l_um", "W": "w_um"},
+    "diff_pair": {"L": "l_um", "W": "w_um"},
+    "esd_device": {"L": "l_um", "W": "finger_width_um"},
+    "res_array": {"L": "length_um", "W": "width_um"},
+}
+
+
+def _netlist_derived_size_params(
+    generator: str, device_params: dict[str, Any]
+) -> dict[str, float]:
+    """Map positive digest dimensions to generator parameters.
+
+    KLayout reports zero for the unspecified L and W of a bare SPICE resistor.
+    Omitting those dimensions lets the generator apply its geometry defaults.
+    """
+    targets = _SIZE_PARAM_TARGETS.get(generator)
+    if not targets:
+        return {}
+    resolved: dict[str, float] = {}
+    for digest_key, gen_param in targets.items():
+        value = device_params.get(digest_key)
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
+            resolved[gen_param] = float(value)
+    return resolved
+
+
+def diff_pair_leg_error(
+    group: dict[str, Any],
+    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+    *,
+    mirror: bool,
+) -> str | None:
+    """Reject a repeated MOS, folded fingers or shorted differential inputs.
+
+    The mirror form may share a gate when the two drains are distinct and one
+    is tied to that gate. Other generators use their own terminal conventions.
+    """
+    if group["generator"] != "diff_pair" or len(group["devices"]) < 2:
+        return None
+    resolved = [
+        (
+            device_ref["name"],
+            digest_devices_by_key.get((device_ref["name"], device_ref["device_class"])),
+        )
+        for device_ref in group["devices"]
+    ]
+    for index, (name_i, device_i) in enumerate(resolved):
+        for name_j, device_j in resolved[index + 1 :]:
+            if device_i is None or device_j is None:
+                # An unresolvable device reference is Phase B's own
+                # validation error (exit 1, "does not resolve"); skip it
+                # here exactly like derive_gate_contact does.
+                continue
+            left, right = device_i["terminals"], device_j["terminals"]
+            shared = {
+                t: left[t]
+                for t in ("G", "D")
+                if left.get(t) is not None and left.get(t) == right.get(t)
+            }
+            if (
+                mirror
+                and shared.keys() == {"G"}
+                and shared["G"] in (left.get("D"), right.get("D"))
+            ):
+                continue
+            if shared:
+                terminals = " and ".join(
+                    f"terminal {t} on net '{net}'" for t, net in shared.items()
+                )
+                return (
+                    f"device_groups (id '{group['id']}'): declared diff_pair "
+                    f"devices '{name_i}' and '{name_j}' are not electrically "
+                    f"distinct legs -- they share {terminals}. Differential "
+                    "inputs need separate gates and drains. A current mirror "
+                    "may share its diode-connected gate with params.mirror=true. "
+                    "Declare one digest device per leg, write the matched pair "
+                    "with no nf (or nf=1) and let params.splits "
+                    "do the folding -- or drive klt gen-compose directly with "
+                    "explicit connectivity[] (see "
+                    "docs/cli/layout-plan-execute.md)."
+                )
+    return None
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -188,8 +291,11 @@ def bind_ring_nets(
 
 #: Generators whose declared devices carry a MOS body (``B``) terminal *and*
 #: whose generated ``ports[]`` can expose a group-level tie to it -- the
-#: contacted ``TAP_PAD<k>`` pads a ring-less array draws (#4143), or, when the
-#: group draws its own guard ring instead, that ring's ``TAP_<side>`` ports.
+#: contacted ``TAP_PAD<k>`` pads a ring-less array draws (#4143), the one
+#: shared ``WELL_TAP`` port a ring-less pfet array draws on a family whose
+#: curated deck derives the tie from an in-well implant tap (#1473,
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES``), or, when the group
+#: draws its own guard ring instead, that ring's ``TAP_<side>`` ports.
 #: Exactly the generators ``layout_plan_execute._TERMINAL_SUFFIXES`` gives an
 #: ``S``/``D``/``G`` map (#5546).
 BODY_TIE_GENERATORS = frozenset({"mos_array", "diff_pair", "esd_device"})
@@ -202,6 +308,17 @@ BODY_TERMINAL = "B"
 #: :data:`_RING_TAP_PREFIX`, of which it is a prefix-extension.
 _TAP_PAD_PREFIX = "TAP_PAD"
 
+#: The one shared well-tie tap port a ring-less ``mos_array`` draws on a
+#: family whose curated deck derives the tie from an implant-covered active
+#: shape inside the well (#1473 -- sg13cmos5l today; see
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES``). ``gen_describe``'s own
+#: comment states why it is group-level: one pad ties every unit device's
+#: PMOS body in the array, so there is no ``U<i>_B``-per-unit port to
+#: resolve. Matched exactly, not by prefix -- unlike the two shapes around it
+#: this is a single fixed name, reported beside the port itself as
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_NET_LABEL``.
+_WELL_TAP_PORT_NAME = "WELL_TAP"
+
 #: A ``mos_array``/``diff_pair``/``esd_device`` guard ring's own tap port
 #: (``gen_describe._ring_ports`` is called with ``tap_prefix="TAP_"`` by all
 #: three). ``GAP_<side>`` -- a marker, never a conductor -- cannot collide.
@@ -212,24 +329,28 @@ def body_tie_port(ports: list[dict[str, Any]]) -> str | None:
     """The single generated port a group's body net should be bound to, or
     ``None`` when the generator drew no tie (#5546).
 
-    A ring-less array's ``TAP_PAD<k>`` pads win over a drawn ring's
-    ``TAP_<side>`` ports purely so the choice is stable if a generator ever
-    reports both -- today they are mutually exclusive
-    (``gen._optional_tap_pads`` returns ``None`` whenever a ring is drawn).
-    **One** port per group is enough either way, exactly as for
-    :func:`bind_ring_nets`: a group's pads all contact the one well (pfet) or
-    the one substrate (nfet), and a ring is a single conductor, so binding
-    more would only wire the tie to itself.
+    A ring-less array's ``TAP_PAD<k>`` pads (#4143) or shared ``WELL_TAP``
+    port (#1473, #5948) win over a drawn ring's ``TAP_<side>`` ports purely
+    so the choice is stable if a generator ever reports both -- today the
+    three are mutually exclusive: pads and the well tap are family-scoped
+    (``gen_layer_params._TAP_DISTANCE_FAMILIES`` /
+    ``_MOS_ARRAY_WELL_TAP_FAMILIES``), and ``gen._optional_tap_pads`` returns
+    ``None`` whenever a ring is drawn. **One** port per group is enough
+    either way, exactly as for :func:`bind_ring_nets`: a group's ties all
+    contact the one well (pfet) or the one substrate (nfet), and a ring is a
+    single conductor, so binding more would only wire the tie to itself.
     """
     names = [
         port["name"]
         for port in ports
         if isinstance(port, dict) and isinstance(port.get("name"), str)
     ]
-    for prefix in (_TAP_PAD_PREFIX, _RING_TAP_PREFIX):
-        for name in names:
-            if name.startswith(prefix):
-                return name
+    for name in names:
+        if name == _WELL_TAP_PORT_NAME or name.startswith(_TAP_PAD_PREFIX):
+            return name
+    for name in names:
+        if name.startswith(_RING_TAP_PREFIX):
+            return name
     return None
 
 
@@ -300,11 +421,12 @@ def bind_body_nets(
       exit 1) naming the group and the nets, rather than the silent short
       one shared tie would draw between them.
     * **No tie port** (a family with no tap-distance rule and no requested
-      ring, e.g. a ring-less sky130 array) -- one ``warnings[]`` entry per
-      untied body net, so the caller learns in this run that the bodies are
-      untied rather than from a later LVS compare. Suppressed for a net a
-      ``guard_ring`` group's own ``net`` (#5095) already names: the plan
-      ties it.
+      ring, e.g. a ring-less sky130 array -- or either flavor on a family
+      whose only drawn tie is the pfet well tap, like sg13cmos5l's nfet) --
+      one ``warnings[]`` entry per untied body net, so the caller learns in
+      this run that the bodies are untied rather than from a later LVS
+      compare. Suppressed for a net a ``guard_ring`` group's own ``net``
+      (#5095) already names: the plan ties it.
     """
     from .layout_plan_execute import LayoutPlanExecuteError
 

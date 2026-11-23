@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .sim_errors import SimError
+
 
 def _find_resumable(
     units: list[dict[str, Any]],
@@ -94,7 +96,7 @@ def _resolve_resumed(
 ) -> dict[int, dict[str, Any]]:
     """The ``--resume`` lookup of ``sim_decks.run_deck_request``: unit
     index -> completion record for every unit that can be skipped."""
-    from .sim import SimError, _probe_engine_version
+    from .sim import _probe_engine_version
 
     if backend == "remote":
         raise SimError(

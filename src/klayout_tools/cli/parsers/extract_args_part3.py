@@ -135,6 +135,31 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-param",
+        dest="device_params",
+        action="append",
+        default=None,
+        metavar="CLASS:PARAM=NAME[:SUFFIX]",
+        help=(
+            "with --engine klayout-runset, carry the measured KLayout "
+            "parameter PARAM of device CLASS onto every `X` call of that "
+            "class as `NAME=<value><SUFFIX>` (issue #5513), repeatable, e.g. "
+            "`--device-param sg13_hv_nmos:W=w:u`. <value> is the extractor's "
+            "measured value written unscaled (12 significant digits), in the "
+            "micron units devices[].params reports; SUFFIX is a SPICE scale suffix "
+            "(letters only) appended verbatim, empty if omitted -- `klt` "
+            "never guesses a PDK's unit or parameter spelling, so you state "
+            "both. Without it each call is parameter-free and the PDK "
+            "subcircuit's own defaults apply (the default, byte-identical to "
+            "before this flag existed). PARAM is case-sensitive and must be "
+            "one the class defines (an unknown one is an error, exit 1); "
+            "parameters left undeclared are still named in warnings[]. A "
+            "clean error (exit 1) under any other engine. The declarations "
+            "are echoed in the JSON response's `device_params` field. See "
+            "docs/cli/extract.md, 'Engine'."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -338,7 +363,7 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
             "recorded content_hash values, no extraction engine re-run. "
             "Combine with --rerun for full mode (re-run the extraction and "
             "diff verdict-bearing fields). Exits 0 if still consistent, 3 "
-            "if drifted -- see docs/cli/extract.md, '--check'"
+            "if drifted, or 4 if a recorded input is unavailable in cheap mode"
         ),
     )
     extract_parser.add_argument(

@@ -1,0 +1,1 @@
+- A sharded batch simulation marks a shard with missing remote metadata as lost and reports its shard index and job ID. Its unverified measurements stay out of the resume checkpoint (#6740).

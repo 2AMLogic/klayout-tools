@@ -30,6 +30,37 @@
 
 //! Small FST-conversion helpers shared by `build.rs`.
 
+/// The FST producer string identifies stores that reserve the writer's canonical
+/// NaN for unwritten real slots and use a different quiet NaN for explicit writes.
+pub(crate) const REAL_NAN_ENCODING: &str = " (explicit NaN v1)";
+pub(crate) const EXPLICIT_NAN: f64 = f64::from_bits(0x7ff8_0000_0000_0001);
+
+pub(crate) struct RealFrameFill {
+    tick: u64,
+    bits: u64,
+}
+
+impl RealFrameFill {
+    pub(crate) fn from_header(header: &fst_reader::FstHeader) -> Self {
+        let bits = if header.version.starts_with("klt-wave ")
+            && header.version.ends_with(REAL_NAN_ENCODING)
+        {
+            f64::NAN.to_bits()
+        } else {
+            // fst-writer 0.3.1 initialized real slots with eight ASCII 'x' bytes.
+            u64::from_le_bytes([b'x'; 8])
+        };
+        Self {
+            tick: header.start_time,
+            bits,
+        }
+    }
+
+    pub(crate) fn matches(&self, tick: u64, value: f64) -> bool {
+        tick == self.tick && value.to_bits() == self.bits
+    }
+}
+
 /// Parse a VCD `$timescale` string (e.g. "1ns", "10ps") into the FST
 /// format's signed power-of-ten exponent (e.g. -9 for ns, -10 for 10ns).
 pub fn timescale_to_exponent(ts: &str) -> i8 {

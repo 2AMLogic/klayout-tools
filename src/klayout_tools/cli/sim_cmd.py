@@ -23,9 +23,8 @@ Exit codes (see ``docs/cli/sim.md`` for the full table):
         incomplete/untrustworthy
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 
-Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2, per
-the spike's flagged open question -- see docs/cli/sim.md's "Exit codes"
-section for the reasoning.
+Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2 -- see
+docs/cli/sim.md's "Exit codes" section for the spike's flagged open question.
 
 ``--op-lint`` (issue #1718) runs the per-device operating-point sanity lint
 (:func:`klayout_tools.op_sanity.run_op_sanity`) on the *same request
@@ -34,9 +33,8 @@ It is a deliberately separate mode rather than an extra key on the sweep
 payload: the whole point is to be the cheap *first* thing an agent runs when
 a measurement misses, so it must be able to say "fail" on its own exit code
 rather than hiding a dead device inside an otherwise-passing sweep report.
-Its exit codes keep the same meaning as the sweep's (0 ran-and-clean,
-1 could not run, 3 real finding, 4 the analysis itself is untrustworthy) --
-see ``docs/cli/sim.md``'s "Operating-point lint" section.
+Its exit codes keep the sweep's meanings (see ``docs/cli/sim.md``'s
+"Operating-point lint" section).
 """
 
 import argparse
@@ -46,14 +44,16 @@ from typing import Any
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
-from ..sim import SimError, load_request, run_sim
-from ..sim_batch_async import read_job_status
+from ..sim import SimError, run_sim
+from ..sim_batch_plan import print_dry_run_plan_line
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
-from .sim_job_text import _print_job_status_text as _print_job_status_text
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success
+from .sim_job_status import _run_job_status as _run_job_status
 from .sim_measurement_text import print_measurement_head
+from .sim_op_lint_text import _print_op_lint_text as _print_op_lint_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
+from .sim_report_out import _write_report_out as _write_report_out
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -74,6 +74,7 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
         print(f"  {unit.get('corner_id') or unit['id']}{seeds}")
     for staged in report["staged_files"]:
         print(f"  stage: {staged['name']} ({staged['kind']})")
+    print_dry_run_plan_line(report)
     for warning in report["warnings"]:
         print(f"  warning: {warning}")
 
@@ -81,35 +82,34 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
 def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
     """Usage failures of the single-request form of ``klt sim`` (``None`` =
     the arguments are fine)."""
-    if args.request is None:
+    if args.request is None and (
+        getattr(args, "op_lint", False) or getattr(args, "job_status", None) is None
+    ):
         # Keep the pre---batch-set contract: a bare ``klt sim`` is an
         # argparse-style usage failure (stderr message, SystemExit(2)).
+        # ``--job-status`` alone is exempt (issue #5810): it needs no
+        # request file, resolving bucket/region/profile from the
+        # ``KLT_BATCH_*`` environment and the fleet config instead.
+        # ``--op-lint`` is not exempt -- it runs on the request document.
         sys.stderr.write(
             "klt sim: error: the following arguments are required: "
             "request (or --batch-set REQUEST...)\n"
         )
         raise SystemExit(2)
-    for flag, name in (
-        ("max_in_flight", "--max-in-flight"),
-        ("capacity_retries", "--capacity-retries"),
-    ):
-        if getattr(args, flag, None) is None:
-            continue
+    if getattr(args, "max_in_flight", None) is not None:
         return emit_error(
             "sim",
-            f"{name} only applies with --batch-set",
+            "--max-in-flight only applies with --batch-set",
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
-    if getattr(args, "pdk_root", None) is not None:
-        for flag, name in (("op_lint", "--op-lint"), ("job_status", "--job-status")):
-            if getattr(args, flag, None) not in (None, False):
-                return emit_error(
-                    "sim",
-                    f"--pdk-root has no effect with {name}",
-                    args.format,
-                    exit_code=EXIT_USAGE_ERROR,
-                )
+    if all(getattr(args, a, None) is not None for a in ("pdk_root", "job_status")):
+        return emit_error(
+            "sim",
+            "--pdk-root has no effect with --job-status",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     return None
 
 
@@ -144,6 +144,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             submit_only=getattr(args, "submit_only", False),
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            capacity_retries=getattr(args, "capacity_retries", None),
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
             collect_partial=getattr(args, "collect_partial", False),
@@ -152,7 +153,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
     except (SimError, OutputLockError) as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    if (write_failure := _write_report_out(report, args)) is not None:
+    if (
+        write_failure := _write_report_out(report, args, implicit_outdir=True)
+    ) is not None:
         return write_failure
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
@@ -191,64 +194,6 @@ def _exit_code_for(report: dict, deck_mode: bool) -> int:
         return EXIT_CORNER_ERRORED
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
-    return EXIT_PASS
-
-
-def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
-    """Write the ``--report-out`` file copy; return an exit code only on failure.
-
-    Issue #2975: an additive file copy of the envelope; stdout is unchanged.
-    Written before emitting so an unwritable path fails cleanly with the error
-    envelope rather than after a full report.
-    """
-    report_out = getattr(args, "report_out", None)
-    if not report_out:
-        return None
-    try:
-        write_json_file(report, report_out)
-    except OSError as exc:
-        return emit_error(
-            "sim",
-            f"could not write report to '{report_out}': {exc}",
-            args.format,
-        )
-    return None
-
-
-def _run_job_status(args: argparse.Namespace) -> int:
-    """``klt sim REQUEST --job-status JOB_ID``: one state read (issue #3073).
-
-    Exit ``0`` whenever the read succeeded -- whatever state the *job* is in
-    (``failed`` included): the exit code reports this read, the ``state``
-    field reports the job. ``1`` for an unknown job id or a transport error.
-    """
-    if getattr(args, "submit_only", False):
-        return emit_error(
-            "sim",
-            "--job-status cannot be combined with --submit-only",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    if getattr(args, "wait_for_capacity", None) is not None:
-        return emit_error(
-            "sim",
-            "--job-status cannot be combined with --wait-for-capacity: it "
-            "launches nothing",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    if args.backend not in (None, "batch"):
-        return emit_error(
-            "sim",
-            f"--job-status reads a batch job (got --backend {args.backend})",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    try:
-        status = read_job_status(load_request(args.request), args.job_status)
-    except SimError as exc:
-        return emit_error("sim", str(exc), args.format, code=exc.code)
-    emit_success(status, args.format, _print_job_status_text)
     return EXIT_PASS
 
 
@@ -330,7 +275,9 @@ def _run_op_lint(args: argparse.Namespace) -> int:
     see this module's docstring.
     """
     try:
-        report = run_op_sanity(args.request, corner=args.op_lint_corner)
+        report = run_op_sanity(
+            args.request, corner=args.op_lint_corner, pdk_root=args.pdk_root
+        )
     except OpSanityError as exc:
         return emit_error("sim", str(exc), args.format)
 
@@ -341,65 +288,6 @@ def _run_op_lint(args: argparse.Namespace) -> int:
     if report["error_count"] > 0:
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
-
-
-def _print_op_lint_text(report: dict) -> None:
-    print(f"netlist: {render_path_field(report['netlist'])}")
-    print(f"status: {report['status']}")
-    print(f"corner: {report['corner']['corner_id']}")
-    print(
-        f"devices: {report['device_count']}  "
-        f"findings: {report['finding_count']} "
-        f"(errors: {report['error_count']}, warnings: {report['warning_count']})"
-    )
-
-    devices = report["devices"]
-    if devices:
-        print()
-        print("devices:")
-        for device in devices:
-            values = device["values"]
-            detail = "  ".join(
-                f"{key}={values[key]!r}"
-                for key in sorted(values)
-                if values[key] is not None
-            )
-            print(
-                f"  {device['name']} [{device['kind']}] {device['region']}"
-                f"{'  ' + detail if detail else ''}"
-            )
-
-    corner_margins = report.get("corner_margins")
-    if corner_margins:
-        print()
-        print("corner margins (|Vds| - |Vdsat|, worst first):")
-        for entry in corner_margins:
-            margin = entry["worst_margin_v"]
-            shown = "n/a" if margin is None else f"{margin * 1000:.1f} mV"
-            print(
-                f"  {entry['corner_id']}  {shown}  "
-                f"device={entry['worst_device'] or '-'}  "
-                f"triode={entry['triode_count']}"
-            )
-            for diagnostic in entry["diagnostics"]:
-                print(f"      {diagnostic['code']}: {diagnostic['message']}")
-
-    findings = report["findings"]
-    if findings:
-        print()
-        print("findings:")
-        for finding in findings:
-            print(f"  [{finding['severity']}] {finding['check']}: {finding['message']}")
-            print(f"      -> {finding['suggestion']}")
-
-    diagnostics = report["diagnostics"]
-    if diagnostics:
-        print()
-        for diagnostic in diagnostics:
-            print(
-                f"diagnostic: {diagnostic['severity']} {diagnostic['code']} - "
-                f"{diagnostic['message']}"
-            )
 
 
 def _print_commands_text(report: dict) -> None:

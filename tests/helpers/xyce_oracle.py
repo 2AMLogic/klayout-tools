@@ -42,6 +42,11 @@ fail CI):
   `$PATH`);
 - an `ngspice` binary on `$PATH` -- the reference side of the pairing.
 
+`KLT_SKIP_NGSPICE_TESTS=1` (the shared local-only opt-out in
+`tests/helpers/tool_probes.py`) skips the module the same way a missing
+binary does: with the reference side suppressed there is nothing to
+cross-validate against.
+
 ## Evidence that both engines actually ran
 
 Per #2007's acceptance criterion 2, an exit code proves nothing (ngspice
@@ -70,6 +75,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+#: The shared local-only opt-out (issue #6144): `KLT_SKIP_NGSPICE_TESTS=1`
+#: skips real-ngspice tiers on hosts that have the binary, so the oracle's
+#: gating consults it instead of re-probing `$PATH` a second time.
+from helpers.tool_probes import NGSPICE_TESTS_SKIPPED, read_ngspice_version
 from klayout_tools._provenance import sha256_file
 
 #: Both binaries are PATH-discovered, like `fastcap` in
@@ -105,27 +114,19 @@ def xyce_version() -> str | None:
 def ngspice_version() -> str | None:
     """ngspice's own reported version from its ``--version`` banner (e.g.
     ``"47"``), or ``None``. Never raises."""
-    if NGSPICE_BINARY is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [NGSPICE_BINARY, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - host-dependent
-        return None
-    match = re.search(r"ngspice-([\w.]+)", completed.stdout or "")
-    return match.group(1) if match else None
+    return read_ngspice_version(NGSPICE_BINARY)
 
 
 def oracle_skip_reason() -> str | None:
     """A human-readable reason this oracle cannot run, or ``None`` when it
     can. Used at module level by `tests/test_sim_xyce_oracle.py`
     (``pytest.skip(..., allow_module_level=True)``). Absence must skip,
-    never fail.
+    never fail. `KLT_SKIP_NGSPICE_TESTS=1` skips the module too -- ngspice
+    is the reference side of the pairing, so under the knob there is
+    nothing to cross-validate against.
     """
+    if NGSPICE_TESTS_SKIPPED:
+        return "KLT_SKIP_NGSPICE_TESTS=1"
     if XYCE_BINARY is None and NGSPICE_BINARY is None:
         return (
             "neither Xyce nor ngspice is installed on this machine -- "

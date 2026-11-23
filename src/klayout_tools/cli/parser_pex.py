@@ -224,7 +224,10 @@ def add_pex_parser(
         help=(
             f"extraction deck to run (currently: {_deck_names_str()}), "
             "passed through to `klt extract --parasitics`. Required unless "
-            "--attach is given alone (issue #4692)."
+            "--attach is given alone (issue #4692), or --engine "
+            "klayout-runset is given: there --deck is optional, and given it "
+            "attaches that curated deck's parasitic network to the runset "
+            "leg through geometric net correspondence (issue #6606)."
         ),
     )
     pex_parser.add_argument(
@@ -312,7 +315,10 @@ def add_pex_parser(
             "each request's `remote.hosts`)."
         ),
     )
-    add_wait_for_capacity_arg(pex_parser, "Applied to every `klt sim` call of the run.")
+    add_wait_for_capacity_arg(
+        pex_parser,
+        "Applied to every `klt sim` call of the run. Ignored under --attach.",
+    )
     pex_parser.add_argument(
         "--resume",
         dest="resume",

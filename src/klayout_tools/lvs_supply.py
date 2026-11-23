@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .lvs_base import LvsError
+
 DEFAULT_SUPPLY_NETS = ("GND", "VCC", "VDD", "VGND", "VPWR", "VSS")
+
+#: Issue #2078: a supply name spans more than one disconnected layout net in a
+#: circuit (always a warning; one entry per circuit and supply).
+CATEGORY_NET_SUPPLY_FRAGMENTED = "net.supply_fragmented"
 
 
 def parse_supply_nets(options: Mapping[str, Any]) -> list[str]:
     """Resolve an exact, case-insensitive allowlist; an empty list disables it."""
-    from .lvs import LvsError
 
     names = options.get("supply_nets", list(DEFAULT_SUPPLY_NETS))
     if not isinstance(names, list) or any(
@@ -78,14 +83,24 @@ def supply_fragmentation_findings(
                 continue
             findings.append(
                 _mismatch(
-                    "net.supply_fragmented",
+                    CATEGORY_NET_SUPPLY_FRAGMENTED,
                     "warning",
                     f"supply '{supply}' spans {count} disconnected layout nets "
                     f"in circuit '{circuit.name}'; connect the supply grid or "
                     "configure options.supply_nets for this design's domains. "
                     "A signal-topology match does not verify power delivery.",
                     "layout",
-                    net={"layout": supply, "reference": None},
+                    # Issue #5833: a fragmented supply names a *group* of
+                    # nets (details.fragment_count of them), not one net,
+                    # so there is no single per-report id to report --
+                    # null on both sides, the same null-not-omitted
+                    # convention every other ``net`` object follows.
+                    net={
+                        "layout": supply,
+                        "layout_id": None,
+                        "reference": None,
+                        "reference_id": None,
+                    },
                     circuit={"layout": circuit.name, "reference": None},
                     details={"supply": supply, "fragment_count": count},
                 )

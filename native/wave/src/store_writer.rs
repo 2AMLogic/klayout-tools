@@ -14,7 +14,9 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use crate::cycle::{ClockTracker, Edge, ResetTracker};
-use crate::fst_convert::{canon_bits_into, transition_scopes, var_type_of};
+use crate::fst_convert::{
+    canon_bits_into, transition_scopes, var_type_of, EXPLICIT_NAN, REAL_NAN_ENCODING,
+};
 
 /// The concrete FST writer type every store uses -- `fst_writer::open_fst`
 /// only opens a file by path (it is not generic over an arbitrary
@@ -86,7 +88,7 @@ impl StoreWriter {
         let info = fst_writer::FstInfo {
             start_time: 0,
             timescale_exponent,
-            version: format!("klt-wave {}", env!("CARGO_PKG_VERSION")),
+            version: format!("klt-wave {}{REAL_NAN_ENCODING}", env!("CARGO_PKG_VERSION")),
             date: String::new(),
             file_type: fst_writer::FstFileType::Verilog,
         };
@@ -219,6 +221,8 @@ impl StoreWriter {
         if group.is_real {
             let text = std::str::from_utf8(bits).unwrap_or("nan");
             let value: f64 = text.parse().unwrap_or(f64::NAN);
+            // The writer deduplicates against the initial canonical NaN by bytes.
+            let value = if value.is_nan() { EXPLICIT_NAN } else { value };
             let le = value.to_le_bytes();
             let _ = self.body.signal_change(fst_id, &le);
         } else {
@@ -273,11 +277,14 @@ impl StoreWriter {
 
     /// Finish writing the store: flushes the final value-change section
     /// and updates the FST header in place (seeking back into `W`).
-    /// `FstBodyWriter::finish` does not hand the underlying writer back,
-    /// so a caller that needs to measure/hash the finished file (as
-    /// `build.rs` does) reopens it by path afterward rather than reusing
-    /// this method's `W`.
+    /// `FstBodyWriter::finish` hands the underlying writer back, but this
+    /// method discards it, so a caller that needs to measure/hash the
+    /// finished file (as `build.rs` does) reopens it by path afterward
+    /// rather than reusing this method's `W`.
     pub fn finish(self) -> Result<(), String> {
-        self.body.finish().map_err(|e| format!("fst finish: {e}"))
+        self.body
+            .finish()
+            .map(|_| ())
+            .map_err(|e| format!("fst finish: {e}"))
     }
 }

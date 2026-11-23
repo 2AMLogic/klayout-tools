@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import types
 
 import pytest
 
@@ -17,6 +18,9 @@ from test_sim_batch import (
     _batch_request,
     _ceiling_request,
     _corner_points,
+    _FakeRunner,
+    _install_fake_batch_transport,
+    _sim_report,
     _split_runner,
     _status,
     _write_body,
@@ -187,6 +191,21 @@ def test_collect_partial_merges_done_shards_and_lists_the_rest(tmp_path, monkeyp
     assert "unfinished_shards" not in environment
 
 
+def test_with_unfinished_shard_map_is_repo_relative_inside_a_repo(tmp_path):
+    """Issue #5542: the `unfinished_shards` emission normalizes the map path
+    the same way as the unlaunched and unrun signals."""
+    (tmp_path / ".git").mkdir()
+    manifest = types.SimpleNamespace(path=str(tmp_path / "out" / "batch-shards.json"))
+    environment = sbs.with_unfinished(
+        None, {1: {"index": 1, "job_id": "j", "state": "running"}}, manifest
+    )
+    assert environment["shard_map"] == "out/batch-shards.json"
+    assert environment["resumable"] is True
+    assert environment["unfinished_shards"] == [
+        {"index": 1, "job_id": "j", "state": "running"}
+    ]
+
+
 def test_collect_partial_with_all_shards_done_equals_plain_attach(
     tmp_path, monkeypatch
 ):
@@ -339,8 +358,31 @@ def test_apply_attach_gates_hosts_only_for_a_bare_job_id():
     }
     with pytest.raises(sim.SimError, match="single job .*hosts = 1.*shard map"):
         sim._apply_attach({}, "klt-sim-job", "batch", 2)
-    with pytest.raises(sim.SimError, match="requires backend 'batch'"):
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch"):
         sim._apply_attach({}, "out/batch-shards.json", "local", 2)
+
+
+def test_single_unit_attach_with_host_batch_default_names_effective_backend(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    del request["backend"]
+    path = _write_request(tmp_path, request)
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch") as error:
+        sim.run_sim(str(path), attach_job_id="klt-sim-old")
+    assert "shard" not in str(error.value)
+    assert not runner.calls
+
+    report = sim.run_sim(str(path), backend="batch", attach_job_id="klt-sim-old")
+    assert report["environment"]["remote"]["job_id"] == "klt-sim-old"
+    assert runner.argvs_matching("launch") == []
 
 
 def test_run_sim_hosts_2_attach_goes_to_the_map_not_a_fresh_fleet(

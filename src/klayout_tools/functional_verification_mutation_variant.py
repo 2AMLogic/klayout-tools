@@ -3,7 +3,7 @@
 Split out of ``functional_verification_mutation.py``: the forked-child
 ``_build_and_test_variant`` and its bounded parent-side runner
 (:func:`_run_isolated_variant`). Names that stay in ``functional_verification.py``
-are reached as ``_fv.<name>`` at call time; every name is re-exported from there.
+are reached as ``_fv.<name>`` at call time.
 """
 
 from __future__ import annotations
@@ -29,12 +29,13 @@ def _build_and_test_variant(
     env: dict[str, str],
     build_log: str,
     module: str,
-    module_dir: str,
+    module_dirs: list[str],
     testcase: str | list[str] | None,
     random_seed: int | None,
     test_dir: str,
     results_xml: str,
     test_log: str,
+    plusargs: list[str] | None = None,
 ) -> None:
     """``_run_build`` then ``_run_test`` against whatever source bytes are on
     disk right now -- the isolated per-mutant build+test this module runs
@@ -70,7 +71,7 @@ def _build_and_test_variant(
         engine_runner,
         engine=engine,
         module=module,
-        module_dir=module_dir,
+        module_dirs=module_dirs,
         hdl_toplevel=hdl_toplevel,
         testcase=testcase,
         random_seed=random_seed,
@@ -81,6 +82,7 @@ def _build_and_test_variant(
         parameters=parameters,
         extra_env=env,
         log_path=test_log,
+        plusargs=plusargs,
     )
 
 

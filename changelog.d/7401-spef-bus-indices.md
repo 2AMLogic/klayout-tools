@@ -1,0 +1,1 @@
+- **SPEF extraction preserves the routed DEF spelling of bus indices and literal brackets in internal nets and instance names.** STA warnings report the number of distinct unresolved net names alongside the discarded record count (#7401, 2026-11-23).
