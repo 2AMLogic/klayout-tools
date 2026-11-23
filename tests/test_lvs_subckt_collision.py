@@ -394,6 +394,16 @@ def test_recovery_scan_selects_named_lib_section(tmp_path):
     }
 
 
+def test_recovery_scan_continues_after_truncated_gzip_library(tmp_path):
+    from klayout_tools.netlist_normalize_scan import recovery_subckt_names
+
+    (tmp_path / "broken.lib").write_bytes(gzip.compress(_CORNERS_LIB.encode())[:-8])
+    _write(tmp_path / "valid.cdl", ".subckt sibling A B\n.ends sibling\n")
+    text = ".include 'valid.cdl'\n.lib 'broken.lib' tt\n"
+    path = _write(tmp_path / "top.cdl", text)
+    assert recovery_subckt_names(text, path, {"SIBLING", "RPPD"}) == {"SIBLING"}
+
+
 def test_reference_lib_missing_target_follows_include_error_path(tmp_path):
     """A missing `.lib` target is silent in the scan (the diagnostic stays
     with KLayout's reader, exactly like a missing `.include`)."""
