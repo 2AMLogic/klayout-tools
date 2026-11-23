@@ -756,33 +756,12 @@ def _detect_single_terminal_nets(
 def _describe_layers_in_set(
     path: str, layer_set: frozenset[tuple[int, int]], *, invert: bool = False
 ) -> list[dict[str, Any]]:
-    """Shared helper behind ``ignored_layers``/``device_recognition_only_
-    layers`` (issue #619): enumerate the input stream's layers (reusing
-    ``layers.py``'s existing per-layer walk, the same one ``klt drc``'s
-    coverage report leans on) and return the shape-bearing ``(layer,
-    datatype)`` pairs that are in ``layer_set`` (``invert=False``) or *not* in
-    it (``invert=True``). Each entry carries its stream ``shapes`` count.
-    Empty-layer entries (``shapes == 0``) are skipped; the list is sorted by
-    ``(layer, datatype)``.
-    """
-    from .layers import layers_report
+    """Return the selected stream layers and their per-definition shape counts."""
+    from ._layout import load_layout
+    from .extract_layer_coverage import layers_in_set
+    from .layers import LayersError
 
-    described: list[dict[str, Any]] = []
-    for entry in layers_report(path)["layers"]:
-        if entry["shapes"] <= 0:
-            continue
-        in_set = (entry["layer"], entry["datatype"]) in layer_set
-        if in_set == invert:
-            continue
-        described.append(
-            {
-                "layer": entry["layer"],
-                "datatype": entry["datatype"],
-                "shapes": entry["shapes"],
-            }
-        )
-    described.sort(key=lambda e: (e["layer"], e["datatype"]))
-    return described
+    return layers_in_set(load_layout(path, LayersError), layer_set, invert=invert)
 
 
 def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, Any]]:
@@ -791,13 +770,9 @@ def _describe_ignored_layers(path: str, deck: ExtractionDeck) -> list[dict[str, 
     Returns the shape-bearing ``(layer, datatype)`` pairs that are *not* in
     ``deck.connectivity_layers`` -- geometry the extraction connectivity graph
     never reads. Each entry carries its stream ``shapes`` count so a consumer
-    can judge whether the amount is material (a stray annotation vs. a whole
-    block routed on an undeclared metal level).
+    can judge whether the amount is material.
 
-    Note this does *not* catch a layer that is read for device recognition
-    only, never as a ``metals``/``vias`` connectivity level -- see
-    :func:`_describe_device_recognition_only_layers` for that distinct case
-    (issue #619).
+    See :func:`_describe_device_recognition_only_layers` for recognition-only layers.
     """
     return _describe_layers_in_set(path, deck.connectivity_layers, invert=True)
 

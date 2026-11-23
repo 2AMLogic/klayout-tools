@@ -8,6 +8,9 @@ gitignored scratch artifact cited by an envelope verified ``True`` on the
 host that happened to have the file and ``None`` in a fresh clone, moving
 ``input_verified`` and, through it, the artifact-anchored T1 verdicts
 between hosts; with it, an evidence render is a function of the commit.
+Since #7195 the same predicate is the one basis for yield ``samples``
+candidates too (#6139's contract): a symlink or ``dir/..`` component a
+clone would not recreate is untracked, whatever artifact kind it leads to.
 
 The never-raise contract matches
 :func:`klayout_tools.build_identity._git`: git missing from ``$PATH``, a
@@ -125,30 +128,79 @@ def _tracked_files_under(root: str) -> frozenset[str] | None:
     return _TRACKED_FILES_CACHE[key]
 
 
-def is_untracked_working_tree_file(path: str) -> bool:
-    """Whether ``path`` names a file inside a functioning git checkout
-    whose index does not track it (issue #5857) -- gitignored scratch, a
-    never-``git add``ed file, a stale leftover.
-
-    ``False`` -- never an exception -- in every case that is not that:
-    ``path`` with no ``.git`` ancestry at all (a ``.git``-less archive
-    copy, a vendored tree), a ``.git`` entry with no functioning repository
-    behind it, git absent from ``$PATH``, or a git failure. Callers keep
-    their filesystem-presence behaviour in all of those, so grading over a
-    tree without VCS metadata is unchanged. Symlinks are resolved first:
-    the file that would be hashed is the file git is asked about, and the
-    containing checkout is found from that file's own directory, the way
-    :func:`~klayout_tools.env_provenance.find_repo_root` walks it."""
-    root = find_repo_root(os.path.dirname(os.path.realpath(path)))
+def _untracked_entry(path: str, *, directory: bool = False) -> bool:
+    """Check an entry, or the indexed children that create a directory."""
+    root = find_repo_root(path if directory else os.path.dirname(path))
     if root is None:
         return False
     tracked = _tracked_files_under(root)
     if tracked is None:
         return False
-    relative = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
-    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+    relative = os.path.relpath(path, root).replace(os.sep, "/")
+    if directory:
+        prefix = relative + "/"
+        return relative != "." and not any(p.startswith(prefix) for p in tracked)
+    return relative not in tracked
+
+
+def _untracked_path_components(absolute: Path) -> bool:
+    """Check every link and directory a lookup traverses before resolving
+    its target (#6139 for yield samples, #7195 for every input artifact)."""
+    pending = [absolute]
+    visited: set[Path] = set()
+    while pending:
+        target = pending.pop()
+        for part in (target, *target.parents):
+            # Opening dir/../file requires dir even though realpath discards it.
+            if part.name == ".." and _untracked_entry(
+                os.path.realpath(part.parent), directory=True
+            ):
+                return True
+            if not os.path.islink(part):
+                continue
+            link = Path(os.path.realpath(part.parent)) / part.name
+            if link in visited:
+                continue
+            visited.add(link)
+            if _untracked_entry(str(link)):
+                return True
+            try:
+                pending.append(link.parent / os.readlink(link))
+            except OSError:
+                continue
+    return False
+
+
+def is_untracked_working_tree_file(path: str) -> bool:
+    """Whether ``path`` names a file inside a functioning git checkout
+    whose index does not track it (issue #5857) -- gitignored scratch, a
+    never-``git add``ed file, a stale leftover, or a file reached only
+    through one (issues #6139 and #7195: every symlink in the chain and
+    every directory a ``dir/..`` step traverses must itself be tracked by
+    its checkout's index, so a purely local link to committed bytes is as
+    untracked as a local copy of them). The one shared basis for input
+    artifacts and yield samples alike.
+
+    ``False`` -- never an exception -- in every case that is not that:
+    ``path`` with no ``.git`` ancestry at all (a ``.git``-less archive
+    copy, a vendored tree), a ``.git`` entry with no functioning repository
+    behind it, git absent from ``$PATH``, a git failure, or a name no
+    filesystem call can represent (an embedded NUL byte -- it stays an
+    attempted, unhashable candidate). Callers keep their filesystem-
+    presence behaviour in all of those, so grading over a tree without
+    VCS metadata is unchanged. The file whose bytes would be hashed is
+    the file git is asked about."""
+    try:
+        resolved = os.path.realpath(path)
+    except ValueError:
+        # An unrepresentable name remains an attempted, unhashable candidate.
         return False
-    return relative.replace(os.sep, "/") not in tracked
+    if _untracked_entry(resolved):
+        return True
+    absolute = Path(path).absolute()
+    if str(absolute) == resolved:
+        return False
+    return _untracked_path_components(absolute)
 
 
 def repo_scoped_candidates(

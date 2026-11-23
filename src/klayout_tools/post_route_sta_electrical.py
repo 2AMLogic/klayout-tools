@@ -99,7 +99,7 @@ def _parse_electrical_slack_check(stdout: str, begin: str, end: str) -> dict[str
     for line in block.splitlines():
         if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
             continue
-        if "(VIOLATED)" not in line:
+        if "(VIOLATED)" not in line.upper():
             continue
         violated_lines += 1
         match = _SLACK_ROW_RE.match(line.strip())

@@ -80,7 +80,7 @@ from .parasitic_integrity import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import klayout.db as kdb
 
@@ -450,6 +450,8 @@ class _ResistanceGraphCollector:
         enabled: bool,
         r_cut_ohm: float | None = None,
         deck: ParasiticsDeck | None = None,
+        *,
+        caps: Mapping[str, int] | None = None,
     ) -> None:
         self._l2n = l2n
         self._label_layers = (
@@ -464,6 +466,7 @@ class _ResistanceGraphCollector:
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
         self._deck = deck
+        self._caps = caps
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -498,6 +501,7 @@ class _ResistanceGraphCollector:
                 self._r_cut_ohm,
                 deck=self._deck,
                 pin_site=promoted_pin_site(self._l2n, net, self._label_layers),
+                caps=self._caps,
             )
 
 
@@ -546,24 +550,15 @@ def _resistance_graph_report(
     r_cut_ohm: float | None = None,
     deck: ParasiticsDeck | None = None,
     pin_site: PinSite | None = None,
+    *,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``parasitics.nets[].resistance_graph`` object for one net
-    (issue #2982, Stage 3.D5 increment 3).
+    """Build a per-net resistance graph and render its terminal-pair matrix.
 
-    ``roles`` is ``(role name, sheet resistance, net region, drawn region)``
-    per conductor role the net has geometry on; this only converts the
-    per-net geometry :func:`_compute_parasitics` already holds into the graph
-    builder's inputs and renders the builder's and solver's results.
-    ``status``, ``terminals``, ``pair_resistance_ohm`` and the diagnostics
-    are taken from :class:`~klayout_tools.extract_resistance_graph.
-    TerminalResistanceMatrix` as-is; ``legacy_resistance_ohm`` is the
-    unchanged series-sum scalar.
-
-    Each landing's ``r_cut_ohm`` resolves via :func:`cut_resistance_resolver`
-    (issue #6917): the explicit ``--resistance-graph-r-cut`` value uniformly
-    when given, else ``deck``'s nominal value for that landing type
-    (``poly_contact`` / ``cuts``), else ``None`` -- a landing then reports
-    ``via_resistance_unknown`` (``unsupported``)."""
+    The legacy scalar stays in the report for comparison and fallback.
+    An explicit per-cut resistance overrides the deck's nominal value for
+    each landing. A landing without either value is unsupported. Explicit
+    caps override the corresponding builder defaults (issue #6964)."""
     from .extract_resistance_graph import (
         RoleInput,
         build_resistance_graph,
@@ -577,7 +572,7 @@ def _resistance_graph_report(
         for name, sheet_res, region, _drawn in roles
     ]
     add_promoted_pin_port(ports, role_inputs, pin_site, dbu)
-    graph = build_resistance_graph(role_inputs, ports, landings, dbu)
+    graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
     reported = (
@@ -784,6 +779,7 @@ def _compute_parasitics(
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -1212,11 +1208,12 @@ def _compute_parasitics(
         num_metals,
     )
     contact_layer_index = layer_index.get("contact")
-    # `resistance_graph` (issue #2982): each net's per-role geometry and
-    # landings, kept only when the opt-in flag is on. The deck rides along
-    # (issue #6917) so each landing resolves its own per-cut resistance.
     graph_collector = _ResistanceGraphCollector(
-        l2n, resistance_graph, resistance_graph_r_cut_ohm, parasitics_deck
+        l2n,
+        resistance_graph,
+        resistance_graph_r_cut_ohm,
+        parasitics_deck,
+        caps=resistance_graph_caps,
     )
 
     for net in nets:

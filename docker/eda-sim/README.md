@@ -220,6 +220,69 @@ Each architecture is built and smoke-tested on **native** hardware
 compiles ngspice and xschem from source, which under arm64 emulation is a
 30-minutes-plus proposition that routinely trips job timeouts.
 
+## Installing the pinned xschem without Docker (chip CI)
+
+Issue #6219 (fleet rule 2am#7275): `tools.xschem` is the fleet's master xschem
+pin, and chip CI installs that exact build **credential-free** from a public
+release asset of [2AMLogic/xschem](https://github.com/2AMLogic/xschem), the
+fleet's public fork of upstream xschem (operator ruling 2026-11-19) -- not from
+the batch image's private S3 artifact, and not from a release of this repo.
+
+| | |
+|---|---|
+| release repo | `2AMLogic/xschem` (`tools.xschem.release_repo`) |
+| release | `3.4.7-2am.1` (`tools.xschem.release_tag`; the fork's `<upstream tag>-2am.<build>`) |
+| asset | `xschem-3.4.7-noble-x86_64.tar.gz` (`tools.xschem.asset`), Ubuntu 24.04 x86_64 |
+| integrity | `tools.xschem.sha256`, verified **before** unpacking |
+| built by | the fork's `.github/workflows/release.yml` (`workflow_dispatch`, operator-run) |
+
+Copy [`scripts/install-xschem.sh`](../../scripts/install-xschem.sh) into the chip
+repo (it is self-contained; needs `curl`, `jq`, `tar`) and run it:
+
+```bash
+scripts/install-xschem.sh                 # -> /opt/eda/xschem (via `sudo -n`)
+export PATH="/opt/eda/xschem/bin:$PATH"
+xschem --version                          # prints XSCHEM V3.4.7
+xschem -q -n -x -o out/ top.sch           # headless netlist
+```
+
+The script reads the pin from this repo's manifest (the local copy when run
+inside this repo, else `main`'s; override with `XSCHEM_MANIFEST`), downloads
+`https://github.com/<release_repo>/releases/download/<release_tag>/<asset>`,
+fails closed if `sha256` is absent or mismatches, and unpacks the tree as
+shipped. Runtime libraries on a bare runner:
+`libcairo2 libx11-6 libxcb1 libxpm4 libxrender1 tcl tk`.
+
+**The tree is not relocatable: it installs at `/opt/eda/xschem`.** The asset is
+built with `--prefix=/opt/eda/xschem`, and outside its source tree xschem takes
+`XSCHEM_LIBRARY_PATH` from that compile-time prefix. A copy unpacked anywhere
+else cannot find its symbol library (`res.sym`, `lab_pin.sym`), and an
+`XSCHEM_SHAREDIR` override only moves the Tcl files, not that library. So the
+script installs there, using `sudo -n` when `/opt/eda` is not writable
+(passwordless on GitHub-hosted runners; it never prompts). It refuses to
+replace a non-empty `/opt/eda/xschem` it did not create unless `--force` is
+given. `XSCHEM_INSTALL_PREFIX` exists for tests and for inspecting an unpack; at
+any other prefix the script warns and xschem will not find its symbols.
+
+Two things to know when smoke-testing the install on a fresh runner:
+
+- On a fresh `HOME`, xschem prints `Created ~/.xschem dir...` before its version
+  line, so take the version with `grep` rather than `head -n 1`.
+- The examples install under `share/doc/xschem/examples`, not `share/xschem`.
+  `0_examples_top.sch` is an index sheet whose symbols are not on the default
+  path; `rcline.sch` uses only `devices/` symbols and netlists headlessly.
+
+**Publishing / re-pinning** happens in the fork, not here, and is two steps
+because the sha256 is the hash of the uploaded bytes: dispatch the fork's
+**Build and publish an xschem release** workflow with the upstream `tag` and a
+`build` number (a rebuild of the same tag takes the next number), then record
+the values from its run summary in `tools.xschem` (`release_tag`, `sha256`) by
+PR. The tarball is not bit-reproducible, so a rebuild changes the sha256. The
+release's git tag points at the upstream commit, so its source archives are the
+exact source the binary was built from, and upstream's `LICENSE` is attached.
+The recorded values are for fork release `3.4.7-2am.1` (fork run 44671921761).
+`install-xschem.sh` fails closed if `tools.xschem.sha256` is ever absent.
+
 ## Known gap
 
 Issue #509's acceptance criteria include *"one real sim from a gf180 repo runs
