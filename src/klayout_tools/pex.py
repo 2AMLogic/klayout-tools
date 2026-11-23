@@ -260,7 +260,10 @@ from .pex_netlist_text import (
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
-from .pex_resistance_graph import _resistance_graph_echo
+from .pex_resistance_graph import (
+    _reject_resistance_graph_with_distributed_rc,
+    _resistance_graph_echo,
+)
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -2395,18 +2398,6 @@ def _device_only_parity(
     }
 
 
-def _reject_resistance_graph_with_distributed_rc(
-    resistance_graph: bool, distributed_rc: bool
-) -> None:
-    """Issue #4037: the ladder keeps the legacy per-level resistance."""
-    if resistance_graph and distributed_rc:
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
-
-
 def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
@@ -2558,6 +2549,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2629,17 +2621,20 @@ def run_pex(
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
     before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
-    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
-    to ``klt extract``'s terminal-aware resistance graph and make the
-    extracted netlist use each ``resistance_source == "graph"`` net's
-    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
-    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
-    ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`` entry,
-    only when the flag was given -- otherwise the report and netlist are
-    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
-    (the ladder stays on the legacy scalar, so a critical net would mix sources).
+    ``resistance_graph``/``resistance_graph_r_cut_ohm``/``resistance_graph_caps``
+    (``klt pex --resistance-graph [--resistance-graph-r-cut OHM]
+    [--resistance-graph-max-* N]``, issues #4037, #6964) forward to ``klt
+    extract``'s terminal-aware resistance graph and make the extracted netlist
+    use each ``resistance_source == "graph"`` net's ``selected_resistance_ohm``
+    as its lumped R (``legacy`` nets keep the legacy scalar). The caps raise
+    the graph builder's per-net size limits. ``extraction.resistance_graph``
+    echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
+    values -- only when a cap was given) and one ``{net, net_id,
+    resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
+    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
+    the graph flag, the report and netlist are byte-identical. Combining it with
+    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
+    legacy scalar, so a critical net would mix resistance sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
@@ -2918,6 +2913,7 @@ def run_pex(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -3519,7 +3515,9 @@ def run_pex(
             **(
                 {
                     "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
+                        parasitics,
+                        resistance_graph_r_cut_ohm,
+                        resistance_graph_caps,
                     )
                 }
                 if resistance_graph

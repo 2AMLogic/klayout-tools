@@ -55,12 +55,12 @@ from .pex import (
     _check_dut_declares_a_circuit,
     _find_dut_include,
     _load_testbench_request,
-    _reject_resistance_graph_with_distributed_rc,
     _require_single_dut,
     _resolve_measured_reference,
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_resistance_graph import _reject_resistance_graph_with_distributed_rc
 from .pex_sim_evidence import schematic_probes
 from .sim import SimError, run_sim
 
@@ -122,6 +122,7 @@ def _extraction_preflight(
     distributed_rc: bool,
     resistance_graph: bool,
     resistance_graph_r_cut_ohm: float | None,
+    resistance_graph_caps: Mapping[str, int] | None,
     parasitic_variants: Sequence[str] | None,
     substrate_tie_ohms: float | None,
     mom_rlc_net: str | None,
@@ -164,6 +165,7 @@ def _extraction_preflight(
                 parasitics_top_cell_only=False,
                 resistance_graph=resistance_graph,
                 resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                resistance_graph_caps=resistance_graph_caps,
                 emit_selected_resistance=resistance_graph,
                 critical_net_patterns=critical_net_patterns,
                 critical_net_all=critical_net_all,
@@ -290,6 +292,7 @@ def run_pex_dry_run(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -374,6 +377,7 @@ def run_pex_dry_run(
         distributed_rc=distributed_rc,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         parasitic_variants=parasitic_variants,
         substrate_tie_ohms=substrate_tie_ohms,
         mom_rlc_net=mom_rlc_net,
