@@ -172,6 +172,36 @@ def yaml_notes(
     return notes
 
 
+def _description_added_across_builds(
+    committed: dict[str, Any], fresh: dict[str, Any]
+) -> bool:
+    """Recognize a missing disclosure echo when both builds bind the same inventory."""
+    old = committed.get("attestation")
+    new = fresh["attestation"]
+    if not isinstance(old, dict) or "description" in old or "description" not in new:
+        return False
+    old_provenance = committed.get("provenance")
+    if not isinstance(old_provenance, dict):
+        return False
+    provenance = fresh["provenance"]
+    versions = (old_provenance.get("klt_version"), provenance.get("klt_version"))
+    if versions[0] == versions[1] or not all(
+        isinstance(version, str) and version and "+unknown" not in version
+        for version in versions
+    ):
+        return False
+    # Item 2 pins the stream in provenance.input and its inventory separately.
+    if fresh["t1_item"] == 2:
+        binding, previous = new.get("inventory"), old.get("inventory")
+    else:
+        binding, previous = provenance.get("input"), old_provenance.get("input")
+    return (
+        isinstance(binding, dict)
+        and bool(binding.get("content_hash"))
+        and binding == previous
+    )
+
+
 def drift_result(
     committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -206,6 +236,8 @@ def drift_result(
         for index, check in enumerate(checks)
         if check["check"] == "pin" and check["role"] == "tool_version"
     }
+    if _description_added_across_builds(committed, fresh):
+        exclude |= {("attestation", "description")}
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,

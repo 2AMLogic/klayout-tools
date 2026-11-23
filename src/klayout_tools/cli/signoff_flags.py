@@ -17,8 +17,6 @@ from __future__ import annotations
 import argparse
 import os
 
-from ..signoff_attest import STREAM_ATTESTABLE_ITEM
-
 
 def repo_root_problem(repo_root: str | None) -> str | None:
     """Issue #2878: an explicit ``--repo-root`` that is not an existing
@@ -106,33 +104,5 @@ def artifact_manifest_problem(
         return (
             "--artifact-manifest only applies to --manifest/--fleet (envelope "
             "aggregation resolves no citations)"
-        )
-    return None
-
-
-def attest_flag_problem(
-    args: argparse.Namespace, inventory: str | None, stream: list[str] | None
-) -> str | None:
-    """The refusal message for an invalid ``--attest`` flag combination, else
-    ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
-    declared checks; items 1, 8, 9 and 10 take ``--inventory``."""
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        if not stream:
-            return (
-                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
-                "layout stream; see docs/cli/signoff.md)"
-            )
-        return None
-    attrs = ("generator", "regenerated_hash", "hash_kind")
-    if stream or any(getattr(args, attr, None) is not None for attr in attrs):
-        return (
-            "--input/--generator/--regenerated-hash/--hash-kind only apply "
-            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
-            "--inventory)"
-        )
-    if not inventory:
-        return (
-            "--attest requires --inventory <file> (the versioned attestation "
-            "inventory; see docs/cli/signoff.md)"
         )
     return None
