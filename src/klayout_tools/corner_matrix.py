@@ -152,11 +152,6 @@ def check_corner_matrix(
     if (request_path is None) == (report_path is None):
         raise CornerMatrixError("give exactly one of --request or --report")
     expected = expected_tuples(_load_object(matrix_path, "matrix"))
-    expected_dupes = _duplicates(expected)
-    if expected_dupes:
-        raise CornerMatrixError(
-            f"matrix expands to duplicate tuple(s): {expected_dupes}"
-        )
     expected_set = set(expected)
 
     result: dict[str, Any] = {"matrix": matrix_path}

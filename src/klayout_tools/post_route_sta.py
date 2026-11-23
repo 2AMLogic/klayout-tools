@@ -3372,7 +3372,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     ``net_names`` uses the unescaped design spelling returned by
     :func:`_spef_net_names` and OpenSTA's ``get_full_name`` (issue #1422).
     The SPEF side counts every listed name found in the design. The design
-    side skips only proven driver-only nets and samples missing names (#6970)."""
+    side skips empty or driver-only internal nets and samples missing names."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",

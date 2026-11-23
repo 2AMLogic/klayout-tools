@@ -9,12 +9,8 @@ out-parameter; none changes a net, a device, a bound model or a rule
 threshold. They are the layout-geometry counterpart of
 `extract_detect_block.py`.
 
-``_bbox_um_rounded`` still lives in `extract.py` and is imported inside the
-function bodies that call it: `extract.py` imports this module at its top
-level, so a module-level ``from .extract import ...`` would be a circular
-import (the idiom `extract_detect_block.py` documents).
-``_resolve_mos_capacitors`` lives in `extract_mos_capacitor.py` (issue #5893)
-and is a plain module-level import.
+Marker and parasitic reports use the same box rounding from ``extract_base``.
+The MOS capacitor resolver lives in ``extract_mos_capacitor``.
 """
 
 from __future__ import annotations
@@ -23,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
 from .decks import ExtractionDeck
+from .extract_base import _bbox_um_rounded
 from .extract_flavour import _flavour_split_island
 from .extract_mos_capacitor import _resolve_mos_capacitors
 
@@ -140,8 +137,6 @@ def _detect_unmodelled_poly_bodies(
     when ``warnings`` is empty.
     """
     import klayout.db as kdb
-
-    from .extract import _bbox_um_rounded
 
     gate_regions = nfet_gate + pfet_gate
     bodies = resistor_bodies if resistor_bodies is not None else kdb.Region()
@@ -337,8 +332,6 @@ def _detect_unsupported_devices(
     only the residue the deck could not classify stays loud.
     """
     import klayout.db as kdb
-
-    from .extract import _bbox_um_rounded
 
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
