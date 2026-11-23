@@ -9,7 +9,7 @@ without a new parameter on each helper, and it never leaks into a later call.
 Three override sources resolve in precedence order (issue #5773):
 ``--yosys-timeout-s`` > ``$KLT_YOSYS_TIMEOUT_S`` > ``request.yosys_timeout_s``
 > the 300 s default. :func:`bind_yosys_timeout` owns that resolution; one
-validation rule (:func:`_validate_yosys_timeout`) and one cap
+validation rule (:func:`validate_budget`) and one cap
 (:data:`YOSYS_TIMEOUT_MAX_S`) serve all three.
 """
 
@@ -42,7 +42,9 @@ DEFAULT_YOSYS_TIMEOUT_S = 300.0
 #: report or the request, so a different budget on the fresh side is not
 #: drift. The synthesis *result* a rerun verifies is budget-independent; a
 #: consumer wanting the fresh budget reads the embedded ``fresh`` report.
-RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"yosys_timeout_s"})
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
+    {"yosys_timeout_s", "abc_timeout_s", "stats_path"}
+)
 
 #: Host-level budget override (``--yosys-timeout-s`` and
 #: ``request.yosys_timeout_s`` are the other two sources; see
@@ -70,9 +72,7 @@ def resolve_timeout(timeout_s: Any, default: float) -> float | None:
     return default if bound is None else bound
 
 
-def _validate_yosys_timeout(
-    value: Any, source_label: str, error_cls: type[Exception]
-) -> float:
+def validate_budget(value: Any, source_label: str, error_cls: type[Exception]) -> float:
     """One validation rule and one error shape for every budget source.
 
     ``source_label`` names the source in the error (``--yosys-timeout-s``,
@@ -97,7 +97,7 @@ def _validate_override(
             value = float(value)
         except ValueError:
             pass
-    return _validate_yosys_timeout(value, source_label, error_cls)
+    return validate_budget(value, source_label, error_cls)
 
 
 def bind_yosys_timeout(
@@ -130,7 +130,7 @@ def bind_yosys_timeout(
     env = _validate_override(raw_env, YOSYS_TIMEOUT_ENV, error_cls) if raw_env else None
     request_value = request.get("yosys_timeout_s")
     if request_value is not None:
-        request_value = _validate_yosys_timeout(
+        request_value = validate_budget(
             request_value, "request.yosys_timeout_s", error_cls
         )
     budget = flag if flag is not None else env if env is not None else request_value

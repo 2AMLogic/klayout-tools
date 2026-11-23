@@ -1,0 +1,1 @@
+- Landing-pad size errors identify the native GF180 top-metal runset or the resolved deck and report the required square side (#6849).

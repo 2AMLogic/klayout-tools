@@ -1,13 +1,14 @@
 """``hints.short_nets`` disclosure builder for ``klt lvs``.
 
-Split out of ``lvs.py`` (issue #4746) to keep that module under its per-file
-size ceiling. Pure move: re-exported from ``lvs`` unchanged; ``lvs`` is
-imported only inside the function so the import graph stays acyclic.
+The runner re-exports this helper. Its disclosure category is shared
+through ``lvs_base``.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .lvs_base import CATEGORY_HINTS_SHORT_NETS_APPLIED
 
 
 def _short_nets_disclosure(
@@ -22,7 +23,6 @@ def _short_nets_disclosure(
     caller. Always ``severity: "warning"`` -- see :func:`_apply_short_nets_hint`
     for why the disclosure, not the transform, is the point.
     """
-    from .lvs import CATEGORY_HINTS_SHORT_NETS_APPLIED
     from .lvs_mismatch import _mismatch
 
     description_parts = []

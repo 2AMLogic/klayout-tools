@@ -30,8 +30,9 @@ declared in its layout netlist versus what it recognized (instances > 0) on
 each side. A runset that recognizes no device on either side yields
 ``status: "inconclusive"`` (exit 4) with ``coverage.nothing_checked`` set --
 a clean-looking empty compare is not evidence.
-This module has no load-time ``lvs.py`` dependency (function-local imports);
-it mirrors ``lvs_netgen.py``.
+
+Runset validation uses the shared errors and categories from ``lvs_base``.
+The compare path imports runner helpers when it needs them.
 """
 
 from __future__ import annotations
@@ -45,6 +46,11 @@ from typing import TYPE_CHECKING, Any
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
 from .env_provenance import repo_relative_path, repo_root_for
+from .lvs_base import (
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
@@ -90,7 +96,6 @@ def _sha_prefixed(path: str | None) -> str | None:
 
 
 def _existing_file(raw: Any, request_dir: str, label: str) -> str:
-    from .lvs import LvsError
 
     if not isinstance(raw, str) or not raw:
         raise LvsError(f"engine '{RUNSET_ENGINE}' requires {label}")
@@ -101,7 +106,6 @@ def _existing_file(raw: Any, request_dir: str, label: str) -> str:
 
 
 def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
-    from .lvs import LvsError
 
     raw_vars = raw_vars or {}
     if not isinstance(raw_vars, dict):
@@ -120,7 +124,6 @@ def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
 
 
 def _parse_options(raw: Any) -> dict[str, Any]:
-    from .lvs import LvsError
 
     options = raw or {}
     if not isinstance(options, dict):
@@ -157,7 +160,6 @@ def _validate_request(
 
 
 def _resolve_klayout_binary(options: dict[str, Any], request_dir: str) -> str:
-    from .lvs import LvsError
 
     resolved = resolve_tool_binary(
         "klayout",
@@ -192,7 +194,6 @@ def _run_runset(
     """Launch the runset; return ``(lvsdb_path, completed)``. Raises
     ``LvsError`` for a launch failure, timeout, or no database written (a
     non-zero exit that did write one is returned; the caller reads it)."""
-    from .lvs import LvsError
 
     # cwd=work_dir below: path arguments must not depend on klt's own cwd.
     binary = os.path.abspath(binary) if os.sep in binary else binary
@@ -382,7 +383,6 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
             "instance-level power connectivity to check",
             derivation if universe else None,
         )
-    from .lvs import POWER_STATUS_MATCH, POWER_STATUS_MISMATCH
 
     findings = _power_connectivity_findings(rows, None)
     return {
@@ -496,8 +496,6 @@ def read_lvsdb_verdict(
     SPICE, used when the db does not carry the reference netlist."""
     import klayout.db as kdb
 
-    from .lvs import LvsError
-
     l2n = kdb.LayoutVsSchematic()
     try:
         l2n.read(lvsdb_path)
@@ -605,8 +603,8 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     from .lvs import (
         _DECK_FILE_GIVEN_KEY,
         SCHEMA_VERSION,
-        LvsError,
         _reference_conversion_echo,
+        _unresolved_reference_subckt_calls,
     )
 
     # Issue #5795: the caller's own --deck-file form, stashed by _merge_deck_flags.
@@ -657,6 +655,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             request["reference"].get("top") and (top or request["reference"]["top"]),
             {str(n).upper() for side in declared.values() for n in side or []}
             | _deck_device_list(deck_file),
+            _unresolved_reference_subckt_calls,
         )
     finally:
         import shutil

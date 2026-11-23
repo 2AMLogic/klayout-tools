@@ -67,6 +67,9 @@ def test_mirrored_inductor_limitation_reader(tmp_path):
     assert found["details"]["limitation"] == (
         signoff_runset.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER
     )
+    # A malformed sibling must not hide a valid limitation later in the list.
+    mixed = {**envelope, "mismatches": [None, *envelope["mismatches"]]}
+    assert signoff_runset.mirrored_inductor_limitation(mixed) == found
     # Without the entry (the negative controls' shape) there is nothing to
     # name, and a non-runset report never carries it.
     plain = _runset_envelope(LVS_MISMATCH_ENVELOPE, deck)
