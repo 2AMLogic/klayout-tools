@@ -4725,6 +4725,75 @@ path resolves as given (like a `not_applicable` document), so a relative
 path is read against the process working directory. `schema_version`: no
 bump; every new report field is omitted when unused.
 
+#### Structural rows: the `structural` disposition (issue #6985)
+
+Some ratified spec rows are not measured quantities at all: a row that
+states a **design constant** the bench itself wires in (measuring the node
+the bench drives would grade the bench's own source, not the design — a
+tautology), or a row whose claim is a **structural property** (device
+sizing, array population, geometry legality) checked by inspecting the
+deck or layout. For such rows no producible envelope can ever carry a
+covering measurement, so before this form they could only be asserted
+through some envelope's `rows` (a false claim) or declared a gap — and a
+gap reads identically whether the row is unevidenced or evidenced by a
+real structural check the grader cannot see.
+
+The `structural` disposition makes such a row representable and distinct.
+It is an object on the row (mutually exclusive with `gap`, either form)
+carrying a human **claim** and the inspected **artifact**, pinned by
+content hash — the same `{file, content_hash}` binding the `not_applicable`
+and justified-gap forms use:
+
+```json
+{
+  "id": "vref_const",
+  "structural": {
+    "claim": "reference is the 0.9 V source `Vref` wired in tb_ota.spice, not a measured node",
+    "artifact": {"file": "sim/tb_ota.spice", "content_hash": "sha256:..."}
+  }
+}
+```
+
+The hash pin proves the artifact is **unchanged**, not that the property
+holds: `klt signoff` records and freshness-pins the artifact, it does not
+execute any check (mirroring `executed_by_klt: false` for `model-run`
+evidence). Outcomes:
+
+- a structural row is listed under `detail.structural_rows`
+  (`[{id, claim, artifact}]`) — never in `declared_gaps`,
+  `justified_gaps`, `uncovered_rows` or `row_sources`, so it is distinct
+  from both a gap and an (impossible) coverage. The key is omitted when
+  no structural row is declared, so a disposition-free report is
+  byte-identical to this build's previous rendering (`--check` sees no
+  drift); `--format text` lists each row's claim and its artifact + hash
+  beside the item;
+- a declared structural row forces the item `unmet` / `partial_coverage`
+  exactly as a justified gap does — the roll-up is deliberately
+  unchanged (that a gap keeps blocking `tier: "T1"` is the operator
+  ruling on #5858; whether a structural disposition may ever *satisfy*
+  item 5 is a separate operator-level ruling in the same family, not
+  decided here);
+- the artifact is hash-checked at grading time like any cited artifact:
+  missing or unreadable grades `unmet` / `structural_artifact_unreadable`,
+  a mismatched content hash `unmet` / `structural_artifact_stale`
+  (`detail` names the row, the file, and both hashes);
+- a malformed `structural` object — a missing or empty `claim`, a
+  missing or malformed `artifact`, an unknown key, a non-object, or
+  `structural` together with `gap` (either form) — is
+  `invalid_evidence` for that item alone, never a raise and never a
+  silent demotion to an undispositioned or gap row;
+- a citation naming a structural row in its `rows` is
+  `invalid_evidence` (a structural row is never covered by a
+  measurement), and the `spec_rows[]` table renders the row in the
+  `structural` state beside `gap` / `no_evidence` (see "The per-spec-row
+  table" below).
+
+Item 6 rows share the reader and grading branch, so they accept the same
+form with the same outcomes. The artifact path resolves as given (like a
+`not_applicable` document or a justified gap's rationale). Additive:
+`schema_version` is not bumped, and every new report field is omitted
+when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -4922,11 +4991,15 @@ The block is a **projection of the same evidence grading already read**, not a
 second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
 because of it. Its rules:
 
-- **States.** Every declared row gets a record, in one of four states. `graded`
-  — at least one cited, file-backed envelope carries a `spec_row`-tagged
-  measurement naming the row. `gap` — the row declares a free-text or justified
-  gap. The record quotes the free text or the justified gap's `reason` in
-  `gap` and has no measured values, even if a citation names it.
+- **States.** Every declared row gets a record, in one of five states.
+  `graded` — at least one cited, file-backed envelope carries a
+  `spec_row`-tagged measurement naming the row. `gap` — the row declares a
+  free-text or justified gap. The record quotes the free text or the
+  justified gap's `reason` in `gap` and has no measured values, even if a
+  citation names it. `structural` — the row carries the `structural`
+  disposition (#6985): the record has no measured values and instead
+  carries the disposition's `claim` and `artifact` (with its content
+  hash); grading refuses citations naming the row, exactly as for a gap.
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
@@ -5010,7 +5083,9 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
   against a proposed limit is provisional) separately; item 6's rows also
   accept the justified object form of `gap` (issue #5599, listed under
   `detail.justified_gaps` with the same outcomes as item 5's -- see
-  "Declared gaps" above);
+  "Declared gaps" above) and the `structural` disposition (issue #6985,
+  listed under `detail.structural_rows`, same outcomes as item 5's -- see
+  "Structural rows" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;
@@ -5382,6 +5457,7 @@ item text:
 | --------- | --------- | ------------ |
 | The ERC spec declares at least one `"kind": "supply"` net, at least one `ties[]` entry (or, issues #2234/#2247, a top-level `ties_disclosure` explaining why it declares none, and which obstacle it hit — see below), and (with a PDN citation) a stackup covering every `power.straps[].layer` | the spec document `klt erc`'s envelope names — see below | `supply_spec_incomplete`, or one of `supply_spec_disclosed_unexpressible` / `supply_spec_disclosed_tool_limitation` for the disclosed-empty case — one reason per disclosed obstacle (`ties_disclosure.kind`) |
 | No declared tie was reported as *degenerate* by the ERC run itself — an `erc_coverage.skipped[]` record for `erc.missing_tie` (issue #2199), i.e. a tap region `klt erc` could not tell apart from an ordinary source/drain contact | the `erc` citation's `erc_coverage` | `supply_spec_incomplete` |
+| Every `ties[]` class the (hash-pinned) spec declares has its exact `erc.missing_tie:["<name>"]` work identity in `erc_coverage.checked` (issue #6987) — a class neither checked nor reported skipped supplied no verdict for a required rule, and a zero finding count cannot tell "the rule ran and found nothing" from "the rule never ran". Nothing weaker stands in: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string. An envelope that omits the entire `erc_coverage` block (every report before #2179) is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class | the `erc` citation's `erc_coverage.checked` | `tie_coverage_incomplete` (`detail.ties_unchecked` names the verdictless classes) |
 | No `erc.unconnected_net`/`erc.supply_short` on a declared supply, no `erc.expected_short_missing` on a declared supply (issue #2463 — a declared `nets[].same_net_as` tie the layout does not draw), no `erc.unlabelled_conductor` on a declared supply (issue #2524 — conductor on a supply's declared owned roles reachable from no label, the severed single-label rail `erc.unconnected_net` structurally cannot see), and no `erc.missing_tie` | the `erc` citation's `erc_findings[]` | `supply_not_continuous` |
 | **With a `place-and-route` citation** (RTL-flow digital): `power.pdn: true` | the `place-and-route` citation | `no_pdn` |
 | ...and a `power.tapcell_master` named, or `power.tapless: true` (library documented tapless, issue #4199) | the `place-and-route` citation | `no_tapcell_master` |
@@ -5966,6 +6042,7 @@ actually ran and failed):
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
 | `"supply_spec_disclosed_tool_limitation"` | yes | **Item 11 only** (issue #2247). The same disclosed zero-`ties[]` state as `"supply_spec_disclosed_unexpressible"` above, naming the other obstacle (`ties_disclosure.kind: "tool_limitation"`): the tap *is* expressible, but the `klt` build this evidence had to be produced on cannot grade a declared tie safely — the reported instance being issue #2169, where a declared tie joins the well/tap regions into the primary connectivity graph and reports a false `erc.supply_short` on any routed design. Still unmet on exactly the same principle: a disclosure is the caller's word about their toolchain, never a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from both "nobody declared ties at all" and "this stream has no tap to name". Kept distinct from the reason above because the remedy differs: re-run against a `klt` build whose tie extraction is isolated (issue #2169) and declare the tie, rather than go looking for a tap that is already drawn — a different *build*, not a redrawn layout. The report's own `provenance.klt_version` is what shows whether the disclosed limitation applies to the run in front of you. |
+| `"tie_coverage_incomplete"` | yes | **Item 11 only** (issue #6987). The cited `klt erc` run's (hash-pinned) spec declares its `ties[]`, the run reported no explicit skip and no finding, but one or more declared classes have **no verdict in the envelope at all**: their exact `erc.missing_tie:["<name>"]` work identity is absent from `erc_coverage.checked`. `erc_coverage` exists to distinguish "the rule ran and found nothing" from "the rule never ran" — a zero finding count is produced identically by both — so a class neither checked nor reported skipped supplied no positive evidence, and the item must not read its silence as a clean tie. Nothing weaker stands in for the missing identity: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string each leave the class verdictless. `detail.ties_unchecked` names which declared classes went verdictless. An explicit producer-format skip record (`{id, reason}`) still renders `"supply_spec_incomplete"` above (issue #2199, checked first), and an envelope that omits the entire `erc_coverage` block — every report before #2179 — is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class. Fix: re-run `klt erc` so every declared tie class is actually computed. |
 | `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), a declared supply's intentional tie to another name (`nets[].same_net_as`, issue #2463) is not drawn (`erc.expected_short_missing` — graded under the same declared-name filter `erc.unconnected_net` uses, since that rule can also name two signal nets), or a well/tub has no connected tap (`erc.missing_tie`). |
 | `"substrate_isolation_undecidable"` | yes | **Item 11 only** (issue #5346). The cited `klt erc` run disclosed `erc.supply_short` as `inapplicable` with reason `substrate_isolation_undecidable` — it could not decide whether two supplies share a substrate body — and listed what was `missing`. An undecided question is not a clean answer, so the item is unmet; the list is in `detail.power_delivery.substrate_isolation_missing`. A substrate-path `erc.supply_short` finding (`via: "substrate"`) is a `supply_not_continuous` blocker like a metal one. When the run instead evaluated the substrate path (`erc.supply_short.substrate` in `erc_coverage.checked`) a met citation carries `power_delivery.substrate_continuity: {"checked": true, "by_assertion": <bool>}`. Declare the missing isolation (`ties[].isolation_boxes`) and re-run `klt erc`. |
 | `"lvs_supply_unproven"`   | no  | **Item 11 only** (issue #2025). The LVS half of the item is unproven: with a PDN citation, the same report's `power_connectivity.status` is not `"match"` (`"unchecked"` satisfies item 4, but not this item, which *is* the question); without one, its `net_correspondence` does not pair every declared supply net to a reference-side net, so the supplies were not part of the compare. Rendered only for a cited LVS report that *passed* — one that did not renders `"lvs_did_not_pass"`/`"check_failed"` below instead. |

@@ -270,15 +270,15 @@ one-document-per-line requirement).
   the document side of the `#` is still a finding.
 - **Mapping keys are scanned too.** A dict *keyed* by an absolute path leaks
   exactly as thoroughly as one valued by it.
-- **Remote worker observations are not flagged** (issue #5133). Everything
-  under `environment.remote.worker_environment` (and, for a sharded run,
-  `environment.remote.fleet.<i>.worker_environment`) — the worker's PDK root,
-  `simulator.selected_path`, version banner, diagnostics — describes the
-  remote host, not the author's checkout, so a batch-sim report lints clean
-  without `--allow-prefix`. The exemption is path-scoped: a
-  `worker_environment` key anywhere other than directly under
-  `environment.remote`, and every other field in the same envelope, is still
-  linted.
+- **Remote worker observations** (issues #5133 and #7484). The worker's
+  PDK root, simulator path, version banner and diagnostics describe the
+  execution host. The linter skips `worker_environment` and
+  `fleet.<j>.worker_environment` under the simulation report's
+  `environment.remote`. In a PEX report, it recognizes the same fields
+  under `testbenches.<i>.sides.schematic.environment.remote` and
+  `testbenches.<i>.sides.extracted.environment.remote`. Other fields,
+  including the client simulator path and the remote work directory, still
+  receive the usual absolute-path checks.
 - **`--allow-prefix` is explicit, never inferred from the environment.** Pass
   `--allow-prefix /usr/share/pdk` for a genuinely machine-wide install root.
   Reading `$PDK_ROOT` instead would make the verdict depend on the linting

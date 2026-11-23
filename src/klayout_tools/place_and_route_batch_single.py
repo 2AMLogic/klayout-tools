@@ -17,8 +17,8 @@ fleet job when the backend is selected *explicitly* (``--backend batch`` or
 * The runner's ``.klt/place-and-route/`` is copied back into this host's
   ``.klt/place-and-route/`` (no ``<corner>/`` subdirectory), so
   ``--check``/``--rerun`` and every report path read as for a local run.
-* The returned report is the runner's own single-run report with
-  ``environment = {"backend": "batch", "remote": {..., "job_id": ...}}``.
+* The returned report is the runner's own single-run report with its effective
+  OpenROAD thread count and the fleet job metadata in ``environment``.
 * **No fallback, ever.** A failed upload, launch, poll or run raises
   :class:`~klayout_tools.place_and_route.PlaceAndRouteError` carrying the
   existing ``batch_*`` ``error.code``; OpenROAD is never launched here.
@@ -133,7 +133,7 @@ def run_single_batch(
             raise PlaceAndRouteError(
                 str(exc), code=exc.code or _par_batch.BATCH_JOB_FAILED_CODE
             ) from exc
-    report["environment"] = {"backend": "batch", "remote": remote}
+    report.setdefault("environment", {}).update(backend="batch", remote=remote)
     return report
 
 

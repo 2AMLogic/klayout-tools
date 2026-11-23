@@ -23,19 +23,19 @@ from . import sim_echo_messages, sim_supply_waveform
 from ._jsonnum import is_finite_number
 from .sim_corner_axes import (
     _expand_corner_units,
-    _expand_options_axis,
     _is_excluded,
-    _normalize_option_row,
     _parse_process_entry,
-    _validate_exclude_options,
-    _validate_exclude_params,
+    _validate_corner_option_name,
+    _validate_exclude_numeric_axis,
 )
 from .sim_corner_point import (
     CornerPoint,
     _bind_temperature_param,
-    _expand_param_axis,
-    _normalize_param_row,
+    _check_param_supply_columns,
+    _expand_numeric_axis,
+    _normalize_numeric_row,
     _temperature_param_name,
+    _validate_param_name,
 )
 from .sim_corner_variants import _parse_variants
 from .sim_echo_messages import zipped_length_message
@@ -124,8 +124,11 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
         # Issue #3035: validated here again, at the receiving worker, with
         # the same rules the caller applied (a wire payload is not trusted).
         params = (
-            _normalize_param_row(
-                raw_params, "request._explicit_points[].params", supply_v
+            _normalize_numeric_row(
+                raw_params,
+                "request._explicit_points[].params",
+                validate_name=_validate_param_name,
+                supply_v=supply_v,
             )
             if raw_params is not None
             else {}
@@ -147,7 +150,11 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
         )
         raw_options = entry.get("options")
         options = (
-            _normalize_option_row(raw_options, "request._explicit_points[].options")
+            _normalize_numeric_row(
+                raw_options,
+                "request._explicit_points[].options",
+                validate_name=_validate_corner_option_name,
+            )
             if raw_options is not None
             else {}
         )
@@ -261,13 +268,28 @@ def _expand_corners(
 
     # Issue #3035: the innermost axis. Its rows are validated before the
     # exclusion rules so a selector can be checked against the declared names.
-    param_rows = _expand_param_axis(corners_spec)
+    param_rows = _expand_numeric_axis(
+        corners_spec,
+        key="params",
+        noun="parameter",
+        validate_name=_validate_param_name,
+        check_columns=_check_param_supply_columns,
+    )
     temperature_param = _temperature_param_name(corners_spec)
     declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
-    _validate_exclude_params(exclude_spec, declared_params)
+    _validate_exclude_numeric_axis(
+        exclude_spec, declared_params, key="params", noun="parameter"
+    )
     # Issue #3125: the solver-option axis, innermost of all.
-    option_rows = _expand_options_axis(corners_spec)
-    _validate_exclude_options(exclude_spec, set(option_rows[0]))
+    option_rows = _expand_numeric_axis(
+        corners_spec,
+        key="options",
+        noun="solver option",
+        validate_name=_validate_corner_option_name,
+    )
+    _validate_exclude_numeric_axis(
+        exclude_spec, set(option_rows[0]), key="options", noun="option"
+    )
 
     points: list[CornerPoint] = []
     seen: dict[str, int] = {}
