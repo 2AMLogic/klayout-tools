@@ -4669,6 +4669,42 @@ byte-identical. A changed `save_vectors` invalidates a `--resume`
 checkpoint. It rides the forwarded request document to `remote`/`batch`
 workers, so the worker image must include this implementation.
 
+#### Measure a device current inside a subcircuit
+
+To measure the current through a native ngspice resistor at one DC sweep
+point, save its device parameter explicitly. In this circuit, the subcircuit
+instance `Xload` contains resistor `Rleg`. ngspice names the resistor
+`r.xload.rleg` (device type, instance, local name), and `[i]` selects its
+current. The default `save all` omits this internal vector, so use the same
+bare `@r.xload.rleg[i]` in `save_vectors` and the `FIND` operand.
+
+Save the circuit as `body.spice`.
+
+```spice
+Vdrive in 0 0
+Xload in 0 load
+.subckt load p n
+Rleg p n 1k
+.ends load
+```
+
+Save this `request.json` beside it.
+
+```json
+{
+  "netlist": "body.spice",
+  "analysis": {"kind": "dc", "args": "Vdrive 0 1 0.1"},
+  "options": {"save_vectors": ["@r.xload.rleg[i]"]},
+  "measurements": [
+    {"name": "ileg", "unit": "A", "spice": ".meas dc ileg FIND @r.xload.rleg[i] AT=0.6"}
+  ]
+}
+```
+
+Run `klt sim request.json --backend local --format json`. At 0.6 V the
+1 kΩ resistor carries 0.0006 A, which the corner reports as a passing
+`ileg` measurement.
+
 #### PSP103 device currents inside a subcircuit
 
 ngspice exposes an OSDI device under the `n.` prefix. Include each enclosing
@@ -5798,6 +5834,22 @@ form that older runners could accept. The batch version-skew check rejects a
 known runner/client version mismatch with `batch_runner_version_mismatch`
 under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
 version skew"); passing that check does not establish mechanism support.
+
+## Supply-relative measurement limits
+
+Either `measurements[].limits.min` or `.max` can be a number or a fraction
+of a named supply. For example, `"limits": {"min": {"frac_of": "vdd",
+"fraction": 0.9}, "max": 2}` grades a measurement against a floor of
+1.458 V at 1.62 V supply and 1.782 V at 1.98 V supply, with a 2 V ceiling
+in both cases. Every selected corner must define the rail. The fraction must
+be finite and nonnegative. A pooled Monte Carlo sigma window requires a
+common numeric bound, so declaring `k_sigma` for the measurement or run
+with a supply-relative bound is refused before the sweep.
+
+For affected measurements, `corners[].measurements[].limits_resolved` gives
+the numeric bounds used for that corner. Aggregate `measurements[].limits`
+retains the request declaration. Off-host jobs require a runner that supports
+supply-relative limits. Older runners cannot grade an object-valued bound.
 
 ## Optional measurements (`measurements[].optional`)
 

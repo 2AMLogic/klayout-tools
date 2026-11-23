@@ -106,6 +106,12 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+When a `klt sim` measurement declares a supply-relative `limits.min` or
+`limits.max`, its per-corner result gains `limits_resolved` containing
+the numeric bounds for that corner. The aggregate measurement retains the
+declared `limits`, including its `{"frac_of": "<rail>", "fraction": k}`
+object. A measurement with only literal bounds keeps its existing shape.
+
 `measurements[].optional` (issue #2925) is an opt-in boolean (default
 `false`) that extends the per-measurement `status` vocabulary with an
 additive value, `"absent"` (`value: null`, `margin: null`, info diagnostic
