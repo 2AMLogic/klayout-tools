@@ -117,7 +117,7 @@ A request naming both, or neither, is a request error.
 Unknown top-level keys are rejected (exit 1, naming the key and listing the
 known fields), matching `klt extract`; only `schema` is always allowed.
 The optional `sdc_check` field (see "SDC drift check") compares a committed
-`.sdc` with the constraints below. It lists `set_clock_transition` under
+`.sdc` with the constraints below. It compares explicit setup and hold multicycle paths and lists `set_clock_transition` under
 `sdc_drift.unchecked`. Set `constraints.clock_transition_ns` to apply the
 primary clock’s ideal slew during analysis.
 
@@ -1756,6 +1756,7 @@ data hold path and is what `into.hold` reports, under its own
   Mode values, destination pins, through pins and pin patterns are outside
   that contract. Register multicycle exceptions have their own selectors in
   `constraints.multicycle_paths`. When `sdc_check`
+  compares multicycle exceptions, it checks each setup and hold multiplier. When it
   reads `set_case_analysis`, `set_false_path -to` or `set_false_path -through`,
   it lists each command and its source line in `sdc_drift.unchecked`. The
   supplied SDC is comparison data only. The JSON request supplies the timing
@@ -1945,6 +1946,27 @@ equal the request's reference for that subject -- the entry's `clock` for a
 mapped port, else the primary clock -- so a clock disagreement is a mismatch,
 never a false `match`. A per-corner period map matches when the SDC period
 equals any corner's value.
+For `set_multicycle_path`, the reader compares each positive integer
+multiplier exactly. Specify one of `-setup` or `-hold`, both `-from` and
+`-to`, and optionally `-through`. Each selector can be a bare name,
+`[get_cells S]` or `[get_pins S]` using the same selector alphabet as the
+request. Matching uses the selector strings. Each missing, extra or changed
+side gets a mismatch with its selection, bound and both multiplier values.
+An absent value is `null`. An SDC-sourced difference includes its line
+number. Changing a selector removes one selection and adds another. Forms
+with implicit sides, edge flags, repeated selectors or Tcl lists appear in
+`unchecked`.
+
+With nonempty `constraints.multicycle_paths`, flat and multi-corner reports
+also carry `provenance.request_sha256`. To reproduce it from the loaded JSON
+object, compute
+`hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`.
+The hash covers every request field, including relative DEF, Verilog, SPEF
+and SDC path strings as written. Whitespace and object key order in the file
+have no effect. The separate `provenance.input.content_hash` identifies the
+geometry input bytes. Omitted or empty multicycle paths leave the request
+digest absent.
+
 Comments, blank lines and `\` continuations are handled; anything else --
 other commands, or a checked command using an option/form the reader does not
 understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
@@ -1962,7 +1984,7 @@ mismatch with `sdc_value: null`.
      "sdc_value": 0.9, "request_value": 0.8, "line": 4}
   ],
   "unchecked": [
-    {"command": "set_multicycle_path", "line": 7,
+    {"command": "set_case_analysis", "line": 7,
      "reason": "command not in the checked subset"}
   ],
   "status": "drift"

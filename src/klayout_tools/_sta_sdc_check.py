@@ -4,11 +4,10 @@ A flow that keeps its constraints in a committed ``.sdc`` must duplicate them
 into the ``klt sta`` request, and nothing noticed the two diverging. With
 ``request.sdc_check = {"path": "<file>.sdc"}`` this module reads the file with a
 small **pure-Python** reader -- no Tcl is executed, nothing reaches OpenSTA, the
-SDC is never a constraint source -- and compares the four supported commands
+SDC is never a constraint source -- and compares the supported commands
 (``create_clock``, ``set_input_delay``, ``set_output_delay``,
-``set_clock_uncertainty``) with the request's constraints. Every other command
-(and any supported command written in a form the reader does not understand) is
-listed by name in ``unchecked``; it is never silently passed.
+``set_clock_uncertainty`` and ``set_multicycle_path``) with the request. Other commands
+and unsupported forms appear by name in ``unchecked``.
 
 Drift is data, not a gate: the response block is informational and the exit
 code is unaffected. Split out of ``post_route_sta.py`` (per-file size ratchet,
@@ -25,6 +24,7 @@ from typing import Any
 
 from . import env_provenance
 from ._sta_io_delay_clock import IoDelayMap, entry_bound, entry_clock
+from ._sta_sdc_multicycle import compare_multicycle, parse_multicycle
 from .post_route_sta_errors import PostRouteStaError
 
 _TOLERANCE = 1e-9
@@ -34,6 +34,7 @@ _SUPPORTED = (
     "set_input_delay",
     "set_output_delay",
     "set_clock_uncertainty",
+    "set_multicycle_path",
 )
 
 
@@ -214,7 +215,10 @@ def parse_sdc(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if words[0] in _SUPPORTED:
             reason = "unsupported option or argument form"
             if ";" not in line and "{" not in line and "$" not in line:
-                parsed = _parse_command(words)
+                if words[0] == "set_multicycle_path":
+                    parsed = parse_multicycle(line)
+                else:
+                    parsed = _parse_command(words)
         if parsed is None:
             unchecked.append({"command": words[0], "line": line_no, "reason": reason})
         else:
@@ -384,6 +388,7 @@ def sdc_drift_block(
     input_delays: IoDelayMap | None,
     output_delays: IoDelayMap | None,
     clock_uncertainty: dict[str, float | None] | None,
+    multicycle: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The response's ``sdc_drift`` block: file identity + hash, each
     mismatch, every unchecked command, and ``status`` (``match``/``drift``)."""
@@ -415,6 +420,7 @@ def sdc_drift_block(
         mismatches,
     )
     _compare_uncertainty(commands, clock_uncertainty, clock_port, mismatches)
+    mismatches.extend(compare_multicycle(commands, multicycle))
     # An unreadable command may supply a requested constraint. Only a
     # missing SDC value relies on inferring absence from the parsed commands.
     unchecked_commands = {entry["command"] for entry in unchecked}

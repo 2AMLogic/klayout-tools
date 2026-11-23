@@ -165,6 +165,8 @@ def test_run_sta_omitted_and_empty_leave_tcl_and_response_unchanged(
     empty = run_sta(empty_path)
 
     assert scripts_plain[0] == scripts_empty[0]
+    assert "request_sha256" not in plain["provenance"]
+    assert "request_sha256" not in empty["provenance"]
     assert "multicycle_paths" not in empty
     assert set(plain) == set(empty)
 

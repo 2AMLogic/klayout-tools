@@ -4419,6 +4419,16 @@ only; `null` when that check was `unavailable`, never `0`). Semantics:
 
 Both are additive; `schema_version` is unchanged.
 
+When a cited STA run reports multicycle exceptions, its check and item 5
+citation carry `detail.applied_exceptions`. The block identifies the STA
+request by `request_sha256` and lists each reporting corner with the
+`index`, `from`, `through`, `to`, `setup` and `hold` of its applied paths.
+A missing digest or malformed path list appears as `null`. Corners without
+entries contribute no row. Item 5 also carries this detail when exactly one
+of its passing STA citations reports exceptions. Each citation retains its
+own detail when several report exceptions. The completeness and annotation
+requirements grade each corner as before. See [SDC drift check](sta.md#sdc-drift-check-sdc_check-issue-5236).
+
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
 `pdk.corners`), so `klt signoff` never widens a claim to corners the

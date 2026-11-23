@@ -310,7 +310,10 @@ from .signoff_spec_row_table import _members_rows_declared, build_spec_row_recor
 from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
+    sta_citation_detail,
     sta_constraint_refusal,
+    sta_exception_disclosure,
+    sta_item_exception_detail,
 )
 
 # The store-pin companion resolution (issue #5963): a `klt yield` citation
@@ -3083,12 +3086,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "em_verdict_checked_edge_count": em_verdict.get("checked_edge_count"),
         }
     elif kind == "sta":
-        # Both documented response shapes reduce to the same excerpt: the
-        # multi-corner shape reports the worst corner (the one that decides
-        # the verdict) plus how many corners were characterised; the flat
-        # single-corner shape reports its own fields with `corner_count`
-        # None, so a reader can tell "one corner, unreported" from "N
-        # corners" without re-parsing the envelope.
+        # Flat runs omit the corner count. Multi-corner runs identify the worst corner.
         worst = _sta_worst_corner(envelope)
         detail = {
             "def_path": envelope.get("def_path"),
@@ -3105,6 +3103,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "worst_hold_slack_ns": worst.get("worst_hold_slack_ns"),
             "timing_status": worst.get("timing_status"),
             "constraint_completeness_status": constraint_completeness_status(worst),
+            **sta_exception_disclosure(envelope),
         }
     elif kind == "functional-verification":
         sdf = _sdf_metadata(envelope)
@@ -5783,11 +5782,11 @@ def _citation(
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
-        # Whether the input artifact was checked against its envelope (#2196).
-        # None records that no artifact was re-hashed.
+        # None means the input was never re-hashed against its envelope (#2196).
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    citation.update(sta_citation_detail(resolution["kind"], resolution["envelope"]))
     citation.update(synthesis_disclosure(resolution["kind"], resolution["envelope"]))
     citation.update(declared_hash_unbound_disclosure(resolution))
     # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
@@ -6110,6 +6109,7 @@ def _build_tier_item(
         else:
             status, reason, citation, failure_detail = grade_spec(spec)
 
+    failure_detail.update(sta_item_exception_detail(item_id, extra))
     return {
         "tier": tier,
         "id": item_id,
