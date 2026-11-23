@@ -1512,6 +1512,36 @@ above still applies, silently, on that side. There is no separate
 diagnostic for this today; give `layout.deck`/`reference.deck` whenever a
 pre-extracted netlist may contain a custom device class.
 
+### Migrating a plain-element sg13cmos5l reference from 0.6 (issue #4424)
+
+For a GDS layout and a caller-generated SPICE reference, set
+`layout.deck` and `reference.deck` to `"sg13cmos5l"` and use
+`reference.form: "plain-element"` (the default). A MoM capacitor uses an
+`X` card and a three-terminal drawn resistor can use an `R` card.
+
+```spice
+XC1 n1 gnd cap_cmomi W=40U L=40U
+R1 in n1 bulk 347641.4191419142 rppd L=810U W=0.6U A=486P P=1621.2U
+```
+
+The 0.6-era rewrite `cap_cmomi PARAMS: W=40 L=40` supplied bare micrometre
+counts. Since #2381, the reader interprets these lengths in SI units, so
+the layout measures 40 µm while the reference reports 40,000,000 µm.
+Emit `W=40U L=40U`. When the resistor card supplies area and perimeter,
+use `P` (10⁻¹² m²) for a value expressed in µm² and `U` (10⁻⁶ m) for a
+value expressed in µm. In the example, `A=486P` means 486 µm² and
+`P=1621.2U` means 1621.2 µm of perimeter.
+
+Compute the positional resistance in ohms from the sg13cmos5l device
+symbol for the schematic dimensions. For the straight `rppd` above,
+with `L` and `W` in µm, the deck uses `70/W + 260*L/(W+0.006)`.
+A sheet-only reference gives 351,000 Ω and still fails after correcting
+the units. Each resistor flavour has its own constants. Correcting both
+the units and the resistance restores device pairing at the default
+tolerance. A small block can report all devices and nets unmatched,
+while a larger block with matching MOS devices can instead identify the
+same stale values in individual `device.property` entries.
+
 ## Bulk-bearing drawn-resistor classes round-tripped through an `X` card (issue #1157)
 
 Since issue #1157, `klt extract`'s bare (non-`--pdk`) output writes a
