@@ -126,6 +126,7 @@ from . import (
     sim_stimulus,
     sim_stress,
     sim_subckt_override,
+    sim_supply_relative,
     sim_supply_waveform,
     sim_tian,
     sim_transfer_meas,
@@ -3411,10 +3412,10 @@ def _prepare_sim_request(
     _validate_supply_override_targets(netlist_path, corner_points)
     # Issue #3035: the same for a `corners.params` name no `.param` declares.
     _validate_param_targets(netlist_path, corner_points)
-    # Issue #3918: a supply-relative `crossings.level` needs its `frac_of`
-    # key in every corner's supply map -- refused here, not mid-sweep.
-    sim_crossings.validate_supply_relative_levels(
-        measurements_spec, [point.supply_v for point in corner_points]
+    supply_maps = [point.supply_v for point in corner_points]
+    sim_crossings.validate_supply_relative_levels(measurements_spec, supply_maps)
+    sim_supply_relative.validate_limits(
+        measurements_spec, supply_maps, monte_carlo_spec
     )
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
@@ -7713,16 +7714,11 @@ def _run_corner(
     timeout or unsuccessful engine exit is recorded in the corner report.
     Unexpected exceptions propagate after the scratch directory is released.
 
-    ``engine="ngspice"`` runs ``ngspice -b`` on a deck carrying a
-    ``.control`` block (see ``_write_corner_deck``). ``engine="xyce"``
-    (issue #2016) runs ``Xyce -b`` -- the ``-b`` is accepted-and-ignored
-    SPICE-compatibility -- on a control-block-free deck (see
-    ``_write_xyce_deck``), with ``-l`` for the log and ``-r ... -a`` for an
-    ASCII rawfile when waveforms were requested. Both branches share the
-    measurement/limits/status tail: the response contract is
-    engine-shaped, not engine-specific, and the two engines are kept
-    byte-comparable for the cross-validation oracle
-    (tests/test_sim_xyce_oracle.py).
+    ``ngspice -b`` reads a deck with a control block from ``_write_corner_deck``.
+    Xyce accepts ``-b`` for compatibility and reads ``_write_xyce_deck``'s
+    control-block-free deck, with ``-l`` for logs and ``-r ... -a`` for ASCII
+    waveforms. Both engines share grading and the response contract exercised
+    by ``tests/test_sim_xyce_oracle.py`` (#2016).
 
     ``fail_on_diagnostic`` (issue #2492, the already-validated
     ``options.fail_on_diagnostic`` codes -- see
@@ -7741,6 +7737,9 @@ def _run_corner(
     that directory as its cwd, so init and relative include paths resolve
     there for both retained artifacts and temporary runs.
     """
+    measurements_spec, limit_echoes = sim_supply_relative.resolve_limits(
+        measurements_spec, point.supply_v
+    )
     is_xyce = engine == "xyce"
     engine_name = XYCE_BINARY if is_xyce else "ngspice"
     with _runner_work_dir(artifacts_dir, point.slug, keep_artifacts) as corner_dir:
@@ -7955,6 +7954,7 @@ def _run_corner(
                 engine_diagnostics=diagnostics,
             )
         )
+        sim_supply_relative.attach_limits(measurement_results, limit_echoes)
         measurement_diagnostics = _demote_abort_cascade(
             measurement_diagnostics, engine_aborted or analysis_never_started
         )
