@@ -22,6 +22,15 @@ from typing import Any
 MEMBER_COUNT_ITEMS: frozenset[int] = frozenset({2, 3, 4, 11})
 
 
+def graded_input_provenance(citation: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy the hash and tri-state verification of an already resolved member."""
+    source = citation or {}
+    return {
+        "content_hash": source.get("content_hash"),
+        "input_verified": source.get("input_verified"),
+    }
+
+
 def member_coverage(raw_entry: Any, extra: dict[str, Any]) -> dict[str, int]:
     """``{"members_covered": n, "members_total": m}`` for a list-form entry.
 

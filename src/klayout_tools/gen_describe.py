@@ -66,6 +66,8 @@ from .gen_layer_params import (
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
     _deck_min_width_um,
+    _device_implant,
+    _device_well_enclosure_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
@@ -79,7 +81,6 @@ from .gen_layer_params import (
     _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
-    _sd_implant_margin_um,
     _tap_pads_wanted,
     mfg_grid_um,
 )
@@ -378,32 +379,18 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
 def _sd_implant_hints(
     family: str, params: dict[str, Any], notes: list[str]
 ) -> dict[str, Any]:
-    """``drc_hints`` fields for the unit devices' source/drain implant
-    (issue #2580), reporting-only: echoes whether the family's
-    flavor-selected ``"nplus"``/``"pplus"`` role resolved to a real layer
-    (the same selection :func:`_device_layer_params` threads to the PCell),
-    appending an explanatory entry to ``notes`` (in place) when it did not
-    -- gf180mcu (issue #1577) is today the only family that declares the
-    roles, so every other family's S/D diffusion lands un-implanted with no
-    DRC rule in its curated deck to flag it. Mirrors
-    :func:`_voltage_flavor_hints`'s own "notes it, never silently drops it"
-    contract; draws nothing and changes no geometry -- actually drawing a
-    correctly-enclosed implant on the remaining families needs a real PDK
-    enclosure rule this repo's curated decks do not carry."""
+    """Report the same layer and active enclosure used by the drawing PCell."""
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
-    sd_implant = _role_layer_info(family, sd_implant_role)
-    if sd_implant is None or _sd_implant_margin_um(family) <= 0:
+    layer, margin, _ = _device_implant(family, flavor)
+    present = layer is not None and margin > 0
+    if not present:
         notes.append(
             f"family '{family}' declares no S/D implant role "
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
-    return {
-        "sd_implant_present": (
-            sd_implant is not None and _sd_implant_margin_um(family) > 0
-        ),
-    }
+    return {"sd_implant_present": present}
 
 
 def _fmt_um(value_um: float) -> str:
@@ -611,6 +598,7 @@ def _mos_array_describe(
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
+        well_enclosure_um=_device_well_enclosure_um(family, params),
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],

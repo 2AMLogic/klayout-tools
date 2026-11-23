@@ -424,6 +424,11 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   For a mixed-signal block sharing one ratified spec, `spec_rows."6.digital"`
+   scopes this statement and scan to the digital rows. Every spec row must be
+   assigned under `6.digital` or `6.analog`. A statistical row assigned to the
+   digital partition still prevents this outcome. Analog rows are graded
+   independently against their yield evidence.
    **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
    restriction is intentional. Analog performance is inherently statistical
    (offset, mismatch, bias spread), so an analog spec with no statistical row
@@ -682,9 +687,11 @@ written to every block.
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
       reason `degenerate_tap_declaration`, issue #2199,
       `degenerate_well_assertion`, issue #2255,
-      `degenerate_well_selection`, issue #2339, or `empty_well_region`,
+      `degenerate_well_selection`, issue #2339, `empty_well_region`,
       issue #2377 — a drawn `well_layer` with no geometry at all in the
-      stream) returns zero for a
+      stream — or `degenerate_connect_target`, issue #7419 — a
+      through-less tie whose `connect_to` role touches none of its tap
+      sites, so it cannot pass by construction) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with

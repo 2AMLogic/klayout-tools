@@ -200,7 +200,7 @@ def test_templates_union_by_name(tmp_path):
     assert text.count("lu_table_template (shared)") == 1
 
 
-def test_same_name_template_conflict(tmp_path):
+def test_unused_template_keeps_first_index(tmp_path):
     tmpl = (
         "  lu_table_template (t) {{\n"
         '    index_1 ("{}");\n'
@@ -209,10 +209,10 @@ def test_same_name_template_conflict(tmp_path):
     )
     a = _write(tmp_path, "groupA.lib", _lib("A", header_extra=tmpl.format("1, 2")))
     b = _write(tmp_path, "groupB.lib", _lib("B", header_extra=tmpl.format("1, 3")))
-    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
-        liberty_merge.merge_liberty([a, b])
-    msg = str(exc.value)
-    assert "template 't'" in msg and "Liberty headers differ" not in msg
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert text.count("lu_table_template (t)") == 1
+    assert 'index_1 ("1, 2")' in text
+    assert 'index_1 ("1, 3")' not in text
 
 
 def test_duplicate_cell_raises(tmp_path):
