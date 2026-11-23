@@ -19,9 +19,9 @@
   `schema_version` bump. Arrays that previously reported `violated` on a
   geometrically perfect layout now report `clean`, and `kind` for `gap` /
   `overlap` names the deviation direction from the expected seam gap rather
-  than a physical intersection. For `gap`/`overlap`, `measured_um` and
-  `expected_um` are now both the **signed** seam gap, so their difference is
-  the deviation; this changes `measured_um` of an `overlap` violation from the
-  positive overlap magnitude to the negative signed gap (`expected_um` stays
-  `0` when `--pitch` equals the cell's extent), and the `description` is
-  phrased off the deviation ("wider"/"narrower than the expected gap").
+  than a physical intersection. When pitch equals the cell’s extent, `expected_um`
+  stays zero and `measured_um` keeps the positive gap or overlap magnitude
+  and its existing description. For a nonzero expected seam gap,
+  `measured_um` and `expected_um` are the signed actual and design gaps.
+  Their difference is the deviation, and the description says how much
+  wider or narrower the seam is than expected.
