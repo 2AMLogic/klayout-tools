@@ -87,7 +87,6 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -126,6 +125,7 @@ from . import (
     sim_stimulus,
     sim_stress,
     sim_subckt_override,
+    sim_supply_relative,
     sim_supply_waveform,
     sim_tian,
     sim_transfer_meas,
@@ -214,6 +214,19 @@ from .sim_batch_features import (
 from .sim_batch_hints import attach_runner_hints as _attach_runner_hints
 from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
+from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports working
+    DEFAULT_MC_SEED_MODE,
+    DEFAULT_MC_SEED_SCOPE,
+    DEFAULT_SAVE_MODE,
+    _Checkpoint,
+    _checkpoint_fingerprint,
+    _checkpoint_path,
+    _key_in_initial_conditions,
+    _key_in_mc_mismatch_scale,
+    _key_in_mc_seed_options,
+    _load_checkpoint,
+    restore_checkpoint,
+)
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -561,6 +574,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_predated",
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
+        sim_spiceinit.BATCH_INIT_UNVERIFIED,
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
         "expr_runner_may_predate",
@@ -710,7 +724,6 @@ SUPPORTED_MC_VARY = ("mismatch", "process", "both")
 #: die at every corner); ``point`` keys on the point's own identity, so any
 #: partition or reordering of a grid yields the same samples.
 SUPPORTED_MC_SEED_SCOPES = ("per_corner", "shared", "point")
-DEFAULT_MC_SEED_SCOPE = "per_corner"
 
 #: Recognised values for ``request.monte_carlo.seed_mode`` -- how each
 #: sample's ``rndseed`` (the integer written as ``.options seed=``) is
@@ -719,7 +732,6 @@ DEFAULT_MC_SEED_SCOPE = "per_corner"
 #: campaign with a documented ``base + draw_index`` rule can be re-expressed
 #: draw-for-draw. ``process_seed``/``mismatch_seed`` stay derived either way.
 SUPPORTED_MC_SEED_MODES = ("derived", "sequential")
-DEFAULT_MC_SEED_MODE = "derived"
 
 #: Per-``(pdk_family, device_family)`` mismatch-activity table consulted by
 #: :func:`_mismatch_family_report` (issue #355). A vendor model deck's global
@@ -2032,7 +2044,6 @@ def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
 #: vector coverage every measurement and waveform consumer needs. klt never
 #: parses, rewrites or widens the netlist's ``.save`` selectors.
 SAVE_MODES = ("all", "netlist")
-DEFAULT_SAVE_MODE = "all"
 
 
 def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
@@ -3383,10 +3394,10 @@ def _prepare_sim_request(
     _validate_supply_override_targets(netlist_path, corner_points)
     # Issue #3035: the same for a `corners.params` name no `.param` declares.
     _validate_param_targets(netlist_path, corner_points)
-    # Issue #3918: a supply-relative `crossings.level` needs its `frac_of`
-    # key in every corner's supply map -- refused here, not mid-sweep.
-    sim_crossings.validate_supply_relative_levels(
-        measurements_spec, [point.supply_v for point in corner_points]
+    supply_maps = [point.supply_v for point in corner_points]
+    sim_crossings.validate_supply_relative_levels(measurements_spec, supply_maps)
+    sim_supply_relative.validate_limits(
+        measurements_spec, supply_maps, monte_carlo_spec
     )
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
@@ -3540,6 +3551,20 @@ def _prepare_sim_request(
         want_waveforms=want_waveforms,
         waveform_max_bytes=waveform_max_bytes,
         waveform_decimate=waveform_decimate,
+    )
+
+
+def _open_resume_checkpoint(
+    checkpoint_path: str,
+    *,
+    resume: bool,
+    **fingerprint_inputs: Any,
+) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
+    """Hash the request inputs and open a checkpoint only when resuming."""
+    if not resume:
+        return {}, None, None
+    return restore_checkpoint(
+        checkpoint_path, _checkpoint_fingerprint(**fingerprint_inputs)
     )
 
 
@@ -3857,20 +3882,9 @@ def _run_sim_corners(
             "fraction": probe_result["estimated_fraction"],
         }
 
-    # The engine seam (issue #2016) rides along to the local backends only:
-    # `remote`/`batch` run whatever their provisioned box/job ships (the
-    # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
-    # above anyway), so the kwarg would be dead weight there. `ngspice_binary`
-    # (issue #2423), `fail_on_diagnostic` (issue #2492) and `ngspice_init`
-    # (issue #2520) ride along the same way and for the same reason: an
-    # off-host shard re-invokes `klt sim` on a *different* host, which
-    # resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`,
-    # `options.fail_on_diagnostic` (grading its own corners inconclusive
-    # there -- passing this process's resolved value would double-grade, so
-    # the CLI overrides are local-backend-only, like `--fail-fast-probe`)
-    # and `options.ngspice_init` (writing its own `.spiceinit`) fresh from
-    # the forwarded request document -- this process's own resolution
-    # describes only this host.
+    # Off-host workers resolve the engine, diagnostic policy and ngspice init
+    # from their staged request. These local kwargs describe the client host.
+    # Forwarding the resolved fail_on_diagnostic policy would grade those corners twice.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
     # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
@@ -4389,8 +4403,12 @@ def _run_sim_corners(
         )
     )
     _attach_timeout_budget_hint(environment, corners, timeout_s)
-    # Issues #2901, #5061: lifted out of `environment.remote` to the top level.
-    remote_diagnostics = pop_remote_diagnostics(environment.get("remote"))
+
+    remote = environment.get("remote")
+    remote_diagnostics = pop_remote_diagnostics(remote)
+    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
+        backend, engine, ngspice_init_lines, remote
+    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4440,7 +4458,12 @@ def _run_sim_corners(
     }
     netlist_digests.pin_provenance_input(report["provenance"])
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
-    diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
+    diag_candidates = (
+        *remote_diagnostics,
+        init_diagnostic,
+        bin_diagnostic,
+        save_diagnostic,
+    )
     if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
     _attach_runner_hints(report, measurements_spec, corners, backend=backend)
@@ -5776,279 +5799,6 @@ def _expand_monte_carlo(
     if mismatch_scale is not None:
         info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
     return sampled, info
-
-
-# --------------------------------------------------------------------------- #
-# Checkpoint/resume (issue #473)
-# --------------------------------------------------------------------------- #
-
-
-def _checkpoint_path(artifacts_dir: str) -> str:
-    """Where a resumable sweep's checkpoint lives: a single ``checkpoint.json``
-    directly under ``artifacts_dir`` -- the same directory ``keep_artifacts``
-    already writes per-corner logs/rawfiles into (see ``run_sim``'s
-    docstring), so a resumable run's on-disk footprint stays in one place
-    regardless of ``keep_artifacts``.
-    """
-    return os.path.join(artifacts_dir, "checkpoint.json")
-
-
-def _open_resume_checkpoint(
-    checkpoint_path: str,
-    *,
-    resume: bool,
-    **fingerprint_inputs: Any,
-) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
-    """The ``resume`` state of :func:`_run_sim_corners`: the corner reports a
-    prior run of this same request already recorded, the engine version that
-    run saw, and the checkpoint this run keeps extending. Without ``resume``
-    there is nothing to load and no checkpoint is kept.
-    """
-    if not resume:
-        return {}, None, None
-    fingerprint = _checkpoint_fingerprint(**fingerprint_inputs)
-    pre_completed, loaded_engine_version = _load_checkpoint(
-        checkpoint_path, fingerprint
-    )
-    checkpoint = _Checkpoint(checkpoint_path, fingerprint)
-    checkpoint.completed = dict(pre_completed)
-    checkpoint.engine_version = loaded_engine_version
-    return pre_completed, loaded_engine_version, checkpoint
-
-
-def _key_in_initial_conditions(
-    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
-) -> None:
-    """Issue #3881: a start state changes the transient result, so a changed
-    map must not reuse a stored one. Keyed in only when present, leaving every
-    legacy fingerprint untouched."""
-    ics = {
-        point.corner_id: point.initial_conditions
-        for point in corner_points
-        if point.initial_conditions
-    }
-    if ics:
-        payload["initial_conditions"] = ics
-
-
-def _key_in_mc_mismatch_scale(
-    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
-) -> None:
-    """Issue #3942: corner IDs carry neither seeds nor the sigma scale, so a
-    resume under another ``monte_carlo.mismatch_scale`` would reuse samples
-    drawn at the old scale. Keyed in only when declared."""
-    mc_scales = sorted(
-        {
-            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
-            for point in corner_points
-            if point.mc_seed and "mismatch_scale" in point.mc_seed
-        }
-    )
-    if mc_scales:
-        payload["mc_mismatch_scale"] = mc_scales
-
-
-def _key_in_mc_seed_options(
-    payload: dict[str, Any], corner_points: Sequence[CornerPoint]
-) -> None:
-    """Issues #2899/#4173: corner IDs carry no seeds, so a resume under another
-    ``monte_carlo.seed_scope`` / ``seed_mode`` would reuse samples drawn from
-    other seeds. Each is keyed in off its default only, so an existing
-    checkpoint stays valid for a request that omits the field."""
-    for field, default, key in (
-        ("seed_scope", DEFAULT_MC_SEED_SCOPE, "mc_seed_scope"),
-        ("seed_mode", DEFAULT_MC_SEED_MODE, "mc_seed_mode"),
-    ):
-        values = {
-            point.mc_seed[field]
-            for point in corner_points
-            if point.mc_seed and field in point.mc_seed
-        } - {default}
-        if values:
-            payload[key] = sorted(values)
-
-
-def _checkpoint_fingerprint(
-    *,
-    netlist_path: str,
-    models_lib: str | None,
-    analysis: dict[str, Any],
-    measurements_spec: list[dict[str, Any]],
-    corner_points: list[CornerPoint],
-    timeout_s: float,
-    engine: str,
-    osdi_preload: tuple[str, ...] = (),
-    corner_section_libs: tuple[str, ...] = (),
-    save_mode: str = DEFAULT_SAVE_MODE,
-    save_vectors: tuple[str, ...] = (),
-    complex_vectors: tuple[str, ...] = (),
-    ngspice_options: dict[str, Any] | None = None,
-    stimulus_lines: tuple[str, ...] = (),
-) -> str:
-    """A SHA-256 fingerprint of everything that determines what a sweep's
-    corners actually run -- the basis for deciding whether an on-disk
-    checkpoint still applies to *this* request.
-
-    Content-hashes the netlist/model library (not just their paths -- an
-    edited-in-place file at the same path must invalidate the checkpoint,
-    per this issue's own acceptance criteria) alongside the analysis,
-    measurement cards, engine (not ``timeout_s``: #5410), and the exact list of
-    expanded corner IDs (covers the whole corner matrix, including any
-    Monte Carlo expansion, since two requests that expand to a different
-    corner list are not resumable against each other's progress). A
-    fingerprint mismatch means "resume against a request file that has
-    changed since the checkpoint was written" -- the checkpoint is treated
-    as if it did not exist, never silently reused against a since-modified
-    matrix (see ``run_sim``'s docstring).
-    """
-    payload: dict[str, Any] = {
-        "netlist_sha256": sha256_file(netlist_path),
-        "models_lib_sha256": sha256_file(models_lib),
-        "analysis": analysis,
-        "measurements_spec": measurements_spec,
-        "engine": engine,
-        "corner_ids": [point.corner_id for point in corner_points],
-    }
-    if osdi_preload:
-        # Issue #2513: a rebuilt `.osdi` changes every device it defines, so
-        # it invalidates a checkpoint exactly like an edited model library.
-        # Only keyed in when declared, so a request without the option keeps
-        # its pre-#2513 fingerprint (and its existing checkpoint) unchanged.
-        payload["osdi_preload_sha256"] = [sha256_file(p) for p in osdi_preload]
-    if save_mode != DEFAULT_SAVE_MODE:
-        # Issue #2732: the saved set decides which measurements resolve, so
-        # a checkpoint written under one mode never applies to the other.
-        # Only keyed in off the default, so an existing checkpoint stays
-        # valid for a request that omits the option.
-        payload["save_mode"] = save_mode
-    if save_vectors:
-        # Issue #3211: the saved vector set decides which measurements resolve.
-        payload["save_vectors"] = list(save_vectors)
-    if complex_vectors:
-        # Issue #3337: the declared vectors decide what the corner returns.
-        payload["complex_vectors"] = list(complex_vectors)
-    if ngspice_options:
-        # Issue #3111: solver options change which solves converge, so a
-        # checkpoint written under other options never applies. Only keyed
-        # in when declared, leaving existing fingerprints untouched.
-        payload["ngspice_options"] = ngspice_options
-    _key_in_mc_seed_options(payload, corner_points)
-    _key_in_mc_mismatch_scale(payload, corner_points)
-    if stimulus_lines:
-        # Issue #2977: the declared stimulus decides every corner's drive, so
-        # an edited schedule must invalidate the checkpoint. Only keyed in
-        # when declared, so existing checkpoints stay valid.
-        payload["stimulus"] = list(stimulus_lines)
-    if any(point.nodeset for point in corner_points):
-        # Issue #3036: an initial guess can change which solution a
-        # multi-equilibrium circuit lands on, so a changed hint must not reuse
-        # a stored result. The corner IDs above do not carry it. Only keyed
-        # in when a hint exists, leaving every legacy fingerprint untouched.
-        payload["nodeset"] = {
-            point.corner_id: point.nodeset for point in corner_points if point.nodeset
-        }
-    _key_in_initial_conditions(payload, corner_points)
-    if windows := _sao.windows_by_corner(corner_points):
-        payload["analysis_overrides"] = windows  # issue #4970
-    if corner_section_libs:
-        # Issue #2522: a corner's per-section libraries determine its device
-        # models exactly as `models.lib` does, so editing one must invalidate
-        # the checkpoint too. Only keyed in when the request declares them, so
-        # a bundle without per-section libraries keeps its pre-#2522
-        # fingerprint (and its existing checkpoint) unchanged.
-        payload["corner_section_libs_sha256"] = [
-            sha256_file(p) for p in corner_section_libs
-        ]
-    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()
-
-
-def _load_checkpoint(
-    path: str, fingerprint: str
-) -> tuple[dict[str, dict[str, Any]], str | None]:
-    """Read a checkpoint file, returning ``({corner_id: corner_report},
-    engine_version)`` -- both empty/``None`` when the file is missing,
-    unreadable, not valid JSON, or its own fingerprint does not match
-    ``fingerprint`` (see :func:`_checkpoint_fingerprint`). Never raises: a
-    corrupt or stale checkpoint degrades to "nothing completed yet", the
-    same outcome as no checkpoint at all, rather than aborting the sweep.
-    """
-    if not os.path.isfile(path):
-        return {}, None
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return {}, None
-    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
-        return {}, None
-    completed = data.get("completed")
-    if not isinstance(completed, dict):
-        return {}, None
-    return completed, data.get("engine_version")
-
-
-class _Checkpoint:
-    """Incrementally persists completed corner reports to a JSON file so an
-    interrupted sweep (wall-clock budget hit, orphaned parent, plain crash)
-    can resume without recomputing corners that already finished.
-
-    Only constructed when the request enables ``options.resume``/``--resume``
-    (see ``run_sim``) -- writing/reading a checkpoint is an explicit opt-in,
-    mirroring ``options.keep_artifacts``, so a default sweep leaves no extra
-    file behind. Every :meth:`record` call flushes the *entire* completed set
-    to disk immediately (via a temp-file-plus-``os.replace`` atomic write,
-    never a partially-written file a concurrent resume could read) -- a
-    corner report is small, and a sweep is corner-count-bounded, so this
-    stays cheap relative to the ``ngspice`` run it follows. Thread-safe: both
-    ``local-parallel``'s bounded dispatch window and ``_run_sharded``'s
-    per-shard threads call :meth:`record` concurrently.
-    """
-
-    @property
-    def fingerprint(self) -> str:
-        return self._fingerprint
-
-    def __init__(self, path: str, fingerprint: str) -> None:
-        self._path = path
-        self._fingerprint = fingerprint
-        self._lock = threading.Lock()
-        self.completed: dict[str, dict[str, Any]] = {}
-        self.engine_version: str | None = None
-
-    def record(
-        self, corner_id: str, report: dict[str, Any], engine_version: str | None
-    ) -> None:
-        with self._lock:
-            self.completed[corner_id] = report
-            if engine_version is not None:
-                self.engine_version = engine_version
-            self._flush_locked()
-
-    def clear(self) -> None:
-        """Remove the checkpoint file once a sweep finishes with nothing
-        skipped -- a fully-completed sweep has nothing left to resume, and a
-        stale file left behind is a pointless leftover (its fingerprint
-        guard already makes it harmless to a future *different* request,
-        but there is no reason to keep it around either)."""
-        with self._lock:
-            self.completed = {}
-            try:
-                os.remove(self._path)
-            except OSError:
-                pass
-
-    def _flush_locked(self) -> None:
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
-        tmp_path = f"{self._path}.tmp"
-        payload = {
-            "fingerprint": self._fingerprint,
-            "engine_version": self.engine_version,
-            "completed": self.completed,
-        }
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-        os.replace(tmp_path, self._path)
 
 
 # --------------------------------------------------------------------------- #
@@ -7642,16 +7392,11 @@ def _run_corner(
     timeout or unsuccessful engine exit is recorded in the corner report.
     Unexpected exceptions propagate after the scratch directory is released.
 
-    ``engine="ngspice"`` runs ``ngspice -b`` on a deck carrying a
-    ``.control`` block (see ``_write_corner_deck``). ``engine="xyce"``
-    (issue #2016) runs ``Xyce -b`` -- the ``-b`` is accepted-and-ignored
-    SPICE-compatibility -- on a control-block-free deck (see
-    ``_write_xyce_deck``), with ``-l`` for the log and ``-r ... -a`` for an
-    ASCII rawfile when waveforms were requested. Both branches share the
-    measurement/limits/status tail: the response contract is
-    engine-shaped, not engine-specific, and the two engines are kept
-    byte-comparable for the cross-validation oracle
-    (tests/test_sim_xyce_oracle.py).
+    ``ngspice -b`` reads a deck with a control block from ``_write_corner_deck``.
+    Xyce accepts ``-b`` for compatibility and reads ``_write_xyce_deck``'s
+    control-block-free deck, with ``-l`` for logs and ``-r ... -a`` for ASCII
+    waveforms. Both engines share grading and the response contract exercised
+    by ``tests/test_sim_xyce_oracle.py`` (#2016).
 
     ``fail_on_diagnostic`` (issue #2492, the already-validated
     ``options.fail_on_diagnostic`` codes -- see
@@ -7670,6 +7415,9 @@ def _run_corner(
     that directory as its cwd, so init and relative include paths resolve
     there for both retained artifacts and temporary runs.
     """
+    measurements_spec, limit_echoes = sim_supply_relative.resolve_limits(
+        measurements_spec, point.supply_v
+    )
     is_xyce = engine == "xyce"
     engine_name = XYCE_BINARY if is_xyce else "ngspice"
     with _runner_work_dir(artifacts_dir, point.slug, keep_artifacts) as corner_dir:
@@ -7884,6 +7632,7 @@ def _run_corner(
                 engine_diagnostics=diagnostics,
             )
         )
+        sim_supply_relative.attach_limits(measurement_results, limit_echoes)
         measurement_diagnostics = _demote_abort_cascade(
             measurement_diagnostics, engine_aborted or analysis_never_started
         )
