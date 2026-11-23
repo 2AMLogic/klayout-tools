@@ -2234,10 +2234,12 @@ budget-skipped, orphaned, or aborted by the fail-fast probe
 (`timeout_budget_unreachable`).
 `complete` means `completed_units == total_units`. The existing
 `unlaunched_shards` and `resumable` fields describe the current dispatch.
-A sharded `--resume` that dispatches and harvests nothing, because every unit
-came from `checkpoint.json`, still reports the summary: `environment.remote`
-then holds only `run`, and `environment.models_lib_sha256_scope` reads
-`"client"` as on any other batch run, not `"local"`.
+When a sharded `--resume` restores every unit from `checkpoint.json`,
+`environment.remote` includes `run` and omits `fleet`. It includes
+[`models_lib_comparison`](#checkpoint-model-library-comparison) and, when the
+client lists per-section libraries, `corner_section_libs_comparison`. Both
+report `not_comparable` because this invocation harvested no worker identity.
+`environment.models_lib_sha256_scope` remains `"client"`.
 
 The client stores observations in `batch-run-history.json` under the artifact
 directory before replacing the shard map. It binds them to the checkpoint
@@ -2828,7 +2830,7 @@ the per-section corner libraries, which carry the identity when there is no
   own `klt sim` reported, i.e. the model card the worker actually loaded;
   `null` when absent or malformed (older runner, error envelope), so
   "unknown" is distinguishable from a value.
-- `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
+- <a id="checkpoint-model-library-comparison"></a>`models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
   `not_comparable` (with `reason`: `no_models_lib`, `runner_hash_unavailable`,
   `client_hash_unavailable` or `models_staged`) comparing it with the client's
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,

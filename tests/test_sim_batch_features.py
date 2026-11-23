@@ -4,8 +4,11 @@ ratchet, #2766); reuses its fake runner."""
 
 from __future__ import annotations
 
+import pytest
+
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_features import finalize_batch_remote
 from test_sim_batch import (
     _CLIENT_VERSION,
     _envelope,
@@ -64,3 +67,37 @@ def test_no_missing_features_adds_no_field(tmp_path, monkeypatch):
     }
     corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
     assert "missing_features" not in corners[0]["diagnostics"][0]
+
+
+@pytest.mark.parametrize(
+    ("models_lib", "libraries", "model_reason"),
+    [
+        ({"scope": "client"}, [], "runner_hash_unavailable"),
+        ({"scope": "absent"}, [], "no_models_lib"),
+        (
+            {"scope": "client"},
+            [{"name": "nfet.lib", "sha256": "a" * 64}],
+            "runner_hash_unavailable",
+        ),
+    ],
+)
+def test_checkpoint_only_batch_resume_reports_client_comparisons(
+    models_lib, libraries, model_reason
+):
+    summary = {"total_units": 2, "completed_units": 2, "complete": True}
+    environment = {
+        "remote": {"run": summary},
+        "models_lib": models_lib,
+        "corner_section_libs": libraries,
+    }
+    finalize_batch_remote(environment, "batch")
+    expected = {
+        "run": summary,
+        "models_lib_comparison": {"status": "not_comparable", "reason": model_reason},
+    }
+    if libraries:
+        expected["corner_section_libs_comparison"] = {
+            "status": "not_comparable",
+            "reason": "runner_libs_unavailable",
+        }
+    assert environment["remote"] == expected
