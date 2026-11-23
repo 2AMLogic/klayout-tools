@@ -52,6 +52,7 @@ from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
 #: ambiguous, so it is refused).
@@ -192,6 +193,11 @@ class CycleMeanOutcome:
     error: str | None = None
     code: str | None = None
 
+    @property
+    def value(self) -> float | None:
+        """Scalar used to grade this measurement."""
+        return self.mean
+
     def report(self) -> dict[str, Any]:
         """The response's ``cycle_mean`` object for this measurement."""
         return {
@@ -282,8 +288,6 @@ def extract_corner_cycle_means(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["cycle_mean"]
     name = spec["name"]
     if not os.path.isfile(raw_path):

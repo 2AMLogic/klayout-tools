@@ -893,23 +893,51 @@ PDK README's note; KLayout 0.28.16 was observed aborting the deck with "Heap
 lost: the DeepShapeStore container no longer exists"), so an old application
 fails up front with `klayout_version_too_old`. The report gains an additive
 `native_deck` block (kind, variant, script path, defaulted globals, floor) and
-the usual `provenance.deck` hash/options. The rule groups executed are the
-report's `coverage.rule_categories`; pair with `--expect-rule-categories` to
-fail on an empty run. An older gf180mcu layout (fragments under
+the usual `provenance.deck` hash/options. The report lists RDB category declarations in `coverage.rule_categories`.
+Use `--expect-rule-categories` to assert their count. An older gf180mcu layout (fragments under
 `drc/rule_decks/*.drc` plus `drc/run_drc.py`) is not driven: resolution
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
-**Known limitation: 3LM gf180mcu variants.** As reported in issue #5091 (not
-re-verified by klt), the native deck's `rule_decks/mslot.rb` uses
-`metal4_drawn` unguarded, so on a 3-metal-layer stack the deck aborts after
-`Executing deck mslot1 ...` with `undefined local variable or method
-'metal4_drawn'`, and `--deck-var metal_level=3LM --deck-var metal_top=30K`
-does not help. The run ends as an error (`klayout_deck_aborted`; the structured
-`error.abort` names the deck and symbol) and any partial report is never
-`clean` (`--allow-deck-errors` only records it under `engine_deck_errors`).
-Not yet reported upstream to gf180mcu-pdk. A per-deck subset runner is not
-provided.
+#### GF180 3LM deck selection
+
+On the installed gf180mcuA three-metal/30 kÅ stack, the default PDK
+`gf180mcu.drc` starts the MSLOT deck `mslot1` and aborts when its rule
+references `metal4_drawn`. That stack has three routing metals. Repeating
+the same metal globals leaves the missing fourth layer unresolved. Issue
+#6916 tracks the MSLOT implementation. An upstream PDK filing is pending.
+
+The native runner accepts the PDK's comma-separated deck tags. Additions and
+exclusions apply from left to right starting with an empty selection. Run
+one of these commands to check MT30 on this stack:
+
+```sh
+klt drc layout/buck.gds --engine klayout --pdk gf180mcuA --deck-var decks=metaltop_30k --format json
+klt drc layout/buck.gds --engine klayout --pdk gf180mcuA --deck-var decks=all,-mslot --format json
+```
+
+On the pinned buck layout, KLayout 0.30.12 reported one `MT30.8` violation
+with the MT30-only selection (1 of 177 default deck IDs). The broader
+selection started 171 decks and reported 600,751 findings in 11 categories,
+including one `MT30.7` and one `MT30.8`. It omitted `mslot1` through
+`mslot6`. Both commands exited 3 for violations. A narrow, isolated Metal3
+rectangle also triggers `MT30.1a` under either selector. [Measured layout](https://github.com/2AMLogic/gf180-buck/blob/6fb02b8/layout/buck.gds)
+
+With the MT30-only selector a 4 × 10 µm rectangle on layer 42/0 returned
+zero findings and eight declared RDB categories: `MT30.1a`, `MT30.1b`,
+`MT30.2`, `MT30.3`, `MT30.4`, `MT30.5`, `MT30.6`, and `MT30.8`.
+With `--expect-rule-categories 8` satisfied, the verdict was still
+`clean_partial`: the excluded deck IDs appear in `coverage.skipped` with
+reason `not_selected`. Signoff withholds full DRC credit, including T1 item 3.
+
+Read `native_deck.deck_selection` for the registry IDs selected, omitted,
+observed starting and never reached. A start establishes only that the
+runner entered a deck. The default buck run started 161 decks, including
+the failing `mslot1`, and never reached the remaining 16. On an abort,
+`error.deck_selection` accompanies the existing `abort` and `decks_executed`
+fields. Tolerating an abort with `--allow-deck-errors` also records the
+selection under `engine_deck_errors`. When a parallel run fails, `abort.decks`
+lists the workers the runner identified as failed. See the [JSON contract](../json-contract.md#gf180-native-drc-deck-selection).
 
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
@@ -935,6 +963,17 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Measurements attached to a finding.** `violations[].values` lists the
+  non-geometry RDB item values in document order. For example, a deck that
+  runs `evaluate_nets` and calls `put('RATIO', ar)` can emit
+  `["[#RATIO] float: 16"]`. The strings preserve KLayout's tags and
+  formatting. A finding with only geometry omits the field. With
+  `--engine both`, look under `reports.native.violations[]`.
+  `--check --rerun` compares this ordered list. KLayout 0.30.12 can emit
+  multiple `put()` properties in different orders on repeated runs, so a
+  reorder alone can appear as drift. The deck supplies these strings
+  as evidence only. They have no effect on coverage, `coverage_unknown`,
+  or the meaning of `--expect-rule-categories`.
 - **Deck stdout as additive evidence (issue #6613).** Every `--engine
   klayout` run that produced a report carries the deck's own captured
   stdout in the additive top-level `deck_output` field:
@@ -4799,7 +4838,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | the native deck aborted part-way (issue #5091). `error.abort` names the failing deck (`deck`, `deck_file`, from the last `Executing deck <name> from <path>` line), the Ruby `message`, the offending `symbol` and `location` (`file:line`) when klayout printed them; `error.decks_executed` lists decks klayout logged as started, the last being the one that aborted. Fields are omitted when the output has none to parse. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. When the GF180 3LM `mslot1` deck aborts on `metal4_drawn`, `error.abort.hint` points to the [deck selectors and their coverage](#gf180-3lm-deck-selection). `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.

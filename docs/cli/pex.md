@@ -1289,8 +1289,8 @@ depended on — writes it beside the extracted netlist as
   geometry effects), by the `delta_pct` rule;
 - `parasitic_delta_pct` — extracted vs device-only (the parasitics alone), by
   the `delta_pct` rule with `device_only_value` as the base;
-- `device_only_status` — that leg's own measurement status, `"error"` when it
-  produced nothing for the row.
+- `device_only_status` — `"skipped"` for a schematic-only observation. Otherwise
+  it records that leg's own measurement status, or `"error"` when the leg produced no result.
 
 For positive-valued measurements the parts reconcile:
 `(1 + representation/100) * (1 + parasitic/100) == 1 + delta_pct/100`, within
@@ -1649,6 +1649,52 @@ instead. (`examples/design-pipeline/12-pex-external.probe.py` inlines the
 netlist it is handed — that still works, and is still the simplest thing a
 harness can do.)
 
+## Oscillators: a `crossings` measurement is delta'd on its `value`
+
+Issue [#6913](https://github.com/2AMLogic/klayout-tools/issues/6913). A
+`measurements[].crossings` entry in a testbench request is compared like any
+other measurement: each `delta[]` row's `schematic_value` /
+`extracted_value` are that side's entry **`value`**, and `delta_pct` is
+computed from the two. There is no special crossings handling — which is
+exactly why the *graded quantity* matters: by default a transient crossings
+entry's `value` is the **crossing count**, a quantised edge number that also
+carries start-up bias, so an oscillator would be delta'd on "177 vs 139
+edges" instead of its frequency.
+
+The fix lives in the request, not in `klt pex`: declare
+`crossings.value_from` (see [`sim.md`](sim.md) → "Grading a reduction
+(`crossings.value_from`)") and both sides' `value` becomes the selected
+reduction — `"period.mean"` in seconds, or `"frequency"` = `1/period.mean`
+in Hz — so `delta_pct` is a real schematic-vs-extracted frequency shift.
+Exclude start-up with the existing `from` window:
+
+```json
+{
+  "name": "f_ro1",
+  "unit": "Hz",
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "200n",
+    "value_from": "frequency"
+  }
+}
+```
+
+A side with too few edges for the reduction (a non-oscillating extracted
+cell reporting 0 or 1 edges, for instance) is an ordinary `status: "error"`
+`klt sim` measurement — its diagnostic message starts with the stable
+`[crossings_insufficient_edges]` token — so the `delta[]` row is an **error
+row** blaming that side (`error.side`), `delta_pct: null`: distinguishable
+from a small value, never a frequency that quietly passes a floor.
+
+`klt pex` itself needed no code change for this (the delta reads `value` as
+of #2872's per-side evidence), and no `schema_version` bump: `value_from` is
+an additive request field into the existing `value` slot. It first ships in
+`klt` v0.9.3, and is a mandatory runner feature on the `batch` backend — an
+older fleet runner is refused pre-launch instead of returning counts.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -1990,7 +2036,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `reference_netlist_sha256` | string | Issue #2875 (additive). `sha256:<64 lowercase hex>` of the exact bytes of `reference_netlist` — the schematic DUT (testbench mode) or `--reference-netlist` (`--measure-command` mode). `null` only if the file was unreadable. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
-| `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
+| `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`. Issue #6990: a `"skipped"` row (a schematic-only observation, `sides: "schematic"`, that did not error on the schematic side) is counted in none of the three; it is reported under `coverage.inapplicable` with reason `schematic_only_measurement` instead. |
 | `schematic_failed`   | integer           | Issue #2989 (additive). Count of `delta[]` rows whose `schematic_status` is `"fail"`. Reported, not enforced: it never feeds `status`, `coverage` or the exit code, so a response can read `pass` while this is non-zero — check it when the limits are a contract both sides must meet. |
 | `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
@@ -2019,14 +2065,14 @@ full `repo`/`external`/`absent` scope meanings.
 | `schematic_value` | number \| null  | The measurement's value on the schematic-side run, or `null` if that corner/measurement was missing or itself errored. |
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
 | `delta_pct`       | number \| null  | `100 * (extracted_value - schematic_value) / abs(schematic_value)`, rounded to 3 decimals; `null` when either value is missing or `schematic_value` is exactly `0`. |
-| `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
+| `status`          | string          | `"pass"`, `"fail"`, `"error"`, or `"skipped"` for a schematic-only observation — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, `"error"` (also when the schematic measurement is missing), or `"absent"` (issue #3620: an optional measurement with no value). Does not affect `status`. |
-| `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"error"` for rows whose extracted side never produced a response. |
+| `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"skipped"` for a schematic-only observation, or `"error"` when an expected extracted response is missing. |
 | `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). When a static diagnostic skips the extracted leg, `stage` is `"execute"`, `code` is `pin_count_mismatch`, `flat_dut_mismatch`, or `pin_order_mismatch`, and `message` carries that diagnostic's `detail`. Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. In `--measure-command` mode, when the blamed side has no diagnostics, `message` is that side's measurement-document `message` and `stage` is `"execute"` (issue #4555). The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
 | `device_only_value` | number \| null | Issue #3298 (additive, `--device-only-leg` only). The measurement on the parasitic-free third leg; `null` when that leg produced nothing for this row. |
 | `representation_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `schematic_value` → `device_only_value`: the device-representation/geometry part of `delta_pct`. |
 | `parasitic_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `device_only_value` → `extracted_value`: the parasitic part of `delta_pct`. |
-| `device_only_status` | string | Issue #3298 (additive, `--device-only-leg` only). The device-only measurement's own `klt sim` status, or `"error"` when the leg produced nothing for this row. |
+| `device_only_status` | string | Issue #3298 (additive, `--device-only-leg` only). `"skipped"` for a schematic-only observation. Otherwise the device-only measurement's own `klt sim` status, or `"error"` when an expected result is missing. |
 
 When the exit code is `4` because rows errored and at least one row carries an
 `error`, one line is also printed to **stderr** (both `--format json` and
@@ -2034,6 +2080,18 @@ When the exit code is `4` because rows errored and at least one row carries an
 cause's side, stage, code and message. A `SimError` that aborts the run
 (exit `1`) now keeps its `code` (e.g. `batch_no_capacity`) as the error
 envelope's `error.code`.
+
+### Schematic-only measurements
+
+An internal schematic node can disappear during extraction. Add `"sides": "schematic"` to its testbench measurement to retain the observation at each corner. An `intermediate: true` expression only defines a vector for later measurements, so it cannot declare `sides`.
+
+```json
+{"name": "vref", "spice": ".meas tran vref FIND v(xdut.vref) AT=1u", "sides": "schematic"}
+```
+
+Step-scoped probes retain their usual `<step>.<name>` identity. PEX runs this probe on the schematic. It omits the probe from the extracted and optional device-only requests. Each delta row preserves the schematic value and limit status. The extracted value and percentage delta are null. The extracted status is `"skipped"`, as is `device_only_status` with `--device-only-leg`. A successful observation has row status `"skipped"`. A schematic error names its side and gives the row status `"error"`. A schematic limit failure still contributes to `schematic_failed`.
+
+The intentionally unrequested comparison appears in `coverage.inapplicable` with reason `schematic_only_measurement`. A passing portable comparison alongside these probes yields `pass` and exit 0. A run containing only successful schematic probes yields `not_checked` and exit 4. Omitting `sides` compares the measurement on both legs. A standalone `klt sim` run still measures the probe.
 
 ### `coverage`: an empty `delta[]` is not a pass
 

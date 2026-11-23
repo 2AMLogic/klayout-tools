@@ -43,9 +43,9 @@ to hand-rolled decks -- a plausible but mis-paired number):
    measurements then find no vectors and come back empty, instead of
    silently reading the *previous* step's solve.
 2. ``echo`` markers around the analysis record the plot name before and
-   after; :func:`step_outcomes` reads them back from the log, so a step that
-   produced no plot is reported as failed (``code: "step_failed"``) rather
-   than inferred from its measurements.
+   after; :func:`sim_step_evidence.step_outcomes` reads them back from the
+   log, so a step that produced no plot is reported as failed (``code:
+   "step_failed"``) rather than inferred from its measurements.
 3. The step's plot name is captured into ``klt_plot_<index>``; a
    step-qualified reference ``lo.vout`` is rewritten to
    ``{$klt_plot_<index>}.vout`` -- ngspice's own plot-qualified vector syntax
@@ -79,7 +79,10 @@ Failure propagation is decided in Python, not inferred from ngspice output: a
 measurement whose step failed, or any of whose inputs produced no value, is
 reported ``status: "error"`` with a ``derived_input_unavailable`` (or the
 step's ``step_failed``) diagnostic -- never graded -- while every independent
-result in the same corner stays inspectable.
+result in the same corner stays inspectable. The one opt-in exception
+(#7072): a step ``.meas`` card with ``on_unreached: "null"`` whose target
+its *completed* step never reached grades ``not_reached`` (info diagnostic
+``measurement_not_reached``) on that step's own log region.
 """
 
 from __future__ import annotations
@@ -87,18 +90,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import sim_eye
+from . import sim_eye, sim_step_evidence
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
+from .sim_step_evidence import step_outcomes as step_outcomes
 from .sim_step_grading import (
     grade_step_measurements as grade_step_measurements,
 )
 from .sim_step_grading import (
     measurement_provenance as measurement_provenance,
-)
-from .sim_step_grading import (
-    step_outcomes as step_outcomes,
 )
 from .sim_step_shadow import validate_step_measurement_name
 
@@ -547,6 +548,7 @@ def _flatten_step_measurement(
     if spec.get("spice") is not None:
         flat["meas_card"] = spec["spice"]
         first = _meas_command(spec["spice"], local, step)
+        deck_lines = [*sim_step_evidence.find_vector_lines(spec), first]
         derived_from: list[str] = []
         spectrum_steps: list[str] = []
     else:
@@ -555,12 +557,10 @@ def _flatten_step_measurement(
         deck_expr, derived_from, spectrum_steps = _substitute_refs(
             expr, known, owner=f"{step['name']}.{local}"
         )
-        first = f"let {local} = {deck_expr}"
-    if spec.get("intermediate"):
-        flat["intermediate"] = True
-        flat["deck_lines"] = [first]
-    else:
-        flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
+        deck_lines = [f"let {local} = {deck_expr}"]
+    if not spec.get("intermediate"):
+        deck_lines.extend([f"let {log_key} = {local}", f"print {log_key}"])
+    flat["deck_lines"] = deck_lines
     if derived_from:
         flat["derived_from"] = derived_from
     if spectrum_steps:
@@ -906,7 +906,13 @@ def validate_alter_targets(
         }
     )
     params = _param_only_targets(netlist_path, step_targets) if step_targets else {}
-    _check_ac_alter_targets_exist(analysis, netlist_path)
+    ac_targets = [
+        (target[: -len(_AC_SUFFIX)], f"step {step['name']!r}: alter target {target!r}")
+        for step in analysis["steps"]
+        for target, _value in step["alter"]
+        if is_ac_alter_target(target)
+    ]
+    check_ac_alter_targets_exist(netlist_path, ac_targets)
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             if target in params:
@@ -919,18 +925,12 @@ def validate_alter_targets(
                 )
 
 
-def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -> None:
-    """Refuse an ``"<SRC>.ac"`` key naming no element of the netlist: ngspice
-    would log ``no such device`` and the step would solve at the nominal
-    excitation. Same conclusiveness rule as ``_param_only_targets`` -- an
-    unreadable file or unresolvable ``.include``/``.lib`` reports nothing."""
-    pairs = [
-        (step["name"], target)
-        for step in analysis["steps"]
-        for target, _value in step["alter"]
-        if is_ac_alter_target(target)
-    ]
-    if not pairs:
+def check_ac_alter_targets_exist(
+    netlist_path: str, targets: list[tuple[str, str]]
+) -> None:
+    """Reject a missing AC source only when the whole include tree was readable.
+    Each pair gives the source name and its request location for diagnostics."""
+    if not targets:
         return
     from .sim import _included_elements, _netlist_declarations
 
@@ -945,10 +945,10 @@ def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -
         if included is None:
             return
         known |= included
-    for step, target in pairs:
-        if target[: -len(_AC_SUFFIX)].strip().lower() not in known:
+    for source, location in targets:
+        if source.strip().lower() not in known:
             raise SimError(
-                f"step {step!r}: alter target {target!r} names no element in "
+                f"{location} names no element in "
                 "the netlist -- ngspice would ignore it and solve at the "
                 "nominal AC magnitude"
             )

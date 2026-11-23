@@ -52,8 +52,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `{"source": <envelope>, "defines": {...}}` (`[]` when absent) — an envelope
   cannot be a JSON object key, and a source outside the repo has no path to
   key on. Both response builders (cocotb and Verilog-bench) emit the new
-  shape, and a committed report now passes `klt env-provenance
-  lint-envelope` clean. Path *resolution* is unchanged — the engine still
+  shape. These three echoed inputs now pass provenance lint. Path *resolution* is unchanged — the engine still
   receives the absolute path (the `$sdf_annotate` shim, the define wrappers)
   — and `--format text` still prints the real absolute paths, via the
   `local_paths` side-channel. Consumers reading these three fields as
