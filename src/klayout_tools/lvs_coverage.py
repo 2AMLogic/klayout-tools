@@ -10,6 +10,7 @@ decomposition as ``lvs_combine.py``); the names are re-imported there, so
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from .lvs_base import CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS
@@ -77,8 +78,10 @@ def _coverage_kind(device_class: Any, kdb_module: Any) -> str | None:
     return None
 
 
-def _implausible_dimensions(netlist: kdb.Netlist, side: str) -> list[dict[str, Any]]:
-    """Flag metre-scale W/L on individual devices in the pruned hierarchy."""
+def _implausible_dimensions(
+    netlist: kdb.Netlist, circuits: Iterable[kdb.Circuit], side: str
+) -> list[dict[str, Any]]:
+    """Flag metre-scale W/L on individual devices in the original hierarchy."""
     # KLayout and the custom MoM reader both expose W/L in micrometres.
     # Cache parameter IDs once per class for large transistor netlists.
     parameters = {
@@ -90,7 +93,7 @@ def _implausible_dimensions(netlist: kdb.Netlist, side: str) -> list[dict[str, A
     if not any(parameters.values()):
         return []
     findings = []
-    for circuit in netlist.each_circuit():
+    for circuit in circuits:
         for device in circuit.each_device():
             dc = device.device_class()
             dimensions = {

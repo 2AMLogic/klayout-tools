@@ -3831,7 +3831,8 @@ length reaches 1,000,000 µm (one metre). Check the SPICE units on the named
 instance. For example, an SG13 MoM capacitor with `W=40` reads as 40 metres.
 Write `W=40U` for a 40 µm capacitor.
 
-Each affected device has one warning per side, with its circuit in
+The check runs on the input hierarchy before device combining or flattening.
+Each affected device definition has one warning per side, with its circuit in
 `details.circuit` and its oversized W/L values in `details.dimensions_um`.
 The warning contributes to `mismatch_count` and `category_counts`. The
 comparer determines the verdict and error count as usual.

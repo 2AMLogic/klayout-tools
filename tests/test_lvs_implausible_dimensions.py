@@ -7,8 +7,8 @@ import pytest
 from klayout_tools.lvs import run_lvs
 
 
-def compare(tmp_path, layout, reference, *, deck=None):
-    request = {"engine": "klayout"}
+def compare(tmp_path, layout, reference, *, deck=None, options=None):
+    request = {"engine": "klayout", "options": options or {}}
     for side, text in (("layout", layout), ("reference", reference)):
         path = tmp_path / f"{side}.spice"
         path.write_text(text)
@@ -46,16 +46,22 @@ def test_reports_both_oversized_dimensions_on_the_reference_capacitor(tmp_path):
     assert "40U" in finding["description"]
 
 
+@pytest.mark.parametrize("flatten", [False, True])
 @pytest.mark.parametrize("length, expected", [("1", True), ("999999U", False)])
 def test_shared_mos_at_threshold_preserves_match_and_error_counts(
-    tmp_path, length, expected
+    tmp_path, length, expected, flatten
 ):
     text = (
         f".subckt child d g s b\nM1 d g s b nch W=10U L={length}\n.ends child\n"
         ".subckt top a b c d\nX1 a b c d child\nX2 a b c d child\n.ends top\n"
         ".subckt unused a b c d\nM2 a b c d nch W=40 L=40\n.ends unused\n"
     )
-    report, warnings = compare(tmp_path, text, text)
+    report, warnings = compare(
+        tmp_path,
+        text,
+        text,
+        options={"flatten_layout": flatten, "flatten_reference": flatten},
+    )
     assert report["status"] == "match"
     assert report["error_count"] == 0
     assert sorted(f["side"] for f in warnings) == (

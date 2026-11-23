@@ -12,13 +12,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST
-from .lvs import _apply_finfet_bulk_policy, _resolve_layout, _select_circuit
+from .lvs import (
+    _apply_finfet_bulk_policy,
+    _reachable_circuits,
+    _resolve_layout,
+    _select_circuit,
+)
 from .lvs_combine import (
     _combine_circuit_devices_safely,
     _correct_combine_parameters,
     _resolve_combine_devices_per_circuit_targets,
     _unmatched_combine_devices_per_circuit_warnings,
 )
+from .lvs_coverage import _implausible_dimensions
 from .lvs_finfet_flatten import flatten_layout_netlist
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .lvs_mos_options import split_layout_mos_flavours
@@ -40,6 +46,7 @@ class _LayoutStage(NamedTuple):
     layout_pin_renames: Any
     layout_abstracted_cells: Any
     supply_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     layout_input_role: str
     flatten_warnings: list[dict[str, Any]]
     power_only_pruning_warnings: list[dict[str, Any]]
@@ -100,6 +107,11 @@ def _resolve_layout_stage(
         layout_net_label_positions,
     )
 
+    dimensions = _implausible_dimensions(
+        layout_netlist,
+        _reachable_circuits(layout_netlist, layout_spec.get("top"), "layout"),
+        "layout",
+    )
     split_layout_mos_flavours(layout_netlist, opts.compare_mos_flavour)
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
@@ -227,6 +239,7 @@ def _resolve_layout_stage(
         layout_pin_renames,
         layout_abstracted_cells,
         supply_findings,
+        dimensions,
         layout_input_role,
         flatten_warnings,
         power_only_pruning_warnings,

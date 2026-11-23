@@ -237,7 +237,6 @@ from .lvs_combine import (
 from .lvs_coverage import (
     _coverage_kind,
     _geometry_disclosure_kind,
-    _implausible_dimensions,
 )
 from .lvs_deck_defaults import apply_deck_ignored_parameters
 from .lvs_finfet import (
@@ -1244,6 +1243,7 @@ def run_lvs(
         layout_pin_renames,
         layout_abstracted_cells,
         supply_findings,
+        layout_dimensions,
         layout_input_role,
         flatten_warnings,
         power_only_pruning_warnings,
@@ -1279,7 +1279,7 @@ def run_lvs(
         power_connectivity,
         layout_deck_name,
         layout_deck,
-        precompare_findings,
+        family_findings,
         combine_warnings,
         combine_incomplete,
     ) = _select_resolve_and_combine(
@@ -1686,7 +1686,7 @@ def run_lvs(
         geometry_warnings=geometry_warnings,
         flatten_warnings=flatten_warnings,
         power_only_pruning_warnings=power_only_pruning_warnings,
-        precompare_findings=precompare_findings,
+        precompare_findings=family_findings + layout_dimensions + ref_stage.dimensions,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
         reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
@@ -3793,7 +3793,7 @@ def _select_resolve_and_combine(
     of #5144). Mutates both netlists and extends ``flatten_warnings`` in
     place, exactly as the inline code did; returns ``(layout_circuit,
     reference_circuit, power_connectivity, layout_deck_name, layout_deck,
-    precompare_findings, combine_warnings, combine_incomplete)``.
+    family_findings, combine_warnings, combine_incomplete)``.
     """
     layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
     reference_circuit = _select_circuit(
@@ -3861,13 +3861,8 @@ def _select_resolve_and_combine(
     # collect-early/append-late shape `flatten_warnings` above uses). Runs for
     # both engines and both layout shapes: all it needs is a resolved
     # `layout.deck` and the reference netlist.
-    precompare_findings = _device_class_family_findings(reference_netlist, layout_deck)
-    precompare_findings.extend(
-        _flavour_selection_warnings(reference_netlist, layout_deck)
-    )
-    precompare_findings.extend(_implausible_dimensions(layout_netlist, "layout"))
-    precompare_findings.extend(_implausible_dimensions(reference_netlist, "reference"))
-
+    family_findings = _device_class_family_findings(reference_netlist, layout_deck)
+    family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
     if opts.combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
         # `fixed_offset_ohm` correction the whole-netlist block below applies
@@ -4037,7 +4032,7 @@ def _select_resolve_and_combine(
         power_connectivity,
         layout_deck_name,
         layout_deck,
-        precompare_findings,
+        family_findings,
         combine_warnings,
         combine_incomplete,
     )
@@ -4666,15 +4661,15 @@ def _is_reader_placeholder_circuit(circuit: Any) -> bool:
     return names == [str(index) for index in range(1, len(names) + 1)]
 
 
-def _reachable_reference_circuits(netlist: Any, top: str | None) -> list[Any]:
-    """The reference circuits reachable from the compared top (``top`` by
+def _reachable_circuits(netlist: Any, top: str | None, side: str) -> list[Any]:
+    """The circuits reachable from the compared top (``top`` by
     name, else the netlist's sole top circuit), each once, in visit order.
 
     ``[]`` when the top cannot be resolved -- :func:`_select_circuit`'s own
     later call raises the authoritative error for that, so this
     pre-compare scan never pre-empts it with a different one."""
     try:
-        root = _select_circuit(netlist, top, "reference")
+        root = _select_circuit(netlist, top, side)
     except LvsError:
         return []
     seen: set[int] = set()
@@ -4737,7 +4732,7 @@ def _unresolved_reference_subckt_calls(
     except OSError:
         defined = set()
     findings: list[dict[str, Any]] = []
-    for parent in _reachable_reference_circuits(reference_netlist, top):
+    for parent in _reachable_circuits(reference_netlist, top, "reference"):
         for sub in parent.each_subcircuit():
             callee = sub.circuit_ref()
             mangled = callee.name.upper()
