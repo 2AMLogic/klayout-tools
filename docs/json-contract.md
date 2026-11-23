@@ -115,7 +115,8 @@ byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
 failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
 (issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
-on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+on both sides, `"pass"`. For a schematic-only observation, `delta[].status`
+is `"skipped"` unless the schematic measurement errored. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
@@ -379,6 +380,14 @@ Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
 scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
 `resistance_source_reason`). Output without the flag is unchanged; no
 `schema_version` bump.
+Issue #6964 likewise adds `caps` (`{max_terminals, max_cells, max_nodes,
+max_edges}`, integers) to `extraction.resistance_graph` of `klt pex
+--resistance-graph`: present only when a `--resistance-graph-max-*` flag was
+given, holding all four effective caps (the builder's default for any flag
+omitted), and absent otherwise -- so an existing graph-enabled envelope is
+unchanged. `klt extract` adds no field for the caps: its per-net
+`graph_too_large` diagnostic names the cap that was exceeded and the value
+applied. No `schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -862,8 +871,13 @@ file per instantiated hard macro — so `provenance.pdk` alone cannot answer
 "where did this cell's pin order come from". Like `klt erc`'s `spec`, it is a
 verb-local field rather than a `build_provenance()` parameter, and it is
 omitted entirely (never an empty list) for every reference form that reads no
-pin-order source. See [`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level
-LVS".
+pin-order source. A file under the resolved PDK root is recorded as the
+string `"$PDK_ROOT/<relative>"` (issue #5812) rather than an absolute host
+path, so a committed report does not leak where the PDK is installed (the PDK
+identity is in `provenance.pdk`); a `reference.pin_order_files` entry outside
+the PDK root stays absolute unless the request sets `portable_paths: true`.
+Same field and type, no `schema_version` bump. See
+[`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level LVS".
 
 `klt signoff` emits **no** `provenance` block of its own — it resolves no
 PDK, applies no deck, and reads no single input stream; the evidence it
@@ -2431,6 +2445,14 @@ A satisfied assertion of either kind marks the declared categories checked
 and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
+
+For `--engine klayout`, optional `violations[].values` contains the
+verbatim XML character data of each non-geometry RDB value in document
+order, including any tag such as `[#RATIO]`. Only findings with such
+values carry the field. `--engine both` retains it in
+`reports.native.violations[]`. `--check --rerun` compares the strings.
+They provide evidence only and do not affect the coverage verdict,
+`coverage_unknown`, or `--expect-rule-categories`.
 
 **Deck stdout as additive evidence** (issue #6613): every `--engine
 klayout` DRC report carries a top-level `deck_output` object —

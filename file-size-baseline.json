@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1593
+      "lines": 1586
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -337,15 +337,15 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2686
+      "lines": 2672
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2488
+      "lines": 2473
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4184
+      "lines": 3931
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -361,11 +361,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3128
+      "lines": 2986
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2831
+      "lines": 2800
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -401,7 +401,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 5993
+      "lines": 5990
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3314
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,11 +509,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2202
+      "lines": 2167
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1359
+      "lines": 1347
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4535
+      "lines": 4532
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11622
+      "lines": 11158
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4525
+      "lines": 4411
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26043
+      "lines": 26034
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

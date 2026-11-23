@@ -52,6 +52,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
+from ._layout import ActiveIndex as _ActiveIndex
 from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -2286,37 +2287,6 @@ def _register_label_layer(
     l2n.connect(conductor_region, label_texts)
 
 
-class _ActiveIndex:
-    """Bbox-indexed copy of the whole-layout active region (issue #2751).
-
-    ``(net_poly & whole_active).merged()`` visits every active polygon in the
-    chip once per candidate net -- candidates x active polygons, quadratic in
-    design size. Here the active polygons are loaded once into a scratch
-    cell, and :meth:`intersect` pulls only those whose bounding box touches
-    the net's own poly bbox through the shape tree's spatial query before
-    intersecting. Active polygons outside that window cannot intersect the
-    net's poly, so the result is geometrically identical to the whole-layout
-    boolean (same merged polygons, same area, same ``gates[]``).
-    """
-
-    def __init__(self, active_region: Any) -> None:
-        import klayout.db as kdb
-
-        self._kdb = kdb
-        self._layout = kdb.Layout()
-        self._cell = self._layout.create_cell("ACTIVE")
-        self._layer = self._layout.layer(0, 0)
-        self._cell.shapes(self._layer).insert(active_region)
-
-    def intersect(self, poly_region: Any) -> Any:
-        if poly_region.is_empty():
-            return poly_region
-        local = self._kdb.Region(
-            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
-        )
-        return (poly_region & local).merged()
-
-
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -2963,6 +2933,7 @@ def run_erc(
     # directly off the connectivity graph on the `findings_only` one (issue
     # #2219). Same answer either way; see `_gate_is_floating`.
     gate_floating: list[bool] = []
+    gf180_violations: list[tuple[dict[str, Any], Any]] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -2972,10 +2943,11 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if active_index is not None:
-            gate_area_region = active_index.intersect(gate_poly_region)
-        else:
-            gate_area_region = gate_poly_region
+        gate_area_region = (
+            active_index.intersect(gate_poly_region)
+            if active_index
+            else gate_poly_region
+        )
         gate_area_um2 = gate_area_region.area() * dbu2_um2
         if gate_area_um2 <= 0:
             continue
@@ -3014,6 +2986,12 @@ def run_erc(
         )
         gate_regions.append(gate_poly_region)
         gate_floating.append(is_floating)
+        if pdk == "gf180mcu" and gates[-1]["antenna_verdict"] == "violate":
+            gf180_violations.append((gates[-1], net))
+
+    _gf180.annotate_contacted_diffusion(
+        gf180_violations, layout, top_cell, stackup, vias, active_region, l2n
+    )
 
     # (issue #2896) A passive-only cell (poly resistors, MoM/MiM caps, no
     # transistor) has no gates by construction, but its declared supplies and

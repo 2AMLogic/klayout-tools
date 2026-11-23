@@ -3856,8 +3856,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad.
 
             Intermediate and far pads are checked on their own physical layers.
-            An area overlap or a shared edge can connect distinct nets through
-            one pad even when their backbones lie on different metals.
+            An area overlap, a shared edge or corner can connect distinct nets
+            through one pad even when their backbones lie on different metals.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -3880,22 +3880,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             Automatic climbs and GF180 9K/11K top-metal landings also
             check intermediate and far pads for spacing.
 
-            A literal positive-area overlap is still always rejected first
-            (mirrors check 4's "positive area only, not a mere edge touch"
-            rule: a ``kdb.Region`` boolean AND between two backbones already
-            yields an empty region for a mere edge touch). For the primary
-            entry, when the two regions do *not* overlap but sit closer
-            together than the resolved deck's own same-layer ``"space"``
-            rule for ``layer`` (:func:`_min_spacing_um_for_layer`), one side
-            is grown by that threshold (``kdb.Region.sized`` -- the standard
-            "distance < d" Minkowski-sum test, symmetric regardless of which
-            side grows) before the same intersection test -- catching the
-            class of violation issue #1386 reported (`nets[].legs[].routed:
-            true` legs that still failed `klt drc`'s
-            `li1.space.1`/`met1.space.1`) that the overlap-only version of
-            this check could not see. A layer with no known ``"space"`` rule
-            keeps the overlap-only test (#6961: verdict is a ``RouteConflict``).
-            """
+            A literal positive-area overlap is still always rejected first,
+            then, on both entries, a shared edge or corner (#7024, #7221):
+            ``kdb.Region.interacting`` -- shares at least one point, as
+            ``LayoutToNetlist`` connects -- is the contact test, and needs no
+            space rule. For the primary entry, when the two regions neither
+            overlap nor touch but sit closer together than the resolved deck's
+            own same-layer ``"space"`` rule for ``layer``
+            (:func:`_min_spacing_um_for_layer`), one side is grown by that
+            threshold (``kdb.Region.sized`` -- the standard "distance < d"
+            Minkowski-sum test, symmetric regardless of which side grows)
+            before the same intersection test -- catching the class of
+            violation issue #1386 reported (`nets[].legs[].routed: true` legs
+            that still failed `klt drc`'s `li1.space.1`/`met1.space.1`) that
+            the overlap-only version could not see. A layer with no known
+            ``"space"`` rule keeps those two tests only (#6961)."""
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None
             if candidate_width_um is None:
