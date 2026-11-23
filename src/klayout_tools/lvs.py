@@ -844,8 +844,18 @@ def _aggregate_lvs_findings(
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
-    # Deck-family diagnostics and metre-scale device dimensions are collected
-    # before comparison. The comparer remains responsible for the verdict.
+    # Issue #2421: same append-here rationale as the disclosures above -- the
+    # deck-family findings are pre-flight determinations about the reference
+    # netlist and the deck, made before the compare ran, not
+    # `NetlistComparer` events. Unlike the disclosures they are
+    # `severity: "error"` (the reference really cannot match), but like
+    # `device.class_arity` they are diagnostic only: they never move `status`
+    # on their own -- the compare that already ran reported the mismatch they
+    # explain. The metre-scale `device.implausible_dimensions` warnings ride
+    # in the same list and are likewise collected before the compare; the
+    # comparer remains responsible for the verdict. Extended unconditionally
+    # (like `supply_findings` below, unlike the `if`-guarded warnings above):
+    # the list is empty on every run with nothing to report.
     mismatches.extend(precompare_findings)
 
     if gate_level_port_alias_warnings:
@@ -3871,6 +3881,7 @@ def _select_resolve_and_combine(
     # `layout.deck` and the reference netlist.
     family_findings = _device_class_family_findings(reference_netlist, layout_deck)
     family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
+
     if opts.combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
         # `fixed_offset_ohm` correction the whole-netlist block below applies
