@@ -598,6 +598,8 @@ engine). `klt extract --engine klayout-runset` reports gain a top-level
 `params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
 `instantiated_device_counts` (`{class: count}` across the instantiated
 hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat).
+For `klt extract`, read the top-level `engine` field to identify the engine.
+A runset report has `engine: "klayout-runset"`. A curated report omits `engine`.
 `instantiated_device_counts` is always present under `klayout-runset`. On the
 curated engine it appears for a FinFET selected circuit that instantiates at
 least one subcircuit, alongside `device_count_scope` and
