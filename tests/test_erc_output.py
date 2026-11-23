@@ -2,6 +2,9 @@
 
 import gzip
 import json
+import os
+import stat
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -90,3 +93,43 @@ def test_write_error_names_destination(tmp_path, capsys):
     output = capsys.readouterr()
     assert output.out == ""
     assert str(dest) in json.loads(output.err)["error"]["message"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+@pytest.mark.parametrize("suffix", [".json", ".json.gz"])
+def test_erc_output_streams_to_existing_fifo(tmp_path, capsys, suffix):
+    layout, spec = tmp_path / "cell.gds", tmp_path / "spec.json"
+    _antenna_fixture(layout, li1_um2=0.2)
+    _basic_spec(spec)
+    dest = tmp_path / ("report" + suffix)
+    os.mkfifo(dest)
+    original_inode = dest.stat().st_ino
+    fd = os.open(dest, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as reader, ThreadPoolExecutor(max_workers=1) as pool:
+        # Keep the read end alive until the CLI closes its writer, including
+        # when the report exceeds the platform's FIFO buffer.
+        with dest.open("wb"):
+            os.set_blocking(fd, True)
+            contents = pool.submit(reader.read)
+            result = main(
+                [
+                    "erc",
+                    str(layout),
+                    str(spec),
+                    "--pdk",
+                    "sky130",
+                    "-o",
+                    str(dest),
+                    "--format",
+                    "json",
+                ]
+            )
+        received = contents.result(timeout=5)
+    assert result == 0
+    if suffix.endswith(".gz"):
+        received = gzip.decompress(received)
+    assert received == capsys.readouterr().out.encode()
+    assert json.loads(received)["status"] == "clean"
+    assert stat.S_ISFIFO(dest.stat().st_mode)
+    assert dest.stat().st_ino == original_inode
+    assert not list(tmp_path.glob(".klt-*.tmp"))
