@@ -114,7 +114,9 @@ def compose_rows(
     function returns ``0`` without touching a row.
 
     Raises :class:`SignoffError` (rule 4 and the reader's own errors) when
-    ``composed_of`` is present but not a non-empty array, an entry is
+    ``composed_of`` is present but not a non-empty array (an explicit
+    ``null`` and ``[]`` included -- only an *absent* key means "not
+    composed"), an entry is
     neither a path string nor a JSON object (or cannot be read/parsed), a
     resolved sub-block manifest is not a JSON object, has no non-empty
     ``block`` name, has a ``kind`` different from the parent's, or declares
@@ -125,9 +127,13 @@ def compose_rows(
     """
     from .signoff import SignoffError
 
-    composed_of = manifest.get("composed_of")
-    if composed_of is None:
+    # Key *absence* is the ordinary single-block case; a key that is present
+    # must be a non-empty array -- an explicit ``null`` is as malformed as
+    # ``[]`` (and a sub-block's ``"composed_of": null`` is already an
+    # authoring error), so it must never silently read as "not composed".
+    if "composed_of" not in manifest:
         return 0
+    composed_of = manifest["composed_of"]
     if not isinstance(composed_of, list) or not composed_of:
         raise SignoffError(
             "block manifest 'composed_of' must be a non-empty JSON array of "

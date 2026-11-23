@@ -344,6 +344,8 @@ def test_check_matches_and_flips_when_sub_block_evidence_edits(tmp_path):
     ("composed_of", "match"),
     [
         ([], "'composed_of' must be a non-empty JSON array"),
+        # An explicit null is a present-but-malformed key, not an absent one.
+        (None, "'composed_of' must be a non-empty JSON array"),
         ("manifests/sub-A.json", "'composed_of' must be a non-empty JSON array"),
         ([42], r"composed_of\[0\] must be a JSON object or a file path string"),
         (
@@ -358,6 +360,10 @@ def test_check_matches_and_flips_when_sub_block_evidence_edits(tmp_path):
         ),
         (
             [{"block": "A", "kind": "analog", "composed_of": []}],
+            r"composed_of\[0\] \(block 'A'\) declares its own 'composed_of'",
+        ),
+        (
+            [{"block": "A", "kind": "analog", "composed_of": None}],
             r"composed_of\[0\] \(block 'A'\) declares its own 'composed_of'",
         ),
     ],

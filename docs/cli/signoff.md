@@ -5814,7 +5814,9 @@ honestly, with one optional manifest key:
 path, `"-"`, or an inline manifest object). Each entry resolves to a
 sub-block manifest with a **required non-empty `block` name** and the
 **same `kind` as the parent**; a sub-block may not declare its own
-`composed_of` (no nesting in v1). A malformed key, a bad entry, a missing
+`composed_of` (no nesting in v1). A malformed key (anything but a non-empty array — an
+explicit `null` and `[]` included; only an *absent* key means "not
+composed"), a bad entry, a missing
 `block` name, a `kind` mismatch, or a nested declaration aborts the report
 with an error naming the entry — a composition authoring mistake, not a
 "no evidence yet" grading outcome.
