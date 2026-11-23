@@ -386,7 +386,7 @@ def _reject_unpairable_sim_model_classes(
     by the deck's generic names (``nfet``/``pfet``). The two class-name sets
     are disjoint, so the compare provably pairs nothing and would report a
     device/net-unmatched cascade that reads like a layout bug. Best-effort,
-    like ``_reject_bare_resistor_x_cards``: without a ``deck`` or for one
+    like ``_reject_bare_deck_x_cards``: without a ``deck`` or for one
     with no curated model table, return early and leave validation to the
     reference read itself. Four clauses, all required:
 
