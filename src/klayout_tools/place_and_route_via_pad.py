@@ -366,7 +366,7 @@ def trim_via_pads(
     )
     if pdk_variant_family(variant) == _ASAP7_FAMILY:
         report["m1_landing_pairs_extended"] = repair_m1_landing_pairs(
-            kdb, layout, top_cell, lef_to_gds
+            kdb, layout, top_cell, lef_to_gds, report=report
         )
     drcfill_regions, drcfill_scan = _drcfill_regions(
         kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu

@@ -5457,6 +5457,7 @@ item text:
 | --------- | --------- | ------------ |
 | The ERC spec declares at least one `"kind": "supply"` net, at least one `ties[]` entry (or, issues #2234/#2247, a top-level `ties_disclosure` explaining why it declares none, and which obstacle it hit — see below), and (with a PDN citation) a stackup covering every `power.straps[].layer` | the spec document `klt erc`'s envelope names — see below | `supply_spec_incomplete`, or one of `supply_spec_disclosed_unexpressible` / `supply_spec_disclosed_tool_limitation` for the disclosed-empty case — one reason per disclosed obstacle (`ties_disclosure.kind`) |
 | No declared tie was reported as *degenerate* by the ERC run itself — an `erc_coverage.skipped[]` record for `erc.missing_tie` (issue #2199), i.e. a tap region `klt erc` could not tell apart from an ordinary source/drain contact | the `erc` citation's `erc_coverage` | `supply_spec_incomplete` |
+| Every `ties[]` class the (hash-pinned) spec declares has its exact `erc.missing_tie:["<name>"]` work identity in `erc_coverage.checked` (issue #6987) — a class neither checked nor reported skipped supplied no verdict for a required rule, and a zero finding count cannot tell "the rule ran and found nothing" from "the rule never ran". Nothing weaker stands in: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string. An envelope that omits the entire `erc_coverage` block (every report before #2179) is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class | the `erc` citation's `erc_coverage.checked` | `tie_coverage_incomplete` (`detail.ties_unchecked` names the verdictless classes) |
 | No `erc.unconnected_net`/`erc.supply_short` on a declared supply, no `erc.expected_short_missing` on a declared supply (issue #2463 — a declared `nets[].same_net_as` tie the layout does not draw), no `erc.unlabelled_conductor` on a declared supply (issue #2524 — conductor on a supply's declared owned roles reachable from no label, the severed single-label rail `erc.unconnected_net` structurally cannot see), and no `erc.missing_tie` | the `erc` citation's `erc_findings[]` | `supply_not_continuous` |
 | **With a `place-and-route` citation** (RTL-flow digital): `power.pdn: true` | the `place-and-route` citation | `no_pdn` |
 | ...and a `power.tapcell_master` named, or `power.tapless: true` (library documented tapless, issue #4199) | the `place-and-route` citation | `no_tapcell_master` |
@@ -5867,6 +5868,83 @@ all available sources, `content_hash` is `null` and
 report can still render `met` without a pin. A pinned entry with no
 resolved hash renders `unmet`/`unverifiable_provenance`.
 
+### Composed (parent) manifests (`composed_of`, issue #6927)
+
+A design assembled from independently signed-off sub-blocks — a parent
+whose DRC/LVS evidence *is* its sub-blocks' evidence — can now state that
+honestly, with one optional manifest key:
+
+```json
+{
+  "block": "my-assembly",
+  "kind": "analog",
+  "evidence": {"1": "…", "5": "…"},
+  "composed_of": [
+    "manifests/sub-block-a.json",
+    "manifests/sub-block-b.json"
+  ]
+}
+```
+
+`composed_of` takes the **same entry shapes `--fleet`'s `blocks` take** (a
+path, `"-"`, or an inline manifest object). Each entry resolves to a
+sub-block manifest with a **required non-empty `block` name** and the
+**same `kind` as the parent**; a sub-block may not declare its own
+`composed_of` (no nesting in v1). A malformed key (anything but a non-empty array — an
+explicit `null` and `[]` included; only an *absent* key means "not
+composed"), a bad entry, a missing
+`block` name, a `kind` mismatch, or a nested declaration aborts the report
+with an error naming the entry — a composition authoring mistake, not a
+"no evidence yet" grading outcome.
+
+**Composition is visible evidence, never T1.** The evidence tiers doc
+scopes a T1 claim to the named block's *own boundary*: two sub-blocks that
+each pass LVS say nothing about whether the parent wires them together
+correctly. So a composed row renders `status: "met_by_composition"` —
+deliberately outside the statuses that satisfy T1, counted in neither
+`t1_met_count` nor `t1_not_applicable_count` — and the parent is
+`tier: null` until it cites its **own** item 3/4 evidence for the assembled
+layout (top-level DRC/LVS). That own evidence always wins: a parent that
+cites its own item 3 or 4 is graded from that citation, passing or
+failing — a failing own LVS is never masked by its sub-blocks' passes.
+The count of composed rows is disclosed as top-level `t1_composed_count`
+(omitted when zero, like `t1_not_applicable_count`), and in the fleet
+roll-up as `t1_composed_count` on the `blocks[]` row. In `--format text`,
+composed rows render as `[COMP ]` (never `MET`), each naming its
+sub-blocks (`composed from:` lines), and the tier line states
+`, N composed (parent boundary uncovered)`.
+
+v1 rules, deliberately narrow:
+
+- **Only items 3 ("DRC clean") and 4 ("LVS clean") compose.** Every other
+  item is graded from the parent's own evidence alone, even if every
+  sub-block has it met.
+- A parent row becomes `met_by_composition` **only when the parent has no
+  own evidence for it** (it would grade `unmet`/`no_evidence`) **and every
+  sub-block's own report has `met` at the same `(id, partition)`** — for a
+  `mixed-signal` block, each partition row composes independently.
+- If any sub-block is not `met` there, the row stays `unmet`/`no_evidence`
+  and gains `detail.composition` naming each sub-block and its status
+  there, so the sub-block verdicts it rested on stay visible.
+- A composed row carries `reason: "composed_from_sub_blocks_only"` (so the
+  fleet roll-up's `blocking_item` says *why* the parent is not T1 — a
+  composed row is a valid blocker candidate) and, in place of
+  `citation`, `composed_from: [{"block", "source", "status",
+  "content_hash"?}, …]` — per sub-block, its manifest path (`null` for an
+  inline entry) and the content hash of the evidence its own report item
+  cited, so staleness stays visible.
+- `unmet_reason_counts` counts only `status == "unmet"` rows, so a
+  `met_by_composition` row is deliberately absent from it — decided and
+  intended: the rollup answers "why is this still unmet", and a composed
+  row is not unmet, it is *not yet the parent's own*.
+- `--check` re-grades the parent and re-reads every sub-block manifest, so
+  editing a sub-block's evidence after committing a composed report flips
+  the check to `drifted` with no new mechanism.
+
+If the operator ever wants composition to qualify for parent T1, that is a
+separate, explicit checklist change (defining what evidence covers the
+interconnect between sub-blocks) — not something `composed_of` decides.
+
 ### Tier-report JSON schema
 
 ```json
@@ -5953,6 +6031,7 @@ resolved hash renders `unmet`/`unverifiable_provenance`.
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
 | `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `t1_composed_count` | integer | **Present only when at least one item is `met_by_composition`** (issue #6927; absent means `0`, so a report with none — every report whose manifest declares no `composed_of` included — is byte-identical to a pre-#6927 one): the number of T1 rows whose verdict was composed from the parent's sub-block reports. **Never part of `t1_met_count` or `t1_not_applicable_count`, so it can never move `tier`** — composition is visible evidence, never T1; a parent with composed rows is `tier: null` until it cites its own item 3/4 evidence. `--format text` states it as `, N composed (parent boundary uncovered)` on the tier line. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "Composed (parent) manifests" above. |
 | `t1_justified_gap_count` | integer     | **Present only when at least one justified gap is declared** (issue #5599; absent means `0`, byte-identical when none): the count of `spec_rows` rows declared with the justified object form of `gap`, across all items and partitions. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17); it never counts as coverage and never moves an item off `unmet`. See "Declared gaps" above. |
 | `findings`      | array\<object\>      | **Present only when at least one finding exists** (issue #5599): one entry per justified gap that names no issue — `{"finding": "justified_gap_without_issue_link", "item", "partition" (when the block is mixed-signal), "row"}`. A declared gap is pending work, so the open issue that would close it should be recorded; its absence is reported here, never refused. |
 | `unmet_reason_counts` | object\<string, integer\> | **Present only when at least one T1 item is `unmet`** (issue #5903; a report with none is byte-identical to a pre-#5903 one). Maps each `reason` token to how many unmet T1 items carry it, e.g. `{"no_evidence": 3, "stale_evidence": 1}`; values sum to the number of unmet T1 items. `not_applicable` items and T2–T4 ladder rows (`tier_not_supported`) are not counted. Separates a block that is mid-progress from one whose pin went stale without changing the exit code (still `3`): `jq -e '(.unmet_reason_counts.stale_evidence // 0) == 0' report.json`. Additive: no `schema_version` bump. Derived from `items[]`, so `--check` leaves it out of the comparison. |
@@ -5972,10 +6051,11 @@ resolved hash renders `unmet`/`unverifiable_provenance`.
 | `partition_boundary` | string     | **Present only on a row whose partition the manifest declared a boundary for** (issue #2278) — the top-level `partition_boundary` entry for this row's `partition`, repeated here so a row selected out of `items[]` carries the definition of the silicon it covers, not just the partition's name. Absent on every row of an undeclared partition, and on every T2-T4 ladder row (a ladder row belongs to no partition). Never graded. |
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
-| `status`    | string               | `"met"`, `"unmet"`, or (item 6 only, issue #2865) `"not_applicable"` — see above and "Item 6 `not_applicable`" below. |
-| `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
+| `status`    | string               | `"met"`, `"unmet"`, (item 6 only, issue #2865) `"not_applicable"`, or (items 3 and 4 of a `composed_of` parent only, issue #6927) `"met_by_composition"` — see above, "Item 6 `not_applicable`" below, and "Composed (parent) manifests" above. **`"met_by_composition"` is not `"met"`**: it is outside the statuses that satisfy T1 and is counted in neither `t1_met_count` nor `t1_not_applicable_count`, so a consumer must handle it as a status of its own — never as a pass, and never as an unmet row either. |
+| `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826); a `"met_by_composition"` row (issue #6927) always carries `"composed_from_sub_blocks_only"` — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
 | `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples digest could not be resolved from disk or a declared store manifest (issues #2197 and #5963), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), `pointer` when the evidence entry carried one (issue #5815), `drc_crosscheck` for a cross-check (`--engine both`) `drc` citation (issue #5815), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `composed_from` | array\<object\> | **Present only on a `status: "met_by_composition"` row** (issue #6927; absent on every other row, so a report with no composed row is byte-identical to a pre-#6927 one): one `{"block", "source", "status", "content_hash"?}` entry per sub-block of the parent's `composed_of`, in manifest order — the sub-block's name, its manifest path (`null` for an inline entry), its own verdict at this row's `(id, partition)` (always `"met"` on a composed row), and, when its own citation carried one, the `content_hash` of the evidence it cited, so a sub-block's later staleness stays visible. Takes the place of `citation`, which is `null` on a composed row. Disclosure of what the row rests on, never a T1 satisfier. See "Composed (parent) manifests" above. |
 
 #### `citation` fields
 
@@ -6011,7 +6091,7 @@ actually ran and failed):
 
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
-| `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
+| `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. **Items 3 and 4 of a `composed_of` parent** (issue #6927): when the parent's sub-blocks were consulted and not every one was `met` at this row's `(id, partition)`, the row stays here and gains `detail.composition` — the same `{"block", "source", "status", "content_hash"?}` list `composed_from` carries, naming each sub-block and its status there. When every sub-block was `met` the row is `met_by_composition` instead (see `"composed_from_sub_blocks_only"` below). |
 | `"evidence_not_klt_native"` | yes | **(issue #6953)** The item has no `evidence` entry, but the manifest's `disclosed_evidence` map named a local artifact for it that this grader cannot read — evidence produced outside `klt` (an OpenROAD STA report, a netlist synthesized from foreign RTL) which no T1 item accepts as a citation. The grader's only claim is that the disclosed path names a readable file (`detail.disclosed_evidence`); its contents are never parsed or interpreted as a grading envelope, and the item still grades `unmet` with no `citation` and no credit — a disclosure is identification, never a verdict. Distinct from `"no_evidence"` (whose meaning, "the manifest has no entry for the item", would otherwise read as "the work was never done"); an unreadable disclosed path renders `"unreadable_evidence"` instead. See the `disclosed_evidence` manifest field above. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
@@ -6041,6 +6121,7 @@ actually ran and failed):
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
 | `"supply_spec_disclosed_tool_limitation"` | yes | **Item 11 only** (issue #2247). The same disclosed zero-`ties[]` state as `"supply_spec_disclosed_unexpressible"` above, naming the other obstacle (`ties_disclosure.kind: "tool_limitation"`): the tap *is* expressible, but the `klt` build this evidence had to be produced on cannot grade a declared tie safely — the reported instance being issue #2169, where a declared tie joins the well/tap regions into the primary connectivity graph and reports a false `erc.supply_short` on any routed design. Still unmet on exactly the same principle: a disclosure is the caller's word about their toolchain, never a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from both "nobody declared ties at all" and "this stream has no tap to name". Kept distinct from the reason above because the remedy differs: re-run against a `klt` build whose tie extraction is isolated (issue #2169) and declare the tie, rather than go looking for a tap that is already drawn — a different *build*, not a redrawn layout. The report's own `provenance.klt_version` is what shows whether the disclosed limitation applies to the run in front of you. |
+| `"tie_coverage_incomplete"` | yes | **Item 11 only** (issue #6987). The cited `klt erc` run's (hash-pinned) spec declares its `ties[]`, the run reported no explicit skip and no finding, but one or more declared classes have **no verdict in the envelope at all**: their exact `erc.missing_tie:["<name>"]` work identity is absent from `erc_coverage.checked`. `erc_coverage` exists to distinguish "the rule ran and found nothing" from "the rule never ran" — a zero finding count is produced identically by both — so a class neither checked nor reported skipped supplied no positive evidence, and the item must not read its silence as a clean tie. Nothing weaker stands in for the missing identity: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string each leave the class verdictless. `detail.ties_unchecked` names which declared classes went verdictless. An explicit producer-format skip record (`{id, reason}`) still renders `"supply_spec_incomplete"` above (issue #2199, checked first), and an envelope that omits the entire `erc_coverage` block — every report before #2179 — is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class. Fix: re-run `klt erc` so every declared tie class is actually computed. |
 | `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), a declared supply's intentional tie to another name (`nets[].same_net_as`, issue #2463) is not drawn (`erc.expected_short_missing` — graded under the same declared-name filter `erc.unconnected_net` uses, since that rule can also name two signal nets), or a well/tub has no connected tap (`erc.missing_tie`). |
 | `"substrate_isolation_undecidable"` | yes | **Item 11 only** (issue #5346). The cited `klt erc` run disclosed `erc.supply_short` as `inapplicable` with reason `substrate_isolation_undecidable` — it could not decide whether two supplies share a substrate body — and listed what was `missing`. An undecided question is not a clean answer, so the item is unmet; the list is in `detail.power_delivery.substrate_isolation_missing`. A substrate-path `erc.supply_short` finding (`via: "substrate"`) is a `supply_not_continuous` blocker like a metal one. When the run instead evaluated the substrate path (`erc.supply_short.substrate` in `erc_coverage.checked`) a met citation carries `power_delivery.substrate_continuity: {"checked": true, "by_assertion": <bool>}`. Declare the missing isolation (`ties[].isolation_boxes`) and re-run `klt erc`. |
 | `"lvs_supply_unproven"`   | no  | **Item 11 only** (issue #2025). The LVS half of the item is unproven: with a PDN citation, the same report's `power_connectivity.status` is not `"match"` (`"unchecked"` satisfies item 4, but not this item, which *is* the question); without one, its `net_correspondence` does not pair every declared supply net to a reference-side net, so the supplies were not part of the compare. Rendered only for a cited LVS report that *passed* — one that did not renders `"lvs_did_not_pass"`/`"check_failed"` below instead. |
@@ -6063,6 +6144,7 @@ actually ran and failed):
 | `"malformed_coverage"`    | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its `coverage` block is present and structurally invalid — it is not an object, or it fails the schema/consistency checks a v1 block must satisfy. The cited check did not fail on its own terms; its own coverage claim simply cannot be trusted. |
 | `"partial_coverage"`      | no  | The evidence resolved to a recognised envelope whose producer applied the common rollup rule and reported its **partial** status token — `"clean_partial"`, `"pass_partial"`, the per-kind spelling of `f"{success}_partial"` (issue #2109, [coverage-contract.md](../coverage-contract.md)). Every check it ran passed, *and* it skipped requested work, so its result is real but not unconditional. The cited check did not fail on its own terms — re-run it over the work it skipped, do not go looking for a violation. Ordered like `"check_failed"` rather than like the three coverage reasons above it: it is decided from the envelope's own verdict, so it is reported even for a kind the item does not accept (exactly as a *failing* report of that kind reports `check_failed`, not `wrong_kind`). |
 | `"timing_margin_missing"` | no  | **(issue #4314)** Digital item 5 cites only passing `klt sim` envelopes (the full-custom sub-case) but no `spec_rows` row with `timing_margin: true` is evidenced by a passing, limited, `spec_row`-tagged measurement at every corner. `detail.missing_timing_margin` names the rows and corners. |
+| `"composed_from_sub_blocks_only"` | yes | **(issue #6927)** **Items 3 and 4 of a `composed_of` parent only — and the one reason in this table carried by a row whose `status` is not `"unmet"`** (it is `"met_by_composition"`). The parent cites no evidence of its own for the item (it would otherwise grade `unmet`/`no_evidence`) and every sub-block's own report is `met` at the same `(id, partition)`; the row names those verdicts in `composed_from` and holds no `citation`. The parent has no check of its own on the item — the sub-blocks' checks ran and passed, but say nothing about how the parent wires them together — so the row is outside the statuses that satisfy T1, and the block stays `tier: null` until it cites its own item 3/4 evidence. It is the `reason` a fleet `blocking_item` carries when a composed row is the block's blocker, and it is deliberately absent from `unmet_reason_counts`, which counts `unmet` rows only. See "Composed (parent) manifests" above. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -6091,6 +6173,15 @@ never disagree about *why* it isn't T1 yet.
   above). Every resolved manifest's `block` field is **required** here
   (unlike single-block tier-report mode, where it is optional) — it is how
   a roll-up row is identified.
+
+A block manifest listed here may itself declare `composed_of`
+(["Composed (parent) manifests"](#composed-parent-manifests-composed_of-issue-6927)
+above): the parent row composes its eligible rows from its sub-blocks
+exactly as in single-block mode, carries `t1_composed_count` when any
+composed, and its `blocking_item` names the first composed row with
+`reason: "composed_from_sub_blocks_only"` when nothing else blocks it. The
+sub-block manifests are *not* separate roll-up rows — list the parent, not
+its children (or list both, if you also want each sub-block's own row).
 
 A block whose manifest is structurally invalid (missing/invalid `kind`, a
 malformed `evidence` map, or no `block` name) aborts the whole roll-up with
@@ -6282,6 +6373,7 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
 | `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
+| `t1_composed_count` | integer | Present only when non-zero (issue #6927): this block's `"met_by_composition"` T1 item count — rows composed from the block's `composed_of` sub-blocks. Never part of `t1_met_count`, so it cannot make a block `tier: "T1"`; when nothing else blocks the block, its `blocking_item` names the first composed row with `reason: "composed_from_sub_blocks_only"`. See "Composed (parent) manifests" above. |
 | `t1_justified_gap_count` | integer     | Present only when non-zero (issue #5599): this block's justified declared-gap count — `spec_rows` rows declared with the justified object form of `gap`. The text roll-up prints `, N justified gaps` beside the count. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17). |
 | `findings`      | array\<object\>      | Present only when non-empty (issue #5599): this block's tier report findings, carried verbatim — today, one entry per justified gap that names no issue (`finding: "justified_gap_without_issue_link"`). |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
