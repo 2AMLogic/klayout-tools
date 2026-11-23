@@ -4031,9 +4031,9 @@ tier-verdict report by different rules:
 
 | Install | What `git_commit`/`git_tag` say | What actually grades the report |
 | --- | --- | --- |
-| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | `signoff.py` as it stood at `abc123` |
-| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff.py` — but installed with no shared `.git` history against the wheel to compare |
-| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | `signoff.py` as it stands on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
+| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | the `signoff*.py` grading modules as they stood at `abc123` |
+| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff*.py` modules — but installed with no shared `.git` history against the wheel to compare |
+| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | the `signoff*.py` modules as they stand on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
 
 `git_commit`/`git_tag` (in `klt version --format json`, and in every tier /
 fleet report's `build` block) identify the **source checkout** each install
@@ -4045,16 +4045,27 @@ grading rules produced it.
 Two mechanisms close that gap, both driven by the same content hash:
 
 1. **`grading_ruleset_id`** — a `sha256:`-prefixed content hash of the
-   shipped `signoff.py` grading module, reported by `klt version --format
+   shipped `signoff*.py` grading modules (issue #7434: every module in the
+   package directory whose filename matches, not just `signoff.py` — the
+   per-item grading rules and the `reason` vocabulary they emit live across
+   the whole leaf family, and a named subset would silently lose coverage
+   again with every future leaf split; each file's basename is mixed into
+   the digest before its bytes, so a rename or a content move between two
+   leaves changes the id too), reported by `klt version --format
    json` (see [`version.md`](version.md)) and echoed into every tier / fleet
    report's own `build` block (above), so a committed report names the
    grading rules that produced it, not just the source checkout. It is
    **identical** between two installs of byte-identical grading code
    (the wheel and the `git+...` snapshot in the table above both report the
    same id, with no shared git history required to prove it) and **changes**
-   whenever `signoff.py`'s grading logic changes (the `main` checkout in the
-   table reports a different id from the tag it moved past). `null` only if
-   this install's `signoff.py` cannot be read at all — never fabricated.
+   whenever any grading module's logic changes — including an edit confined
+   to a leaf such as `signoff_power_delivery.py` (the `main` checkout in the
+   table reports a different id from the tag it moved past). Modules outside
+   the `signoff*.py` family (`design_evidence_tiers.py`, `coverage.py`,
+   `metrics.py`, ...) are deliberately not covered; the checklist doc itself
+   is covered separately by the report's `source_doc_content_hash`.
+   `null` only if this install's `signoff*.py` grading modules cannot be
+   read at all — never fabricated.
 2. **`klt signoff --describe-grader`** — enumerates, at runtime and without
    reading source, which T1 checklist item ids this build has grading rules
    for at all, alongside the same `grading_ruleset_id`:

@@ -62,9 +62,10 @@ tag, a ``pip install git+...@<tag>`` snapshot of that same tag, and an
 editable checkout that has moved past it on ``main`` can all report
 overlapping or identical version strings while grading a tier-verdict report
 by different rules. :func:`grading_ruleset_id` is a content hash of the
-shipped ``signoff.py`` module, so two installs of byte-identical grading code
-report the same id regardless of how each was installed, and any edit to
-that module's logic changes it. ``klt version --format json`` reports it
+shipped ``signoff*.py`` grading modules, so two installs of byte-identical
+grading code report the same id regardless of how each was installed, and
+any edit to any of those modules' logic changes it. ``klt version --format
+json`` reports it
 alongside the rest of the build identity, and it is echoed into every
 tier-verdict/fleet report's own ``build`` block (``signoff.py``'s
 ``_BUILD_IDENTITY_FIELDS``) so a committed report names the grading rules
@@ -73,6 +74,7 @@ that produced it, not just the source checkout.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import re
@@ -324,16 +326,29 @@ def klayout_version_expected() -> str | None:
     return _checkout_klayout_version_expected()
 
 
-def _grading_module_path() -> str:
-    """Absolute path to ``signoff.py`` next to this module, in whichever
-    install layout is running -- a wheel unpacks it into ``site-packages``
-    beside this file, an editable/source install has it in the same
-    ``src/klayout_tools`` directory. Never imports the module itself: this
-    only needs its *bytes*, not its behaviour, and ``signoff.py`` already
-    imports :func:`version_report` from this module, so importing back would
-    be circular.
+def _grading_module_paths() -> list[str]:
+    """Absolute paths of every ``signoff*.py`` grading module shipped next to
+    this module, sorted by basename, in whichever install layout is running
+    -- a wheel unpacks them into ``site-packages`` beside this file, an
+    editable/source install has them in the same ``src/klayout_tools``
+    directory. Never imports the modules themselves: this only needs their
+    *bytes*, not their behaviour, and ``signoff.py`` already imports
+    :func:`version_report` from this module, so importing back would be
+    circular. The glob (rather than a named module list) is the point
+    (issue #7434): per-item grading logic and the ``reason`` vocabulary it
+    emits live across the whole leaf family, and a named subset would silently
+    lose coverage again with every future leaf split.
     """
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "signoff.py")
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        names = os.listdir(package_dir)
+    except OSError:
+        return []
+    return [
+        os.path.join(package_dir, name)
+        for name in sorted(names)
+        if fnmatch.fnmatch(name, "signoff*.py")
+    ]
 
 
 def grading_ruleset_id() -> str | None:
@@ -351,43 +366,61 @@ def grading_ruleset_id() -> str | None:
     evidence has no way to tell, from ``klt version`` alone, which grading
     rules produced it.
 
-    Deliberately a **content** hash of the shipped ``signoff.py`` module
-    rather than something derived from ``git_commit``:
+    Deliberately a **content** hash of the shipped ``signoff*.py`` grading
+    modules rather than something derived from ``git_commit``:
 
     - Two installs built from the *same* commit -- a PyPI-published wheel
       and a ``git+...`` snapshot of the same release tag -- ship
-      byte-identical ``signoff.py`` source and must report the *same* id,
+      byte-identical ``signoff*.py`` source and must report the *same* id,
       with no shared git history to compare against (a wheel's
       ``site-packages`` install carries no ``.git`` directory at all).
-      Hashing the file achieves that for free; comparing commits does not.
-    - An edit to ``signoff.py``'s grading logic changes this id even when
+      Hashing the files achieves that for free; comparing commits does not.
+    - An edit to any grading module's logic changes this id even when
       unrelated files elsewhere in the repo also changed in the same commit
       -- a stable, scoped answer to "did the grading rules change", rather
       than the much coarser "did *anything* change" ``git_commit`` answers.
 
-    Hashes the **whole** ``signoff.py`` module (not just its per-item
-    grading functions): the module has no sharp internal boundary between
-    "grading logic" and "everything else" that would not itself need
-    updating -- and require re-verification -- every time a helper is
-    renamed or refactored across that line. A doc-only edit inside
-    ``signoff.py`` (e.g. a docstring correction) does move this id; that
-    false-positive is the deliberately conservative trade-off for never
-    missing a real grading-logic change, mirroring
+    Hashes **every** ``signoff*.py`` module in the package directory (issue
+    #7434), not just ``signoff.py``: the grading rules and the ``reason``
+    vocabulary they emit are spread across the whole leaf family
+    (``signoff_power_delivery.py``, ``signoff_justified_gap.py``,
+    ``signoff_unmet_reasons.py``, ...), and hashing one named file is how
+    this id's coverage silently shrank with every leaf split. Each module's
+    basename is mixed into the digest before its bytes, so a rename, or
+    content moving between two modules, changes the id too. Each module is
+    still hashed whole rather than extracting per-item grading functions:
+    there is no sharp internal boundary between "grading logic" and
+    "everything else" that would not itself need updating -- and require
+    re-verification -- every time a helper is renamed or refactored across
+    that line. A doc-only edit inside a ``signoff*.py`` module (e.g. a
+    docstring correction) does move this id; that false-positive is the
+    deliberately conservative trade-off for never missing a real
+    grading-logic change, mirroring
     :func:`~.design_evidence_tiers.parse_tier_doc`'s own whole-file
     ``content_hash`` for the checklist doc (issue #2175) rather than a
     narrower, harder-to-keep-accurate per-item extraction.
 
-    ``None`` only in the pathological case where the shipped module cannot
-    be read at all (e.g. a corrupted or hand-truncated install) -- never
-    fabricated.
+    Deliberately *not* covered: modules outside the ``signoff*.py`` family
+    that grading also reads (``design_evidence_tiers.py``, ``coverage.py``,
+    ``metrics.py``, ...) -- the checklist doc itself is covered separately
+    by the report's own ``source_doc_content_hash`` (issue #2175).
+
+    ``None`` only in the pathological case where the shipped grading
+    modules cannot be read at all (e.g. a corrupted or hand-truncated
+    install) -- never fabricated.
     """
-    path = _grading_module_path()
-    if not os.path.isfile(path):
+    paths = _grading_module_paths()
+    if not any(os.path.basename(path) == "signoff.py" for path in paths):
         return None
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    try:
+        for path in paths:
+            digest.update(os.path.basename(path).encode("utf-8") + b"\x00")
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+    except OSError:
+        return None
     return f"sha256:{digest.hexdigest()}"
 
 
