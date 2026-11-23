@@ -55,7 +55,7 @@ def _antenna_repair_warnings(
     if target_stage != "route" or not _antenna_diode_absent(library):
         return []
     return [
-        "antenna repair did not run: request.library.antenna_diode is "
+        "antenna repair did not run: the effective request.library.antenna_diode is "
         "null (the library has no antenna diode), so repair_antennas "
         "was not called; the antenna check still ran"
     ]
