@@ -1806,15 +1806,15 @@ merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
 
 Sibling requests may use different model libraries for the same netlist.
-Each shard must declare the same measurement names, units, limits and
-provenance, including `spec_row` and `case` whenever present. A disagreement
+Each shard must agree on the measurement names, units and limits, and on
+the `spec_row` and `case` declarations whenever present. A disagreement
 returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
 those row and case labels and grades limits over every declared corner.
 
 You can cite the merged report for item 5 of a `klt signoff` manifest.
 List the intended rows on the citation. Passing tagged measurements with
-limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
-digest. Mixed or missing shard hashes leave the pin unverifiable.
+limits give those rows derived coverage. A manifest pin can verify the
+netlist when every shard records the same non-empty input digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -1839,7 +1839,7 @@ stdout carries `{"schema_version": 1, "status": "refused", "refusal": {"code",
 | `7` | `unexpected_shard` | a report shares no corner with the plan |
 | `8` | `corner_mismatch` | a report overlaps the plan but is not exactly one shard's corners |
 | `9` | `request_mismatch` | a planned request file is unreadable or not the one the plan pinned |
-| `10` | `inconsistent_shards` | shards disagree on measurement names/units/limits, the simulated netlist or `schema_version` |
+| `10` | `inconsistent_shards` | shards disagree on measurement names, units, limits, `spec_row`, `case`, the simulated netlist or `schema_version` |
 
 When several classes apply the exit code is the first in the order `9, 8, 7, 6,
 5, 10`; the message lists every problem. Other exits: `1` could not run, with the usual error envelope on stderr
