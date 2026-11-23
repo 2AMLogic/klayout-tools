@@ -4200,6 +4200,7 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
     {
         "run_id",
         "netlist_path",
+        "stats_path",
         "script_path",
         "run_script_path",
         "restructured_netlist_path",

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import synthesize, synthesize_arithmetic
+from klayout_tools import synthesize, synthesize_arithmetic, synthesize_timeout
 from klayout_tools.cli import main
 from test_signoff import _synth_item_1
 from test_synthesize import (
@@ -162,6 +162,15 @@ def test_engine_failures_remain_errors(tmp_path, monkeypatch, capsys, stage, tim
 
 
 def test_partial_text_and_rerun(tmp_path, monkeypatch, capsys):
+    # The budget keys live in the timeout module's set; minted per-run paths
+    # like stats_path live in synthesize's (#7315). The merged set the rerun
+    # canonicalizer strips is the union of the two.
+    assert synthesize_timeout.RERUN_BOOKKEEPING_KEYS == {
+        "yosys_timeout_s",
+        "abc_timeout_s",
+    }
+    assert "stats_path" in synthesize.RERUN_BOOKKEEPING_KEYS
+    assert "netlist_path" in synthesize.RERUN_BOOKKEEPING_KEYS
     path = setup_run(tmp_path, monkeypatch, synthesis={"abc_timeout_s": 5})
     with monkeypatch.context() as patch:
         intercept_stage(patch)
@@ -178,6 +187,12 @@ def test_partial_text_and_rerun(tmp_path, monkeypatch, capsys):
                 "equivalence: not_run",
             ]
         )
+        lines = text.splitlines()
+        stats_index = next(
+            i for i, line in enumerate(lines) if line.startswith("stats_path:")
+        )
+        assert lines[stats_index + 1] == "cell_counts:"
+        assert lines[stats_index + 2].startswith("  ")
         report = synthesize.run_synthesize(path)
         saved = tmp_path / "saved.json"
         report["provenance"]["abc_timeout_s"] = report["partial"]["abc_timeout_s"] = 10
