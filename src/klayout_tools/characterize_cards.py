@@ -17,6 +17,11 @@ def spice_number(value: float) -> str:
     return liberty_writer.format_number(value, precision=10)
 
 
+def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
+    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
+    return f"{name} {node} 0 PWL({body})"
+
+
 def slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
 

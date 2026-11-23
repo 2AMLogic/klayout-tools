@@ -79,6 +79,11 @@ from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
 
+# Deck-known configuration warnings (issue #7311) for the two gf180mcu
+# `request.power` shapes the bundled deck is known to reject: pure, static
+# (no DRC run) strings kept out of this file for its size ceiling.
+from .place_and_route_deck_warnings import deck_warnings
+
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
 # the one name that subsystem calls back into this module for -- called once
@@ -136,13 +141,6 @@ from .place_and_route_portable import portable_response
 from .place_and_route_power_audit import (
     audit_power_delivery as audit_power_delivery,
 )
-
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
 from .place_and_route_power_pins import _POWER_PIN_PATTERNS as _POWER_PIN_PATTERNS
 from .place_and_route_power_pins import rail_label_evidence
 from .place_and_route_reports import (
@@ -2238,6 +2236,7 @@ def _run_single_corner(
     warnings.extend(_antenna_repair_warnings(target_stage, library))
     warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
+    warnings.extend(deck_warnings(cell_library, power, power_info))
     # Additive producer (issue #7411): one entry when any stage's Liberty
     # read discarded a timing model (STA-1253/STA-1311). A clean deck adds
     # nothing -- `warnings` stays byte-identical to the pre-#7411 run.

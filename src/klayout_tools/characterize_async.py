@@ -30,7 +30,7 @@ from typing import Any
 
 from . import liberty_writer
 from .characterize_bisect import ConstraintError
-from .characterize_cards import slug, spice_number
+from .characterize_cards import _pwl, slug, spice_number
 
 #: ``timing_sense`` of a forced arc: whether the pin's *asserting* edge and
 #: the output edge it causes point the same way.
@@ -105,11 +105,6 @@ def _schedule(settle: float, max_ramp: float) -> tuple[float, float, float, floa
     prime = settle
     assert_ns = prime + pulse_w + max_ramp + settle
     return prime, pulse_w, assert_ns, assert_ns + max_ramp + settle
-
-
-def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
-    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
-    return f"{name} {node} 0 PWL({body})"
 
 
 def build_async_deck(
