@@ -1098,7 +1098,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Count violations against this corner's Liberty limits.
+                # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,

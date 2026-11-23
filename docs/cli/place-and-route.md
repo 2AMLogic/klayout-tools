@@ -3763,6 +3763,9 @@ model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
 stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
 OpenROAD 26Q3-1510).
 
+Use retained logs for local debugging and determine stage success from the
+OpenROAD exit status and the stage's required outputs.
+
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
 
@@ -4130,7 +4133,9 @@ Add `order.fixed_origin_um` to place the first listed standard cell at a
 specified DEF coordinate in micrometres. Each subsequent member advances by
 `pitch_um` in positive x for a row or positive y for a column. Use literal
 linked instance names, including any bus brackets. A member may belong to one
-fixed group and any number of measurement groups.
+fixed group and any number of measurement groups. Placement begins at the
+`place` stage. A fixed origin requires `target_stage` to be `place`, `cts`,
+or `route` (the default).
 
 ```json
 {
