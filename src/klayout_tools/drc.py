@@ -99,6 +99,7 @@ from .drc_layer_selection import (
     selection_empties_every_top_cell,
 )
 from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
+from .drc_sg13g2_implant import implant_coverage
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2002,11 +2003,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-wide scopes, independent of stream geometry (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+    voltage_domain_warnings = _voltage_domain_warnings(
+        setup, set(rules_skipped) | omitted_ids
+    )
 
     # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
@@ -2042,8 +2041,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "unchecked_rules": unchecked_rules,
+        **implant_coverage(setup),
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
-        "deck_scope": deck_scope,
+        "deck_scope": sorted({rule.scope for rule in deck if rule.scope}),
         "unmodeled_rules": get_unmodeled_rules(deck_name),
         # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(

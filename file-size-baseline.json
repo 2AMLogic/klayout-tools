@@ -333,7 +333,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2672
+      "lines": 2656
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4411
+      "lines": 4370
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",

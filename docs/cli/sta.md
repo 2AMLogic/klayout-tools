@@ -2263,8 +2263,9 @@ invocation ID, script filename/hash, normalized script/metrics/log paths,
 process outcome/return code, and `retention_errors`. New paths use
 `{path, scope}` envelopes (as, since schema 2 / issue #2879, are
 `def_path`, `verilog_path`, and `spef_path`). Log `repo` paths resolve from
-the invoking repository root; the input-path fields resolve from the root of
-the repository containing the request file. For withheld `external` paths, find
+the repository containing the request file (#6764) — the same root the
+input-path fields use, never the invoking directory, so one request yields
+one committed report from any cwd. For withheld `external` paths, find
 `openroad-logs/<invocation_id>/` beside the generated script in the request's
 `.klt/sta/` directory.
 
