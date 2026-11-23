@@ -2575,7 +2575,7 @@ def _run_rebuild_corners(
                 output_subdir=name,
             )
         except PlaceAndRouteError as exc:
-            entry.update({"status": "failed", "error": str(exc)})
+            _route_overflow.record_corner_failure(entry, exc)
         else:
             entry.update(report)
         corner_runs.append(entry)
@@ -2917,10 +2917,10 @@ def _extract_stage_metrics(
     congestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
-    contract's field names -- see this module's docstring
-    "``-metrics <file>.json`` confirmed working end-to-end" for the exact
-    key mapping, verified live. Only includes keys that stage's own report
-    calls actually populate (contract spike section 5: "each with whatever
+    contract's field names. See "Stage granularity and invocation shape"
+    in ``docs/cli/place-and-route.md`` for how each stage produces the dump.
+    This function defines the key mapping and includes only the keys that
+    the stage's reports populate (contract spike section 5: "each with whatever
     subset of the top-level metric fields that stage's own OpenROAD reports
     provide")."""
     entry: dict[str, Any] = {"name": stage}

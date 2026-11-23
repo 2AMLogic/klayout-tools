@@ -425,10 +425,9 @@ class PlaceAndRouteError(Exception):
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
 
-    ``code``, ``job_id`` and ``details`` are optional and set only by the
-    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
-    machine-readable ``error.code`` for the CLI's error envelope, the batch
-    job id, and extra structured envelope fields.
+    Optional fields carry a machine-readable ``code``, a batch ``job_id``
+    and structured ``details``, such as congestion evidence from a failed
+    local route.
     """
 
     def __init__(
@@ -1864,8 +1863,8 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     ``sta::check_percent`` enforces). Omitted/``None`` defaults to ``0``,
     matching ``global_route``'s own default and this module's prior
     behaviour exactly -- the explicit A/B disable path this issue's
-    acceptance criteria require. See this module's own docstring, "Timing-
-    driven global routing + bounded antenna-repair iteration"."""
+    acceptance criteria require. See "Timing-driven/repair-iteration routing flags"
+    in ``docs/cli/place-and-route.md``."""
     if value is None:
         return 0
     if not is_int(value):
@@ -1939,8 +1938,8 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
     Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
-    See this module's own docstring, "Timing-driven
-    global routing + bounded antenna-repair iteration"."""
+    See "Timing-driven/repair-iteration routing flags" in
+    ``docs/cli/place-and-route.md``."""
     if value is None:
         return 1
     if not is_int(value):
@@ -2026,9 +2025,9 @@ def _validate_post_route_spef(value: Any) -> bool:
     ``klt extract --parasitics`` runs against the merged routed GDS, its
     output is written as SPEF, and a fresh OpenSTA session seeded from the
     ``"route"`` stage's own checkpoint re-reports slack/violation counts via
-    ``read_spef`` -- *alongside*, never replacing, that stage's existing
-    ``estimate_parasitics -global_routing``-derived top-level fields (see
-    this module's own docstring and :func:`_post_route_spef_metrics`).
+    ``read_spef`` alongside the top-level fields from
+    ``estimate_parasitics -global_routing``. See "Post-route SPEF STA"
+    in ``docs/cli/place-and-route.md`` and :func:`_post_route_spef_metrics`.
 
     Omitted/``None`` defaults to ``False`` -- this feature adds real
     wall-clock cost on top of every existing ``"route"``-stage caller (a

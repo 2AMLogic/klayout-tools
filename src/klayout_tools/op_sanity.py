@@ -127,6 +127,7 @@ from .sim import (
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
+from .sim_case_names import validate_request_measurements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1259,13 +1260,11 @@ def _all_measurement_specs(
     request: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
     """``(label, spec)`` for every measurement object the request declares:
-    the top-level ``measurements[]``, then each ``analysis_steps[]`` step's
-    own (labelled ``<step>.<name>``). Malformed entries are skipped -- ``klt
-    sim`` itself owns validating the request's shape."""
+    the top-level ``measurements[]`` (shape-checked by :func:`load_request`),
+    then each ``analysis_steps[]`` step's own (``<step>.<name>``), whose
+    malformed entries are skipped -- ``klt sim`` owns validating those."""
     specs = [
-        (str(spec.get("name", "?")), spec)
-        for spec in request.get("measurements") or []
-        if isinstance(spec, dict)
+        (str(spec.get("name", "?")), spec) for spec in request.get("measurements", [])
     ]
     steps = request.get("analysis_steps")
     for step in steps if isinstance(steps, list) else []:
@@ -1288,16 +1287,17 @@ def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate an op-sanity request JSON file.
 
     The same document ``klt sim`` takes (see ``sim.load_request``), but only
-    ``netlist`` is required: this verb always runs a plain ``op``, so a
-    request's ``analysis``/``measurements`` are not needed for it to work.
+    ``netlist`` is required: this verb always runs a plain ``op``, so
+    ``analysis`` is optional -- but a supplied ``measurements`` is shape-checked.
     """
-    request = _load_request_json(request_path, OpSanityError)
-    return validate_request_shape(
-        request,
+    request = validate_request_shape(
+        _load_request_json(request_path, OpSanityError),
         "request file",
         error_cls=OpSanityError,
         required_fields=("netlist",),
     )
+    validate_request_measurements(request, error_cls=OpSanityError)  # issue #6590
+    return request
 
 
 def _refuse_param_axis(point: Any) -> None:
