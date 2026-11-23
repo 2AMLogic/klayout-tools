@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
+from .extract_base import ExtractError
 from .extract_parasitics import _net_identity_name, spice_safe_net_name
 
 if TYPE_CHECKING:
@@ -153,3 +154,53 @@ class NetSelectors:
         if self.parasitics_patterns:
             out["parasitics_net_patterns"] = list(self.parasitics_patterns)
         return out
+
+
+def _build_net_selectors(
+    critical_net_patterns: Sequence[str] | None,
+    critical_net_all: bool,
+    critical_net_excludes: Sequence[str] | None,
+    parasitics_net_patterns: Sequence[str] | None,
+    strict_net_patterns: bool,
+    *,
+    parasitics: bool,
+) -> NetSelectors | None:
+    """Validate the pattern/all-nets selector flags (issue #2974); ``None``
+    when none was given, so every report stays byte-identical to before."""
+    if critical_net_excludes and not critical_net_all:
+        raise ExtractError("--critical-net-exclude requires --critical-net-all")
+    selecting = critical_net_patterns or critical_net_all or parasitics_net_patterns
+    if not selecting and not strict_net_patterns:
+        return None
+    if not selecting:
+        raise ExtractError(
+            "--strict-net-patterns requires --critical-net-pattern, "
+            "--critical-net-all or --parasitics-net-pattern"
+        )
+    if not parasitics:
+        raise ExtractError(
+            "--critical-net-pattern/--critical-net-all/--parasitics-net-pattern "
+            "require --parasitics"
+        )
+    return NetSelectors(
+        critical_patterns=tuple(critical_net_patterns or ()),
+        critical_all=critical_net_all,
+        critical_excludes=tuple(critical_net_excludes or ()),
+        parasitics_patterns=tuple(parasitics_net_patterns or ()),
+        strict=strict_net_patterns,
+        error=ExtractError,
+    )
+
+
+def _selects_critical(net_selectors: NetSelectors | None) -> bool:
+    return net_selectors is not None and net_selectors.has_critical
+
+
+def _report_net_selectors(
+    net_selectors: NetSelectors | None,
+    parasitics_report: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    if net_selectors is not None:
+        parasitics_report.update(net_selectors.echo())
+        warnings.extend(net_selectors.warnings)

@@ -1,0 +1,1 @@
+- **Powered place-and-route reports honor explicit tapless and named-tap declarations**, so signoff item 11 can grade a caller-declared tapless library (#6993, 2026-11-21).

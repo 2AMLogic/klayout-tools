@@ -1,4 +1,5 @@
-"""``klt pdk find|check --expect-version`` (issue #3810). Hermetic tmp trees."""
+"""``klt pdk find|check --expect-version`` (issue #3810) and
+``check --expect-bundle-sha256`` (issue #5624). Hermetic tmp trees."""
 
 import json
 
@@ -8,15 +9,21 @@ from klayout_tools.cli import main
 
 SHA = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 OTHER = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+BUNDLE = "9f2c" * 16  # 64-hex bundle sha256
+BUNDLE_OTHER = "0a5b" * 16
 
 
-def _install(root, sources=None, marker=None, broken=False):
+def _install(root, sources=None, marker=None, broken=False, store=None):
     variant_dir = root / "sky130A"
     (variant_dir / "libs.tech" / "ngspice").mkdir(parents=True)
     if sources is not None:
         (variant_dir / "SOURCES").write_text(sources, encoding="utf-8")
     if marker is not None:
         (variant_dir / ".fetched-version").write_text(marker, encoding="utf-8")
+    if store is not None:
+        (variant_dir / ".pdk-store.json").write_text(
+            json.dumps(store), encoding="utf-8"
+        )
     if broken:
         (variant_dir / "libs.tech" / "ngspice" / "dangling").symlink_to(
             "/nonexistent/x"
@@ -104,3 +111,342 @@ def test_broken_symlink_wins_over_mismatch(capsys, tmp_path):
     assert code == 4
     assert report["version_expectation"]["status"] == "mismatch"
     assert OTHER in err
+
+
+# --------------------------------------------------------------------------- #
+# Issue #5624: the store identity namespace (`.pdk-store.json`)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("verb", ["find", "check"])
+@pytest.mark.parametrize("expect", [OTHER, OTHER[:7]])
+def test_store_only_full_and_short_pin_match(capsys, tmp_path, verb, expect):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code, report, err = _run(capsys, tmp_path, verb, "--expect-version", expect)
+    assert code == 0 and err == ""
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": expect,
+        "installed": OTHER,
+    }
+
+
+def test_store_only_different_sha_is_mismatch_exit_6(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER})
+    code, report, err = _run(capsys, tmp_path, "check", "--expect-version", SHA)
+    assert code == 6
+    assert SHA in err and OTHER in err
+    assert report["version_expectation"] == {
+        "status": "mismatch",
+        "expected": SHA,
+        "installed": OTHER,
+    }
+
+
+def test_store_exact_string_pin_matches_in_store_namespace(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": "2026.11.14"})
+    code, report, _ = _run(capsys, tmp_path, "find", "--expect-version", "2026.11.14")
+    assert code == 0
+    assert report["version_expectation"]["status"] == "match"
+    assert report["version_expectation"]["installed"] == "2026.11.14"
+
+
+@pytest.mark.parametrize(
+    ("version", "pin"), [("2026", "2026"), ("123456", "123456"), ("ABCDEF", "abcdef")]
+)
+def test_store_short_hex_pin_matches_identical_version(capsys, tmp_path, version, pin):
+    # Issue #6298: an all-hex store version shorter than git's 7-char
+    # abbreviation floor is still byte-identical to the pin, so it must
+    # match, not mismatch (case-insensitively, like the prefix path).
+    _install(tmp_path / "r", store={"version": version})
+    code, report, err = _run(capsys, tmp_path, "find", "--expect-version", pin)
+    assert code == 0 and err == ""
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": pin,
+        "installed": version,
+    }
+
+
+def test_open_pdks_short_hex_stamp_pin_matches_identical_stamp(capsys, tmp_path):
+    # Issue #6298: same equality short-circuit for an explicit
+    # `open_pdks <short-hex>` pin against an identical SOURCES stamp.
+    _install(tmp_path / "r", "open_pdks 2026\n")
+    code, report, err = _run(
+        capsys, tmp_path, "find", "--expect-version", "open_pdks 2026"
+    )
+    assert code == 0 and err == ""
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": "open_pdks 2026",
+        "installed": "open_pdks 2026",
+    }
+
+
+def test_store_open_pdks_stamp_pin_is_unknown(capsys, tmp_path):
+    # An explicit `open_pdks <sha>` stamp names the SOURCES namespace; against
+    # a store install the namespaces differ, so the result stays `unknown`.
+    _install(tmp_path / "r", store={"version": OTHER})
+    code, report, err = _run(
+        capsys, tmp_path, "find", "--expect-version", f"open_pdks {SHA}"
+    )
+    assert code == 6
+    assert report["version_expectation"]["status"] == "unknown"
+    assert report["version_expectation"]["installed"] == OTHER
+
+
+def test_store_stamp_at_parent_dir_matches_too(capsys, tmp_path):
+    # #5318's documented placement: one level above the (real) variant dir.
+    root = tmp_path / "r"
+    variant_dir = root / "sky130A"
+    (variant_dir / "libs.tech").mkdir(parents=True)
+    (root / ".pdk-store.json").write_text(
+        json.dumps({"version": OTHER}), encoding="utf-8"
+    )
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-version", OTHER[:11])
+    assert code == 0
+    assert report["version_expectation"]["status"] == "match"
+
+
+def test_sources_wins_over_store_stamp(capsys, tmp_path):
+    _install(
+        tmp_path / "r",
+        sources=f"open_pdks {SHA}\n",
+        store={"version": OTHER, "sha256": BUNDLE},
+    )
+    code, report, err = _run(capsys, tmp_path, "check", "--expect-version", SHA)
+    assert code == 0 and err == ""
+    # byte-identical to an install with no .pdk-store.json at all
+    assert report["version_expectation"] == {
+        "status": "match",
+        "expected": SHA,
+        "installed": f"open_pdks {SHA}",
+    }
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-version", OTHER)
+    assert code == 6
+    assert report["version_expectation"]["installed"] == f"open_pdks {SHA}"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #5624: ``check --expect-bundle-sha256``
+# --------------------------------------------------------------------------- #
+
+
+def test_bundle_match_exits_0(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code, report, err = _run(
+        capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE
+    )
+    assert code == 0 and err == ""
+    assert report["bundle_expectation"] == {
+        "status": "match",
+        "expected": BUNDLE,
+        "installed": BUNDLE,
+    }
+
+
+def test_bundle_mismatch_exits_6(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code, report, err = _run(
+        capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE_OTHER
+    )
+    assert code == 6
+    assert BUNDLE_OTHER in err and BUNDLE in err
+    assert report["bundle_expectation"]["status"] == "mismatch"
+
+
+@pytest.mark.parametrize(
+    "store", [None, {"version": OTHER}, {"sha256": 123}, {"sha256": "  "}]
+)
+def test_bundle_unknown_fails_closed_exit_6(capsys, tmp_path, store):
+    _install(tmp_path / "r", store=store)
+    code, report, err = _run(
+        capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE
+    )
+    assert code == 6 and "unknown" in err
+    assert report["bundle_expectation"]["installed"] is None
+
+
+@pytest.mark.parametrize("at_variant_root", [True, False])
+@pytest.mark.parametrize(
+    "value", ["pending", "12ab", "g" * 64, "１" * 64, BUNDLE + " "]
+)
+def test_malformed_matching_bundle_is_unknown(capsys, tmp_path, at_variant_root, value):
+    root = tmp_path / "r"
+    _install(root)
+    stamp = root / ".pdk-store.json"
+    if at_variant_root:
+        # A valid farther stamp cannot override a malformed nearer one.
+        stamp.write_text(json.dumps({"sha256": BUNDLE}))
+        stamp = root / "sky130A" / ".pdk-store.json"
+    stamp.write_text(json.dumps({"sha256": value}))
+
+    code, report, err = _run(capsys, tmp_path, "check", "--expect-bundle-sha256", value)
+    assert code == 6 and "unknown" in err
+    assert report["bundle_expectation"] == {
+        "status": "unknown",
+        "expected": value,
+        "installed": None,
+    }
+
+
+def test_valid_bundle_comparison_is_exact(capsys, tmp_path):
+    _install(tmp_path / "r", store={"sha256": BUNDLE.upper()})
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE)
+    assert code == 6
+    assert report["bundle_expectation"] == {
+        "status": "mismatch",
+        "expected": BUNDLE,
+        "installed": BUNDLE.upper(),
+    }
+
+
+def test_bundle_absent_from_payload_without_flag(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code, report, _ = _run(capsys, tmp_path, "check")
+    assert code == 0 and "bundle_expectation" not in report
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-version", OTHER)
+    assert code == 0 and "bundle_expectation" not in report
+
+
+def test_bundle_is_check_only_find_rejects_it(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    with pytest.raises(SystemExit) as exc:
+        main(["pdk", "find", "--expect-bundle-sha256", BUNDLE])
+    assert exc.value.code == 2
+
+
+def test_both_expectation_flags_together(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code, report, err = _run(
+        capsys,
+        tmp_path,
+        "check",
+        "--expect-version",
+        OTHER[:9],
+        "--expect-bundle-sha256",
+        BUNDLE,
+    )
+    assert code == 0 and err == ""
+    assert report["version_expectation"]["status"] == "match"
+    assert report["bundle_expectation"]["status"] == "match"
+    # one failing leg still exits 6 and reports both legs' verdicts
+    code, report, err = _run(
+        capsys,
+        tmp_path,
+        "check",
+        "--expect-version",
+        SHA,
+        "--expect-bundle-sha256",
+        BUNDLE_OTHER,
+    )
+    assert code == 6
+    assert report["version_expectation"]["status"] == "mismatch"
+    assert report["bundle_expectation"]["status"] == "mismatch"
+    assert SHA in err and BUNDLE_OTHER in err
+
+
+def test_bundle_text_output_line(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
+    code = main(
+        [
+            "pdk",
+            "check",
+            "--pdk",
+            "sky130A",
+            "--pdk-root",
+            str(tmp_path / "r"),
+            "--expect-bundle-sha256",
+            BUNDLE_OTHER,
+        ]
+    )
+    out, err = capsys.readouterr()
+    assert code == 6
+    assert "bundle_expectation: mismatch" in out
+    assert "klt: PDK bundle expectation mismatch" in err
+
+
+def test_broken_symlink_wins_over_bundle_mismatch(capsys, tmp_path):
+    _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE}, broken=True)
+    code, report, err = _run(
+        capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE_OTHER
+    )
+    assert code == 4
+    assert report["bundle_expectation"]["status"] == "mismatch"
+    assert BUNDLE_OTHER in err
+
+
+def test_bundle_flat_install_stamp_at_parent_matches(capsys, tmp_path):
+    # Flat single-PDK install (#522): `--pdk-root` names the PDK's own
+    # directory, so the variant dir is the root itself -- not the phantom
+    # `root/<variant>` join. Stamp at #5318's placement (one level above):
+    # only the real variant dir reaches it, so both legs must match.
+    root = tmp_path / "sg13g2"
+    (root / "libs.tech" / "ngspice").mkdir(parents=True)
+    (tmp_path / ".pdk-store.json").write_text(
+        json.dumps({"version": OTHER, "sha256": BUNDLE}), encoding="utf-8"
+    )
+    child = root / "sg13g2"
+    child.mkdir()
+    (child / ".pdk-store.json").write_text(json.dumps({"sha256": BUNDLE_OTHER}))
+    code = main(
+        [
+            "pdk",
+            "check",
+            "--pdk",
+            "sg13g2",
+            "--pdk-root",
+            str(root),
+            "--format",
+            "json",
+            "--expect-version",
+            OTHER,
+            "--expect-bundle-sha256",
+            BUNDLE,
+        ]
+    )
+    out, err = capsys.readouterr()
+    report = json.loads(out)
+    assert code == 0 and err == ""
+    assert report["variant"] == "sg13g2"
+    assert report["version_expectation"]["status"] == "match"
+    assert report["bundle_expectation"] == {
+        "status": "match",
+        "expected": BUNDLE,
+        "installed": BUNDLE,
+    }
+
+
+@pytest.mark.parametrize("suffix", ["b", "0123456789abcdef01234567"])
+def test_pin_longer_than_installed_store_commit_mismatches(capsys, tmp_path, suffix):
+    _install(tmp_path / "r", store={"version": SHA})
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-version", SHA + suffix)
+    assert code == 6
+    assert report["version_expectation"]["status"] == "mismatch"
+
+
+@pytest.mark.parametrize("entry", ["dangling", "directory", "oversize"])
+def test_unusable_nearest_stamp_fails_both_expectations(capsys, tmp_path, entry):
+    root = tmp_path / "r"
+    _install(root)
+    record = json.dumps({"version": SHA, "sha256": BUNDLE})
+    (root / ".pdk-store.json").write_text(record)
+    nearest = root / "sky130A" / ".pdk-store.json"
+    if entry == "dangling":
+        nearest.symlink_to("missing-stamp")
+    elif entry == "directory":
+        nearest.mkdir()
+    else:
+        nearest.write_text(record.ljust(65536) + "invalid")
+    code, report, _ = _run(
+        capsys,
+        tmp_path,
+        "check",
+        "--expect-version",
+        SHA,
+        "--expect-bundle-sha256",
+        BUNDLE,
+    )
+    assert code == 6
+    assert report["version_expectation"]["status"] == "unknown"
+    assert report["bundle_expectation"]["status"] == "unknown"

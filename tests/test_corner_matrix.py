@@ -121,6 +121,17 @@ def test_request_duplicate_tuple(tmp_path, matrix):
         check_corner_matrix(matrix, request_path=req)
 
 
+def test_matrix_duplicate_tuple(tmp_path):
+    # The matrix side of issue #5870: expected_tuples() routes through
+    # sim._expand_corners, which refuses duplicate corner_ids, so a
+    # duplicate-resolving matrix is rejected before any diffing happens
+    # (the old "matrix expands to duplicate tuple(s)" branch was unreachable).
+    matrix = _write(tmp_path / "matrix.json", {**AXES, "process": ["tt", "ss", "tt"]})
+    req = _write(tmp_path / "r.json", {"corners": AXES})
+    with pytest.raises(CornerMatrixError, match="matrix is not a valid corner grid"):
+        check_corner_matrix(matrix, request_path=req)
+
+
 def test_request_mode_coverage_complete_equals_complete(tmp_path, matrix):
     req = _write(tmp_path / "r.json", {"corners": AXES})
     out = check_corner_matrix(matrix, request_path=req)

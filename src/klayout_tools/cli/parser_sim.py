@@ -427,6 +427,47 @@ def add_sim_parser(
     )
     _add_format_arg(sim_parser)
     sim_parser.add_argument(
+        "--regrade",
+        dest="regrade",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "re-run only the check-failing points of this same request with "
+            "the tightened solver settings it declares in "
+            "options.tightened_rerun (issue #6778): REPORT is the first "
+            "pass's committed report, --check-id names the failed check and "
+            "--corner selects the affected corner ids from it. Returns a "
+            "companion record holding both attempts' values; the tightened "
+            "observation carries the grade, and a timeout or unusable "
+            "re-run grades unresolved, never pass. A batch baseline "
+            "dispatches the subset on batch even for one unit. See "
+            "docs/cli/sim.md 'Tightened re-run of check-failing points'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--check-id",
+        dest="check_id",
+        metavar="ID",
+        default=None,
+        help=(
+            "with --regrade: the identifier of the failed checker that "
+            "selected the units (recorded per re-run unit; the chip's own "
+            "checker re-grades the tightened observations)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--corner",
+        dest="corners",
+        action="append",
+        metavar="CORNER_ID",
+        default=None,
+        help=(
+            "with --regrade: one corners[].corner_id from the source report "
+            "to re-run tightened (repeatable; each unit is dispatched "
+            "exactly once; zero --corner flags submits zero jobs)"
+        ),
+    )
+    sim_parser.add_argument(
         "--check",
         dest="check",
         metavar="REPORT",

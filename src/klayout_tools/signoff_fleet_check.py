@@ -31,6 +31,7 @@ from ._report_verify import (
     load_committed_report,
     strip_path_patterns,
 )
+from .signoff_base import SignoffError
 from .signoff_generator_batch import GeneratorExecution
 from .signoff_unmet_reasons import DERIVED_REPORT_PATHS
 
@@ -414,8 +415,6 @@ def _load_committed_signoff_report(
     when the real fault is the wrong file path. ``mode_flag`` names the
     invocation the refusal message prints (``"--manifest --check"`` etc.).
     """
-    from .signoff import SignoffError
-
     committed = load_committed_report(report_path, SignoffError)
     if required_key not in committed:
         raise SignoffError(
