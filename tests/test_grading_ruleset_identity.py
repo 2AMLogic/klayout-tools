@@ -134,6 +134,21 @@ def test_grading_ruleset_id_none_when_the_module_is_missing(tmp_path, monkeypatc
     assert build_identity.grading_ruleset_id() is None
 
 
+def test_grading_ruleset_id_none_when_install_directory_is_missing(
+    tmp_path, monkeypatch
+):
+    assert _grading_id_for(monkeypatch, tmp_path / "missing-install") is None
+
+
+def test_grading_ruleset_id_none_when_a_discovered_leaf_cannot_be_read(
+    tmp_path, monkeypatch
+):
+    install = _grading_install(tmp_path, "broken-install")
+    (install / "signoff_broken.py").symlink_to(install / "missing.py")
+
+    assert _grading_id_for(monkeypatch, install) is None
+
+
 def test_version_report_includes_grading_ruleset_id(monkeypatch):
     monkeypatch.setattr(
         build_identity, "grading_ruleset_id", lambda: "sha256:" + "a" * 64
