@@ -353,8 +353,11 @@ are unchanged.
 same `engine_host` contract as `ngspice_binary`: `version_banner` is
 `environment.remote.worker_environment.simulator.version_banner` when that
 capture's `capture` is `"ok"` (a sharded run reports one only when every
-member captured the same banner), and `binary_sha256` is `null` — the worker
-capture records no digest. With no usable worker banner, `version_banner` is
+member captured the same banner). A batch worker also hashes the executable it
+selected. `binary_sha256` contains its lowercase SHA-256 when every member
+captured the same valid digest. Older captures, missing hashes and mixed
+digests yield `null`. Two different observed hashes give `probe: "disagreement"`,
+even when the version banners match. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
@@ -902,11 +905,14 @@ baked image and which PDK snapshot produced this result, the same role
 `environment.models_lib_sha256` plays for `local`/`local-parallel`.
 `spin_up_s` is the measured wall-clock from provisioning start to the
 remote host being ready to accept the first corner (instance reaching
-`running` plus SSH becoming reachable) — `runtime_s`/`engine_version` remain
-the only fields that legitimately vary between a `local` and a `remote` run
-of the same request (see "Semantics and guarantees" below); given a matching
-`engine_version` and PDK snapshot hash, `.meas` measurements are expected to
-match bit-for-bit.
+`running` plus SSH becoming reachable).
+
+**Numeric reproducibility across hosts.** A matching ngspice major version
+and PDK snapshot do not guarantee a fixed number of matching digits in
+`.meas` results. Different builds, linked numerical libraries and host
+floating-point behavior can change the values. Use the worker's binary hash
+to identify the executable and set comparison tolerances appropriate to the
+quantity and the circuit's requirements.
 
 **Transport: SSH/SCP push-then-pull, no IAM instance profile on the
 guest.** `remote_launcher.select_instance_type()` sizes one instance for the
@@ -8815,7 +8821,7 @@ Seeding these sources per sample is not implemented. For what noise such a trans
 sample's seeds are keyed on the point's *position* in this request's expanded
 corner list, so sample *k* is a different die at every corner, a single-point
 request always uses position 0, and reordering axes or splitting a grid
-across requests changes the draws. Existing reports reproduce bit-for-bit.
+across requests changes the draws. The default preserves the previous seed sequence.
 Two opt-in scopes change only that key:
 
 | `seed_scope` | Seeds keyed on | Use it for |

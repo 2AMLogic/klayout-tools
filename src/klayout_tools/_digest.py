@@ -8,6 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+
+
+def normalize_sha256(value: object) -> str | None:
+    """Return a lowercase 64-hex digest, or None for malformed evidence."""
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
 
 
 def sha256_file(path: str | None) -> str | None:

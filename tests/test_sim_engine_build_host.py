@@ -15,15 +15,21 @@ directly. No fleet job is submitted and no real `ngspice` is probed.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import subprocess
+
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import sim
+from klayout_tools import sim, sim_batch
 from test_sim_batch import (
     _batch_request,
     _capture,
     _FakeRunner,
     _install_fake_batch_transport,
+    _run_capture_program,
     _sim_report,
     _status,
     _write_body,
@@ -275,3 +281,74 @@ def test_a_report_without_engine_build_gains_neither_key():
     assert "engine_build" not in environment
     assert "client_engine_build" not in environment
     assert environment["ngspice_binary"] is None  # #3110 behaviour unchanged
+
+
+def test_worker_capture_hashes_the_selected_executable(tmp_path, monkeypatch):
+    script = "#!/bin/sh\nprintf 'ngspice-46 build A\\n'\n"
+    captured = _run_capture_program(tmp_path, ngspice_script=script)
+    digest = hashlib.sha256(script.encode()).hexdigest()
+    assert captured["simulator"]["binary_sha256"] == digest
+    monkeypatch.setattr(sim, "_probe_engine_build", lambda _: dict(_CLIENT_BUILD))
+    environment = _batch_report(tmp_path, monkeypatch, simulator=captured["simulator"])[
+        "environment"
+    ]
+    assert environment["engine_build"]["binary_sha256"] == digest
+    assert environment["client_engine_build"] == _CLIENT_BUILD
+
+
+@pytest.mark.parametrize("bad", ["a" * 65, "a" * 10000, "g" * 64, 123, None])
+def test_invalid_worker_binary_digest_is_unavailable(tmp_path, monkeypatch, bad):
+    environment = _batch_report(
+        tmp_path,
+        monkeypatch,
+        simulator={"binary_sha256": bad, "version_banner": _WORKER_BANNER},
+    )["environment"]
+    worker = environment["remote"]["worker_environment"]
+    assert worker["simulator"].get("binary_sha256") is None
+    assert environment["engine_build"]["binary_sha256"] is None
+    assert environment["engine_build"]["version_banner"] == _WORKER_BANNER
+
+
+@pytest.mark.parametrize(
+    ("digests", "expected", "probe"),
+    [
+        (["a" * 64, "A" * 64], "a" * 64, "ok"),
+        (["a" * 64, "b" * 64], None, "disagreement"),
+        (["a" * 64, None], None, "ok"),
+    ],
+)
+def test_sharded_worker_binary_digest_requires_agreement(digests, expected, probe):
+    members = []
+    for digest in digests:
+        member = _banner_block("ok", _WORKER_BANNER, "ok")
+        if digest is not None:
+            member["worker_environment"]["simulator"]["binary_sha256"] = digest
+        members.append(member)
+    build = _offhost({"fleet": members})["engine_build"]
+    assert build["binary_sha256"] == expected
+    assert build["probe"] == probe
+    assert build["version_banner"] == _WORKER_BANNER
+
+
+@pytest.mark.parametrize("request_payload", [{"engine": "xyce"}, {"decks": []}])
+def test_other_batch_modes_preserve_the_simulator_capture(tmp_path, request_payload):
+    executable = tmp_path / "ngspice"
+    executable.write_text("#!/bin/sh\necho ngspice-46\n")
+    executable.chmod(0o755)
+    request_payload = {
+        **request_payload,
+        "options": {"ngspice_binary": str(executable)},
+    }
+    subprocess.run(
+        ["sh", "-c", sim_batch._worker_capture_command(request_payload)],
+        env={**os.environ, "EDA_OUTPUT_DIR": str(tmp_path)},
+        check=True,
+    )
+    capture_path = tmp_path / "worker_environment.json"
+    capture = json.loads(capture_path.read_text())
+    assert capture["simulator"]["version_probe"] == "ok"
+    assert "binary_sha256" not in capture["simulator"]
+    capture["simulator"]["binary_sha256"] = "f" * 64
+    capture_path.write_text(json.dumps(capture))
+    collected = sim_batch._read_worker_environment(str(tmp_path), request_payload)
+    assert "binary_sha256" not in collected["simulator"]

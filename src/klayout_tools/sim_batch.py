@@ -242,6 +242,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_STR_MAX,
     _assess_deck_support,
     _bounded_model_inputs,
+    _bounded_simulator,
     _bounded_str,
     _deck_preflight_lines,
     _runner_supports_decks,
@@ -2085,11 +2086,8 @@ def _read_worker_environment(
 ) -> dict[str, Any]:
     """The ``worker_environment`` block of ``environment.remote`` (issue #2834).
 
-    Worker-observed: it describes what the job instance resolved, never the
-    submitter's values. Always present; ``capture`` is ``"ok"``, ``"absent"``
-    (legacy worker or no collected artifact) or ``"malformed"``, and a
-    non-ok capture carries ``None`` observations. Every field is
-    re-validated and bounded here -- the file is untrusted input.
+    Captures report the worker’s observations. Missing or malformed captures
+    carry None observations. Validate and bound each field from the worker file.
     """
     unknown: dict[str, Any] = {
         "capture": "absent",
@@ -2119,17 +2117,7 @@ def _read_worker_environment(
         doc = json.loads(raw.decode("utf-8"))
         if not isinstance(doc, dict):
             raise ValueError("not an object")
-        sim_in = doc.get("simulator")
-        sim_in = sim_in if isinstance(sim_in, dict) else {}
-        simulator = {
-            "requested_binary": _bounded_str(sim_in.get("requested_binary")),
-            "binary_source": _bounded_str(sim_in.get("binary_source"), 40),
-            "selected_path": _bounded_str(sim_in.get("selected_path")),
-            "version_banner": _bounded_str(
-                sim_in.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
-            ),
-            "version_probe": _bounded_str(sim_in.get("version_probe"), 40),
-        }
+        simulator = _bounded_simulator(doc.get("simulator"), request)
         pdk_in = doc.get("pdk")
         pdk_in = pdk_in if isinstance(pdk_in, dict) else {}
         pdk = {
