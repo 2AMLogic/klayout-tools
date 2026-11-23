@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/equiv_sequential.py",
-      "lines": 1527
+      "lines": 1413
     },
     {
       "path": "src/klayout_tools/erc.py",
@@ -289,7 +289,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9163
+      "lines": 9157
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 541
+      "lines": 525
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3704
+      "lines": 3604
     },
     {
       "path": "src/klayout_tools/place_and_route.py",

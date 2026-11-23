@@ -45,7 +45,7 @@ def assemble_extract_report(
     merged_net_labels: Any,
     missing_flavour_markers: Any,
     netlist_sha256: Any,
-    nets: Any,
+    nets: list[dict[str, Any]],
     parasitics_report: Any,
     path: Any,
     pdk_info: Any,
@@ -76,6 +76,7 @@ def assemble_extract_report(
     # `klt pex` picks for its own `layout`. `netlist_path` below is an
     # *output* path and stays a plain string (see `SCHEMA_VERSION`).
     repo_root = env_provenance.repo_root_for(path)
+
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": env_provenance.repo_relative_path(path, repo_root=repo_root),

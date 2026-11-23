@@ -31,11 +31,14 @@ def apply_attach(
     if attach_job_id is None:
         return
     is_shard_map = attach_job_id.endswith(".json")
-    if backend != "batch" or (hosts != 1 and not is_shard_map):
+    if backend != "batch":
         raise SimError(
-            "--attach requires backend 'batch' with a single job "
-            "(hosts = 1); a sharded run has one job id per shard -- attach "
-            "it with its batch-shards.json shard map"
+            f"--attach resolved to backend {backend!r}. Retry with --backend batch."
+        )
+    if hosts != 1 and not is_shard_map:
+        raise SimError(
+            "--attach with a bare job ID requires a single job (hosts = 1). "
+            "For a sharded run, attach with its batch-shards.json shard map."
         )
     if submit_only:
         raise SimError(
