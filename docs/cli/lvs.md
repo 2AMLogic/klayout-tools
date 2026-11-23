@@ -5740,8 +5740,10 @@ engines, with `options.netgen_setup` still composed ahead of them. A
 A `"gate-level-verilog"` reference **is** replayed too (issue #4353): its
 `reference_conversion` echo carries `form`, `library`, `pdk`, `pdk_root` and
 the resolved `pin_order_files`, so `--rerun` re-reads the Verilog with the
-same pin-order sources. A gate-level report committed before that echo
-existed stays best-effort.
+same pin-order sources. For portable reports, the verifier locates the recorded PDK
+variant on its host and resolves repo-scoped files relative to the report’s repository.
+An external pin-order file has no recorded location and cannot be replayed.
+Reports predating the conversion echo retain best-effort replay.
 A `layout.label_layers` override **is** replayed (issue #2686) from the
 report's top-level `label_layers` echo, `null` roles included; a report
 without that field (no override, or committed before it existed) replays
