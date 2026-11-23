@@ -1,8 +1,4 @@
-"""Live (real ngspice) check of ``options.save_vectors`` augmentation for the
-structured measurement forms (issue #5559): the issue's Reproduce request
-(``cycle_mean`` + ``energy``) must pass under ``save_vectors`` and match the
-no-``save_vectors`` values.  Single corner, local backend.
-"""
+"""Single-corner, local ngspice measurements with ``options.save_vectors``."""
 
 from __future__ import annotations
 
@@ -87,3 +83,33 @@ def test_stress_under_save_vectors_needs_only_the_named_nodes(tmp_path):
         str(path), artifacts_dir=str(tmp_path / "stress"), backend="local"
     )["corners"][0]
     assert [m["status"] for m in corner["measurements"]] == ["pass"]
+
+
+def test_dc_find_saved_subcircuit_resistor_current(tmp_path):
+    (tmp_path / "body.spice").write_text(
+        """Vdrive in 0 0
+Xload in 0 load
+.subckt load p n
+Rleg p n 1k
+.ends load
+"""
+    )
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "dc", "args": "Vdrive 0 1 0.1"},
+        "options": {"save_vectors": ["@r.xload.rleg[i]"]},
+        "measurements": [
+            {
+                "name": "ileg",
+                "unit": "A",
+                "spice": ".meas dc ileg FIND @r.xload.rleg[i] AT=0.6",
+            }
+        ],
+    }
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(request))
+    report = sim.run_sim(str(path), artifacts_dir=str(tmp_path / "dc"), backend="local")
+    (measurement,) = report["corners"][0]["measurements"]
+    assert measurement["status"] == "pass"
+    assert measurement["unit"] == "A"
+    assert measurement["value"] == pytest.approx(0.0006)

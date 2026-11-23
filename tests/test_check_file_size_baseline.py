@@ -1,36 +1,31 @@
 """Tests for the per-file size ratchet (issue #2766).
 
-`scripts/check_file_size_baseline.py` is a dedicated CI step that gates
-per-file line growth against the baseline read from the **comparison
-revision** (PR merge-base / push-before SHA), never the working tree, so a
-PR cannot loosen its own gate. These tests assert, against isolated
-temporary Git repositories (every scenario is real committed history, so
-rename detection, bootstrap, and merge-base semantics are exercised for
-real):
+`scripts/check_file_size_baseline.py` gates per-file line growth against
+the baseline read from the **comparison revision** (PR merge-base /
+push-before SHA), never the working tree, so a PR cannot loosen its own
+gate. These tests assert, against isolated temporary Git repositories
+(real committed history, so rename detection, bootstrap, and merge-base
+semantics are exercised for real):
 
-1. **Counting and governance** -- physical line counting (blank/comment
-   lines, final unterminated line, empty files) and the governed-source
-   inventory (`.py`/`.rs`/`.sh` outside the vendored agent-tooling trees;
-   directory names never exempt).
-2. **The two-baseline contract** -- unchanged debt passes; growth, new
-   debt, stale ceilings, surviving entries, and new/mismatched vendor
-   exemptions fail; shrinkage with a tightened entry passes; deletion and
-   crossing under the limit require entry removal.
-3. **Bootstrap** -- when the comparison revision predates the checker, the
-   trusted baseline derives from that tree's measured content and the
-   seed passes only by matching it.
+1. **Counting and governance** -- physical line counting (blanks,
+   comments, final unterminated line, empty files) and the governed
+   inventory (`.py`/`.rs`/`.sh` outside vendored trees; names never exempt).
+2. **The two-baseline contract** -- unchanged debt passes; growth, new debt,
+   stale ceilings, surviving entries, and mismatched exemptions fail; a
+   tightened entry passes; deletion and crossing under the limit drop entries.
+3. **Bootstrap** -- a comparison revision predating the checker derives the
+   trusted baseline from that tree's measured content; the seed must match it.
 4. **Renames** -- a non-growing rename of a baselined file is permitted;
    growth (through a rename or across the limit) is not.
 5. **Vendor exemptions** -- hash-pinned files are exempt; changed bytes
-   cease to be exempt; routine PRs cannot add pins; the vendor-refresh
-   exception fires only when the whole diff is the baseline plus
-   already-pinned paths.
-6. **Usable input contract** -- missing refs and malformed baselines exit
-   2 with actionable diagnostics; check mode is read-only; output is
-   deterministic; a multi-commit push is caught by its before SHA.
-7. **This checkout** -- the committed seed accepts unchanged existing
-   source, the committed baseline is structurally sound, and the CI
-   workflow actually wires the gate.
+   cease to be; routine PRs cannot add pins; the refresh exception fires
+   only for a baseline-plus-pinned-paths-only diff.
+6. **Usable input and regeneration** -- missing refs and malformed
+   baselines exit 2; check mode is read-only; output is deterministic; a
+   multi-commit push is judged by its before SHA; update mode carries
+   matching pins and still-covering ceilings verbatim (#7414).
+7. **This checkout** -- the seed accepts unchanged source, the committed
+   baseline is sound, and CI actually wires the gate.
 """
 
 from __future__ import annotations
@@ -958,19 +953,24 @@ def test_update_baseline_never_mints_exemptions(repo):
     updated = json.loads((repo / "file-size-baseline.json").read_text())
     shas = {entry["sha256"] for entry in updated["vendor_hashes"]}
     assert _sha256(_big(600, seed=13)) not in shas
+    assert _sha256(_big(600, seed=11)) in shas
     assert {"path": "vendor/other.py", "lines": 600} in updated["debts"]
 
 
-def test_update_baseline_carries_still_matching_pins_and_tightens_debt(repo):
-    _vendor_base_repo(repo)
-    _stage(repo, {"src/first.py": _big(80, seed=12)})
+def test_update_baseline_carries_still_covering_ceiling(repo):
+    _stage(
+        repo,
+        {
+            "src/debt.py": _big(580),
+            "file-size-baseline.json": _baseline_doc({"src/debt.py": 600}),
+        },
+    )
 
     result = _run(repo, "--update-baseline")
 
     assert result.returncode == 0, result.stderr
     updated = json.loads((repo / "file-size-baseline.json").read_text())
-    assert updated["vendor_hashes"] == [_pin(_big(600, seed=11), "vendor/dep.py")]
-    assert updated["debts"] == []
+    assert updated["debts"] == [{"path": "src/debt.py", "lines": 600}]
 
 
 def test_update_baseline_warns_about_untracked_governed_files(repo):

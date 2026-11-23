@@ -40,13 +40,9 @@ from collections.abc import Callable, Mapping, Sequence, Set
 from typing import Any
 
 from ._jsonnum import is_finite_number, is_number
-from .signoff import (
-    SignoffError,
-    _classify,
-    _classify_failure_reason,
-    _read_envelope,
-)
+from .signoff import _classify, _classify_failure_reason
 from .signoff_attest_pins import json_node
+from .signoff_base import SignoffError, _read_envelope
 from .signoff_drc_crosscheck import crosscheck_project
 
 #: Item 8's accepted inventory keys (``signoff_attest._ITEM_KEYS[8]``).
