@@ -327,18 +327,7 @@ def klayout_version_expected() -> str | None:
 
 
 def _grading_module_paths() -> list[str]:
-    """Absolute paths of every ``signoff*.py`` grading module shipped next to
-    this module, sorted by basename, in whichever install layout is running
-    -- a wheel unpacks them into ``site-packages`` beside this file, an
-    editable/source install has them in the same ``src/klayout_tools``
-    directory. Never imports the modules themselves: this only needs their
-    *bytes*, not their behaviour, and ``signoff.py`` already imports
-    :func:`version_report` from this module, so importing back would be
-    circular. The glob (rather than a named module list) is the point
-    (issue #7434): per-item grading logic and the ``reason`` vocabulary it
-    emits live across the whole leaf family, and a named subset would silently
-    lose coverage again with every future leaf split.
-    """
+    """Find shipped signoff modules beside this file, ordered by basename."""
     package_dir = os.path.dirname(os.path.abspath(__file__))
     try:
         names = os.listdir(package_dir)
@@ -352,62 +341,14 @@ def _grading_module_paths() -> list[str]:
 
 
 def grading_ruleset_id() -> str | None:
-    """A content hash identifying the grading rules ``klt signoff``'s
-    tier-verdict mode ships in *this* build (issue #2216) -- the missing
-    half ``git_commit``/``git_tag`` cannot answer.
+    """Identify the installed grading rules by their source bytes (#2216, #7434).
 
-    Three installs can report the exact same ``klt`` version string while
-    grading a tier-verdict report by different rules: a registry wheel built
-    from a release tag, a ``pip install git+...@<tag>`` snapshot of that
-    same tag, and a full-repo checkout that has moved past the tag on
-    ``main``. ``git_commit``/``git_tag`` identify the *source checkout* each
-    of those was built from, not the grading logic actually compiled into
-    the running build -- and a consumer who commits a tier-verdict report as
-    evidence has no way to tell, from ``klt version`` alone, which grading
-    rules produced it.
+    Hash every shipped ``signoff*.py`` module in basename order, including each
+    basename and a NUL before its contents. Wheels and checkouts with identical
+    files then agree, while a change to a grading leaf or its name changes the
+    digest. Reading the files directly also avoids importing the grader here.
 
-    Deliberately a **content** hash of the shipped ``signoff*.py`` grading
-    modules rather than something derived from ``git_commit``:
-
-    - Two installs built from the *same* commit -- a PyPI-published wheel
-      and a ``git+...`` snapshot of the same release tag -- ship
-      byte-identical ``signoff*.py`` source and must report the *same* id,
-      with no shared git history to compare against (a wheel's
-      ``site-packages`` install carries no ``.git`` directory at all).
-      Hashing the files achieves that for free; comparing commits does not.
-    - An edit to any grading module's logic changes this id even when
-      unrelated files elsewhere in the repo also changed in the same commit
-      -- a stable, scoped answer to "did the grading rules change", rather
-      than the much coarser "did *anything* change" ``git_commit`` answers.
-
-    Hashes **every** ``signoff*.py`` module in the package directory (issue
-    #7434), not just ``signoff.py``: the grading rules and the ``reason``
-    vocabulary they emit are spread across the whole leaf family
-    (``signoff_power_delivery.py``, ``signoff_justified_gap.py``,
-    ``signoff_unmet_reasons.py``, ...), and hashing one named file is how
-    this id's coverage silently shrank with every leaf split. Each module's
-    basename is mixed into the digest before its bytes, so a rename, or
-    content moving between two modules, changes the id too. Each module is
-    still hashed whole rather than extracting per-item grading functions:
-    there is no sharp internal boundary between "grading logic" and
-    "everything else" that would not itself need updating -- and require
-    re-verification -- every time a helper is renamed or refactored across
-    that line. A doc-only edit inside a ``signoff*.py`` module (e.g. a
-    docstring correction) does move this id; that false-positive is the
-    deliberately conservative trade-off for never missing a real
-    grading-logic change, mirroring
-    :func:`~.design_evidence_tiers.parse_tier_doc`'s own whole-file
-    ``content_hash`` for the checklist doc (issue #2175) rather than a
-    narrower, harder-to-keep-accurate per-item extraction.
-
-    Deliberately *not* covered: modules outside the ``signoff*.py`` family
-    that grading also reads (``design_evidence_tiers.py``, ``coverage.py``,
-    ``metrics.py``, ...) -- the checklist doc itself is covered separately
-    by the report's own ``source_doc_content_hash`` (issue #2175).
-
-    ``None`` only in the pathological case where the shipped grading
-    modules cannot be read at all (e.g. a corrupted or hand-truncated
-    install) -- never fabricated.
+    Return None if the orchestrator is missing or any grading file is unreadable.
     """
     paths = _grading_module_paths()
     if not any(os.path.basename(path) == "signoff.py" for path in paths):
