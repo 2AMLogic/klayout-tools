@@ -2802,7 +2802,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
-| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -3181,6 +3181,19 @@ the running version in `running`. Attestation exits 3 and leaves the
 output file untouched. If the running version contains `+unknown`, the check
 passes with `"unverifiable": true`. A pinned value containing `+unknown` is
 compared literally when the running build is known.
+
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
 
 When upgrading an inventory that already pins klt, update the pin to the
 build you will use and regenerate its committed envelope to include the new
@@ -4332,6 +4345,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    `path` and `reviewed_by` (`signoff_runset.PINNED_RUNSETS`), so a block can
    check its runset is pinned before running `klt lvs --engine
    klayout-runset`.
+
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
 
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`

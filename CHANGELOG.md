@@ -14,32 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt place-and-route --from-def <routed.def>` runs only the DEF→GDS
-  merge on a committed routed stream** (issue #7721, 2026-11-24): a new
-  local entry point for the merge-time repair family
-  (`min_area_repair`, `via_pad_trim` with `tip_check`/`router_fill_scan`,
-  `power_stack_repair`) that `klt drc` re-grades never invoke and
-  `--resume` cannot reach without the stage `.odb` checkpoints and
-  `*.commit.json` records a committed result set does not carry. It
-  resolves the LEF/GDS/macro views from the request (same resolution as a
-  placement run, issue #4204 default-variant substitution included;
-  `--pdk`/`--pdk-root` honored), runs the existing merger unchanged with
-  no OpenROAD process, and writes `<stage_root>/<top>_from_def.gds` — its
-  own name, so the committed `<top>.gds` being compared against is never
-  overwritten, and a populated `outputs.dir` is allowed. Only
-  `hdl_toplevel` and `pdk.cell_library` are required in the request; the
-  original run's request works unchanged. The response reports the
-  merge's own fields (`layer_map`, `def_net_names`, `min_area_repair`,
-  `via_pad_trim`, `power_stack_repair`, `pin_conductor`,
-  `gds_dbu_um`) plus an additive `from_def` block (the supplied DEF's
-  path and `def_content_hash`, the resolved `tech_lef`/`cell_lef`/
-  `cell_gds`/`macro_lefs`/`macro_gds`); routing, stage timing and ODB
-  metrics are absent — they exist only when a placement run produced
-  them. Refused by name: `--check`/`--rerun`/`--resume`/`--backend`
-  combinations and a `post_route_spef` request (needs the route stage's
-  OpenSTA checkpoint). **Additive — `schema_version` unchanged:** a new
-  flag and a new response shape for it; every existing invocation and
-  payload is untouched.
+- **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
+  revision token case-insensitively** (issue #6362, 2026-11-24, additive —
+  `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already
+  ignored case but the `open_pdks <token>` arm was an exact compare, so a
+  declared `options.pdk_revision` spelled in a different case than the
+  worker's token (e.g. upper-case hex) reported a spurious advisory
+  `mismatch` plus a `warning` on a worker that *has* that revision. Both
+  arms now fold case. Matching stays otherwise exact: an abbreviated
+  revision (a 7-character prefix) is still a `mismatch`, and the advisory
+  field still never changes a run's outcome. See `docs/cli/sim.md`.
 - The `klt lvs` report category `device.implausible_dimensions` has severity
   `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
