@@ -441,11 +441,9 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("V0.AUX.1", "Table 3.11.2"),
     Asap7Rule("V0.LIG.A.1", "Table 3.11.2"),
     Asap7Rule("V0.M1.EN.1", "Table 3.11.1"),
-    # M1-M3
     *_metal_family("M1"),
     *_metal_family("M2"),
     *_metal_family("M3"),
-    # V1-V3 (width and connectivity)
     *_via_family("V1", "M2"),
     *_via_family("V2", "M3"),
     *_via_family("V3", "M4"),
@@ -453,6 +451,7 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("V2.M2.EN.1", "Table 3.13.1"),
     Asap7Rule("V3.M3.EN.1", "Table 3.13.1", "stated by Table 3.13.1 note 2"),
     Asap7Rule("V3.M4.EN.2", "Table 3.13.1"),
+    Asap7Rule("V3.M4.AUX.2", "Table 3.13.1"),
     Asap7Rule("V1.M2.EN.2", "Table 3.13.1"),
     Asap7Rule("V2.M3.EN.2", "Table 3.13.1"),
     # M4-M7 (Tables 3.14.1-3.14.2, 3.16.1-3.16.2)
@@ -615,12 +614,11 @@ def _top_metal_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     )
 
 
-def _v123_gaps(layer: str, upper: str) -> tuple[Asap7RuleGap, ...]:
+def _v123_spacing_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     t = "Table 3.13.1"
     return (
         Asap7RuleGap(f"{layer}.S.1", t, _TRACK, "#3147"),
         *_gaps(tuple(f"{layer}.S.{n}" for n in (2, 3, 4)), t, _END_CAP, "#3147"),
-        Asap7RuleGap(f"{layer}.{upper}.AUX.2", t, _EXACT_W, "#3147"),
     )
 
 
@@ -654,9 +652,11 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     ),
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
-    *_v123_gaps("V1", "M2"),
-    *_v123_gaps("V2", "M3"),
-    *_v123_gaps("V3", "M4"),
+    *_v123_spacing_gaps("V1"),
+    Asap7RuleGap("V1.M2.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
+    *_v123_spacing_gaps("V2"),
+    Asap7RuleGap("V2.M3.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
+    *_v123_spacing_gaps("V3"),
     # M4-M7 / V4-V7 (Tables 3.14-3.17)
     *_sadp_metal_gaps("M4", "Table 3.14.1", "Table 3.14.2"),
     *_sadp_metal_gaps("M5", "Table 3.14.1", "Table 3.14.2"),
