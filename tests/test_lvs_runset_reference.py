@@ -235,3 +235,158 @@ def test_sg13g2_explicit_mapping_and_defined_rf_subcircuit_take_precedence(tmp_p
         ".subckt inductor a b sub\nR1 a b 10\n.ends inductor\n"
     )
     assert call in _sg13g2_text(tmp_path, ".include cells.sp\n" + text)
+
+
+# --- Issue #7836: SG13G2 bipolar and MOS calls reach the native reader as cards ---
+
+
+def _schem(call: str) -> str:
+    return f".subckt SCHEM\n{call}\n.ends SCHEM\n"
+
+
+@pytest.mark.parametrize(
+    ("call", "card"),
+    [
+        (
+            "XQ2 net4 net5 net6 sub npn13G2v Nx=1 El=1.15",
+            "QXQ2 net4 net5 net6 sub npn13G2v le=1.15u we=120n m=1",
+        ),
+        ("Xq3 c b e s npn13G2v nx=2 EL=1", "QXq3 c b e s npn13G2v le=1u we=120n m=2"),
+        (
+            "XQ4 c b e s npn13G2l Nx=3 El=2.5",
+            "QXQ4 c b e s npn13G2l le=2.5u we=70n m=3",
+        ),
+        ("XQ5 c b e s npn13G2 Nx=4", "QXQ5 c b e s npn13G2 le=900n we=70n m=4"),
+        (
+            "XQ6 c b e s npn13G2v\n+ PARAMS: El=1.0",
+            "QXQ6 c b e s npn13G2v le=1.0u we=120n m=1",
+        ),
+    ],
+)
+def test_sg13g2_bipolar_call_becomes_the_native_q_card(tmp_path, call, card):
+    # The pinned xschem symbols' ``lvs_format``: C/B/E/S pins, ``m=Nx`` and
+    # ``le=El*1e-6`` (written as the ``u`` suffix), a fixed per-model ``we``.
+    converted = _sg13g2_text(tmp_path, _schem(call))
+    assert card in converted.splitlines()
+    assert not [x for x in converted.splitlines() if x[:1] in "Xx" and "npn" in x]
+
+
+@pytest.mark.parametrize(
+    "model", ["sg13_hv_nmos", "sg13_hv_pmos", "sg13_lv_nmos", "sg13_lv_pmos"]
+)
+def test_sg13g2_mos_call_keeps_its_runset_class(tmp_path, model):
+    call = f"XM1 d g s b {model} W=1u L=0.45u ng=2 m=3"
+    converted = _sg13g2_text(tmp_path, _schem(call))
+    assert f"MXM1 d g s b {model} W=1u L=0.45u ng=2 m=3" in converted.splitlines()
+    assert "nfet" not in converted and "pfet" not in converted
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "XQ1 c b e s npn13G2v Nx=1",  # no El: the symbol's LVS form needs it
+        "XQ1 c b e s npn13G2v Nx=1 El={w}",  # not a plain number
+        "XQ1 c b e s npn13G2v Nx=1 El=1u",  # a unit suffix on a micrometre value
+        "XQ1 c b e npn13G2v Nx=1 El=1",  # three terminals
+        "XM1 d g s sg13_hv_nmos W=1u L=1u",  # three terminals
+        "XM1 d g s b sg13_hv_nmos W=1u",  # no L
+    ],
+)
+def test_sg13g2_unconvertible_call_stays_a_call(tmp_path, call):
+    # Left exactly as written, for the unresolved-call scan to name.
+    converted = _sg13g2_text(tmp_path, _schem(call))
+    assert call in converted.splitlines()
+
+
+def test_sg13g2_explicit_device_map_and_child_circuits_take_precedence(tmp_path):
+    text = _schem(
+        "XQ1 c b e s npn13G2v Nx=1 El=1\n"
+        "XM1 d g s b sg13_hv_nmos W=1u L=1u\n"
+        "Xchild a b c s child"
+    )
+    mapped = _sg13g2_text(
+        tmp_path,
+        text + ".subckt child a b c s\n.ends child\n",
+        device_map={
+            "npn13G2v": {"kind": "bipolar", "class": "my_npn"},
+            "sg13_hv_nmos": "my_nmos",
+        },
+    ).splitlines()
+    assert not [x for x in mapped if "npn13G2v" in x or "sg13_hv_nmos" in x]
+    assert any(" my_npn " in x or x.endswith(" my_npn") for x in mapped)
+    assert any(" my_nmos " in x for x in mapped)
+    assert "Xchild a b c s child" in mapped  # genuine hierarchy untouched
+
+
+def test_sg13g2_native_primitives_ignore_other_decks(tmp_path, fake_klayout):
+    # A non-SG13G2 runset's reader keeps its own conversion.
+    request = _mim_request(tmp_path, form="subckt-call", deck="sky130")
+    (tmp_path / "ref.sp").write_text(_schem("XQ1 c b e s npn13G2v Nx=1 El=1"))
+    _, seen = _capture_reference(request)
+    assert "XQ1 c b e s npn13G2v Nx=1 El=1" in seen["text"].splitlines()
+
+
+def _sg13g2_request(tmp_path, spice, **reference):
+    request = _mim_request(tmp_path, form="subckt-call", **reference)
+    (tmp_path / "ref.sp").write_text(spice)
+    request["deck_file"] = str(tmp_path / "sg13g2.lvs")
+    (tmp_path / "sg13g2.lvs").write_text("# IHP native runset\n")
+    return request
+
+
+def test_sg13g2_declared_class_does_not_exempt_a_lost_call(tmp_path, fake_klayout):
+    # The native reader converts no ``X`` card, so a callee that merely names a
+    # declared class (here the fixture layout's ``NMOS``) is still lost.
+    request = _sg13g2_request(
+        tmp_path,
+        ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n"
+        "XQ1 c b a d NMOS Nx=1\nXQ2 c b a d npn13G2v Nx=1\n.ends\n",
+    )
+    found = _unresolved(run_lvs(json.dumps(request)))
+    assert sorted(
+        (m["instance"]["reference"], m["subcircuit"]["reference"]) for m in found
+    ) == [("Q1", "NMOS"), ("Q2", "NPN13G2V")]
+    assert all(m["severity"] == "error" for m in found)
+
+
+def test_sg13g2_lost_call_stays_visible_beside_a_converted_one(tmp_path, fake_klayout):
+    request = _sg13g2_request(
+        tmp_path,
+        ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n"
+        "Xgood c b a d npn13G2v Nx=1 El=1.15\n"
+        "Xlost c b a d npn13G2v Nx=1\nXchild c b a d CHILD\n.ends\n"
+        ".subckt CHILD p q r s\n.ends CHILD\n",
+    )
+    report, seen = _capture_reference(request)
+    assert "QXgood c b a d npn13G2v le=1.15u we=120n m=1" in seen["text"]
+    found = _unresolved(report)
+    assert [m["instance"]["reference"].upper() for m in found] == ["LOST"]
+    assert found[0]["circuit"]["reference"].upper() == "TOP"
+    assert found[0]["subcircuit"]["reference"] == "NPN13G2V"
+    assert report["status"] == "mismatch"
+    assert report["category_error_counts"]["reference.unresolved_subckt_call"] == 1
+
+
+def test_sg13g2_report_replays_with_its_conversion_inputs(tmp_path, fake_klayout):
+    request = _sg13g2_request(
+        tmp_path,
+        ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n"
+        "Xgood c b a d npn13G2v Nx=1 El=1.15\nXlost c b a d npn13G2v Nx=1\n.ends\n",
+        device_map={"unused_dev": "nfet"},
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["reference_conversion"] == {
+        "form": "subckt-call",
+        "deck": None,
+        "device_map": {"unused_dev": "nfet"},
+    }
+    assert report["status"] == "mismatch"
+    assert [m["instance"]["reference"].upper() for m in _unresolved(report)] == ["LOST"]
+    committed = tmp_path / "report.json"
+    committed.write_text(json.dumps(report))
+    # ``status`` here is the replay's own verdict: the rerun rebuilt the same
+    # conversion from the echoed inputs, so it reproduced the committed
+    # report -- converted call, named lost call and all -- with no drift.
+    result = rerun_lvs_report(str(committed))
+    assert result["status"] == "match", result
+    assert not result.get("drift"), result
