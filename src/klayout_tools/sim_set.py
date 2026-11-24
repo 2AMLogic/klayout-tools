@@ -112,6 +112,23 @@ def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
     return dirs
 
 
+def _check_aggregate_destination(aggregate_path: str | None, dirs: list[str]) -> None:
+    if not aggregate_path:
+        return
+    aggregate = os.path.realpath(aggregate_path)
+    for directory in dirs:
+        member = os.path.join(directory, REPORT_FILENAME)
+        if aggregate == os.path.realpath(member) or (
+            os.path.exists(aggregate)
+            and os.path.exists(member)
+            and os.path.samefile(aggregate, member)
+        ):
+            raise SimError(
+                f"--report-out '{aggregate_path}' would overwrite "
+                f"member report '{member}'"
+            )
+
+
 def _job_ids(report: dict[str, Any]) -> list[str]:
     remote = (report.get("environment") or {}).get("remote") or {}
     blocks = remote.get("fleet") if isinstance(remote.get("fleet"), list) else [remote]
@@ -368,6 +385,10 @@ def run_sim_set(
     if isinstance(capacity_retries, bool) or capacity_retries < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
 
+    dirs = _request_dirs(request_paths, outdir)
+    protected_aggregate = aggregate_path if portable_paths else None
+    _check_aggregate_destination(protected_aggregate, dirs)
+
     if preflight is None and run is run_sim:
         preflight = preflight_batch_request
     if preflight is not None:
@@ -398,7 +419,6 @@ def run_sim_set(
             ],
         }
 
-    dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
     reference_dir = (
         os.path.dirname(os.path.abspath(aggregate_path))
@@ -430,6 +450,8 @@ def run_sim_set(
         ),
     )
 
+    # A previously absent file can now resolve through a filesystem case alias.
+    _check_aggregate_destination(protected_aggregate, dirs)
     errored = sum(1 for r in requests if r["status"] == "error")
     failed = sum(1 for r in requests if r["status"] == "fail")
     worst = max((r["exit_code"] for r in requests), default=0)

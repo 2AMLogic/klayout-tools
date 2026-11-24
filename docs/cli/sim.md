@@ -1728,7 +1728,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   `set-manifest.json`. For example, `-o bundle/members --report-out
   bundle/reports/set.json --portable-paths` records
   `../members/amp/report.json` for a member named `amp.request.json`.
-  Moving the whole `bundle/` preserves this reference.
+  Moving the whole `bundle/` preserves this reference. Choose an aggregate
+  filename distinct from every member report.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
