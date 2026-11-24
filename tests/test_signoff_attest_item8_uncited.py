@@ -93,6 +93,7 @@ def test_text_line_renders_an_uncited_row(tmp_path):
 @pytest.mark.parametrize(
     "rows",
     [
+        None,
         "R1",
         [{"row": "gain"}],
         [{"row": "", "issue": 1}],

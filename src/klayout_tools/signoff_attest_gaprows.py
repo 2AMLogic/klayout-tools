@@ -37,9 +37,7 @@ def validated_gap_rows(
     each entry a declared gap row plus the issue that owns closing it. The
     messages name ``key`` and ``adjective``, so delegating callers keep
     byte-identical error text."""
-    raw = inventory.get(key)
-    if raw is None:
-        return []
+    raw = inventory.get(key, [])
     if not isinstance(raw, list):
         raise _error(f"'{key}' must be a list of {{row, issue}}")
     rows: list[dict[str, Any]] = []

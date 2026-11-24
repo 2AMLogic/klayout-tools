@@ -364,6 +364,8 @@ def validate_into(
 
 def validated_unbenched_rows(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``unbenched_rows``: ``[{"row": str, "issue": int}]`` (optional)."""
+    if inventory.get("unbenched_rows") is None:  # Item 9 also accepts explicit null.
+        return []
     return gaprows.validated_gap_rows(inventory, "unbenched_rows", "unbenched")
 
 
