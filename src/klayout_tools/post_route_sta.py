@@ -245,6 +245,7 @@ timing, which matters most in a ``request.pdk.corners`` sweep. See
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -254,11 +255,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from . import _liberty_warnings, _sta_wire_load, env_provenance
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
-from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
 from ._openroad_engine import (
@@ -577,18 +578,11 @@ _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
 
 
 def load_request(request_path: str) -> dict[str, Any]:
-    """Read and minimally validate a ``klt sta`` request JSON file.
+    """Read the request as written and validate its shape for later hashing.
 
-    Reject unreadable files, malformed JSON, unknown top-level fields, and
-    requests missing ``pdk`` or ``constraints``. The schema field is optional.
-
-    Unlike ``pdk``/``constraints``, neither ``def`` nor ``verilog`` is a
-    required top-level field here -- exactly one of them is required, a
-    relationship :func:`validate_request_shape`'s flat "these keys must all
-    be present" check cannot express. :func:`run_sta` validates that
-    mutual-exclusion/require-one-of relationship itself, right after calling
-    this function (see its own "Request-field resolution" section, issue
-    #1825).
+    The loader requires ``pdk`` and ``constraints``, accepts an optional schema,
+    and rejects unknown fields, unreadable files and malformed JSON. After this
+    check, :func:`run_sta` requires exactly one of ``def`` and ``verilog`` (#1825).
     """
     request = _load_request_json(request_path, PostRouteStaError)
     request = validate_request_shape(
@@ -819,6 +813,11 @@ def run_sta(
         )
         if constraints.boundary and "clock_driving_cell" in constraints.boundary:
             response["clock_driving_cell"] = constraints.boundary["clock_driving_cell"]
+        if multicycle:
+            canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            response["provenance"]["request_sha256"] = hashlib.sha256(
+                canonical.encode()
+            ).hexdigest()
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -830,6 +829,7 @@ def run_sta(
             input_delays=constraints.input_delays,
             output_delays=constraints.output_delays,
             clock_uncertainty=clock_uncertainty,
+            multicycle=multicycle,
         )
         return response
 
@@ -954,10 +954,6 @@ class _ReportPaths:
             if scrubbed == str(exc):
                 raise
             raise PostRouteStaError(scrubbed) from exc
-
-
-def _identity(text: str) -> str:
-    return text
 
 
 @dataclass(frozen=True)
@@ -1091,7 +1087,6 @@ def _dispatch_sta(
         timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
-        scrub=report_paths.scrub,
         sdf_stem=basename if write_sdf else None,
         report_paths=report_paths,
     )
@@ -1181,6 +1176,7 @@ def _dispatch_sta(
         # finite WNS (`timing_status: "constrained"`) only says *some* path
         # was timed; this says whether any endpoint/register was left out.
         "constraint_completeness": corner_fields["constraint_completeness"],
+        "liberty_warnings": corner_fields["liberty_warnings"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
@@ -1245,7 +1241,6 @@ def _run_corner_session(
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
-    scrub: Callable[[str], str] = _identity,
     sdf_stem: str | None = None,
     report_paths: _ReportPaths | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1308,6 +1303,9 @@ def _run_corner_session(
     macro_liberty_paths = macro_blackbox.macro_liberty_paths(
         macros, corner, error_cls=PostRouteStaError
     )
+    decks = (liberty_path, *macro_liberty_paths)
+    # `str` is the no-op scrub for a report_paths-less call.
+    scrub = report_paths.scrub if report_paths is not None else str
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1460,6 +1458,8 @@ def _run_corner_session(
         "constraint_completeness": _parse_constraint_completeness(
             completed.stdout or ""
         ),
+        # Additive field (issue #7411): see `_liberty_warnings`.
+        "liberty_warnings": _liberty_warnings.parse(completed, report_paths, decks),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
@@ -1653,7 +1653,6 @@ def _run_multi_corner(
             timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
-            scrub=report_paths.scrub,
             sdf_stem=basename if write_sdf else None,
             report_paths=report_paths,
         )

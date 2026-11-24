@@ -75,6 +75,7 @@ real failure.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -112,11 +113,13 @@ from . import (
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
+    sim_mismatch_scale,
     sim_noise,
     sim_noise_mechanism,
     sim_op_args,
     sim_passes,
     sim_portable,
+    sim_probit_sigma,
     sim_search,
     sim_settled,
     sim_slope_band_meas,
@@ -167,7 +170,8 @@ from ._paths import (
     resolve_tool_binary,
     validate_request_shape,
 )
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import sha256_file as sha256_file
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -180,6 +184,13 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
+from .ngspice_build import ENGINE_BANNER_MAX
+from .ngspice_build import (
+    engine_version as _extract_engine_version,
+)
+from .ngspice_build import (
+    probe_engine_build as _probe_engine_build,
+)
 from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -584,12 +595,16 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
+        sim_spiceinit.MODEL_SELECTION_INIT_HINT,
         # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
         "expr_no_value",
         # Report-level (top-level `diagnostics[]`, issue #5385): process legs
         # with bit-identical results; a warning.
         "process_leg_check",
+        # Report-level (top-level `diagnostics[]`, issue #5486): a selected
+        # `*_mismatch` section whose family `mismatch_scale` did not reach.
+        "mismatch_scale_unreached_family",
         # Report-level (top-level `diagnostics[]`, issue #6720); a warning.
         "batch_convergence_all_failed",
     }
@@ -3269,7 +3284,13 @@ def _prepare_sim_request(
             corner_points,
             monte_carlo_spec,
             injected,
-            mismatch_scale=_resolve_mismatch_scale(monte_carlo_spec, models.get("pdk")),
+            mismatch_scale=_resolve_mismatch_scale(
+                monte_carlo_spec,
+                models.get("pdk"),
+                corner_points=corner_points,
+                models=_model_resolution_models(request, models),
+                request_dir=request_dir,
+            ),
         )
         monte_carlo_info = _with_family_mismatch(
             monte_carlo_info,
@@ -3291,6 +3312,9 @@ def _prepare_sim_request(
             "quantiles": quantiles,
             "k_sigma": k_sigma,
             "window_scope": window_scope,
+            "probit_sigma": sim_probit_sigma.validate(
+                monte_carlo_spec, measurements_spec
+            ),
         }
         # Echo only what the request actually declared, so a sampling-only
         # request's `environment.monte_carlo` keeps its `{n, seed, vary}`
@@ -3509,14 +3533,12 @@ def _open_resume_checkpoint(
     checkpoint_path: str,
     *,
     resume: bool,
-    **fingerprint_inputs: Any,
+    fingerprint: Callable[[], str],
 ) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
     """Hash the request inputs and open a checkpoint only when resuming."""
     if not resume:
         return {}, None, None
-    return restore_checkpoint(
-        checkpoint_path, _checkpoint_fingerprint(**fingerprint_inputs)
-    )
+    return restore_checkpoint(checkpoint_path, fingerprint())
 
 
 def _run_sim_corners(
@@ -3660,8 +3682,12 @@ def _run_sim_corners(
         "ngspice_options": ngspice_options,
         "stimulus_lines": stimulus_lines,
     }
+    # The checkpoint, run history and shard map share one digest of these inputs.
+    shard_fingerprint = functools.cache(
+        functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
+    )
     pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
-        checkpoint_path, resume=bool(resume), **fingerprint_inputs
+        checkpoint_path, resume=bool(resume), fingerprint=shard_fingerprint
     )
 
     # Issue #5775: a sharded batch run keeps its shard map even without
@@ -3947,15 +3973,12 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
-            shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
+            shard_fingerprint=shard_fingerprint,
         )
 
-    shard_fingerprint = (
-        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
-    )
     history = sim_batch_history.begin(
         artifacts_dir,
-        shard_fingerprint,
+        shard_fingerprint if backend == "batch" else None,
         request,
         hosts,
         bool(resume),
@@ -4008,12 +4031,10 @@ def _run_sim_corners(
         # needs its own S3 job contract and launch. See this function's
         # docstring on `hosts`.
         fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
-        # Issue #3300: a sharded batch run keeps a shard-to-job-id map keyed
-        # by the resume fingerprint, so `--resume` re-attaches to shards that
-        # already ran instead of paying for them again.
+        # The explicit fleet needs its fingerprint for the shard-to-job-id map.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": shard_fingerprint,
+                "shard_fingerprint": shard_fingerprint(),
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4208,7 +4229,11 @@ def _run_sim_corners(
                 entry, specs_by_name.get(entry["name"]), plots_by_corner
             )
 
-    coverage = _build_coverage(measurements_spec, corners, capture_only=capture_only)
+    grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
+    measurements_rollup.extend(grid_stats)
+    coverage = _build_coverage(
+        measurements_spec, corners, capture_only=capture_only, grid_stats=grid_stats
+    )
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -4363,9 +4388,6 @@ def _run_sim_corners(
 
     remote = environment.get("remote")
     remote_diagnostics = pop_remote_diagnostics(remote)
-    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
-        backend, engine, ngspice_init_lines, remote
-    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4417,7 +4439,9 @@ def _run_sim_corners(
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     diag_candidates = (
         *remote_diagnostics,
-        init_diagnostic,
+        sim_spiceinit.report_init_diagnostic(
+            backend, engine, ngspice_init_lines, remote, corners
+        ),
         bin_diagnostic,
         save_diagnostic,
     )
@@ -4425,6 +4449,9 @@ def _run_sim_corners(
         report["diagnostics"] = top_diags
     _attach_runner_hints(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
+    sim_mismatch_scale.attach_unreached_families(
+        report, monte_carlo_info, dispatch_points
+    )
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -4485,27 +4512,10 @@ def _grade_corners(
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
-    # Issues #2492 + #2493: ONE count for the single "this corner produced
-    # numbers, but they are not trustworthy enough to grade" status -- see
-    # :data:`_INCONCLUSIVE_STATUS` for why the two increments' originally
-    # separate `inconclusive`/`implausible_solution` statuses are one token
-    # with two *reason codes* rather than two parallel statuses and two
-    # parallel counts. Counted separately from `passed`/`failed`/`errored`
-    # (a distrusted corner is none of the three), always present, and always
-    # `0` for a request that declares neither `options.fail_on_diagnostic`
-    # nor a plausibility bound -- so
-    # `passed + failed + errored + inconclusive == corner_count` holds and a
-    # caller scanning only the original three cannot silently miscount the
-    # corners that moved to the new status. *Which* reason applied is read
-    # off `diagnostic_counts` (issue #2491), which already counts the
-    # `inconclusive`/`implausible_solution` marker diagnostics by code.
+    # Count distrusted corners separately from report-wide population verdicts.
     inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
-    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
-    # design failure even when every individual sample passed -- it is only
-    # reachable via a declared sigma window, since every other rollup `fail`
-    # is already inherited from a corner that failed above -- so it feeds
-    # the same `failed` precedence input as a failed corner, rather than
-    # being reported and ignored.
+    # A Monte Carlo sigma window or a grid-wide probit sigma can fail its
+    # bound even when every corner passes. Either fails the report.
     measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
     # Issue #2109: the common rollup rule is the single decision table for
     # real failures/errors, zero/partial/unknown/malformed coverage and full
@@ -4536,19 +4546,13 @@ def _grade_corners(
     # no number at all is strictly less information than a number the run
     # declines to trust.
     #
-    # This mints a top-level `status: "inconclusive"` rather than folding
-    # into `"error"`. `docs/json-contract.md` frames status/exit codes as
-    # *additive per verb* ("a command may ship a new code above 2 in a later
-    # release ... the new code is a new verdict"), and `klt lvs` already
-    # ships exactly this token at exactly this exit code
-    # (`lvs.py`'s `STATUS_INCONCLUSIVE`, issue #1370) -- so `klt sim`
-    # reporting `"inconclusive"`/exit `4` for "ran fine, cannot vouch for
-    # the numbers" is the established house spelling, not a new invention,
-    # and it keeps "the simulator broke" (`"error"`) distinguishable from
-    # "I do not trust this solve" at the top level and not only in the
-    # counts. Never fires unless the request opted in, so an unmodified
-    # request's `status` is byte-identical to before either issue.
-    if status != "error" and inconclusive:
+    if status != "error" and (
+        inconclusive
+        or any(
+            m.get("statistic") == "probit_sigma" and m["status"] == "inconclusive"
+            for m in measurements_rollup
+        )
+    ):
         status = _INCONCLUSIVE_STATUS
     return {
         "passed": passed,
@@ -5277,35 +5281,16 @@ def _validate_k_sigma(value: Any, field: str) -> float:
 
 
 def _resolve_mismatch_scale(
-    mc_spec: dict[str, Any], pdk: Any
-) -> tuple[float, str] | None:
-    """Validate the optional ``request.monte_carlo.mismatch_scale`` (issue
-    #3942) and return ``(scale, param)`` -- the factor and the PDK family's
-    mismatch ``.param`` it sets -- or ``None`` when the request omits it.
-
-    The scale is applied by writing the family's multiplicative mismatch
-    switch (:data:`sim_mismatch_gate.MISMATCH_SWITCH`), so only a family
-    whose switch is verified to scale the ``AGAUSS``/``delvto`` terms
-    linearly is supported; any other family (or an undeterminable PDK) is
-    refused rather than approximated."""
-    if "mismatch_scale" not in mc_spec:
-        return None
-    value = mc_spec["mismatch_scale"]
-    field = "request.monte_carlo.mismatch_scale"
-    if not is_finite_number(value):
-        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    if value < 0:
-        raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    family = pdk_variant_family(pdk) if pdk else None
-    param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if param is None:
-        known = ", ".join(sorted(sim_mismatch_gate.MISMATCH_SWITCH))
-        raise SimError(
-            f"{field} is only supported for PDK families with a verified "
-            f"multiplicative mismatch switch ({known}); models.pdk "
-            f"{pdk!r} resolves to family {family!r}"
-        )
-    return float(value), param
+    mc_spec: dict[str, Any], pdk: Any, **kwargs: Any
+) -> sim_mismatch_scale.MismatchScale | None:
+    """``request.monte_carlo.mismatch_scale`` (issues #3942, #5486), resolved
+    to the deck ``.param`` cards that apply it -- see
+    :func:`klayout_tools.sim_mismatch_scale.resolve` for the two PDK shapes
+    (a verified multiplicative switch, or sigma ``.param``s scanned out of
+    the selected mismatch sections' libraries)."""
+    return sim_mismatch_scale.resolve(
+        mc_spec, pdk, resolve_lib_ref=_resolve_lib_ref, **kwargs
+    )
 
 
 def _validate_spec_row(value: Any, field: str) -> str | None:
@@ -5617,7 +5602,7 @@ def _mc_sample_seed(
     varies: tuple[bool, bool],
     scope_key: object,
     sample_index: int,
-    mismatch_scale: tuple[float, str] | None,
+    mismatch_scale: sim_mismatch_scale.MismatchScale | None,
 ) -> dict[str, Any]:
     """The ``mc_seed`` record of one Monte Carlo sample (see
     :func:`_expand_monte_carlo`'s seed contract)."""
@@ -5649,8 +5634,8 @@ def _mc_sample_seed(
         mc_seed["seed_mode"] = seed_mode
     if mismatch_scale is not None:
         # Rides the point (and so the fleet wire and the deck
-        # writer); echoed only when declared (issue #3942).
-        mc_seed["mismatch_scale"], mc_seed["mismatch_param"] = mismatch_scale
+        # writer); echoed only when declared (issue #3942/#5486).
+        mc_seed.update(mismatch_scale.seed_fields())
     return mc_seed
 
 
@@ -5658,7 +5643,7 @@ def _expand_monte_carlo(
     corner_points: list[CornerPoint],
     mc_spec: dict[str, Any],
     injected: tuple[list[dict[str, Any]], float] | None = None,
-    mismatch_scale: tuple[float, str] | None = None,
+    mismatch_scale: sim_mismatch_scale.MismatchScale | None = None,
 ) -> tuple[list[CornerPoint], dict[str, Any]]:
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
@@ -5684,8 +5669,8 @@ def _expand_monte_carlo(
     ``.param`` expressions): ngspice receives only the combined
     ``.options seed=<rndseed>``, derived from both components, so it still
     changes per sample under ``vary: "process"``. For such decks, request
-    ``monte_carlo.mismatch_scale: 0`` (issue #3942; sky130/gf180mcu) to
-    switch the deck's own mismatch off and get a sigma=0 control.
+    ``monte_carlo.mismatch_scale: 0`` (issues #3942/#5486) to switch the
+    deck's own mismatch off and get a sigma=0 control.
 
     Requesting the *same* ``mc_spec["seed"]`` again (same process, different
     process, doesn't matter) reproduces the exact same sequence of derived
@@ -5754,7 +5739,7 @@ def _expand_monte_carlo(
     if "seed_mode" in mc_spec:
         info["seed_mode"] = seed_mode
     if mismatch_scale is not None:
-        info["mismatch_scale"], info["mismatch_param"] = mismatch_scale
+        info.update(mismatch_scale.seed_fields())
     return sampled, info
 
 
@@ -6373,8 +6358,6 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 # Per-corner ngspice invocation
 # --------------------------------------------------------------------------- #
-
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 
 
 _WAVEFORM_KEYWORDS = frozenset(
@@ -8389,15 +8372,12 @@ def _write_corner_deck(
     # process corner, none without a process axis. See `_corner_lib_lines`.
     lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
-    if point.mc_seed is not None and "mismatch_scale" in point.mc_seed:
-        # Issue #3942: the sigma scale. Must come after the `.lib` (whose
-        # section sets the switch itself, e.g. sky130 `.param mc_mm_switch=0`
-        # or `=1` in the `_mm` sections) so the request's value is the last
-        # definition and wins.
-        lines.append(
-            f".param {point.mc_seed['mismatch_param']}="
-            f"{_format_param_value(point.mc_seed['mismatch_scale'])}"
-        )
+    # Issues #3942/#5486: the sigma scale -- one `.param` card for a switch
+    # family, one per scanned sigma for sg13g2. Must come after the `.lib`
+    # (whose section sets the switch or defines the sigmas itself, e.g.
+    # sky130 `.param mc_mm_switch=1` in the `_mm` sections) so the request's
+    # value is the last definition and wins.
+    lines.extend(sim_mismatch_scale.deck_lines(point.mc_seed, _format_param_value))
     # Issue #2977: the request's declared `stimulus`, expanded to PWL sources.
     lines.extend(sim_stimulus.lines_for_corner(stimulus_lines, point.supply_v))
     # Issue #3338: the two-port's per-port z0 + AC-source cards.
@@ -8785,10 +8765,7 @@ def _write_xyce_deck(
         handle.write("\n".join(lines) + "\n")
 
 
-#: Bound on the recorded ``--version`` banner; matches the worker capture's
-#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
-_ENGINE_BANNER_MAX = 2000
-_ENGINE_BANNER_TIMEOUT_S = 10
+_ENGINE_BANNER_MAX = ENGINE_BANNER_MAX
 
 
 def _engine_build_with_comparison(
@@ -8806,66 +8783,6 @@ def _engine_build_with_comparison(
         attach_engine_build_comparison(remote_environment, engine_build)
         attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
-
-
-def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """The local ngspice build identity (issue #3095) -- ``--version`` banner plus
-    binary sha256 -- probed once per sweep into ``environment.engine_build`` on
-    ``local`` reports, ``client_engine_build`` off-host (#5566 rewrites ``engine_build``
-    to the worker's). ``engine_version`` is the major version only and two builds of one
-    major can differ in options (FFTW vs. padded FFT). ``None`` for engines without a
-    probe (xyce). A failed probe never fails the run; ``probe`` / ``reason`` say why."""
-    if ngspice_binary is None:
-        return None
-    build: dict[str, Any] = {
-        "version_banner": None,
-        "binary_sha256": None,
-        "probe": "ok",
-        "reason": None,
-    }
-    try:
-        build["binary_sha256"] = sha256_file(ngspice_binary)
-    except OSError:
-        pass
-    try:
-        proc = subprocess.run(
-            [ngspice_binary, "--version"],
-            capture_output=True,
-            text=False,
-            timeout=_ENGINE_BANNER_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        build.update(
-            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
-        )
-        return build
-    except Exception as exc:  # the probe must never fail the sweep
-        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
-        return build
-    raw = proc.stdout or proc.stderr or b""
-    text: str = (
-        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-    )[: _ENGINE_BANNER_MAX * 4]
-    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
-        :_ENGINE_BANNER_MAX
-    ]
-    if proc.returncode != 0 or not banner:
-        build.update(
-            probe="error",
-            reason=(
-                f"--version exited {proc.returncode}"
-                if proc.returncode != 0
-                else "--version printed no banner"
-            ),
-        )
-        return build
-    build["version_banner"] = banner
-    return build
-
-
-def _extract_engine_version(stdout: str) -> str | None:
-    match = _ENGINE_VERSION_RE.search(stdout or "")
-    return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------- #
@@ -10068,6 +9985,7 @@ def _build_coverage(
     corners: list[dict[str, Any]],
     *,
     capture_only: bool = False,
+    grid_stats: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Common checked-work v1 plus the existing simulation coverage counters.
 
@@ -10081,8 +9999,10 @@ def _build_coverage(
         measurements_spec
     )
 
-    checked = []
-    skipped = []
+    grid_stats = grid_stats or []
+    checked: list[str] = []
+    skipped: list[dict[str, str]] = []
+    sim_probit_sigma.coverage(grid_stats, checked, skipped)
     inapplicable = []
     for corner_index, corner in enumerate(corners):
         if not measurements_spec:
@@ -10109,8 +10029,8 @@ def _build_coverage(
 
     block = {
         "corners_simulated": len(corners),
-        "measurements_declared": len(measurements_spec),
-        "measurements_with_limits": measurements_with_limits,
+        "measurements_declared": len(measurements_spec) + len(grid_stats),
+        "measurements_with_limits": measurements_with_limits + len(grid_stats),
         "unrecognized_limit_keys": unrecognized,
         **build_check_coverage(
             checked=checked,

@@ -4,7 +4,7 @@ import pytest
 
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from test_post_route_sta import (
-    _live_sky130_env,
+    _LIVE_ONLY,
     _propagated_constraints,
     _setup_multi_corner_env,
     _setup_success_env,
@@ -104,9 +104,7 @@ def test_invalid_driver_reports_field_before_engine(tmp_path, monkeypatch, bad, 
         run_sta(path)
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None, reason="requires OpenROAD and the sky130A PDK"
-)
+@_LIVE_ONLY
 def test_live_driver_on_propagated_buffered_clock(tmp_path):
     paths = _write_clock_fixtures(tmp_path)
     driver = {"cell": "sky130_fd_sc_hd__buf_2", "pin": "X", "input_pin": "A"}

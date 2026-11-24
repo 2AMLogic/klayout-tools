@@ -8,20 +8,25 @@ from klayout_tools.gen import generate
 
 
 @pytest.mark.parametrize(
-    ("params", "well_um"),
+    ("generator", "params", "well_um"),
     [
-        ({"dummy": 0}, 0.31),
-        ({"cols": 3, "rows": 2}, 0.31),
-        ({"voltage_flavor": "hv", "add_guard_ring": True}, 0.62),
+        ("mos_array", {"dummy": 0}, 0.31),
+        ("mos_array", {"cols": 3, "rows": 2}, 0.31),
+        ("mos_array", {"voltage_flavor": "hv", "add_guard_ring": True}, 0.62),
+        ("diff_pair", {}, 0.31),
+        ("diff_pair", {"voltage_flavor": "hv", "add_guard_ring": False}, 0.62),
+        ("diff_pair", {"voltage_flavor": "hv", "splits": 3, "mirror": True}, 0.62),
     ],
 )
-def test_pfet_device_and_dummy_active_have_psd_and_well(tmp_path, params, well_um):
+def test_pfet_device_and_dummy_active_have_psd_and_well(
+    tmp_path, generator, params, well_um
+):
     root = tmp_path / "pdk"
     (root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     path = tmp_path / "pfet.gds"
     report = generate(
         {
-            "generator": "mos_array",
+            "generator": generator,
             "pdk": {"variant": "ihp-sg13g2", "root": str(root)},
             "params": {"w_um": 1.6, "l_um": 0.4, "flavor": "pfet", **params},
             "options": {"output": str(path)},
@@ -37,6 +42,11 @@ def test_pfet_device_and_dummy_active_have_psd_and_well(tmp_path, params, well_u
 
     device = region(1).overlapping(region(5))
     assert not device.is_empty()
+    if generator == "diff_pair" and params.get("add_guard_ring", True):
+        tap = region(1) - device
+        assert not tap.is_empty()
+        assert (tap & region(14)).is_empty()
+    assert region(14).space_check(round(0.31 / layout.dbu)).is_empty()
     assert (device.sized(round(0.18 / layout.dbu)) - region(14)).is_empty()
     assert (device.sized(round(well_um / layout.dbu)) - region(31)).is_empty()
     drc = run_drc(str(path), "sg13g2")
