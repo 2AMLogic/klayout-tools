@@ -424,6 +424,11 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   For a mixed-signal block sharing one ratified spec, `spec_rows."6.digital"`
+   scopes this statement and scan to the digital rows. Every spec row must be
+   assigned under `6.digital` or `6.analog`. A statistical row assigned to the
+   digital partition still prevents this outcome. Analog rows are graded
+   independently against their yield evidence.
    **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
    restriction is intentional. Analog performance is inherently statistical
    (offset, mismatch, bias spread), so an analog spec with no statistical row

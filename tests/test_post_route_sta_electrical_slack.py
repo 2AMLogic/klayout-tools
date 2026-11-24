@@ -13,7 +13,7 @@ import pytest
 from klayout_tools import post_route_sta
 from klayout_tools import post_route_sta_electrical as electrical
 from klayout_tools.post_route_sta import run_sta
-from test_post_route_sta import _live_sky130_env, _write_request
+from test_post_route_sta import _LIVE_ONLY, _write_request
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -98,11 +98,7 @@ def test_electrical_checks_block_has_slack_classes_issue_5241():
         assert block[key]["worst_slack_ns"] is None
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_min_pulse_width_issue_5241(tmp_path):
     """Engine integration (issue #5241): a 2 ns clock meets every liberty
     min-pulse-width limit (checked, zero); a 0.05 ns clock violates them

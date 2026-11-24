@@ -226,7 +226,7 @@ multiplier warnings".
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
 and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
-"Asynchronous submit and status".
+"Asynchronous submit, status and cancel".
 
 `klt sim` on a **sharded** `batch` run (issue #5522) adds two top-level
 roll-ups to `environment.remote` beside the existing `fleet[]` array:
@@ -356,6 +356,18 @@ three-terminal entry, i.e. every deck shipped today, whose `nets` maps are
 byte-identical to before. No existing key changed, so **no
 `schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
 recognition" section.
+
+**A conditional hierarchy census is additive.** In a curated FinFET
+extraction, a selected circuit with subcircuit instances gains three top-level
+fields. `device_count_scope` is `"selected_circuit"`, `instantiated_device_counts`
+counts each device class across the instantiated hierarchy, and
+`instantiated_device_count` gives their sum. For example, a top cell with two
+wrapper instances, each containing two one-NMOS leaves, reports
+`{"nmos_rvt": 4}` and a total of 4. Flat selected circuits omit all three
+fields. The existing `device_count`, `device_counts`, `devices[]` and
+`metrics.extract__device__count` still describe devices directly in the
+selected circuit. The extract report retains `schema_version` 4.
+[Extraction report](cli/extract.md).
 
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
@@ -585,7 +597,13 @@ and
 engine). `klt extract --engine klayout-runset` reports gain a top-level
 `params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
 `instantiated_device_counts` (`{class: count}` across the instantiated
-hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat).
+For `klt extract`, read the top-level `engine` field to identify the engine.
+A runset report has `engine: "klayout-runset"`. A curated report omits `engine`.
+`instantiated_device_counts` is always present under `klayout-runset`. On the
+curated engine it appears for a FinFET selected circuit that instantiates at
+least one subcircuit, alongside `device_count_scope` and
+`instantiated_device_count` (issue #7615). Under the runset
 engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
 instantiated hierarchy, which for a flat runset is the selected circuit's own
 count.
@@ -792,6 +810,14 @@ additively as `environment.remote.worker_environment` (and in each
 observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
+
+For sharded batch simulation, `environment.remote.run` records whole-run
+completion, the original host count, observed rounds, distinct jobs with launch
+evidence and the observed launch-to-terminal span. `environment.remote.fleet`
+covers jobs harvested or dispatched during the reporting invocation. The
+`history_coverage` field identifies partial history from older artifacts.
+See the [simulation report contract](cli/sim.md#whole-run-batch-summary) for
+the fields and their null semantics.
 
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
@@ -1996,7 +2022,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
-| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `library_limit_report_path` (also in the route stage and per-corner entries, null when no report is available, additive in #7588) (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
@@ -2732,6 +2758,8 @@ the warnings print as they happen, ahead of the plain-text error line.
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_cancel_nothing_to_cancel` | `klt sim --cancel JOB_ID`: the fleet's cancel verb found no pending or running instance for that job (already finished or cancelled, or unknown to the fleet tag) and wrote nothing (issue #4351). Not an infrastructure failure. See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
+  | `sim` | `batch_job_cancelled` | `--backend batch`: polling (a blocking run or `--attach`) observed `status.json` state `cancelled` — the job was cancelled through the fleet; nothing is re-launched and no results are coming (issue #4351). See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner (refused with exit `87`) keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code` and, additively, one top-level `diagnostics[]` entry with this code (severity `error`, `accepted_client_release`, remedy in `message`; issue #5061). See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity or shared vCPU/Spot-quota budget. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. Those diagnostics also carry additive `missing_features[]` (the request-feature keys the runner predates; issue #4863). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |

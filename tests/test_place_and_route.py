@@ -70,6 +70,10 @@ from pathlib import Path
 
 import pytest
 
+from helpers.place_and_route_merge import (
+    _skipped_power_stack_repair,
+    _skipped_via_pad_trim,
+)
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
@@ -6146,6 +6150,7 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "max_capacitance_violation_count": 2,
             "max_transition_violation_count_vs_library": 3,
             "max_capacitance_violation_count_vs_library": 2,
+            "library_limit_report_path": report["library_limit_report_path"],
         }
     ]
 
@@ -7966,11 +7971,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
-            # Issue #2357: the library-only counterpart -- also 0/0 here,
-            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
-            # was given for this request.
             "max_transition_violation_count_vs_library": 0,
             "max_capacitance_violation_count_vs_library": 0,
+            "library_limit_report_path": None,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -8059,9 +8062,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
-        # Issue #2357: the library-only counterpart, also 0/0 here.
         "max_transition_violation_count_vs_library": 0,
         "max_capacitance_violation_count_vs_library": 0,
+        "library_limit_report_path": None,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
@@ -8696,25 +8699,13 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
             "layers": [],
         },
     }
-
-
-def _skipped_via_pad_trim(variant: str) -> dict:
-    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
-    s = {
-        "status": "skipped",
-        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
-    }
-    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
-    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
-    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8830,6 +8821,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
         # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
         "pin_conductor": {"status": "unchanged", "layers": []},
     }

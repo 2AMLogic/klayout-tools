@@ -75,6 +75,9 @@ def load_commit(
         or not isinstance(record.get("engine_logs"), list)
     ):
         return None
+    # Older route records predate per-pin library reports. Replay the route once.
+    if stage == "route" and "library_limit_report_path" not in record["stage_entry"]:
+        return None
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, list) or not all(
         isinstance(name, str) and os.path.isfile(os.path.join(output_dir, name))
