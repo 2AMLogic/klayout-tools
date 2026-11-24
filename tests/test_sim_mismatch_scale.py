@@ -196,6 +196,49 @@ def test_refuses_a_mixed_library_whose_sigma_is_not_a_literal(tmp_path, value):
     assert "not a plain numeric literal" in message
 
 
+def test_refuses_a_one_argument_lib_inside_the_selected_section(tmp_path):
+    """A one-argument ``.lib <token>`` inside an open section is ambiguous
+    (a section name or an include) and cannot nest; treating it as an opener
+    silently ended the scan and scaled only the sigmas before it (#7671)."""
+    (tmp_path / "first.lib").write_text(".param sg13g2_a_mm = 1\n")
+    (tmp_path / "second.lib").write_text(".param sg13g2_b_mm = 2\n")
+    corner = tmp_path / "corner.lib"
+    corner.write_text(
+        ".lib mos_tt_mismatch\n"
+        "  .include first.lib\n"
+        "  .lib second.lib\n"
+        "  .param sg13g2_c_mm = 3\n"
+        ".endl mos_tt_mismatch\n"
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        _resolve(1, corner)
+    message = str(excinfo.value)
+    # Names the offending line and the file, so the fix is actionable.
+    assert ".lib second.lib" in message
+    assert "corner.lib" in message
+
+
+def test_a_one_argument_lib_after_endl_is_still_a_section_opener(tmp_path):
+    """Outside the selected section a one-argument ``.lib`` opens another
+    block of the same file and is skipped exactly as before (#7671)."""
+    corner = tmp_path / "corner.lib"
+    corner.write_text(
+        ".lib mos_tt_mismatch\n"
+        "  .param sg13g2_a_mm = 1\n"
+        ".endl mos_tt_mismatch\n"
+        ".lib other_section\n"
+        "  .param sg13g2_b_mm = 2\n"
+        ".endl other_section\n"
+    )
+    assert _resolve(1, corner).cards == (("sg13g2_a_mm", 1.0),)
+
+
+def test_section_opener_with_different_case_still_selects(tmp_path):
+    corner = tmp_path / "corner.lib"
+    corner.write_text(".lib MOS_TT_MISMATCH\n  .param sg13g2_a_mm = 1\n.endl\n")
+    assert _resolve(1, corner).cards == (("sg13g2_a_mm", 1.0),)
+
+
 @pytest.mark.parametrize(
     "written,nominal",
     [("4n", 4e-9), ("2.5meg", 2.5e6), ("4nF", 4e-9), ("3E-9", 3e-9), ("5", 5.0)],

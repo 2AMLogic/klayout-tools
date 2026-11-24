@@ -344,6 +344,18 @@ def _walk_section(
     for line in lines:
         start = _LIB_START_RE.match(line)
         if start is not None and start.group(2) is None:
+            if inside:
+                # SPICE sections do not nest, so a one-argument `.lib` inside
+                # an open section can only be an include form; reading it as
+                # an opener would end the scan here and scale only the sigmas
+                # before it (issue #7671).
+                raise SimError(
+                    f"{field} cannot scale mismatch-sigma parameters across "
+                    f"{line.strip()!r} in {path}: a one-argument .lib inside "
+                    f"the selected {section!r} section is ambiguous (a "
+                    "section name or an include) -- refusing rather than "
+                    "scaling only the parameters before it"
+                )
             # `.lib <section>` opens a named block of this same file.
             inside = start.group(1).lower() == section.lower()
             continue
