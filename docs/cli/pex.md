@@ -1157,6 +1157,12 @@ klt pex pnpMPA.gds --engine klayout-runset --deck-file sg13cmos5l.lvs \
     --deck sg13cmos5l --top pnpMPA_lvs --extract-only --format json
 ```
 
+A derived resistor terminal strip under a landing pad can cover part of a
+metal island already identified on the same runset net. When the entire
+strip lies on that net's metal and has a single possible metal role, the
+existing metal probes establish its coverage. A strip on a different
+cluster, an overhang or an ambiguous metal role still leaves a gap.
+
 A net the correspondence cannot match 1:1 is **listed, never silently
 dropped or silently merged** (`extraction.net_correspondence`:
 `matched` / `unmatched_runset_nets` / `unmatched_curated_nets` /

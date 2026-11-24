@@ -348,7 +348,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
-from . import sim_population_limits, sim_regrade
+from . import sim_errors, sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -1611,20 +1611,20 @@ def _resolve_ngspice_binary(options: dict[str, Any], request_dir: str) -> str:
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sim`` request JSON file.
 
-    Raises :class:`SimError` if the file is missing/unreadable, not valid
-    JSON, or missing a required top-level field (``netlist``, and one of
-    ``analysis`` or -- issue #2482 -- ``analysis_steps``; which one, and
-    that not both are declared, is validated in :func:`run_sim`).
-    ``models`` is validated separately, in :func:`run_sim` -- it is only
-    required when the request declares a ``corners.process`` axis (see
-    ``_resolve_models_lib``). Does not require the request to carry a
-    ``schema`` field (see this module's docstring).
+    Raises :class:`SimError` if the file is missing/unreadable, invalid JSON,
+    not an object, or missing a required top-level field (``netlist``, one of
+    ``analysis`` or -- #2482 -- ``analysis_steps``; which one, and that not
+    both are declared, is validated in :func:`run_sim`). ``models`` is
+    validated in :func:`run_sim`, only for a ``corners.process`` axis (see
+    ``_resolve_models_lib``). No ``schema`` field is required.
     """
     request = _load_request_json(request_path, SimError)
-    # Command and deck lists have their own validators and no corner matrix.
-    if sim_commands.COMMANDS_FIELD in request:
-        return request
-    if "decks" in request:
+    if not isinstance(request, dict):  # #7720: guard before membership tests
+        raise SimError("request file must contain a JSON object")
+    if sim_commands.COMMANDS_FIELD in request or "decks" in request:
+        sim_errors.request_options(request)  # #7720: before first read
+        if sim_commands.COMMANDS_FIELD in request:
+            return request
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
