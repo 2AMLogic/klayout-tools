@@ -7,7 +7,7 @@ lives in `klayout_tools/post_route_sta_violating_endpoints.py`.
 output (OpenROAD 26Q3-1510 `sta` binary, 2026-11-23) replayed through the
 stub helpers `test_post_route_sta.py` exports -- the same replay pattern
 `test_post_route_sta_path_groups.py` uses for the sky130 boundary capture.
-The live-engine check of the same flow is the `_live_sky130_env`-gated test
+The live-engine check of the same flow is the `_LIVE_ONLY`-gated test
 at the bottom (the sg13g2 capture design is combinational-only because the
 available liberty has no flip-flops, so its rows are all output-setup /
 output-hold checks against virtual capture clocks).
@@ -24,6 +24,7 @@ from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import run_sta
 from klayout_tools.post_route_sta_errors import PostRouteStaError
 from test_post_route_sta import (
+    _LIVE_ONLY,
     _STA_METRICS,
     _setup_multi_corner_env,
     _setup_verilog_success_env,
@@ -304,30 +305,7 @@ def test_run_sta_multi_corner_carries_the_field_per_corner(tmp_path, monkeypatch
 # -- live engine (openroad on PATH + PDK_ROOT with sky130A) ------------------ #
 
 
-def _live_sky130_env() -> str | None:
-    import os
-    import shutil
-
-    if shutil.which("openroad") is None:
-        return None
-    if os.environ.get("KLT_SKIP_OPENROAD_TESTS") == "1":
-        return None
-    if not os.environ.get("PDK_ROOT"):
-        return None
-    try:
-        post_route_sta._resolve_liberty(
-            "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
-        )
-    except PostRouteStaError:
-        return None
-    return "sky130A"
-
-
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_boundary_violating_endpoints(tmp_path):
     """Engine integration: the boundary request's two hold violators (the
     removal check and the `bus[1]` data hold behind `hold_violation_count:
