@@ -722,6 +722,7 @@
         "klayout_tools.pex_merged_pins",
         "klayout_tools.pex_net_correspondence",
         "klayout_tools.pex_netlist_text",
+        "klayout_tools.pex_probe_regions",
         "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_body_bias",
