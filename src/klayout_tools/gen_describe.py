@@ -75,12 +75,12 @@ from .gen_layer_params import (
     _cut_fixed_size_um,
     _deck_min_width_um,
     _device_implant,
+    _device_well_enclosure_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
-    _mos_array_well_enclosure_um,
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
@@ -385,12 +385,12 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
 
 
 def _sd_implant_hints(
-    family: str, params: dict[str, Any], notes: list[str], *, mos_array: bool = False
+    family: str, params: dict[str, Any], notes: list[str]
 ) -> dict[str, Any]:
     """Report the same layer and active enclosure used by the drawing PCell."""
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
-    layer, margin, _ = _device_implant(family, flavor, mos_array=mos_array)
+    layer, margin, _ = _device_implant(family, flavor)
     present = layer is not None and margin > 0
     if not present:
         notes.append(
@@ -606,7 +606,7 @@ def _mos_array_describe(
         pitch_x_um=params["pitch_x_um"],
         pitch_y_um=params["pitch_y_um"],
         top_endcap_um=_gate_top_endcap_um(family),
-        well_enclosure_um=_mos_array_well_enclosure_um(family, params),
+        well_enclosure_um=_device_well_enclosure_um(family, params),
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
@@ -762,7 +762,7 @@ def _mos_array_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
-    sd_implant_hints = _sd_implant_hints(family, params, notes, mos_array=True)
+    sd_implant_hints = _sd_implant_hints(family, params, notes)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"

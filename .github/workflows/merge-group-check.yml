@@ -1,0 +1,67 @@
+name: Merge-queue group check
+
+# Adapted from 2AMLogic/loom's optional merge-group-check.yml.
+# Recheck the commit status after CI completes. The first run can post pending.
+on:
+  merge_group:
+    types: [checks_requested]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: ['gh-readonly-queue/**']
+
+permissions: {}
+
+concurrency:
+  group: merge-group-check-${{ github.event.merge_group.head_sha || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  group-check:
+    name: Merge authorization
+    # Branch names alone do not establish the origin of a workflow run.
+    if: >-
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'merge_group' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: write
+    steps:
+      # Loom reads .loom/config.json and verifies the checkout's origin. Use
+      # protected main for configuration, including any statusCommand.
+      - name: Check out trusted Loom configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/heads/main
+          sparse-checkout: .loom
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install the pinned public Loom binary
+        env:
+          LOOM_VERSION: v0.20.20
+          LOOM_SHA256: 5624c9a97ee1d0cd9fa577a2a7b26b53aef167aefb5cfbaa2410ae3a6ec88d2a
+        run: |
+          set -euo pipefail
+          asset=loom-daemon-x86_64-unknown-linux-gnu
+          binary="$RUNNER_TEMP/loom-daemon"
+          curl --fail --silent --show-error --location --proto '=https' \
+            "https://github.com/2AMLogic/loom/releases/download/$LOOM_VERSION/$asset" \
+            --output "$binary"
+          printf '%s  %s\n' "$LOOM_SHA256" "$binary" | sha256sum --check -
+          chmod 0755 "$binary"
+
+      - name: Verify the merge-group commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GROUP_SHA: ${{ github.event.merge_group.head_sha || github.event.workflow_run.head_sha }}
+        run: |
+          "$RUNNER_TEMP/loom-daemon" forge merge-queue group-check \
+            --commit "$GROUP_SHA" --repo "$GH_REPO"

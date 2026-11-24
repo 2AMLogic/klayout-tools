@@ -124,7 +124,7 @@ def _with_timeout_override(
     }
 
 
-def _refuse_corner_only_flags(
+def refuse_corner_only_flags(
     request: dict[str, Any],
     pdk_root: str | None,
     timeout_s: float | None,

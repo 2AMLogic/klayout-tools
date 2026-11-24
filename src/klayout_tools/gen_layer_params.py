@@ -262,11 +262,9 @@ _PDK_SD_IMPLANT_MIN_SPACE_UM: dict[str, float] = {
 }
 
 
-def _device_implant(
-    family: str, flavor: str, *, mos_array: bool
-) -> tuple[Any, float, float]:
+def _device_implant(family: str, flavor: str) -> tuple[Any, float, float]:
     """Drawing layer, active enclosure and inter-island spacing, in µm."""
-    if mos_array and family == "sg13g2" and flavor == "pfet":
+    if family == "sg13g2" and flavor == "pfet":
         import klayout.db as kdb
 
         return kdb.LayerInfo(14, 0), 0.18, 0.31  # pSD.c and pSD.b
@@ -278,7 +276,7 @@ def _device_implant(
     )
 
 
-def _mos_array_well_enclosure_um(family: str, params: dict[str, Any]) -> float:
+def _device_well_enclosure_um(family: str, params: dict[str, Any]) -> float:
     if family == "sg13g2" and params.get("flavor") == "pfet":
         return 0.62 if params.get("voltage_flavor") == "hv" else 0.31  # NW.c1 / NW.c
     return WELL_ENCLOSURE_MARGIN_UM
@@ -1914,7 +1912,7 @@ def _resistor_strip_layer_params(
 
 
 def _device_layer_params(
-    pdk_info: dict[str, Any], params: dict[str, Any], *, mos_array: bool = False
+    pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
     """Hidden layer params for a generator drawing unit MOS-like devices
     (``mos_array``, and the device half of ``diff_pair``).
@@ -2004,9 +2002,7 @@ def _device_layer_params(
             "flavor='nfet'"
         )
     flavor = params.get("flavor", "nfet")
-    sd_implant, sd_implant_margin, sd_implant_space = _device_implant(
-        family, flavor, mos_array=mos_array
-    )
+    sd_implant, sd_implant_margin, sd_implant_space = _device_implant(family, flavor)
     npc = _role_layer_info(family, "npc")
     npc_margin = _PDK_NPC_MARGIN_UM.get(family, 0.0)
     # MOS capacitor (issue #3283): the marker layer must resolve and `w_um`
@@ -2064,6 +2060,7 @@ def _device_layer_params(
         "npc_present": npc is not None and npc_margin > 0,
         "npc_margin_um": npc_margin if npc is not None else 0.0,
         "npc_min_space_um": _PDK_NPC_MIN_SPACE_UM.get(family, 0.0),
+        "device_well_enclosure_um": _device_well_enclosure_um(family, params),
         "sd_implant_min_space_um": sd_implant_space,
     }
     if mos_cap_mark is not None:
@@ -2519,13 +2516,10 @@ def _mos_array_layer_params(
     ``*_layer``-without-a-``*_present``-gate default in this module."""
     import klayout.db as kdb
 
-    layer_params = _device_layer_params(pdk_info, params, mos_array=True)
+    layer_params = _device_layer_params(pdk_info, params)
     # Issue #3648: a family with a tap-distance rule gets tap pads even
     # without a ring, which need the ring role's tap/implant layers.
     family = _pdk_family(pdk_info["variant"])
-    layer_params["device_well_enclosure_um"] = _mos_array_well_enclosure_um(
-        family, params
-    )
     if params.get("add_guard_ring") or _tap_pads_wanted(family):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
