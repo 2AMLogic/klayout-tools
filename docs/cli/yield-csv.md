@@ -47,6 +47,10 @@ The estimator grades control values against the nominal measurement's limits.
 population are optional and independent of the control. They record the caller's
 run settings in `provenance`, echoed by `klt yield` under `source.provenance`.
 
+For per-draw waveform reductions, the campaign can retain its simulator version,
+netlist digest, seed sequence and spec row alongside the CSV-derived values.
+[Caller-driven transient-noise example](yield.md#ingesting-a-caller-driven-transient-noise-campaign)
+
 ## Exit codes
 
 | Exit code | Meaning |
