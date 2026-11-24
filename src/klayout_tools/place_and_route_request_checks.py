@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from ._power_activity import validate_power_activity
+from .place_and_route_multicycle import validated_entries as validate_multicycle_entries
 from .place_and_route_pins import check_io_pin_constraints
 from .place_and_route_request import (
     PlaceAndRouteError,
@@ -93,6 +94,7 @@ class _RequestLevelChecks(NamedTuple):
     portable_paths: bool
     output_dbu_um: float | None
     post_route_sdf: bool
+    multicycle: list[dict[str, Any]] | None
 
 
 def _validate_request_level(
@@ -200,6 +202,9 @@ def _validate_request_level(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
+    multicycle = validate_multicycle_entries(
+        request.get("constraints") or {}, clock_period_ns
+    )
     # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
     power_activity = validate_power_activity(
         request.get("constraints") or {}, PlaceAndRouteError
@@ -261,4 +266,5 @@ def _validate_request_level(
         portable_paths=portable_paths,
         output_dbu_um=output_dbu_um,
         post_route_sdf=post_route_sdf,
+        multicycle=multicycle,
     )

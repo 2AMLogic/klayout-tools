@@ -1,1 +1,1 @@
-- Standalone STA accepts structured generated clocks and reports each derived clock's measured period and register count.
+- Standalone STA accepts structured generated clocks and reports each derived clock's measured period and register count (#6925).
