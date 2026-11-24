@@ -350,7 +350,8 @@ def _capture_stub_yosys(monkeypatch, *, abc_log_text, stats_dump, top="gcd"):
         )
         write(f"{cwd}/gcd_synth.v", "// fake mapped netlist\n")
         write(f"{cwd}/gcd_abc.log", abc_log_text)
-        write(f"{cwd}/{recovery.ABC_STATS_DUMP_FILENAME}", stats_dump)
+        if stats_dump is not None:
+            write(f"{cwd}/{recovery.ABC_STATS_DUMP_FILENAME}", stats_dump)
         return fake_completed(returncode=0, stdout="run\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)

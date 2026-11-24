@@ -76,6 +76,16 @@ def split_spice_tokens(line: str) -> list[str]:
     return merged
 
 
+def spice_nodes(tokens: list[str]) -> list[str]:
+    """Read positional nodes, including comma-separated and parenthesized lists."""
+    nodes: list[str] = []
+    for token in tokens:
+        if token.startswith("(") and token.endswith(")"):
+            token = token[1:-1]
+        nodes.extend(split_spice_tokens(token.replace(",", " ")))
+    return nodes
+
+
 def split_card_assignments(
     tokens: list[str],
 ) -> tuple[list[tuple[str, str]], str | None]:

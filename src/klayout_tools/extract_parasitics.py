@@ -6,8 +6,8 @@ helpers for inter-layer ports, masks and net area/perimeter, the fragment
 square measurements in :mod:`klayout_tools.extract_fragment_resistance`, the lumped
 R/C model (:func:`_compute_parasitics`) and its dead-metal cross-check
 (:func:`_detect_dead_metal`), the star/distributed-ladder topology helpers
-(:func:`_terminal_star_positions_um`, :func:`_terminal_star_weights`,
-:func:`_distributed_rc_order`, :func:`_distributed_rc_segments`), the writer
+(moved to :mod:`klayout_tools.extract_terminal_topology` by issue #6899,
+which pays for its reduced-network emission growth with the move), the writer
 that turns a computed model into netlist devices
 (:func:`_inject_parasitics`, 518 lines), the per-net emitted-network
 integrity record that writer feeds
@@ -41,7 +41,6 @@ in ``extract_base``.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
@@ -88,6 +87,18 @@ from .extract_parasitic_body import (
 )
 from .extract_parasitic_body import (
     star_hub_only_indices as star_hub_only_indices,
+)
+from .extract_resistance_network import reduced_network_plan
+from .extract_terminal_topology import (
+    _distributed_rc_order,  # noqa: F401 -- re-export; tests import it from here
+    _distributed_rc_segments,
+    _terminal_star_positions_um,
+)
+from .extract_terminal_topology import (
+    _terminal_star_weights as _terminal_star_weights,
+)
+from .extract_terminal_topology import (
+    emit_reduced_network as _emit_reduced_network,
 )
 from .parasitic_integrity import (
     GROUND_OWNER,
@@ -1696,165 +1707,6 @@ def _detect_dead_metal(
     return dead_metal
 
 
-def _terminal_star_positions_um(terminal_refs: list[Any]) -> list[tuple[float, float]]:
-    """The approximate ``(x_um, y_um)`` location of each of ``terminal_refs``,
-    read from its owning device's ``Device.trans`` (already reported in real
-    micrometres -- unlike most of this module, no ``dbu`` scaling is needed).
-
-    This is a **coarse** proxy for a terminal's true physical location
-    (issue #592): KLayout's connectivity extraction records one placement
-    transform per *device* (typically the center of its recognition shape),
-    not a distinct position per terminal, so every terminal on the same
-    device instance shares that device's single location. Good enough to
-    rank a net's terminals by their approximate spread for the star-topology
-    resistance split; not a substitute for true per-segment routing
-    measurement (out of scope -- issue #592's deferred Option 2)."""
-    positions: list[tuple[float, float]] = []
-    for ref in terminal_refs:
-        disp = ref.device().trans.disp
-        positions.append((disp.x, disp.y))
-    return positions
-
-
-def _terminal_star_weights(positions: list[tuple[float, float]]) -> list[float]:
-    """Normalized (sum to ``1.0``) per-terminal resistance-split weights for
-    the star topology: proportional to each position's Euclidean distance
-    from the centroid of ``positions``, so a terminal placed farther from a
-    net's other terminals is assigned more of that net's total resistance --
-    a coarse, position-aware stand-in for "farther terminals see more
-    interconnect" without a full per-segment routing model (issue #592).
-
-    Degenerates to an equal ``1/N`` split when every position coincides
-    (including ``N == 1``, where the lone terminal necessarily sits at the
-    "centroid") -- this is what makes a single-terminal net's star reduce to
-    exactly the pre-#592 Gamma-shunt's one lumped resistor: same total value,
-    not a smaller or larger one."""
-    n = len(positions)
-    if n == 0:
-        return []
-    cx = sum(p[0] for p in positions) / n
-    cy = sum(p[1] for p in positions) / n
-    distances = [math.hypot(x - cx, y - cy) for x, y in positions]
-    total = sum(distances)
-    if total <= 0.0:
-        return [1.0 / n] * n
-    return [d / total for d in distances]
-
-
-def _distributed_rc_order(positions: list[tuple[float, float]]) -> list[int]:
-    """An index permutation of ``positions`` approximating a physical tap
-    order along a net's dominant spread axis (``--distributed-rc``, issue
-    #977, Epic #709 Phase 2b): a ladder needs a linear chain, not an
-    unordered set, so terminals must be placed in *some* sequence before
-    :func:`_distributed_rc_segments` can derive adjacent-pair segment R/C.
-
-    Finds the pair of positions with the greatest pairwise Euclidean
-    distance (the same coarse "how spread out is this net" signal
-    :func:`_terminal_star_weights` already leans on), projects every
-    position onto the axis between that pair, and sorts by the projection
-    -- a deterministic, position-only proxy for "which end is which" that
-    needs no routing/skeleton geometry (:func:`_terminal_star_positions_um`'s
-    own docstring: terminal position is a device-placement proxy, not true
-    routed geometry).
-
-    Degenerates to the input order (``[0, 1, ..., n - 1]``) for ``n <= 2``
-    (nothing to order between two points) and whenever every position
-    coincides (the projection axis is undefined) -- harmless, since every
-    segment length is then ``0.0`` too and :func:`_distributed_rc_segments`'s
-    equal-split fallback takes over regardless of order.
-    """
-    n = len(positions)
-    if n <= 2:
-        return list(range(n))
-
-    best_pair = (0, 1)
-    best_dist = -1.0
-    for i in range(n):
-        xi, yi = positions[i]
-        for j in range(i + 1, n):
-            xj, yj = positions[j]
-            dist = math.hypot(xj - xi, yj - yi)
-            if dist > best_dist:
-                best_dist = dist
-                best_pair = (i, j)
-    if best_dist <= 0.0:
-        return list(range(n))
-
-    ai, aj = best_pair
-    ax, ay = positions[ai]
-    bx, by = positions[aj]
-    ux, uy = bx - ax, by - ay
-    norm = math.hypot(ux, uy)
-    ux, uy = ux / norm, uy / norm
-    projections = [
-        ((x - ax) * ux + (y - ay) * uy, idx) for idx, (x, y) in enumerate(positions)
-    ]
-    projections.sort(key=lambda item: (item[0], item[1]))
-    return [idx for _, idx in projections]
-
-
-def _distributed_rc_segments(
-    positions: list[tuple[float, float]],
-    r_total_ohm: float,
-    c_total_ff: float,
-) -> tuple[list[int], list[float], list[float]]:
-    """Break one net's total lumped resistance/capacitance into a chain
-    ("ladder") along ``positions``' approximate physical order, for
-    ``--distributed-rc`` (issue #977, Epic #709 Phase 2b) -- the multi-
-    segment alternative to :func:`_inject_parasitics`'s star topology.
-
-    Returns ``(order, segment_r_ohm, node_c_ff)``, all keyed to
-    ``positions``' own indices:
-
-    - ``order``: :func:`_distributed_rc_order`'s index permutation (length
-      ``N``, one entry per terminal) -- the ladder's node sequence.
-    - ``segment_r_ohm``: ``N - 1`` per-segment series resistances, one
-      between each adjacent pair in ``order``. Each segment's share of
-      ``r_total_ohm`` is proportional to that pair's Euclidean distance
-      (its approximate physical length), so the segments always sum back
-      to exactly ``r_total_ohm`` -- the same "legs sum back to the net's
-      total" invariant :func:`_terminal_star_weights` already guarantees
-      for the star topology.
-    - ``node_c_ff``: ``N`` per-terminal ground capacitances, in ``order``'s
-      sequence. Each terminal's share of ``c_total_ff`` is the *average* of
-      its one or two adjacent segments' length share (an interior node
-      touches two segments, an end node touches one) -- the standard "half
-      the capacitance of each adjoining segment" lumped-element
-      discretization of a distributed RC line. Node capacitances also sum
-      back to exactly ``c_total_ff``.
-
-    Degenerates to an equal split (``r_total_ohm / (N - 1)`` per segment,
-    ``c_total_ff / N`` per node) when every position coincides -- the same
-    "no spatial signal available" fallback :func:`_terminal_star_weights`
-    already uses, and still conserves both totals.
-
-    ``positions`` must have at least 2 entries -- a distributed ladder needs
-    at least one segment; a net with 0 or 1 terminal has nothing to chain
-    and stays on the star/Gamma-shunt path in :func:`_inject_parasitics`.
-    """
-    order = _distributed_rc_order(positions)
-    n = len(order)
-    ordered = [positions[i] for i in order]
-    seg_lengths = [
-        math.hypot(ordered[i + 1][0] - ordered[i][0], ordered[i + 1][1] - ordered[i][1])
-        for i in range(n - 1)
-    ]
-    total_length = sum(seg_lengths)
-
-    if total_length <= 0.0:
-        segment_r_ohm = [r_total_ohm / (n - 1)] * (n - 1)
-        node_c_ff = [c_total_ff / n] * n
-        return order, segment_r_ohm, node_c_ff
-
-    segment_r_ohm = [r_total_ohm * (length / total_length) for length in seg_lengths]
-    node_c_ff = []
-    for i in range(n):
-        adjacent_lengths = seg_lengths[max(i - 1, 0) : min(i + 1, n - 1)]
-        share = sum(adjacent_lengths) / (2.0 * total_length)
-        node_c_ff.append(c_total_ff * share)
-    return order, segment_r_ohm, node_c_ff
-
-
 def _tag_slice_origin(node: kdb.Net, origin_id: int, enabled: bool) -> None:
     """Tag ``node`` as part of original net ``origin_id``'s parasitic chain
     (issue #2245) -- a no-op unless ``enabled``.
@@ -1980,6 +1832,7 @@ def _inject_parasitics(
     variants: ParasiticVariants | None = None,
     substrate_tie_ohms: float | None = None,
     emit_selected_resistance: bool = False,
+    emit_resistance_network: bool = False,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -1995,6 +1848,19 @@ def _inject_parasitics(
     block, or a ``--mom-rlc-resistance-ohm`` override) keeps
     ``resistance_ohm``. ``False`` (the default, and what ``klt extract``
     always passes) is the legacy-scalar netlist.
+
+    ``emit_resistance_network`` (issue #6899, internal -- only ``klt pex
+    --resistance-network`` sets it, which also sets
+    ``emit_selected_resistance``) writes the Kron-reduced terminal network
+    of :func:`klayout_tools.extract_resistance_network` in place of the star
+    for every net whose graph solved ``ok`` with three or more terminals
+    and whose device terminals map one-to-one onto its graph terminals; two
+    terminal graph nets keep the ``emit_selected_resistance`` scalar, and
+    every other net keeps the star/Gamma-shunt model, reported per net in
+    the additive ``resistance_graph.network`` block. Requires
+    ``resistance_graph=True`` and refuses ``--spef`` (the SPEF writer
+    models the star/ladder only). ``False`` (the default) is byte-identical
+    to before.
 
     ``mom_rlc_inductor`` (``(net_name, inductance_nh)``, issue #988, Epic
     #709 Phase 3a) -- ``None`` unless ``--mom-rlc-net`` was given together
@@ -2263,6 +2129,10 @@ def _inject_parasitics(
             _lumped_resistance_ohm(entry, emit_selected_resistance),
             _MIN_PARASITIC_R_OHM,
         )
+        # What the emitted netlist actually carries for this net (issue
+        # #6899): the lumped scalar on every pre-existing path, the summed
+        # pair resistors on the reduced-network path below.
+        emitted_r_ohm = r_total_ohm
         c_farad = entry["capacitance_ff"] * 1e-15
         net_escaped = spice_safe_net_name(entry["net"])
         drop_r = variants is not None and variants.drops_r(net_escaped)
@@ -2271,6 +2141,26 @@ def _inject_parasitics(
         # Snapshot before mutating: moving a terminal off `net` below changes
         # what `net.each_terminal()` would yield mid-iteration.
         terminal_refs = list(net.each_terminal())
+
+        # `--resistance-network` (issue #6899): the per-net plan for the
+        # graph-reduced terminal network, and its additive report block
+        # (both built in `_reduced_network_plan`/`_reduced_network_report`,
+        # keeping this complexity-baselined function's own branching flat).
+        # A `drop-r`/`drop-c-ground` variant or a `--mom-rlc-net` R override
+        # keeps the net on the star path below (the override/variant must
+        # win), so only a clean plan takes the reduced branch.
+        # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
+        # stay on the hub -- all of them under `drop-r`, only the
+        # body-class ones under `drop-r-body`, none otherwise.
+        hub_only = star_hub_only_indices(variants, net_escaped, drop_r, terminal_refs)
+        network, mapping = reduced_network_plan(
+            entry,
+            terminal_refs,
+            emit_resistance_network=emit_resistance_network,
+            variant_dropped_r=drop_r or bool(hub_only),
+            variant_dropped_c=drop_c,
+            emit_selected_resistance=emit_selected_resistance,
+        )
 
         terminal_reports: list[dict[str, Any]] = []
         segment_reports: list[dict[str, Any]] = []
@@ -2406,16 +2296,46 @@ def _inject_parasitics(
             # `entry["net"]`, exactly the star topology's own convention.
             hub = legs[mid_index]
             hub_name = leg_names[mid_index]
+        elif network is not None:
+            # Graph-reduced terminal network (issue #6899): the Kron
+            # reduction of the net's solved resistance graph, one resistor
+            # per surviving terminal pair between per-terminal leg nets --
+            # see `_emit_reduced_network`'s docstring for the topology.
+            # `mapping` and the graph report are non-None whenever a plan
+            # succeeded, by `reduced_network_plan`'s own construction.
+            rc_model = "reduced"
+            (
+                hub,
+                hub_name,
+                leg_uids,
+                terminal_reports,
+                device_count,
+                emitted_r_ohm,
+            ) = _emit_reduced_network(
+                circuit,
+                res_class,
+                cap_class,
+                ground,
+                ground_uid,
+                integ,
+                entry,
+                net,
+                net_uid,
+                terminal_refs,
+                entry["resistance_graph"],
+                network,
+                mapping,
+                existing_names,
+                instance_name,
+                origin_id,
+                record_slice_topology,
+            )
+            net_c_count = device_count - len(network.resistors)
+            total_r_count += len(network.resistors)
         elif terminal_refs:
             hub = net
             hub_name = entry["net"]
             positions = _terminal_star_positions_um(terminal_refs)
-            # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
-            # stay on the hub -- all of them under `drop-r`, only the
-            # body-class ones under `drop-r-body`, none otherwise.
-            hub_only = star_hub_only_indices(
-                variants, net_escaped, drop_r, terminal_refs
-            )
             weights = body_adjusted_star_weights(positions, hub_only)
             for i, (term_ref, weight) in enumerate(
                 zip(terminal_refs, weights, strict=True)
@@ -2559,7 +2479,7 @@ def _inject_parasitics(
         r_dropped = drop_r and rc_model == "lumped"
         c_dropped = drop_c and rc_model == "lumped"
         emitted_c_ff = 0.0 if c_dropped else entry["capacitance_ff"]
-        total_r += 0.0 if r_dropped else r_total_ohm
+        total_r += 0.0 if r_dropped else emitted_r_ohm
         total_c_ff += emitted_c_ff
         total_c_count += net_c_count
         # Issue #2764: declare this net's emitted topology to the integrity

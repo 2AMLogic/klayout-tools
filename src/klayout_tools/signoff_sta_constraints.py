@@ -87,9 +87,17 @@ def sta_exception_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def sta_citation_detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
-    """Attach the exception detail to its own citation in a compound item."""
-    detail = sta_exception_disclosure(envelope) if kind == "sta" else {}
-    return {"detail": detail} if detail else {}
+    """Attach the STA disclosures to its own citation in a compound item: the
+    envelope's ``geometry_source`` (issue #7711 -- always disclosed, never
+    graded unless ``require_routed_geometry``) and any exception detail."""
+    if kind != "sta":
+        return {}
+    return {
+        "detail": {
+            "geometry_source": envelope.get("geometry_source"),
+            **sta_exception_disclosure(envelope),
+        }
+    }
 
 
 def sta_item_exception_detail(item_id: int, extra: dict[str, Any]) -> dict[str, Any]:
@@ -97,7 +105,7 @@ def sta_item_exception_detail(item_id: int, extra: dict[str, Any]) -> dict[str, 
     if item_id != 5:
         return {}
     details = [
-        c["detail"]
+        {"applied_exceptions": c["detail"]["applied_exceptions"]}
         for c in extra.get("citations", [])
         if c.get("kind") == "sta" and "applied_exceptions" in c.get("detail", {})
     ]
