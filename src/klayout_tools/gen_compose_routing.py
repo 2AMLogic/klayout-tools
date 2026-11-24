@@ -106,6 +106,7 @@ from .gen_compose_layer_rules import (
 from .gen_compose_layer_rules import (
     _resolve_landing_pad_sizes as _resolve_landing_pad_sizes,
 )
+from .gen_compose_pad_notch import _pad_introduced_notches_dbu
 from .gen_compose_plane_change import (
     RouteConflict as RouteConflict,
 )
@@ -1869,10 +1870,12 @@ def _pad_self_notch_violation_um(
     ``region.merge()``, literally the same polygon; the violation is a
     self-notch of *that* polygon, not a conflict between two separate ones.
 
-    Returns the closest found spacing (um), or ``None`` when nothing in the
-    merged shape violates ``spacing_um`` (including when ``spacing_um`` is
-    non-positive, or the pad does not even reach the block's own geometry at
-    the resolution ``geometry["dbu"]`` provides).
+    Only a notch the *pad introduces* counts (#6314, ``gen_compose_pad_notch``);
+    one the block already carries is left to ``klt drc``. Returns the closest
+    introduced spacing (um), or ``None`` when the pad
+    introduces none narrower than ``spacing_um`` (including when ``spacing_um``
+    is non-positive, or the pad does not even reach the block's own geometry
+    at the resolution ``geometry["dbu"]`` provides).
     """
     import klayout.db as kdb
 
@@ -1882,21 +1885,17 @@ def _pad_self_notch_violation_um(
         return None
 
     x0_um, y0_um, x1_um, y1_um = pad_box_um
-    combined = kdb.Region()
-    combined.insert(geometry["region"])
-    combined.insert(
+    widths = _pad_introduced_notches_dbu(
+        geometry["region"],
         kdb.Box(
             int(round(x0_um / dbu)),
             int(round(y0_um / dbu)),
             int(round(x1_um / dbu)),
             int(round(y1_um / dbu)),
-        )
+        ),
+        spacing_dbu,
     )
-    combined.merge()
-    violations = combined.notch_check(spacing_dbu)
-    if violations.is_empty():
-        return None
-    return min(edge_pair.distance() for edge_pair in violations) * dbu
+    return min(widths) * dbu if widths else None
 
 
 def _leg_block_spacing_violation_um(

@@ -44,6 +44,7 @@ from .place_and_route_batch_job import (
     BATCH_TREE_FILENAME,
     build_job_spec,
 )
+from .place_and_route_request_checks import _validate_request_level
 
 #: The host-default variable, shared with ``klt sim`` (2am#1004).
 BACKEND_ENV = sim.BACKEND_ENV
@@ -360,13 +361,12 @@ def _local_deck_hash(
 def _preflight(
     request: dict[str, Any], request_dir: str, pdk_variant: str | None
 ) -> tuple[str | None, str, list[tuple[str, str]], float, sim_batch.BatchConfig]:
-    """The request-level checks done before any upload: the netlist hash, the
-    cell library, the packaged tree, the job timeout and the fleet config."""
-    netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _provenance.content_hash(netlist_path)
-    cell_library = request["pdk"].get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    """The checks done before any upload. The local backend's whole request
+    contract runs first (#7583), so a request defect is one error before any
+    fleet spend and outranks a packaging or fleet-config problem."""
+    checks = _validate_request_level(request, request_dir)
+    input_hash = _provenance.content_hash(checks.netlist_path)
+    cell_library = checks.cell_library
     files = package_tree(request, request_dir)
     timeout_s = _job_timeout_s(request)
     config = _resolve_config(request, pdk_variant, timeout_s)
