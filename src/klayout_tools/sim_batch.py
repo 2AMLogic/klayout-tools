@@ -105,6 +105,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     _batch_common,
     _provenance,
+    _warn,
     remote_transport,
     sim_batch_image,
     sim_batch_observer,
@@ -844,7 +845,7 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
             "anyway; see docs/cli/sim.md)",
             code=BATCH_RUNNER_MISMATCH_CODE,
         )
-    print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {message}; submitting anyway")
 
 
 def _feature_diagnostic(
@@ -909,7 +910,7 @@ def _enforce_published_runner_features(
             code=BATCH_RUNNER_FEATURE_CODE,
         )
     if assessment["check"] != "enforce":
-        print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+        _warn.warn(f"klt sim: warning: {message}; submitting anyway")
         return _feature_diagnostic(
             missing, versions, assessment["client_klt_version"], "manifest"
         )
@@ -1057,7 +1058,7 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             'request.batch.job_ceiling_check to "warn" to submit anyway)',
             code=BATCH_JOB_CEILING_CODE,
         )
-    print(f"klt sim: warning: {warning}", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {warning}")
 
 
 # --------------------------------------------------------------------------- #
@@ -2630,10 +2631,7 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             handle.write("\n")
         os.replace(tmp_path, path)
     except OSError as exc:
-        print(
-            f"klt sim: warning: could not write batch receipt {path}: {exc}",
-            file=sys.stderr,
-        )
+        _warn.warn(f"klt sim: warning: could not write batch receipt {path}: {exc}")
         try:
             os.unlink(tmp_path)
         except OSError:
