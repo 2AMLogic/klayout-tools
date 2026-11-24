@@ -869,7 +869,7 @@ def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
     for var in OPT_IN_DECK_VARS:
         assert f"${var} = nil unless defined? ${var}" in text
     # The default contract is untouched: nothing opt-in leaked into RULES.
-    assert len(RULE_IDS) == 268
+    assert len(RULE_IDS) == 271
 
 
 def test_docs_list_opt_in_grid_rules_and_vars():
