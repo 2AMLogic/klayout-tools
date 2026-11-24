@@ -27,11 +27,10 @@ with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_measurement_kind, sim_raw, sim_snm
+from . import sim_measurement_kind, sim_snm
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
@@ -189,26 +188,17 @@ class SnmOutcome:
 def _analyze_triple(raw_path: str) -> sim_snm.SnmResult | SnmOutcome:
     """The SNM for one triple's rawfile, or a triple-level failure outcome
     (the caller prefixes the measurement name)."""
-    if not os.path.isfile(raw_path):
-        return SnmOutcome(
-            code="snm_vector_missing",
-            error=(
-                "its x, y1 or y2 vector did not resolve against this DC "
-                "analysis's saved vectors (no rawfile was written) -- check "
-                "the node names, and that options.save_mode does not omit them"
-            ),
-        )
-    try:
-        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
-    except sim_raw.RawFileError as exc:
-        return SnmOutcome(
-            code="snm_raw_invalid", error=f"could not read its rawfile: {exc}"
-        )
-    if len(raw.names) != 4 or not raw.points:
-        return SnmOutcome(
-            code="snm_raw_invalid",
-            error="its rawfile must hold a sweep axis, x, y1 and y2 with samples",
-        )
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="snm",
+        columns=4,
+        vector_desc="x, y1 or y2",
+        analysis_label="DC",
+        expected_columns="a sweep axis, x, y1 and y2",
+    )
+    if error is not None:
+        return SnmOutcome(code=error[0], error=error[1])
+    assert raw is not None
     columns = [[z.real for z in raw.column(i)] for i in (1, 2, 3)]
     try:
         return sim_snm.analyze_snm(*columns)

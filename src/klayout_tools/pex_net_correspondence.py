@@ -20,6 +20,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .pex_errors import PexError
+from .pex_probe_regions import net_probe_regions
 
 
 def _is_anonymous(name: str) -> bool:
@@ -310,24 +311,21 @@ def build_probes(
             {"runset_cluster_id": net.cluster_id, "reason": "coordinate_mismatch"}
             for net in circuit.each_net()
         ]
-    roles.update(dict.fromkeys(landings, "metal0"))
-    layers = sorted(roles.keys() | uncertain.keys())
+    probe_roles = {**roles, **dict.fromkeys(landings, "metal0")}
     probes = []
     incomplete = []
     for net in circuit.each_net():
-        for layer in layers:
-            region = lvs.polygons_of_net(net, layer, True)
-            if region is None or region.is_empty():
-                continue
-            if layer in landings:
-                region = region & landings[layer]
-            candidates = [roles[layer]] if layer in roles else uncertain[layer]
+        regions = net_probe_regions(lvs, net, roles, uncertain, landings)
+        for layer, region in regions.items():
+            candidates = (
+                [probe_roles[layer]] if layer in probe_roles else uncertain[layer]
+            )
             points, gaps = _layer_probes(
                 region,
                 net.cluster_id,
                 layer,
                 candidates,
-                certain=layer in roles,
+                certain=layer in probe_roles,
                 dbu_um=layout.dbu,
             )
             probes.extend(points)

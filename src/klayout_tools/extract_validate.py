@@ -55,6 +55,24 @@ def _validate_report_parasitics(report_parasitics: Any, spef_output: Any) -> Non
         raise ExtractError("--report-parasitics slim requires --spef")
 
 
+def _require_resistance_graph_for_network(
+    emit_resistance_network: Any, resistance_graph: Any, spef_output: Any
+) -> None:
+    """``emit_resistance_network`` (issue #6899) reduces the graph result
+    and cannot be rendered as SPEF (the SPEF writer models the
+    star/ladder). Lives here, beside its call site, rather than in
+    ``extract.py`` (size-ratcheted)."""
+    if not emit_resistance_network:
+        return
+    if not resistance_graph:
+        raise ExtractError("emit_resistance_network requires resistance_graph")
+    if spef_output is not None:
+        raise ExtractError(
+            "emit_resistance_network cannot be combined with --spef: the "
+            "SPEF writer models the star/ladder topologies only"
+        )
+
+
 def _require_parasitics_for_resistance_graph(
     resistance_graph: bool, parasitics: bool
 ) -> None:
@@ -102,6 +120,7 @@ def validate_run_extract_args(
     resistance_graph_r_cut_ohm: Any,
     resistance_graph_caps: Any,
     emit_selected_resistance: Any,
+    emit_resistance_network: Any,
     critical_net_patterns: Any,
     critical_net_all: Any,
     critical_net_excludes: Any,
@@ -185,6 +204,9 @@ def validate_run_extract_args(
     # their rules live with the cap table, so both stay one source of truth.
     validate_resistance_graph_caps(resistance_graph, resistance_graph_caps)
     _require_resistance_graph_for_emit(emit_selected_resistance, resistance_graph)
+    _require_resistance_graph_for_network(
+        emit_resistance_network, resistance_graph, spef_output
+    )
 
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -158,6 +158,22 @@ class _CapacityWatch:
     def launched(self, index: int) -> None:
         with self._lock:
             self._waiting.discard(index)
+
+    def start_retry_pass(self, refused: Collection[int]) -> None:
+        """Re-base the pending count for a ``--capacity-retries`` pass (#6535).
+
+        :meth:`finished` runs once per shard *attempt*, so a shard re-run by a
+        retry pass would be counted done a second time and the ``K of M
+        shards pending`` line would drift to 0 and then below. Only the
+        ``refused`` shards are outstanding in the new pass (every other shard
+        already reached its terminal outcome), so ``_finished`` restarts at
+        ``_total - len(refused)`` and each retry attempt's ``finished`` then
+        counts it down once. Lifecycle states, launch-rate history and
+        emission throttling are run-wide and left alone; waiting membership
+        is rebuilt by the pass's own refusals."""
+        with self._lock:
+            self._finished = self._total - len(set(refused))
+            self._waiting.clear()
 
     def finished(self, index: int) -> None:
         with self._lock:

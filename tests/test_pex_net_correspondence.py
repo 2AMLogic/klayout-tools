@@ -122,7 +122,7 @@ def fake_klayout(monkeypatch, tmp_path):
     return state
 
 
-def _merged(tmp_path, fake_klayout):
+def _merged(tmp_path, fake_klayout, *, pins=None, rename=False):
     gds = tmp_path / "inv.gds"
     _write_fixture(str(gds))
     deck_file = tmp_path / "pdk.lvs"
@@ -138,8 +138,8 @@ def _merged(tmp_path, fake_klayout):
         label_layers=None,
         device_models=None,
         deck_options=None,
-        declared_pins=None,
-        rename_declared_pins=False,
+        declared_pins=pins,
+        rename_declared_pins=rename,
         tie_declared_pins=False,
         critical_nets=None,
         critical_net_patterns=None,

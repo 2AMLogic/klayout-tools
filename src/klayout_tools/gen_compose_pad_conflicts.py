@@ -122,11 +122,17 @@ def _leg_conflict_message(
     #1057 overlap test; the electrical-contact test (#7024, #7221) -- a
     shared edge or corner, on the primary entry and the #1913
     intermediate/far pad entries alike, whatever the deck's space rules
-    say; then the #1386 spacing-aware test on the primary entry only
-    (``check_spacing``). The overlap and spacing tests consult
+    say; then the #1386 spacing test wherever the caller enables
+    ``check_spacing``. The overlap and spacing tests consult
     :func:`_landing_pad_conflict_reason` first so a conflict at a landing
     pad names pad-vs-pitch instead of a generic backbone crossing. Returns
     ``None`` when no test fires -- the caller keeps looping.
+
+    The #1386 spacing test grows the candidate by the deck's own same-layer
+    ``"space"`` threshold (``kdb.Region.sized`` -- the standard "distance < d"
+    Minkowski-sum test, symmetric regardless of which side grows) and
+    intersects that with the other region. A layer with no known ``"space"``
+    rule keeps the overlap and contact tests only (#6961).
 
     The overlap and spacing messages (and their thresholds) are
     byte-identical to the pre-#5803 wording. What they say changes only
