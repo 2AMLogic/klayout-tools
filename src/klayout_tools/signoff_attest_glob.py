@@ -22,9 +22,9 @@ inventory is refused with a message naming the required version, so an older
 "literal path" forever, which is why the glob form is a mapping, not a
 string).
 
-Like :mod:`signoff_attest_item9`, this module does not import
-:mod:`signoff_attest` at module level (which imports us): the error class and
-the path validator are imported lazily.
+This module does not import :mod:`signoff_attest` at module level (which
+imports us): the path validator is imported lazily. The error class comes
+from the leaf :mod:`signoff_base`.
 """
 
 from __future__ import annotations

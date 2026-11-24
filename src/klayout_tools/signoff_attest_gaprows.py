@@ -10,9 +10,10 @@ dropping it from the inventory.
 The shape validator and the check builders are shared here so the two items
 cannot drift (issue #5856 generalised item 9's helpers); an item's own
 policy -- item 8 cross-checks each row against ``spec_rows`` and
-``citations`` -- stays with the item. ``AttestationError`` is imported
-lazily, the same way :mod:`klayout_tools.signoff_attest_item9` does it:
-``signoff_attest`` imports this module's users.
+``citations`` -- stays with the item. ``AttestationError`` comes from the
+leaf :mod:`klayout_tools.signoff_base`, so refusing a malformed row needs no
+import of :mod:`klayout_tools.signoff_attest` (which imports this module's
+users).
 """
 
 from __future__ import annotations
