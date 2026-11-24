@@ -79,6 +79,29 @@ def test_parenthesized_pin_list_validation_preserves_target_offset():
         pex_binding.retarget_calls("Xcall (a b c) RES", "RES", "LAYOUT", 2)
 
 
+@pytest.mark.parametrize(
+    ("pins", "count"),
+    [
+        ("(RES b) c", 3),
+        ("RES (b c)", 3),
+        ("(RES) (b)", 2),
+        ("(RES,b) c", 3),
+        ("(RES b)\n+ c", 3),
+    ],
+)
+def test_mixed_pin_groups_preserve_the_instance_card(pins, count):
+    prefix = f"Xm {pins} "
+    suffix = " PARAMS: m=2 ; RES\n"
+    assert pex_binding.retarget_calls(prefix + "rEs" + suffix, "RES", "PHY", count) == (
+        prefix + "PHY" + suffix
+    )
+
+
+def test_mixed_pin_groups_reject_wrong_arity():
+    with pytest.raises(ValueError, match="^instance 'Xm' has 3 nodes for 2 pins$"):
+        pex_binding.retarget_calls("Xm (a b) c RES\n", "RES", "PHY", 2)
+
+
 def test_only_instance_target_tokens_change():
     body = (
         "* Xcomment a b rEs\n.control\nxdisplay a b rEs\n.endc\n"
