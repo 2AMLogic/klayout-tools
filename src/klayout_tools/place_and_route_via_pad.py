@@ -369,8 +369,8 @@ def trim_via_pads(
         report["m1_landing_pairs_extended"] = repair_m1_landing_pairs(
             kdb, layout, top_cell, lef_to_gds, report=report
         )
-        report["m1_v1_enclosures_repaired"] = repair_m1_v1_enclosures(
-            kdb, layout, top_cell, lef_to_gds
+        report["m1_v1_enclosures_repaired"], report["m1_v1_enclosures_remaining"] = (
+            repair_m1_v1_enclosures(kdb, layout, top_cell, lef_to_gds)
         )
     drcfill_regions, drcfill_scan = _drcfill_regions(
         kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu

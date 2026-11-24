@@ -52,24 +52,33 @@ def _protected(kdb, top, cut, cut_index, other_masks, label_index, extra):
     return not labels.interacting(extra).is_empty()
 
 
-def _extension(kdb, cut, pad, metal, dbu, protected):
-    source = kdb.Region([s.polygon for s in metal.each_touching(cut)])
-    source = source.interacting(kdb.Region(cut))
+def _source(kdb, metal, cut):
+    shapes = kdb.Region([s.polygon for s in metal.each_touching(cut)])
+    return shapes.interacting(kdb.Region(cut))
+
+
+def _missing_enclosures(kdb, cut, source, dbu):
+    candidates = []
+    for box in _enclosure_boxes(
+        kdb, cut, _nm_to_dbu_ceil(5, dbu), _nm_to_dbu_ceil(2, dbu)
+    ):
+        extra = kdb.Region(box) - source
+        if extra.is_empty():
+            return []
+        candidates.append((box, extra))
+    return candidates
+
+
+def _extension(kdb, cut, pad, source, candidates, metal, dbu, protected):
     # A bare via pad carries no evidence of attached cell or route metal.
     if source.count() != 1 or (source - kdb.Region(pad)).is_empty():
-        return None
-    boxes = list(
-        _enclosure_boxes(kdb, cut, _nm_to_dbu_ceil(5, dbu), _nm_to_dbu_ceil(2, dbu))
-    )
-    additions = [kdb.Region(box) - source for box in boxes]
-    if any(extra.is_empty() for extra in additions):
         return None
     # Include both ends of every possible spacing pair; retain complete
     # polygons because M1 spacing depends on the length of the facing edges.
     window = kdb.Region(cut.enlarged(_nm_to_dbu_ceil(75, dbu)))
     search = window.bbox().enlarged(_nm_to_dbu_ceil(40, dbu))
     nearby = kdb.Region([s.polygon for s in metal.each_touching(search)])
-    for box, extra in zip(boxes, additions, strict=True):
+    for box, extra in candidates:
         trial = kdb.Region(box)
         if nearby.interacting(trial).count() != 1 or protected(cut, extra):
             continue
@@ -78,13 +87,13 @@ def _extension(kdb, cut, pad, metal, dbu, protected):
     return None
 
 
-def repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds) -> int:
+def repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds) -> tuple[int, int]:
     """Add only top-cell M1, preserving the shared masters and non-target cuts."""
     if lef_to_gds.get("M1") != (19, 0) or lef_to_gds.get("V1", (21, 0)) != (21, 0):
-        return 0
+        return 0, 0
     metal_index, cut_index = layout.find_layer(19, 0), layout.find_layer(21, 0)
     if metal_index is None or cut_index is None:
-        return 0
+        return 0, 0
     other_masks = [
         index
         for layer in (18, 112, 113)
@@ -98,10 +107,24 @@ def repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds) -> int:
     metal = kdb.Shapes()
     metal.insert(kdb.Region(top.begin_shapes_rec(metal_index)).merged())
     repaired = 0
+    refused = []
     for cut, pad in _placed_landings(kdb, top, metal_index, cut_index):
-        extra = _extension(kdb, cut, pad, metal, layout.dbu, protected)
-        if extra is not None:
-            top.shapes(metal_index).insert(extra)
-            _merge_repair(kdb, metal, extra)
-            repaired += 1
-    return repaired
+        source = _source(kdb, metal, cut)
+        candidates = _missing_enclosures(kdb, cut, source, layout.dbu)
+        if not candidates:
+            continue
+        extra = _extension(
+            kdb, cut, pad, source, candidates, metal, layout.dbu, protected
+        )
+        if extra is None:
+            refused.append(cut)
+            continue
+        top.shapes(metal_index).insert(extra)
+        _merge_repair(kdb, metal, extra)
+        repaired += 1
+    # Another placement may have added metal to the same conductor later.
+    remaining = sum(
+        bool(_missing_enclosures(kdb, cut, _source(kdb, metal, cut), layout.dbu))
+        for cut in refused
+    )
+    return repaired, remaining

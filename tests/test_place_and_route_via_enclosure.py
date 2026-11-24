@@ -33,7 +33,7 @@ def _repair(layout, top):
     report = trim_via_pads(
         kdb, layout=layout, top_cell=top, variant="asap7A", lef_to_gds={"M1": (19, 0)}
     )
-    return report["m1_v1_enclosures_repaired"]
+    return report["m1_v1_enclosures_repaired"], report["m1_v1_enclosures_remaining"]
 
 
 @pytest.mark.parametrize(
@@ -52,13 +52,13 @@ def test_placed_enclosure_preserves_master_and_bare_instance(rotation, mirror):
         kdb.Box(21, 4, 23, 14),
     ]:
         top.shapes(layout.layer(112, 0)).insert(blocker.transformed(trans))
-    assert _repair(layout, top) == 1
+    assert _repair(layout, top) == (1, 1)
     expected = kdb.Region(kdb.Box(18, 0, 20, 18).transformed(trans))
     assert ((_region(top, metal) - before) ^ expected).is_empty()
     assert (before - _region(top, metal)).is_empty()
     assert (_region(top, cut) ^ cuts).is_empty()
     assert (_region(master, metal) ^ pad).is_empty()
-    assert _repair(layout, top) == 0
+    assert _repair(layout, top) == (0, 1)
 
 
 @pytest.mark.parametrize(
@@ -87,7 +87,7 @@ def test_legal_and_obstructed_placements_keep_their_geometry(mode):
             top.shapes(layout.layer(layer, 0)).insert(box.transformed(trans))
     metal = layout.layer(19, 0)
     before = _region(top, metal)
-    assert _repair(layout, top) == 0
+    assert _repair(layout, top) == (0, 1 if mode == "legal" else 2)
     assert (_region(top, metal) ^ before).is_empty()
 
 
@@ -98,7 +98,7 @@ def test_notch_needs_enclosure_along_the_entire_side():
     for box in [kdb.Box(18, 0, 20, 8), kdb.Box(18, 9, 20, 18)]:
         top.shapes(metal).insert(box.transformed(trans))
     before = _region(top, metal)
-    assert _repair(layout, top) == 1
+    assert _repair(layout, top) == (1, 1)
     assert (
         (_region(top, metal) - before)
         ^ kdb.Region(kdb.Box(18, 8, 20, 9).transformed(trans))
@@ -130,5 +130,5 @@ def test_packaged_deck_removes_only_the_routed_v1_marker(tmp_path):
     routed = ("top", 100, 200, 118, 218)
     bare = ("top", 400, 0, 418, 18)
     assert markers() == {routed, bare}
-    assert _repair(layout, top) == 1
+    assert _repair(layout, top) == (1, 1)
     assert markers() == {bare}
