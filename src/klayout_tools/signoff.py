@@ -49,6 +49,7 @@ from typing import (
 from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
+from . import signoff_malformed_coverage as disclosure
 from . import signoff_nothing_checked as vacuous
 from ._git_tracked import is_untracked_working_tree_file
 from ._jsonnum import is_finite_number
@@ -140,6 +141,7 @@ from .signoff_coverage_disclosure import (
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     _maybe_record_failed_sim,
+    _recognised_bound,
     _record_envelope,
     _remember_envelope,
     _sim_coverage_counts,
@@ -2419,8 +2421,7 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
         # Issue #4859: no `coverage` block to count, so read the rollup
         # itself -- a model-run with no limits-bearing measurement applied
         # no bound to anything.
-        raw = envelope.get("measurements")
-        limited = any(isinstance(m, dict) and m.get("limits") for m in (raw or []))
+        limited = any(_recognised_bound(m) for m in envelope.get("measurements") or [])
         return None if limited else _REASON_NO_LIMITS_CHECKED
     if kind == "sim" and refusal is None:
         # Issue #3769: sim coverage counts an unlimited measurement as a
@@ -4890,8 +4891,7 @@ def _grade_check_outcome(
     gate, so it would otherwise hide the manifest ``content_hash`` pin --
     a comparable, genuinely stale one included -- behind the envelope's own
     failure, for every kind. :func:`~.signoff_evidence_pin.pin_disclosure`
-    carries it beside the verdict, never changing it; a stale pin also names
-    the failed comparison, as the staleness verdict's own detail does."""
+    carries it beside the verdict, never changing it."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -4912,8 +4912,7 @@ def _grade_check_outcome(
     )
     pin = pin_disclosure(spec, resolution, check_kind=kind)
     if pin.get("content_hash_pin") == PIN_STALE:
-        # Name the failed comparison, exactly as the staleness verdict does.
-        pin = hints.stale_pin(spec, resolution)
+        pin = hints.stale_pin(spec, resolution)  # name the failed compare
     return {}, ("unmet", reason, None, {**failure_detail, **pin})
 
 
@@ -4949,15 +4948,20 @@ def _kind_gated_failure_detail(
 
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
-    raised. Disclosed beside the verdict, never changing it -- via the
-    shared :func:`~.signoff_evidence_pin.pin_disclosure` since issue #5598.
+    raised; disclosed beside the verdict, never changing it, via
+    :func:`~.signoff_evidence_pin.pin_disclosure` (issue #5598).
 
     Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
     route names the artifact it read as :func:`_grade_check_outcome`'s does.
+    Malformed coverage also names the cited artifact and the validator's error (#5643).
     """
     if kind_gated == _REASON_NOTHING_CHECKED:
         return vacuous.nothing_checked_item_detail(
+            envelope, _citation(dict(resolution))
+        )
+    if kind_gated == disclosure.MALFORMED_COVERAGE_REASON:
+        return disclosure.malformed_coverage_item_detail(
             envelope, _citation(dict(resolution))
         )
     campaign = _yield_campaign_disclosure(check_kind, envelope)
@@ -5837,8 +5841,8 @@ def _citation(
     # skipped *requested* work carries that statement, so an item graded
     # `"met"` off a pre-adapter producer -- one still reporting its
     # unconditional success token on a partial run -- discloses the gap
-    # instead of hiding it. Present only for a v1 `coverage` block that says
-    # `partial`, and never consulted by any grading rule.
+    # instead of hiding it. Present only for a v1 block saying `partial`;
+    # never consulted by any grading rule.
     partial = _partial_coverage_disclosure(resolution["envelope"])
     if partial is not None:
         citation["coverage_qualification"] = partial
@@ -5847,11 +5851,8 @@ def _citation(
     # then cwd-relative) carries that fact explicitly, so `content_hash:
     # null` here reads as "this input could not be verified" rather than
     # being indistinguishable from any other benign reason a hash might be
-    # absent. Present only in that one case -- never when the report simply
-    # named no samples document at all, and never consulted by any grading
-    # rule (an unpinned manifest entry still renders `"met"`; a pinned one
-    # already renders `"unmet"`/`unverifiable_provenance` via the
-    # `content_hash` mismatch check above `_citation` is only reached past).
+    # absent. Present only in that one case; never consulted by any grading
+    # rule.
     content_hash_unresolved = resolution.get("content_hash_unresolved")
     if content_hash_unresolved is not None:
         citation["content_hash_unresolved"] = content_hash_unresolved
@@ -5862,8 +5863,7 @@ def _citation(
     # that state (`"insufficient"`, `"not_detected"`) never reach here --
     # `_yield_campaign_refusal` has already rendered them `"unmet"` -- so
     # what this key carries on a `"met"` item is the state the claim rests
-    # on, including the `"not_declared"` case the grader deliberately does
-    # not refuse. Never consulted by any grading rule.
+    # on, including `"not_declared"`. Never consulted by any grading rule.
     campaign = _yield_campaign_disclosure(resolution["kind"], resolution["envelope"])
     if campaign is not None:
         citation["yield_campaign"] = campaign
@@ -6465,7 +6465,7 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if isinstance(m, dict)
         and m.get("spec_row") == row
         and m.get("status") == "pass"
-        and m.get("limits")
+        and _recognised_bound(m)
     ]
     if not names:
         return ["*"]

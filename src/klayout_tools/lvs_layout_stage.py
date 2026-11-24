@@ -94,6 +94,7 @@ def _resolve_layout_stage(
         opts.def_pins,
         progress,
         coverage,
+        join_same_named_nets=opts.join_same_named_nets,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.

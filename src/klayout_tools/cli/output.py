@@ -111,7 +111,21 @@ def emit_success(
 
 @contextlib.contextmanager
 def _report_destination(path: str) -> Iterator[BinaryIO]:
-    """Stage regular files next to their target. Keep symlinks and streams usable."""
+    """Stage regular files next to their target. Keep symlinks and streams usable.
+
+    A failed write re-raises :class:`OSError` carrying the errno text but not
+    the ``.klt-<uuid>.tmp`` staging name, which never existed for the caller:
+    every verb's error message already names the destination (issue #7658).
+    """
+    try:
+        yield from _stage_report(path)
+    except OSError as exc:
+        if exc.filename is None:
+            raise
+        raise OSError(exc.errno, exc.strerror) from exc
+
+
+def _stage_report(path: str) -> Iterator[BinaryIO]:
     target = os.path.realpath(path) if os.path.islink(path) else path
     try:
         mode = os.stat(target).st_mode

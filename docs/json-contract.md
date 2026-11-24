@@ -357,6 +357,18 @@ byte-identical to before. No existing key changed, so **no
 `schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
 recognition" section.
 
+**A conditional hierarchy census is additive.** In a curated FinFET
+extraction, a selected circuit with subcircuit instances gains three top-level
+fields. `device_count_scope` is `"selected_circuit"`, `instantiated_device_counts`
+counts each device class across the instantiated hierarchy, and
+`instantiated_device_count` gives their sum. For example, a top cell with two
+wrapper instances, each containing two one-NMOS leaves, reports
+`{"nmos_rvt": 4}` and a total of 4. Flat selected circuits omit all three
+fields. The existing `device_count`, `device_counts`, `devices[]` and
+`metrics.extract__device__count` still describe devices directly in the
+selected circuit. The extract report retains `schema_version` 4.
+[Extraction report](cli/extract.md).
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
@@ -585,7 +597,13 @@ and
 engine). `klt extract --engine klayout-runset` reports gain a top-level
 `params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
 `instantiated_device_counts` (`{class: count}` across the instantiated
-hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat).
+For `klt extract`, read the top-level `engine` field to identify the engine.
+A runset report has `engine: "klayout-runset"`. A curated report omits `engine`.
+`instantiated_device_counts` is always present under `klayout-runset`. On the
+curated engine it appears for a FinFET selected circuit that instantiates at
+least one subcircuit, alongside `device_count_scope` and
+`instantiated_device_count` (issue #7615). Under the runset
 engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
 instantiated hierarchy, which for a flat runset is the selected circuit's own
 count.
@@ -2788,8 +2806,8 @@ therefore still see that one hint line ahead of the envelope.
   | `drc` | `klayout_unavailable` | `--engine klayout` (issue #3076): the standalone `klayout` application binary is missing or could not be launched (run or `--min-klayout-version` probe) — the second opinion could not run. Exit `1`, never a verdict; not a bad-input error. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
   | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` application (`--klayout-binary`, `$KLT_KLAYOUT_BINARY` or `PATH`; the resolved binary is recorded as `environment.klayout_binary` on every run, issues #4950/#5844) is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
   | `drc` | `negative_control_failed` | `--engine klayout --negative-control`: the known-bad fixture produced no violations (or missed a `--negative-control-categories` entry) under the same deck, so a clean verdict cannot be trusted. See [docs/cli/drc.md](cli/drc.md) "Negative control". |
-  | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
-  | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
+  | `pex`, `sim`, `place-and-route`, `netlist --output-dir` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
+  | `pex`, `sim`, `place-and-route`, `netlist --output-dir` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
 
 Under `--format text` (the default), errors remain the pre-existing
 plain-text stderr line: `klt <command>: <message>`. Text is a courtesy

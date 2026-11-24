@@ -34,7 +34,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import _warn, device_multiplier_lint, env_provenance
+from . import _warn, device_multiplier_lint, env_provenance, sim_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._provenance import sha256_file
@@ -246,20 +246,15 @@ def remote_entry_environment(
     corners_lost: int,
     artifacts_dir: str,
     checkpoint_path: str | None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """``environment.remote`` -- additive/optional (``remote``/``batch`` only).
+    """Build the remote or batch environment for the simulation report.
 
-    See ``docs/cli/sim.md``. ``checkpoint_path`` is the retained checkpoint
-    (``None`` when the sweep did not retain one), which
-    :func:`~klayout_tools._batch_common.apply_unrun_signal` uses to point a
-    later ``--resume`` at the corners this run never got back.
-
-    The value under ``"remote"`` is whatever ``apply_unrun_signal`` returns:
-    ``remote_environment`` itself when no unrun signal applies, else a new
-    dict carrying the additive ``unrun_units``/``resumable``/``shard_map``
-    fields. Either way a later reader of ``environment["remote"]`` -- notably
-    :func:`~klayout_tools.sim_batch_features.pop_remote_diagnostics` -- sees
-    exactly what it saw when this was inline.
+    ``apply_unrun_signal`` preserves the worker identity and adds resume
+    details when corners were lost. It uses the retained checkpoint, when
+    available, to point a later ``--resume`` at the missing corners.
+    A declared PDK revision is compared with the workers' observed stamps
+    in the sibling ``pdk_revision_comparison`` report field.
     """
     if remote_environment is None:
         return {}
@@ -269,7 +264,10 @@ def remote_entry_environment(
             corners_lost,
             artifacts_dir,
             checkpoint_path,
-        )
+        ),
+        **sim_provenance.pdk_revision_comparison_environment(
+            remote_environment, request
+        ),
     }
 
 
