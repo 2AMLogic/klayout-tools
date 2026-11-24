@@ -447,6 +447,7 @@ def _validated_characterization(
     report = _normalize_repo_path(inventory["report"], "report", root)
     rows = _validated_spec_rows(inventory)
     citations = _validated_citations(inventory, rows, root)
+    uncited = item8.validated_uncited_rows(inventory, rows, citations)
     cited = sorted({path for paths in citations.values() for path in paths})
     if report in cited:
         raise AttestationError(
@@ -467,6 +468,7 @@ def _validated_characterization(
         "report": report,
         "spec_rows": list(rows),
         "citations": citations,
+        "uncited_rows": uncited,
         "envelope_checks": envelope_checks,
         "external_records": external_records,
         "corners": corners,
@@ -729,24 +731,14 @@ def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
     """Item 8's checks, in order: report, cited envelopes present + recognised,
-    a citation per spec row, each freshness command, then (digital) metrics."""
+    a citation or declared gap per row, freshness commands, then digital metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
     cites = normalized["citations"]
     cited, present, envelopes = item8.evidence_checks(
         root, cites, _file_check, set(normalized.get("external_records", ()))
     )
     checks.extend((*present.values(), *envelopes.values()))
-    for row in sorted(normalized["spec_rows"]):
-        paths = cites[row]
-        checks.append(
-            {
-                "check": "citation",
-                "role": "spec_row",
-                "row": row,
-                "envelopes": paths,
-                "passed": bool(paths) and all(envelopes[p]["passed"] for p in paths),
-            }
-        )
+    checks.extend(item8.row_checks(normalized, envelopes))
     for path in cited:
         checks.append(
             command(

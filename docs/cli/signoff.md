@@ -2789,8 +2789,9 @@ an inventory the author did not write.
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
-| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
-| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
+| | `spec_rows`: list of row ids | yes, non-empty | each row outside `uncited_rows` has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
+| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no citation fails its `citation` check unless it is listed in `uncited_rows` |
+| | `uncited_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `uncited_row` check per entry (role `row`), **passing**: the known, owned gap and the issue that owns closing it are visible to the grader instead of the row being dropped from `spec_rows` — item 8's counterpart of item 9's `unbenched_rows`. The `row` must be declared in `spec_rows` and have no cited paths: a row that is both listed and cited, a row not in `spec_rows`, or a malformed entry is refused (exit `1`). Whether an uncited row should fail T1 item 8 is a grading-policy decision this producer does not make. *First ships in the first release after `v0.9.2`; `v0.9.2` refuses `uncited_rows` as an unknown field.* |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
@@ -4241,9 +4242,9 @@ tier-verdict report by different rules:
 
 | Install | What `git_commit`/`git_tag` say | What actually grades the report |
 | --- | --- | --- |
-| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | `signoff.py` as it stood at `abc123` |
-| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff.py` — but installed with no shared `.git` history against the wheel to compare |
-| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | `signoff.py` as it stands on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
+| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | the `signoff*.py` grading modules as they stood at `abc123` |
+| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff*.py` modules — but installed with no shared `.git` history against the wheel to compare |
+| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | the `signoff*.py` modules as they stand on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
 
 `git_commit`/`git_tag` (in `klt version --format json`, and in every tier /
 fleet report's `build` block) identify the **source checkout** each install
@@ -4255,16 +4256,27 @@ grading rules produced it.
 Two mechanisms close that gap, both driven by the same content hash:
 
 1. **`grading_ruleset_id`** — a `sha256:`-prefixed content hash of the
-   shipped `signoff.py` grading module, reported by `klt version --format
+   shipped `signoff*.py` grading modules (issue #7434: every module in the
+   package directory whose filename matches, not just `signoff.py` — the
+   per-item grading rules and the `reason` vocabulary they emit live across
+   the whole leaf family, and a named subset would silently lose coverage
+   again with every future leaf split; each file's basename is mixed into
+   the digest before its bytes, so a rename or a content move between two
+   leaves changes the id too), reported by `klt version --format
    json` (see [`version.md`](version.md)) and echoed into every tier / fleet
    report's own `build` block (above), so a committed report names the
    grading rules that produced it, not just the source checkout. It is
    **identical** between two installs of byte-identical grading code
    (the wheel and the `git+...` snapshot in the table above both report the
    same id, with no shared git history required to prove it) and **changes**
-   whenever `signoff.py`'s grading logic changes (the `main` checkout in the
-   table reports a different id from the tag it moved past). `null` only if
-   this install's `signoff.py` cannot be read at all — never fabricated.
+   whenever any grading module's logic changes — including an edit confined
+   to a leaf such as `signoff_power_delivery.py` (the `main` checkout in the
+   table reports a different id from the tag it moved past). Modules outside
+   the `signoff*.py` family (`design_evidence_tiers.py`, `coverage.py`,
+   `metrics.py`, ...) are deliberately not covered; the checklist doc itself
+   is covered separately by the report's `source_doc_content_hash`.
+   `null` only if this install's `signoff*.py` grading modules cannot be
+   read at all — never fabricated.
 2. **`klt signoff --describe-grader`** — enumerates, at runtime and without
    reading source, which T1 checklist item ids this build has grading rules
    for at all, alongside the same `grading_ruleset_id`:
@@ -5270,6 +5282,36 @@ a malformed member or empty list is `invalid_evidence`. `spec_rows` is ignored
 for item 7. The manifest is the record of which cells were cited; `klt
 signoff` does not check they cover the hierarchy. A single string/object
 entry renders exactly as before.
+
+To require a particular set of PVT corners for item 7, declare the corner
+IDs in the manifest. For example, a two-corner analog box looks like this.
+
+```json
+{"corner_box": {"7.analog": ["tt/1.800V/27C", "ss/1.620V/125C"]}}
+```
+
+The bare key `"7"` applies to either partition. A qualified key overrides
+it for that partition. Each list must contain at least one ID, and its IDs
+must be unique, non-empty strings. Signoff compares them literally. The
+manifest supplies the required box even if a cited report ran only one
+corner. Monte Carlo sample IDs have no special handling and do not count
+toward a base corner.
+
+Each declared corner needs a passing PEX `delta[]` row for every distinct
+`(testbench, measurement)` in the cited reports. A command-mode row has a
+null testbench. Schematic-only `skipped` rows contribute no requirements
+or credit. Extra corners need no coverage. A report with an aggregate
+`error` caused only by row errors can contribute its passing measurements.
+A second report can supply the missing comparisons. Any limit failure
+still fails the item, and every citation must pass the usual freshness,
+post-layout and coverage checks. Reports predating the row identity fields
+need a fresh run to contribute to a declared box.
+
+The JSON item retains each report's own verdict in `citations_graded`.
+Its `detail.corner_box` gives the declared and covered corner counts. When
+coverage is incomplete, the reason is `partial_coverage` and each entry in
+`missing` names the `corner_id` and the remaining measurement keys. Text
+output prints the count and names the missing corners.
 
 `invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
 `detail.problem` string naming the cause, e.g. `member 2 is not a string or

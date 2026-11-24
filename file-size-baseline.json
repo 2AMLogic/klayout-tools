@@ -344,10 +344,6 @@
       "lines": 4700
     },
     {
-      "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 695
-    },
-    {
       "path": "src/klayout_tools/gen_compose_routing.py",
       "lines": 4803
     },
@@ -721,7 +717,7 @@
     },
     {
       "path": "tests/test_build_identity.py",
-      "lines": 702
+      "lines": 620
     },
     {
       "path": "tests/test_characterize.py",

@@ -295,6 +295,7 @@
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_abstract_pin_join",
+        "klayout_tools.extract_abstract_poly",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_report_canonicalize",
         "klayout_tools.extract_validate",
@@ -460,6 +461,7 @@
         "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
+        "klayout_tools.gen_compose_port_search",
         "klayout_tools.gen_compose_routing",
         "klayout_tools.gen_compose_top_metal_floors",
         "klayout_tools.gen_compose_via_cuts"
@@ -931,6 +933,7 @@
         "klayout_tools.signoff_attest_command",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
+        "klayout_tools.signoff_attest_gaprows",
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
@@ -969,6 +972,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_corner_box",
         "klayout_tools.signoff_report_diff",
         "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_require_build",
@@ -1035,6 +1039,7 @@
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
+        "klayout_tools.sim_batch_image",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_knobs",
         "klayout_tools.sim_batch_plan",
@@ -1081,6 +1086,7 @@
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_mismatch_scale",
+        "klayout_tools.sim_mismatch_scan",
         "klayout_tools.sim_measurement_grading",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
@@ -1143,6 +1149,7 @@
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
         "klayout_tools.sim_window",
+        "klayout_tools.sim_windowed",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
@@ -1202,7 +1209,8 @@
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
         "klayout_tools.post_route_sta_stages",
-        "klayout_tools.post_route_sta_verify"
+        "klayout_tools.post_route_sta_verify",
+        "klayout_tools.post_route_sta_violating_endpoints"
       ]
     },
     "stats": {

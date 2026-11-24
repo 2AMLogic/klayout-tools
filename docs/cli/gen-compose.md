@@ -1803,6 +1803,103 @@ to pick the path themselves — the retry only fires for a leg that supplied
 none. As with every other check in this document, the composed output must
 still be re-verified with `klt drc`.
 
+### Interleaved same-block pads: the cross-coupled pair (#7003)
+
+The #1393 retry clears two same-block self-nets that merely *want the same
+lane*. It cannot clear a crossing that is inherent to the pair. The canonical
+shape is the wiring of a cross-coupled inverter pair across two mirrored
+two-unit arrays (`mos_array` with `topology: array`, `rows: 1`, `cols: 2`,
+`mirror: true`, `gate_contact: true`): net `A` ties unit 0's drain to unit 1's
+gate, net `B` ties unit 1's drain to unit 0's gate. In the drain band `A`'s
+pin is west of `B`'s and in the gate band it is east of it, so the two legs
+cross however they are drawn on one plane — and looping `B` around the outside
+of the block changes nothing, because what it collides with is `A` itself,
+not the block. Every lane is exhausted and the leg is reported:
+
+```
+crosses already-routed net 'A' -- a bounded same-block cross-layer detour (4 alternate lanes looped clear of the block's own bbox) was tried first, and each one still conflicted; for a higher plane, name connectivity[].legs[].layer_role or legs[].waypoints_um (issue #7003)
+```
+
+That is the intended escape hatch, not a routing failure: the net graph is
+non-planar, and which net changes plane is the caller's call — the router
+never escalates past `routing.cross_block_layer_role` on its own, because an
+explicit plane always wins over the automatic fallback ("Per-net routing
+planes" below). Declare the legs:
+
+```json
+{
+  "connectivity": [
+    {
+      "net": "A",
+      "pins": [
+        { "block": "n", "port": "U0_D" }, { "block": "n", "port": "U1_G" },
+        { "block": "p", "port": "U0_D" }, { "block": "p", "port": "U1_G" }
+      ],
+      "legs": [{
+        "from_pin": { "block": "n", "port": "U0_D" },
+        "to_pin":   { "block": "n", "port": "U1_G" },
+        "waypoints_um": [[0.91, 0.70], [2.08, 0.70]]
+      }, {
+        "from_pin": { "block": "p", "port": "U0_D" },
+        "to_pin":   { "block": "p", "port": "U1_G" },
+        "waypoints_um": [[7.84, 0.70], [9.01, 0.70]]
+      }, {
+        "from_pin": { "block": "n", "port": "U1_G" },
+        "to_pin":   { "block": "p", "port": "U1_G" }
+      }]
+    },
+    {
+      "net": "B",
+      "pins": [
+        { "block": "n", "port": "U1_D" }, { "block": "n", "port": "U0_G" },
+        { "block": "p", "port": "U1_D" }, { "block": "p", "port": "U0_G" }
+      ],
+      "legs": [{
+        "from_pin": { "block": "n", "port": "U1_D" },
+        "to_pin":   { "block": "n", "port": "U0_G" },
+        "layer_role": "metal2"
+      }, {
+        "from_pin": { "block": "p", "port": "U1_D" },
+        "to_pin":   { "block": "p", "port": "U0_G" },
+        "layer_role": "metal2"
+      }]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17, "cross_block_layer_role": "metal2" }
+}
+```
+
+With both blocks placed in one row
+(`"placement": {"strategy": "row", "order": ["n", "p"], "spacing_um": 1.0}` —
+the waypoints are that placement's composed-frame coordinates, `p` sitting
+6.93 µm east of `n`), this composes with `unrouted_nets: []`, is `klt drc`-clean
+on sky130A and extracts as the two distinct nodes. Each part is load-bearing:
+
+- **`B`'s crossing legs name a plane above the one `A` draws on.** `metal2`
+  is the plane directly above `metal` (li1 → met1 on sky130A). Use a higher
+  plane that the via ladder can reach. An explicit plane is never retried, and
+  each leg drops to its own pins through the ordinary via ladder, which lands
+  only at the pins. `B`'s inter-block link needs no entry: rejected on li1
+  against `A`'s gate link, it takes the usual #1680 cross-block retry onto
+  `routing.cross_block_layer_role`. Said once for the whole net instead —
+  `"layer_role": "metal2"` on `B`'s entry, no `legs[]` — it routes just as
+  well.
+- **`A` stays on `routing.layer_role`, steered through the gap.** Left to
+  itself, `A`'s drain-to-gate leg takes the #1168 pad hop and runs on
+  `routing.cross_block_layer_role` straight over `B`'s drain pin — exactly
+  where `B`'s via ladder must land, on the way to *any* higher plane, so `B`
+  is rejected whatever plane it names. Each `waypoints_um` pair is the two
+  pins' own x, at a y midway between the S/D row's pads and the gate pads —
+  the li1 gap the leg threads instead, never needing the hop. The gate-to-gate
+  link is named so the automatic spanning tree does not pick the gate-to-drain
+  pair (`n.U1_G` → `p.U0_D`), which does need it.
+- **A leg that must change plane mid-route** takes the plane-bearing
+  waypoints of "Changing plane mid-leg" (#2930).
+
+Nothing here is specific to the cross-coupled pair: any two same-block nets
+whose pads interleave in one band and not in the other share the same
+one-plane crossing, and the same answer.
+
 ## Channel track assignment (#1467)
 
 `#1393` above resolves same-block self-net contention; the route-vs-route
@@ -3181,6 +3278,7 @@ and the rules come from the active deck:
 | any footprint overlaps a `keepout_layers` shape | `keep_out` |
 | a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
 | a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
+| a pad, merged with everything drawn on its own layer, leaves a notch narrower than the layer's `space` rule (the port net's own metal included: a pad wider than the run it lands on protrudes past it and notches the merged polygon) | `self_notch` |
 
 The port is reported on the net's own layer at the chosen point, so the
 router's existing via-drop draws the stack there. Candidates are ranked by
@@ -3205,8 +3303,11 @@ by via layer `"layer/datatype"`) and the router draws the same array.
 **Response (additive).** Blocks that used the option carry
 `blocks[].derived_ports[]`:
 `{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
-via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
-total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+via_count, via_array, pad_sides_um, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`;
+`pad_sides_um` maps each pad layer to the pad side the search certified, keyed
+`"layer/datatype"` like `ports[].via_array.pitch_um`, so a caller drawing the
+ladder itself draws exactly the footprint that was checked).
 `schema_version` is unchanged.
 
 **Frames (#5609).** `label_um` and `landing.x_um`/`y_um` are in the **source

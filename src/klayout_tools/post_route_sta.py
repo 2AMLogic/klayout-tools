@@ -385,6 +385,11 @@ from .post_route_sta_stages import (
     _worst_path_lines,
     _worst_path_stage_lines,
 )
+from .post_route_sta_violating_endpoints import (
+    _validate_max_violating_endpoints,
+    _violating_endpoint_lines,
+    _violating_endpoints_corner_field,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -707,6 +712,9 @@ def run_sta(
         ),
         report_ports=_validate_report_ports(request["constraints"], clock_port),
         report_path_stages=_validate_report_path_stages(request["constraints"]),
+        max_violating_endpoints=_validate_max_violating_endpoints(
+            request["constraints"]
+        ),
         false_path_from=_validate_false_path_from(request["constraints"], clock_port),
         report_instances=_validate_report_instances(request["constraints"]),
     )
@@ -958,11 +966,12 @@ class _ReportPaths:
 
 @dataclass(frozen=True)
 class _StaConstraints:
-    """Issue #7023: the eleven validated port/path constraint values that
+    """Issue #7023: the twelve validated port/path constraint values that
     travel together unchanged from :func:`run_sta` into every corner
     session -- the scalar and per-port input/output delays, the scalar and
     per-port input transitions, the boundary settings, the report ports,
-    the path-stage flag, the false-path sources, and the report instances.
+    the path-stage flag, the violating-endpoint cap, the false-path
+    sources, and the report instances.
 
     Built once after request validation and passed as this one value
     through :func:`_dispatch_sta`, :func:`_run_multi_corner`, and
@@ -981,6 +990,7 @@ class _StaConstraints:
     boundary: dict[str, Any] | None
     report_ports: list[str] | None
     report_path_stages: bool
+    max_violating_endpoints: int | None
     false_path_from: list[str] | None
     report_instances: list[str] | None
 
@@ -1119,27 +1129,17 @@ def _dispatch_sta(
         # Additive field (issue #1825): `null` unless `request.verilog` was
         # given -- the mutually-exclusive counterpart to `def_path` above.
         "verilog_path": report_paths.verilog_path,
-        # Additive field (issue #1826): echo of `request.geometry_source` --
-        # see this module's own docstring "Pre-route DEFs" section. Always
-        # present (never `null`): `"routed"` is the default when the request
-        # omits it, matching this command's pre-#1826 behaviour byte-for-
-        # byte. Issue #1825 adds the third `"netlist_estimate"` value,
-        # forced (never caller-chosen) whenever `request.verilog` is given.
+        # Additive field (issue #1826): echo of `request.geometry_source`, never `null`
+        # (see the module docstring "Pre-route DEFs"); `"routed"` by default,
+        # `"netlist_estimate"` whenever `request.verilog` is given (issue #1825).
         "geometry_source": geometry_source,
-        # Additive fields (issue #1825): the wire-load estimate knob
-        # actually used, for provenance -- `null`/`null` unless
-        # `request.verilog` was given (see this module's own docstring
-        # "From-scratch netlist input" section). Never present on a
-        # `def`-mode response with anything but `null`/`null`, since a
-        # `def`-mode run's parasitics never come from a liberty wire-load
-        # model.
+        # Additive fields (issue #1825): the wire-load estimate knob used,
+        # `null`/`null` unless `request.verilog` was given (a `def`-mode run's
+        # parasitics never come from a liberty wire-load model).
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
-        # Additive field (issue #2635): echo of `request.macros`, resolved
-        # to absolute paths -- the identical shape `klt synthesize`'s own
-        # response carries (`klayout_tools.macros.macros_response`), so one
-        # declaration round-trips through both verbs' reports unchanged.
-        # `[]` when the request declared none.
+        # Additive field (issue #2635): echo of `request.macros`, resolved to
+        # absolute paths in `klt synthesize`'s own shape; `[]` when none declared.
         "macros": macro_spec.macros_response(macros),
         # Additive field (issue #5707): cells linked as untimed black boxes
         # (always present; their delay/power is excluded from the numbers).
@@ -1160,21 +1160,9 @@ def _dispatch_sta(
         "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
         "total_negative_hold_slack_ns": corner_fields["total_negative_hold_slack_ns"],
         "fmax_mhz": corner_fields["fmax_mhz"],
-        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
-        # `null` -- whether the four slack fields above are measurements at
-        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
-        # restated. A design whose only timing paths run input-port ->
-        # register / register -> output-port reports that sentinel unless
-        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
-        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
-        # gate would otherwise report "timing closed" on a design that was
-        # never timed. Check this field before trusting any slack number in
-        # this response.
+        # A positive OpenSTA sentinel can represent an unconstrained path.
         "timing_status": corner_fields["timing_status"],
-        # Additive field (issue #2780): constraint completeness -- unconstrained
-        # endpoints and unclocked registers, with counts and identities. A
-        # finite WNS (`timing_status: "constrained"`) only says *some* path
-        # was timed; this says whether any endpoint/register was left out.
+        # Measured slack can coexist with unclocked registers or unconstrained pins.
         "constraint_completeness": corner_fields["constraint_completeness"],
         "liberty_warnings": corner_fields["liberty_warnings"],
         "setup_violation_count": corner_fields["setup_violation_count"],
@@ -1191,7 +1179,14 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
-    for field in ("wire_load", "port_paths", "instance_paths", "generated_clocks"):
+    # These fields are present only when the corner session produced them.
+    for field in (
+        "wire_load",
+        "port_paths",
+        "instance_paths",
+        "generated_clocks",
+        "violating_endpoints",
+    ):
         if field in corner_fields:
             response[field] = corner_fields[field]
     # Additive field (issue #2968): the applied exclusion list, present only
@@ -1200,17 +1195,15 @@ def _dispatch_sta(
         response["false_path_from"] = list(constraints.false_path_from)
     if multicycle:  # additive (issue #6921): only when entries named
         response["multicycle_paths"] = corner_fields["multicycle_paths"]
-    response["spef_annotation"] = corner_fields["spef_annotation"]
-    # Additive field (issue #2739): the propagated-clock evidence block --
-    # what propagation actually reached -- `null` unless the request asked
-    # for propagated-clock timing (see `_parse_clock_latency`).
-    response["clock_propagation"] = corner_fields["clock_propagation"]
-    # Additive field (issue #2886): the post-route SDF this corner's session
-    # wrote -- `{path, scope, content_hash}`, `null` unless `request.sdf`.
-    response["sdf"] = corner_fields["sdf"]
-    # Additive field (issue #3005): see `_electrical_checks_block`.
-    response["electrical_checks"] = corner_fields["electrical_checks"]
-    response["engine_log"] = corner_fields["engine_log"]
+    # Required corner fields can carry null when a requested measurement is unavailable.
+    for key in (
+        "spef_annotation",
+        "clock_propagation",
+        "sdf",
+        "electrical_checks",
+        "engine_log",
+    ):
+        response[key] = corner_fields[key]
 
     return response
 
@@ -1345,6 +1338,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             propagated_clock=propagated_clock,
@@ -1380,6 +1374,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             power_activity=power_activity,
@@ -1482,17 +1477,18 @@ def _run_corner_session(
             stdout, wire_load_model, wire_load_mode, has_def=has_def
         )
     )
-    # Additive field (issue #3042): only present when the request named
-    # `constraints.report_ports`, so an unrequested response is unchanged.
+    # Optional timing-path details are included only when requested.
     if constraints.report_ports:
-        corner_fields["port_paths"] = _port_paths(
-            completed.stdout or "", constraints.report_ports
-        )
-    # Additive field (issue #5754): only present when the request named
-    # `constraints.report_instances`, so an unrequested response is unchanged.
+        corner_fields["port_paths"] = _port_paths(stdout, constraints.report_ports)
     corner_fields.update(
-        _instance_paths_corner_field(
-            completed.stdout or "", constraints.report_instances
+        _instance_paths_corner_field(stdout, constraints.report_instances)
+    )
+    corner_fields.update(
+        _violating_endpoints_corner_field(
+            stdout,
+            constraints.max_violating_endpoints,
+            setup_violation_count,
+            hold_violation_count,
         )
     )
     if spef_path is not None:
@@ -3515,6 +3511,7 @@ def _sta_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     propagated_clock: bool = False,
@@ -3637,6 +3634,7 @@ def _sta_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     # Before the completeness query, which must stay the script's last
@@ -3669,6 +3667,7 @@ def _sta_netlist_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
@@ -3757,6 +3756,7 @@ def _sta_netlist_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     lines += _generated.evidence_lines(clock_extras)
