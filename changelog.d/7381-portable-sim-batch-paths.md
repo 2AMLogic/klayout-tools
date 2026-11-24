@@ -1,1 +1,1 @@
-- Batch simulation offers `--portable-paths` to omit the submitter's binary path and keep member report references usable after moving a report bundle.
+- Batch simulation offers `--portable-paths` to omit the submitter's binary path and keep member report references usable after moving a report bundle (#7381, 2026-11-24).
