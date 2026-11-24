@@ -721,7 +721,7 @@
     },
     {
       "path": "tests/test_build_identity.py",
-      "lines": 702
+      "lines": 620
     },
     {
       "path": "tests/test_characterize.py",
