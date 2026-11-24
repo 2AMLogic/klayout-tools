@@ -6265,7 +6265,10 @@ v1 rules, deliberately narrow:
   `mixed-signal` block, each partition row composes independently.
 - If any sub-block is not `met` there, the row stays `unmet`/`no_evidence`
   and gains `detail.composition` naming each sub-block and its status
-  there, so the sub-block verdicts it rested on stay visible.
+  there. In `--format text`, each entry appears under the unmet row as
+  `sub-block: <block> (source=<source>, status=<status>)`. A sub-block
+  with an evidence hash adds `, content_hash=<hash>` before the closing
+  parenthesis. An inline manifest uses `<inline>` for the source.
 - A composed row carries `reason: "composed_from_sub_blocks_only"` (so the
   fleet roll-up's `blocking_item` says *why* the parent is not T1 — a
   composed row is a valid blocker candidate) and, in place of
