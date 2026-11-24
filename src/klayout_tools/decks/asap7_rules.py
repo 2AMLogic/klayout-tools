@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import asap7_v0_gaps as _v0_gaps
+
 #: The DRC-DSL deck script this module describes.
 DECK_PATH = Path(__file__).with_name("asap7.drc")
 
@@ -540,13 +542,6 @@ _END_CAP = (
     "corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs "
     "per-via end-cap classification against the upper metal"
 )
-_LISD_EXACT_3 = (
-    "'== 3 nm on at least two opposite sides' is expressible without a routing "
-    "direction, but the literal '==' contradicts the pinned shipped cells (100 "
-    "V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every "
-    "opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells "
-    "satisfy only the 'at least 3 nm' reading, so the exact check is not shipped"
-)
 _EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
 _SADP_TRACK = (
     "defined against the routing tracks (adjacent tracks, parallel run "
@@ -622,16 +617,6 @@ def _v123_spacing_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     )
 
 
-_V0_LIG_ENCLOSURE = (
-    "V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT "
-    "and SLVT library has 1,413 selected V0 wholly inside LIG."
-)
-
-_V0_LIG_DIRECTION = (
-    "In each pinned library, 4,899 selected cuts touch horizontal LIG only on their "
-    "vertical V0 edges. A square LIG has no unique length axis."
-)
-
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _GATE_DISCONTINUOUS, "#2812"),
@@ -646,10 +631,14 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     ),
     # V0 (Tables 3.11.1 / 3.11.2)
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
-    *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
-    *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
-    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _V0_LIG_ENCLOSURE, "#3147"),
-    Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _V0_LIG_DIRECTION, "#3147"),
+    *_gaps(
+        ("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _v0_gaps.CORNER_SPACING, "#3147"
+    ),
+    *_gaps(
+        ("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _v0_gaps.LISD_EXACT_3, "#3147"
+    ),
+    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _v0_gaps.LIG_ENCLOSURE, "#3147"),
+    Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _v0_gaps.LIG_DIRECTION, "#3147"),
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
     *_v123_spacing_gaps("V1"),
