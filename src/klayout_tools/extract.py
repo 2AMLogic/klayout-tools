@@ -346,6 +346,7 @@ from .extract_pdk_resolve import (
     _require_pdk_for_device_models as _require_pdk_for_device_models,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
+from .extract_pin_clusters import _promoted_pin_nets_by_cluster
 from .extract_preflight import preflight_layout, require_declared_set_for_rename
 from .extract_progress import StageTimer, active_timer, stage
 from .extract_progress import _staged as _staged
@@ -366,8 +367,7 @@ from .extract_progress import _staged as _staged
 # rather than dropped. Because ruff's isort merges same-module plain-name
 # groups into one statement, the F401 suppression that marks them re-exports
 # sits on the whole group rather than on each line. `extract_report.py`'s own
-# three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
-# `_each_pin_net`) have no caller here and are deliberately not imported.
+# report-only helpers have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
     _describe_devices,
     _describe_matched_device_groups,
@@ -1428,14 +1428,14 @@ def run_extract(
     ``parasitic_variants`` (``klt extract --parasitic-variant <variant>``,
     repeatable, issue #3056) drops parasitic elements at injection time so a
     failing ``klt pex`` delta row can be attributed to R or C: ``drop-r:NET|*``
-    shorts a net's star legs into its hub, ``drop-c-ground:NET|*`` omits its
-    ground capacitor, ``drop-c-coupling`` omits every ``Ccc_*`` card. Anything
-    else raises :class:`ExtractError`, as does use without ``parasitics``; a
-    ``NET`` matching no net goes to ``warnings``, as does one that names a
-    ``--distributed-rc`` net (left unchanged). ``None``/empty (the default)
-    emits the network and report byte-identically to before this feature
-    existed; otherwise the report's ``parasitics`` block carries
-    ``parasitic_variant`` (the request, verbatim).
+    shorts a net's star legs into its hub, ``drop-r-body:NET|*`` keeps its
+    body/bulk terminals on the hub (class-aware, issue #7317),
+    ``drop-c-ground:NET|*`` omits its ground capacitor, ``drop-c-coupling``
+    omits every ``Ccc_*`` card. Anything else raises :class:`ExtractError`,
+    as does use without ``parasitics``; a ``NET`` matching no net goes to
+    ``warnings``, as does one naming a ``--distributed-rc`` net (unchanged).
+    ``None``/empty (the default) is byte-identical to before this feature
+    existed; otherwise ``parasitics.parasitic_variant`` echoes the request.
 
     ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
     issue #1700) scopes the *ground* R/C pass itself -- the base per-net
@@ -1873,12 +1873,10 @@ def run_extract(
     ``net_id`` is ``net.cluster_id`` -- unique across every net *object* in
     this circuit, the same convention ``parasitics.nets[].net_id`` already
     uses for the identical "several distinct nets share one label" shape
-    (issue #765/#811). ``pin_index`` is that net's 0-based position in the
-    written ``.SUBCKT``/instance-line port order (``circuit.each_pin()``,
-    the exact sequence ``NetlistSpiceWriter`` iterates) when it is a promoted
-    pin, ``None`` otherwise -- resolving a specific ``.SUBCKT`` port index
-    straight back to a ``nets[]`` entry, positionally, with no separate
-    ``klt lvs`` run against a reference schematic needed.
+    (issue #765/#811). For a promoted pin, ``pin_index`` is its 0-based
+    position in KLayout's ``Circuit.each_pin()`` order used by
+    ``NetlistSpiceWriter``. An explicit ``--pins`` order can reorder the
+    written top-level ``.SUBCKT`` header. Internal nets have ``pin_index=None``.
     ``label_positions_um`` is ``[{"text": str, "x_um": float, "y_um": float},
     ...]`` -- every drawn text-label shape naming this net, in this circuit's
     own local coordinate frame (same convention
@@ -4122,26 +4120,6 @@ def _duplicated_declared_pin_names(
                 name_net_ids.setdefault(component, set()).add(net.cluster_id)
 
     return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
-
-
-def _promoted_pin_nets_by_cluster(circuit: Any) -> dict[int, tuple[Any, list[int]]]:
-    """Every promoted pin's net of ``circuit`` exactly once, keyed by
-    ``Net.cluster_id`` and in ``each_pin()`` order (deterministic for a given
-    netlist): two pins can resolve to one net object, and the rename pass
-    (issue #2854) must process -- and rename -- that net once. Values are
-    ``(net, [pin_id, ...])``.
-
-    A pin with no net, or whose net carries no name, is skipped: there is
-    nothing to match a declared name against.
-    """
-    pin_nets: dict[int, tuple[Any, list[int]]] = {}
-    for pin in circuit.each_pin():
-        net = circuit.net_for_pin(pin.id())
-        if net is None or not net.expanded_name():
-            continue
-        entry = pin_nets.setdefault(net.cluster_id, (net, []))
-        entry[1].append(pin.id())
-    return pin_nets
 
 
 def _declared_pin_short_finding(

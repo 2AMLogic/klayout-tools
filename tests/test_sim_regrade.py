@@ -151,6 +151,48 @@ def test_unknown_selection_id_is_refused_before_dispatch(tmp_path, monkeypatch):
     assert launched == []
 
 
+@pytest.mark.parametrize("indices", [[0], [0, 1, 1], [1, 0]])
+def test_worker_refuses_inconsistent_explicit_selection(tmp_path, indices):
+    path = _request(tmp_path)
+    request = json.loads(path.read_text())
+    points = sim._expand_corners(request.pop("corners"), [])
+    request["_regrade"] = {"select_corner_ids": [p.corner_id for p in points]}
+    request["_explicit_points"] = sim._corner_points_to_wire(
+        [points[i] for i in indices]
+    )
+    path.write_text(json.dumps(request))
+    with pytest.raises(SimError, match="corner IDs must match select_corner_ids"):
+        sim.run_sim(str(path), backend="local", dry_run=True)
+
+
+def test_split_jobs_keep_their_share_of_the_selected_ids(tmp_path):
+    from klayout_tools import sim_remote
+
+    path = _request(tmp_path, corners={"temperature_c": [0, 27, 80]})
+    request = json.loads(path.read_text())
+    points = sim._expand_corners(request["corners"], [])
+    selected = [points[2], points[0]]
+    ids = [p.corner_id for p in selected]
+    request["_regrade"] = {"select_corner_ids": ids, "tmax": "25p"}
+    for shard in sim_remote._shard_corner_points(selected, 2):
+        worker = sim_remote._build_remote_request(
+            request,
+            explicit_points=shard,
+            timeout_s=60,
+            keep_artifacts=False,
+            want_waveforms=False,
+        )
+        (tmp_path / worker["netlist"]).write_bytes(
+            (tmp_path / "body.spice").read_bytes()
+        )
+        path.write_text(json.dumps(worker))
+        report = sim.run_sim(str(path), dry_run=True)
+        assert report["units"] == [
+            {"corner_id": shard[0].corner_id, "analysis_args": TIGHTENED_ARGS}
+        ]
+    assert request["_regrade"]["select_corner_ids"] == ids
+
+
 def test_duplicate_selection_is_refused(tmp_path, monkeypatch):
     _stub_engine(monkeypatch)
     request = _request(tmp_path)
