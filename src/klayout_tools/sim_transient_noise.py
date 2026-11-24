@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
-from . import sim_steps
+from . import _warn, sim_steps
 from ._spice_text import logical_lines
 from .sim_errors import SimError
 
@@ -313,5 +312,5 @@ def with_unseeded_noise(
     )
     if noise_report is None:
         return monte_carlo_info
-    print(f"warning: {noise_report['unseeded_sources_note']}", file=sys.stderr)
+    _warn.warn(f"warning: {noise_report['unseeded_sources_note']}")
     return {**monte_carlo_info, **noise_report}
