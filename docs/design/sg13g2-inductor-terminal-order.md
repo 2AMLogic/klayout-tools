@@ -4,20 +4,20 @@ A label-ordered comparison accepted the correctly mirrored spiral and also accep
 
 ## Measurements
 
-KLayout 0.30.12 ran the SG13G2 v0.3.0 runset in strict top-port mode on macOS arm64. The fixture contains one two-terminal inductor with a substrate connection. Each table entry counts strict top-port errors recorded in the `.lvsdb`. The cross-reference column gives klt’s result from the database before applying those errors. It was identical in all four runs for each row. The KLayout process returned zero even on the crossed-port controls. [Fixture definitions](../../tests/fixtures/runset_inductor/README.md) · [Pinned deck](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/5cccb161f7492697cfa52eb14dc03beb00bdca9e/ihp-sg13g2/libs.tech/klayout/tech/lvs/sg13g2.lvs)
+KLayout 0.30.12 ran the SG13G2 v0.3.0 runset in strict top-port mode on macOS arm64. The fixture contains one two-terminal inductor with a substrate connection. The four run-mode columns count strict top-port errors in the `.lvsdb`. The extracted-inductor census agreed in all four modes. The unresolved column counts extracted inductors whose labels the ordering step could not assign. Report and apply gave the same count. Only these two modes run the ordering step. The cross-reference column gives klt’s result from the database before applying those errors. It was identical in all four runs for each row. The KLayout process returned zero even on the crossed-port controls. [Fixture definitions](../../tests/fixtures/runset_inductor/README.md) · [Pinned deck](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/5cccb161f7492697cfa52eb14dc03beb00bdca9e/ihp-sg13g2/libs.tech/klayout/tech/lvs/sg13g2.lvs)
 
-| Layout and reference | Cross-reference | Shipped | Report only | Label order | Markers only |
-| --- | --- | ---: | ---: | ---: | ---: |
-| As drawn, correct reference | match | 0 | 0 | 0 | 2 |
-| Mirrored, correct reference | match | 2 | 2 | 0 | 2 |
-| As drawn, reversed reference winding | match | 2 | 2 | 2 | 2 |
-| Both labels moved off their pins | inconclusive, zero extracted inductors | 0 | 0 | 0 | 0 |
-| As drawn, LA and LB exchanged on their pins | match | 2 | 2 | 0 | 2 |
-| Mirrored, reversed reference winding | match | 0 | 0 | 2 | 2 |
-| Independent VDD and OUT pin names | match | 2 | 2 | 2 | 0 |
-| Independent pin names, reversed reference winding | match | 2 | 2 | 2 | 2 |
+| Layout and reference | Cross-reference | Extracted inductors | Unresolved | Shipped | Report only | Label order | Markers only |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| As drawn, correct reference | match | 1 | 0 | 0 | 0 | 0 | 2 |
+| Mirrored, correct reference | match | 1 | 0 | 2 | 2 | 0 | 2 |
+| As drawn, reversed reference winding | match | 1 | 0 | 2 | 2 | 2 | 2 |
+| Both labels moved off their pins | inconclusive | 0 | 0 | 0 | 0 | 0 | 0 |
+| As drawn, LA and LB exchanged on their pins | match | 1 | 0 | 2 | 2 | 0 | 2 |
+| Mirrored, reversed reference winding | match | 1 | 0 | 0 | 0 | 2 | 2 |
+| Independent VDD and OUT pin names | match | 1 | 0 | 2 | 2 | 2 | 0 |
+| Independent pin names, reversed reference winding | match | 1 | 0 | 2 | 2 | 2 | 2 |
 
-**Label ordering.** The pinned VCO step reads the label falling inside each extracted terminal shape. It swaps the winding nets before comparison when LA is on terminal 2. The report-only wrapper reproduced all eight shipped results. Applying it swapped exactly one device on each mirrored layout and on the swapped-label layout. It preserved the as-drawn result and still rejected reversed wiring and off-pin texts. However, correctly mirrored geometry and exchanged terminal labels gave it the same local evidence. Both became clean. An empty unresolved-device count also needs a device census. The off-pin layout extracted zero inductors in every mode. [Measured step](https://github.com/2AMLogic/sg13g2-vco/blob/612eccac9129c9a6b806ebad225c4a0fd44ef8cd/layout/scripts/lvs_label_order.rb)
+**Label ordering.** The pinned VCO step reads the label falling inside each extracted terminal shape. It swaps the winding nets before comparison when LA is on terminal 2. The report-only wrapper reproduced all eight shipped results. Applying it swapped exactly one device on each mirrored layout and on the swapped-label layout. It preserved the as-drawn result and still rejected reversed wiring and off-pin texts. However, correctly mirrored geometry and exchanged terminal labels gave it the same local evidence. Both became clean. On the off-pin layout the step reported zero unresolved devices because it extracted zero inductors. The other seven comparisons each extracted one inductor and reported zero unresolved devices. [Measured step](https://github.com/2AMLogic/sg13g2-vco/blob/612eccac9129c9a6b806ebad225c4a0fd44ef8cd/layout/scripts/lvs_label_order.rb)
 
 **Marker-only extraction.** A disposable copy of the PDK omitted the single connection `connect(ind_pin, ind_text)`. Its port geometry still came from texts on layer 27/25, and the original strict check still ran. With independent metal labels, the as-shipped names `LA,VDD` and `LB,OUT` became `VDD` and `OUT`. The reversed reference still produced both errors. On the ordinary correct fixture, the same edit left anonymous layout nets `$2` and `$3` opposite schematic pins LA and LB. Using this candidate for all SG13G2 inductors would reject that known-good case. The edited include had a different digest despite the unchanged top-level deck. [Port derivation](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/5cccb161f7492697cfa52eb14dc03beb00bdca9e/ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/ind_derivations.lvs) · [Pin connection](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/5cccb161f7492697cfa52eb14dc03beb00bdca9e/ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/ind_connections.lvs#L28)
 
@@ -76,7 +76,14 @@ db = out / "result.lvsdb"
 v = read_lvsdb_verdict(str(db), str(reference), sg13g2=True)
 errors = [e["message"] for e in strict_port_findings(db.read_text())]
 step = out / "order.json"
-print(out.name, v["status"], errors, json.loads(step.read_text())["reordered"] if step.exists() else "-")
+result = {
+    "case": out.name, "status": v["status"], "strict_port_errors": errors,
+    "extracted_inductors": v["device_census"]["layout"].get("inductor", 0),
+}
+if step.exists():
+    order = json.loads(step.read_text())
+    result["label_order"] = {k: order[k] for k in ("inductor_devices", "unresolved", "reordered")}
+print(json.dumps(result))
 PY
     done
 }
