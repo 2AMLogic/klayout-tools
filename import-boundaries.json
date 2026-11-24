@@ -785,6 +785,7 @@
         "klayout_tools.place_and_route_sta",
         "klayout_tools.place_and_route_warnings",
         "klayout_tools.place_and_route_unconstrained",
+        "klayout_tools.place_and_route_via_enclosure",
         "klayout_tools.place_and_route_via_pad",
         "klayout_tools.place_and_route_via_tip",
         "klayout_tools.place_and_route_via_tip_repair"

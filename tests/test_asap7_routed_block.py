@@ -19,6 +19,7 @@ from klayout_tools.decks.asap7 import EXTRACTION_DECK
 from klayout_tools.erc import run_erc
 from klayout_tools.extract_finfet import extract_finfet_netlist
 from klayout_tools.lvs import run_lvs
+from klayout_tools.place_and_route_via_pad import trim_via_pads
 
 _RVT = (
     Path(__file__).resolve().parent.parent
@@ -197,3 +198,36 @@ def test_declared_pins_do_not_create_pins_but_name_the_missing_labels(tmp_path):
         tmp_path, _routed(tmp_path, route="m1", top_labels=False), "IN,OUT"
     )
     assert any("matched no promoted net" in w and "IN, OUT" in w for w in bare)
+
+
+def test_placed_enclosure_repair_preserves_the_inverter_connection(tmp_path):
+    layout = kdb.Layout()
+    layout.read(_routed(tmp_path, route="m2"))
+    top = layout.cell("TOP")
+    metal, cuts = layout.layer(19, 0), layout.layer(21, 0)
+    # Put the first V1 into a placed via master, as in the routed DEF merge.
+    next(s for s in top.shapes(cuts).each() if s.bbox().left == 440).delete()
+    via = layout.create_cell("VIA_VIA12")
+    for index in (cuts, metal):
+        via.shapes(index).insert(kdb.Box(0, 0, 72, 72))
+    top.insert(kdb.CellInstArray(via.cell_index(), kdb.Trans(440, 504)))
+    path = str(tmp_path / "placed.gds")
+    layout.write(path)
+    assert _lvs(tmp_path, path)["status"] == "match"
+    report = trim_via_pads(
+        kdb, layout=layout, top_cell=top, variant="asap7A", lef_to_gds={"M1": (19, 0)}
+    )
+    assert report["m1_v1_enclosures_repaired"] == 1
+    layout.write(path)
+    assert _lvs(tmp_path, path)["status"] == "match"
+
+    # The same extractor and reference must distinguish both electrical faults.
+    second_via = next(s for s in top.shapes(cuts).each() if s.bbox().left == 760)
+    second_box = second_via.bbox()
+    second_via.delete()
+    layout.write(path)
+    assert _lvs(tmp_path, path)["category_counts"]["net.split"] == 1
+    top.shapes(cuts).insert(second_box)
+    top.shapes(metal).insert(kdb.Box(185, 538, 500, 554))
+    layout.write(path)
+    assert _lvs(tmp_path, path)["category_counts"]["net.merged"] == 1
