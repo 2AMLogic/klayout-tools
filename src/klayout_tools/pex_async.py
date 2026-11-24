@@ -134,6 +134,7 @@ class AsyncLegs:
         self._legs: list[dict[str, Any]] = []
         self._recorded: dict[tuple[str, str], dict[str, Any]] = {}
         self._manifest: dict[str, Any] = {}
+        self._schematic_top: str | None = None
         self._extracted_netlist_sha256: str | None = None
         self._request_sha256: dict[str, str] = {}
         # Issue #4686: a re-run of an interrupted --submit-only replays the
@@ -168,15 +169,27 @@ class AsyncLegs:
         return manifest
 
     def verify(
-        self, *, extracted_netlist_sha256: str | None, request_sha256: Mapping[str, str]
+        self,
+        *,
+        extracted_netlist_sha256: str | None,
+        request_sha256: Mapping[str, str],
+        schematic_top: str | None = None,
     ) -> None:
         """Refuse a manifest recorded for different inputs than this
         invocation extracted/loaded (the sim ``--attach`` precedent), and an
         ``--attach`` of a manifest whose submit never finished."""
+        self._schematic_top = (
+            schematic_top.lower() if schematic_top is not None else None
+        )
         self._extracted_netlist_sha256 = extracted_netlist_sha256
         self._request_sha256 = dict(request_sha256)
         if not self._manifest:
             return
+        if self._manifest.get("schematic_top") != self._schematic_top:
+            raise PexError(
+                f"{self._flag()}: schematic DUT selection differs from the manifest",
+                code=FINGERPRINT_MISMATCH_CODE,
+            )
         recorded = {
             tb["label"]: tb["request_sha256"] for tb in self._manifest["testbenches"]
         }
@@ -290,6 +303,11 @@ class AsyncLegs:
     def _write(self, *, complete: bool) -> None:
         payload: dict[str, Any] = {
             "schema_version": ASYNC_SCHEMA_VERSION,
+            **(
+                {"schematic_top": self._schematic_top}
+                if self._schematic_top is not None
+                else {}
+            ),
             "complete": complete,
             "extracted_netlist_sha256": self._extracted_netlist_sha256,
             "testbenches": [

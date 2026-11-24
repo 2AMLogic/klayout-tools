@@ -1,0 +1,1 @@
+- **Abstract leaf pins connect across abutting poly terminals** (#7663, 2026-11-23). `--top-cell-pins` keeps generated open-pin nets internal while retaining their diagnostics.
