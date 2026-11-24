@@ -24,7 +24,7 @@ from klayout_tools.decks import get_extraction_deck
 from klayout_tools.extract import run_extract
 from klayout_tools.extract_inductors import cut_inductor_windings
 from klayout_tools.extract_spef import ExtractError
-from klayout_tools.lvs import run_lvs
+from klayout_tools.lvs import LvsError, run_lvs
 from klayout_tools.netlist_capacitor_recovery import (
     make_capacitor_class_recovery_reader,
 )
@@ -270,6 +270,67 @@ def test_inline_lvs_matches_the_three_terminal_reference(tmp_path):
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
     assert not [m for m in report["mismatches"] if m["severity"] == "error"]
+
+
+def _preextracted_layout(tmp_path, layout_text, *, deck=None):
+    layout_path = tmp_path / "layout.spice"
+    layout_path.write_text(layout_text)
+    ref_path = tmp_path / "ref.spice"
+    ref_path.write_text(_REFERENCE)
+    layout = {"netlist": str(layout_path), "top": "top"}
+    if deck:
+        layout["deck"] = deck
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": layout,
+                "reference": {"netlist": str(ref_path), "top": "top", "deck": "sg13g2"},
+            }
+        )
+    )
+    return str(request)
+
+
+def test_bare_inductor_cards_name_instances_and_deck(tmp_path):
+    text = (
+        ".subckt top a b vsubs\n"
+        "XD_1 a b vsubs InDuCtor PARAMS:\n"
+        "XL2 a b vsubs\n+ INDUCTOR\n.ends top\n"
+    )
+    with pytest.raises(LvsError, match=r"XD_1 .*XL2 .*layout\.deck.*sg13g2"):
+        run_lvs(_preextracted_layout(tmp_path, text))
+
+
+def test_preextracted_inductor_with_layout_deck_matches(tmp_path):
+    text = _REFERENCE.replace("inductor\n", "inductor PARAMS:\n")
+    assert (
+        run_lvs(_preextracted_layout(tmp_path, text, deck="sg13g2"))["status"]
+        == "match"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "X1 a b vsubs other",
+        "X1 a b inductor",
+        "X1 a b vsubs extra inductor",
+        "X1 a b vsubs inductor PARAMS: custom=1",
+    ],
+)
+def test_bare_inductor_guard_leaves_other_card_shapes_to_reader(tmp_path, body):
+    text = f".subckt top a b vsubs\n{body}\n.ends top\n"
+    report = run_lvs(_preextracted_layout(tmp_path, text))
+    assert report["status"] == "mismatch"
+
+
+def test_bare_defined_inductor_remains_a_subcircuit(tmp_path):
+    (tmp_path / "model.spice").write_text(
+        ".subckt inductor a b s\nR1 a b 5\n.ends inductor\n"
+    )
+    text = '.include "model.spice"\n' + _REFERENCE
+    assert run_lvs(_preextracted_layout(tmp_path, text))["status"] == "mismatch"
 
 
 def test_external_bridge_between_the_ports_is_an_lvs_mismatch(tmp_path):
