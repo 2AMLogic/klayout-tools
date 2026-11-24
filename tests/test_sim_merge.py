@@ -286,6 +286,19 @@ def test_monte_carlo_report_is_not_mergeable(tmp_path, shard_reports):
     assert excinfo.value.exit_code == 1
 
 
+def test_derive_report_is_not_mergeable(tmp_path, shard_reports):
+    # Issue #7184: a cross-corner entry rolled up over no corner would read
+    # as a pass, so the merge refuses it instead (#7225 re-derives).
+    derived = copy.deepcopy(shard_reports)
+    derived["tt"]["measurements"].append(
+        {"name": "rng", "derive": {"axis": "params.code"}, "status": "pass"}
+    )
+    paths = [_write(tmp_path, f"{k}.report", r) for k, r in derived.items()]
+    with pytest.raises(sim_merge.MergeError, match="cross-corner derive") as excinfo:
+        sim_merge.merge_reports(_plan(tmp_path, shard_reports), paths)
+    assert excinfo.value.exit_code == 1
+
+
 def test_manifest_planning_the_same_corners_twice_is_invalid(tmp_path, shard_reports):
     corners = [c["corner_id"] for c in shard_reports["tt"]["corners"]]
     manifest = _write(

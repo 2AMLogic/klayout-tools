@@ -377,6 +377,69 @@ wrapper's `status` stays in step with the engine it wrapped (issue #5664).
 `counts.pins` still reports the structural pin presence, and a pin pair the
 comparer itself graded otherwise remains `severity: "error"`.
 
+**The runset's strict top-port findings are first-class (issue #6903).** A
+PDK runset may check more than the compare: IHP's `sg13g2.lvs` runs
+`compare && flag_missing_ports` unless its `ignore_top_ports_mismatch`
+switch is set (klt passes no such `deck_vars` entry, so the runset's own
+default — **on** — applies; the answer is recorded at
+`provenance.runset.strict_top_port_mode`, `null` when the runset's log
+never reached the comparison step), and `flag_missing_ports` (KLayout
+0.30.2+) fails the run on top-level port nets whose layout and reference
+names disagree, logging `Port mismatch '<layout>' vs. '<reference>'`
+entries **into the `.lvsdb` cross-reference's log block** — a compare
+whose pairs are all `Match` can therefore be a runset the wrapper just
+failed. Those findings are parsed back out of the database (the
+`klayout.db` API does not expose them; `provenance.runset.xref_log`
+records the log verbatim, warnings included) and listed as
+`severity: "error"` `port.name_mismatch` entries in `mismatches[]`, the
+finding text verbatim in `description` and the two net names in `net`.
+Apostrophes in a net name are preserved. When the runset text leaves the
+boundary between names ambiguous, both names are `null` and the error
+still counts toward the verdict.
+**While any error-severity one stands, `status` is never `match`** —
+before #6903 a strict-port failure on an otherwise clean compare read
+`status: "match"` beside the runset's own `ERROR : Netlists don't match`
+(that line is logger-prefixed, so `provenance.runset.engine_error_lines`
+legitimately stays empty). This keeps, and does not compete with, the
+#5664 rule above: the #5664 downgrade is about *pin pairs the comparer
+itself graded matched*, while these entries are the runset's own error
+verdict; the preserved principle in both is that klt never reports
+`match` where the wrapped runset, in the mode klt ran it, reports a
+failure. Measured on the pinned IHP runset (v0.3.0, `5cccb161`, KLayout
+0.30.12); regression tests: `tests/test_lvs_klayout_runset_ports.py`
+(hermetic, against the captured database in
+`tests/fixtures/runset_inductor/`) and
+`tests/test_lvs_runset_inductor.py` (PDK-gated, with both negative
+controls).
+
+**Mirrored `inductor2` terminal order is a named, in-band known
+limitation (issue #6903).** The same runset finds an `inductor2`'s two
+ports by their `LA`/`LB` texts (`ind_derivations.lvs`) but then assigns
+`inductor_1`/`inductor_2` by port-polygon x position
+(`custom_extractor.lvs`' `sort_polygons`), and `DeviceCustomInd` clears
+terminal equivalence — so a **mirrored** spiral extracts with its winding
+terminals reversed however it is wired, and its `LA`/`LB` texts (which
+`ind_connections.lvs` uses as net names) turn the reversal into
+`port.name_mismatch` crossings (or, with surrounding asymmetric context,
+into a terminal-reversed device mismatch). When the engine sees that
+positive evidence — the layout device's terminal 1 on an `LB`-labelled
+net and terminal 2 on an `LA`-labelled one, with the paired reference
+keeping `LA` first — it appends one `severity: "warning"`
+`topology.known_limitation` entry carrying
+`details.limitation: "mirrored-inductor2-terminal-order"` and the three
+net names. `status` is left exactly as the runset reported it (this
+names a cause; it is not a pass), and `klt signoff` renders the named
+refusal reason `runset_inductor_terminal_order` for items 4 and 11
+(`docs/cli/signoff.md`) instead of a bare `check_failed`. Negative
+controls measured on the pin: a genuinely reversed *reference* (layout
+labels natural) and `LA`/`LB` texts moved off the port pins (no inductor
+extracted at all) both stay plain failures with no named limit. A
+crossed-label layout (each text on the other port's net) is
+netlist-indistinguishable from a mirrored spiral — identical terminal
+order, names and findings — and necessarily carries the same named limit;
+electrically the two are the same report, and the label-ordered
+normalisation proposed in #6914 resolves both identically.
+
 **An empty extraction is graded, not an error (issue #4081).** When the runset
 extracts zero devices from the layout its compare step never runs, so the
 `.lvsdb` has no cross-reference. If the extracted netlist is also device-free,
@@ -3101,7 +3164,7 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `net.supply_fragmented`, `device.unmatched`, `device.class`, `device.class_arity`, `device.class_family_unsatisfiable`, `device.flavour_mismatch`, `device.unmerged_fingers`, `device.bulk_reconciled`, `device.finfet_bulk_tied`, `device.bulk_ignored`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.geometry_not_compared`, `device.implausible_dimensions`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `device.series_fold_offset_absorbed`, `pin.unmatched`, `pin.count`, `pin.declared_short`, `reference.unresolved_subckt_call`, `reference.gate_level_pin_case_folded`, `topology`, `topology.flattened`, `topology.hierarchy_mismatch`, `topology.known_limitation`, `topology.power_only_pruned`, `topology.dangling_output_ambiguous`, `topology.reference_port_alias_joined`, `topology.top_level_pins_anchored`, `hints.rejected`, `hints.constant_nets_declared`, `hints.short_nets_applied`, `hints.layout_short_nets_applied`, `combine_devices_per_circuit.unmatched`, `compare.timeout`, `coverage.no_devices_recognized`, `runset.incomplete`. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `net.supply_fragmented`, `device.unmatched`, `device.class`, `device.class_arity`, `device.class_family_unsatisfiable`, `device.flavour_mismatch`, `device.unmerged_fingers`, `device.bulk_reconciled`, `device.finfet_bulk_tied`, `device.bulk_ignored`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.geometry_not_compared`, `device.implausible_dimensions`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `device.series_fold_offset_absorbed`, `pin.unmatched`, `pin.count`, `pin.declared_short`, `port.name_mismatch`, `reference.unresolved_subckt_call`, `reference.gate_level_pin_case_folded`, `topology`, `topology.flattened`, `topology.hierarchy_mismatch`, `topology.known_limitation`, `topology.power_only_pruned`, `topology.dangling_output_ambiguous`, `topology.reference_port_alias_joined`, `topology.top_level_pins_anchored`, `hints.rejected`, `hints.constant_nets_declared`, `hints.short_nets_applied`, `hints.layout_short_nets_applied`, `combine_devices_per_circuit.unmatched`, `compare.timeout`, `coverage.no_devices_recognized`, `runset.incomplete`. |
 | `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `net.supply_fragmented` entry (see below), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.class_family_unsatisfiable` entry (see below) is likewise always `"error"` — a reference netlist that names two or more device classes of one option-selected, shared-geometry family cannot match under any `deck_options` value, which is a real defect in the reference and never merely informational (it is nonetheless *diagnostic*: it explains the mismatch the compare already reported, and never moves `status` on its own). Every `pin.declared_short` entry (see below) is likewise always `"error"` — one conductor shorting two declared interface pins is a layout defect, never a naming artifact (like `device.class_family_unsatisfiable` it is *diagnostic*: it explains a mismatch the compare usually already reports, and never moves `status` on its own — a reference that models the same short can still `"match"` while carrying this entry). Every `reference.gate_level_pin_case_folded` entry (see below) is always `"warning"` — it discloses a case-insensitive pin binding made while converting a `reference.form: "gate-level-verilog"` netlist, so it never changes `status`. Every `reference.unresolved_subckt_call` entry (see below) is always `"error"` and, unlike the diagnostic-only error categories, always forces `status: "mismatch"` (issue #2952). Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `device.parameter_excluded` entry (see below) is always `"warning"` for the same reason — it discloses that `options.compare_parameters` removed a parameter from a device class's compare entirely, so it never changes `status` either. Every `device.geometry_not_compared` entry (see below) is likewise always `"warning"` — it discloses that a participating resistor/capacitor class's *secondary* parameters (`L`/`W`/`A`/`P` for a resistor, `A`/`P` for a capacitor) took no part in the compare, which is a property of KLayout's own device-class definitions rather than a finding about these two netlists, so it never changes `status` either. Every `device.implausible_dimensions` entry (see below) is likewise always `"warning"` — it discloses a device whose parsed W or L reaches 1,000,000 µm (one metre), which usually means a SPICE length suffix is missing, so it never changes `status` either (a request whose only finding is this entry reports whatever the comparer decided, with a nonzero `mismatch_count`). Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.hierarchy_mismatch` entry (see below) is likewise always `"warning"` — it is advisory only, so it never changes `status`. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `topology.reference_port_alias_joined` entry (see below) is likewise always `"warning"` — it discloses that a reference port declared only via a plain `assign` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`) had its net joined onto its canonical target's net before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `topology.top_level_pins_anchored` entry (see below) is likewise always `"warning"` — it discloses that `options.anchor_top_level_pins` used the two sides' shared top-level pin names as compare anchors, which only ever *removes* a degree of freedom from the comparer, so it never changes `status` on its own (a pin pairing the comparer refuses is reported separately, as `hints.rejected`). Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a combined device's parameter was corrected in place after `combine_devices()` produced a value inconsistent with the parallel group it folded, so `status` reflects the corrected value, not the discovery of the inconsistency. Every `device.series_fold_offset_absorbed` entry (see below) is likewise always `"warning"` — it discloses that a series fold charged a resistor class's `fixed_offset_ohm` once for N drawn primitives, so it never changes `status` either (a `match` stays a `match`). Every `hints.short_nets_applied` entry (see below) is likewise always `"warning"` — it discloses that `hints.short_nets` resolved a mask-option reference to one concrete code (merging net groups, dropping link devices) before comparing, so it never changes `status` either. Every `hints.layout_short_nets_applied` entry (see below) is likewise always `"warning"` — it discloses that `hints.layout_short_nets` merged named layout nets before comparing, a tie asserted by the request rather than read from the layout, so it never changes `status` either (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |

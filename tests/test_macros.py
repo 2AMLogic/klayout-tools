@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import macros as macro_spec
+from klayout_tools.macro_blackbox import verilog_declared_modules
 
 
 class _Err(Exception):
@@ -292,9 +293,7 @@ def test_multi_module_blackbox_containing_the_cell_is_accepted(tmp_path):
 
 
 def test_escaped_identifier_blackbox_module_is_matched(tmp_path):
-    assert macro_spec.verilog_declared_modules("module \\a.b (D);\nendmodule") == [
-        "a.b"
-    ]
+    assert verilog_declared_modules("module \\a.b (D);\nendmodule") == ["a.b"]
 
 
 def test_duplicate_macro_cell_names_rejected(tmp_path):

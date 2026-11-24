@@ -95,6 +95,26 @@ def mapped_sta_constraints(constraints: dict[str, Any] | None) -> dict[str, Any]
     return {"clocks": clocks, "multicycle_paths": constraints["multicycle_paths"]}
 
 
+def mapped_sta_macros(
+    constraints: dict[str, Any] | None, macros: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Build Verilog-mode STA declarations before synthesis starts."""
+    if constraints is None:
+        return []
+    declarations = macro_spec.macros_response(macros)
+    for index, macro in enumerate(declarations):
+        if macro["lef"] is None:
+            if macro["lib"] is not None:
+                raise SynthesizeError(
+                    f"request.macros[{index}].lef is required to use a macro liberty "
+                    "in mapped-netlist STA for constraints.multicycle_paths"
+                )
+            # Synthesis consumed the Verilog declaration. STA links the
+            # mapped instance using its cell-only, untimed black-box form.
+            declarations[index] = {"cell": macro["cell"]}
+    return declarations
+
+
 def constrained_timing_fields(
     constraints: dict[str, Any] | None,
     *,
@@ -102,7 +122,7 @@ def constrained_timing_fields(
     hdl_toplevel: str,
     cell_library: str,
     corner: str,
-    macros: list[dict[str, Any]],
+    sta_macros: list[dict[str, Any]],
     pdk_variant: str | None,
     pdk_root: str | None,
 ) -> dict[str, Any]:
@@ -119,7 +139,7 @@ def constrained_timing_fields(
         "constraints": constraints,
         # These paths were resolved relative to the synthesis request. Keep
         # those inputs when running STA from the synthesis artifact directory.
-        "macros": macro_spec.macros_response(macros),
+        "macros": sta_macros,
     }
     try:
         request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")

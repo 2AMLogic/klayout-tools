@@ -311,6 +311,7 @@ from .synthesize_constrained_timing import (
 from .synthesize_constrained_timing import (
     constrained_timing_fields,
     mapped_sta_constraints,
+    mapped_sta_macros,
 )
 from .synthesize_driving_cell import (
     ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
@@ -995,10 +996,9 @@ def run_synthesize(
     latch_map_request = _resolve_latch_map(request)
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # with everything else that needs no PDK resolution; the one
-    # corner-dependent half (which of a macro's per-corner liberties applies)
-    # necessarily waits for `_resolve_liberty` below, exactly as
-    # `dont_use`'s own liberty-dependent half already does.
+    # corner-dependent half waits for `_resolve_liberty` below.
     macros = _validate_macros(request.get("macros"), request_dir)
+    sta_macros = mapped_sta_macros(sta_constraints, macros)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -1416,7 +1416,7 @@ def run_synthesize(
             hdl_toplevel=hdl_toplevel,
             cell_library=cell_library,
             corner=corner,
-            macros=macros,
+            sta_macros=sta_macros,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
         ),
@@ -1876,12 +1876,13 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
     :mod:`klayout_tools.macros` and accepted identically by ``klt sta``.
 
     Returns ``[]`` when the field is omitted, so a request written before
-    this field existed synthesizes byte-for-byte as it did. A thin wrapper
-    rather than a second validator: the field's *shape* is a contract shared
-    across three verbs, and the only thing that differs per verb is which
-    exception class a bad request raises.
+    this field existed synthesizes byte-for-byte as it did. A thin wrapper:
+    the only per-verb differences are the error class and, here alone, the
+    LEF-less relaxation (issue #5612).
     """
-    return macro_spec.validate_macros(macros, request_dir, error_cls=SynthesizeError)
+    return macro_spec.validate_macros(
+        macros, request_dir, error_cls=SynthesizeError, allow_missing_lef=True
+    )
 
 
 def _macro_blackbox_inputs(
@@ -1905,7 +1906,8 @@ def _macro_blackbox_inputs(
        list (:func:`klayout_tools.macros.blackbox_verilog_text`) into
        ``<run dir>/<cell>_blackbox.v`` and loaded the same way. This is the
        path that means a caller with only a LEF never has to hand-write (and
-       hand-maintain) a stub.
+       hand-maintain) a stub -- unreachable for a LEF-less macro (issue
+       #5612), which has no LEF to generate from and always takes 1 or 2.
 
     Every disposition has the same effect on the netlist: the macro
     survives ``hierarchy``/``synth``/``abc`` as one opaque instance rather
@@ -2038,18 +2040,16 @@ def _macro_area_warning(
         )
         if with_lib:
             text += (
-                " Add the area of "
-                + ", ".join(with_lib)
-                + " from its macro liberty (response.macros[].lib) before "
+                f" Add the area of {', '.join(with_lib)}"
+                " from its macro liberty (response.macros[].lib) before "
                 "comparing area_um2 to an area budget."
             )
         if without_lib:
             text += (
-                " "
-                + ", ".join(without_lib)
-                + " has no macro liberty (response.macros[].lib is null: "
-                "LEF-only or verilog_blackbox), so no area is available "
-                "for it here."
+                f" {', '.join(without_lib)}"
+                " has no macro liberty (response.macros[].lib is null: "
+                "LEF-only, verilog_blackbox-only or abstract-less), so no "
+                "area is available for it here."
             )
         warnings["macro_area_excluded"] = text
     if others_missing:
