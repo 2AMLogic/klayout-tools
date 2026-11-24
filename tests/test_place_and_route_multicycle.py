@@ -20,7 +20,7 @@ from test_place_and_route import (
     _stub_run_extract_for_post_route_spef,
 )
 from test_place_and_route_resume import STAGES, _env, _record_stage_runs, _strip
-from test_post_route_sta import _live_sky130_env
+from test_post_route_sta import _LIVE_ONLY
 from test_sta_multicycle_run import _feedback_netlist
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
@@ -158,7 +158,7 @@ def test_invalid_entries_fail_before_a_stage_runs(
     assert ran == []
 
 
-@pytest.mark.skipif(_live_sky130_env() is None, reason="requires OpenROAD and SKY130")
+@_LIVE_ONLY
 @pytest.mark.parametrize(
     ("launch", "capture", "expected"),
     [
@@ -221,7 +221,7 @@ def _checkpoint_slacks(tmp_path, script, *, apply_exception):
     return slacks
 
 
-@pytest.mark.skipif(_live_sky130_env() is None, reason="requires OpenROAD and SKY130")
+@_LIVE_ONLY
 def test_routed_feedback_and_adjacent_path_match_standalone_sta(tmp_path, monkeypatch):
     monkeypatch.setenv("PDK", "sky130A")
     (tmp_path / "top.v").write_text(_feedback_netlist())
