@@ -424,6 +424,4 @@ def test_cli_text_format_prints_merge_summary(tmp_path, monkeypatch, capsys):
         "power_stack_repair: skipped "
         "(no M4/M5/V3/V4 layer in the KLayout layer map)" in out
     )
-    assert (
-        "m4_grid_repair: skipped (no M4 layer in the KLayout layer map)" in out
-    )
+    assert "m4_grid_repair: skipped (no M4 layer in the KLayout layer map)" in out
