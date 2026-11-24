@@ -227,6 +227,7 @@ def test_assemble_lvs_report_wires_the_derivation():
         opts = SimpleNamespace(
             deck_options=None,
             label_layers=None,
+            join_same_named_nets=False,
             def_net_names=False,
             def_pins_echo=None,
             layout_abstraction=SimpleNamespace(patterns=(), echo={}),

@@ -1504,7 +1504,6 @@ def _probe_single_abstract_pin_point(
                 net = l2n.probe_net(region, point)
                 if net is not None:
                     return net, True
-                break
     for name, region in probe_layers:
         if name in _BODY_IDENTITY_PROBE_ROLES and name != role:
             continue
@@ -1718,7 +1717,7 @@ def _wire_abstract_cells(
     global_net_ports_by_cell: dict[int, int] | None = None,
     lef_layer_roles: dict[str, str] | None = None,
     def_probes: dict[str, list[tuple[int, kdb.Point]]] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[kdb.Net]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
     ``abstracted_cells[]`` field alongside any ``warnings`` this pass itself
@@ -1777,11 +1776,9 @@ def _wire_abstract_cells(
     returned ``warnings`` alongside the per-instance geometric-miss entries
     above.
 
-    Instance/subckt naming is deterministic: cell types are visited in
-    ``instances``'s own order (already sorted by
-    :func:`_collect_abstract_instances`); each occurrence is named
-    ``"<cell type>_<n>"`` (0-based, per cell type), sanitized for SPICE via
-    :func:`_sanitize_instance_name`.
+    Instance names follow the deterministic placement order in ``instances``.
+    The third result identifies generated open nets by identity, so top-pin
+    reconciliation can keep them internal even when a user label has the same name.
 
     ``local_candidates_by_cell`` (issue #1183) is ``{<cell index>:
     <_local_pin_candidate_points() result>}`` for every matched cell type,
@@ -1819,6 +1816,7 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    unresolved: list[kdb.Net] = []
     joins = AbstractPinJoins()
     wired: list[tuple[kdb.SubCircuit, dict[str, int]]] = []
     # Count LEF-merged substrate-role pins even when a verbose report is disabled.
@@ -1904,6 +1902,7 @@ def _wire_abstract_cells(
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
+                    unresolved.append(net)
                     warnings.append(
                         f"--abstract-cells instance '{instance_name}' (cell "
                         f"'{cell.name}') pin '{pin_name}': no conductor found "
@@ -1935,4 +1934,4 @@ def _wire_abstract_cells(
         )
     )
     report.sort(key=lambda entry: entry["cell"])
-    return report, warnings
+    return report, warnings, unresolved

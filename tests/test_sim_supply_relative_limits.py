@@ -112,3 +112,65 @@ def test_missing_rail_in_later_unit_is_rejected(tmp_path):
     )
     with pytest.raises(sim.SimError, match=r"measurement 'level': limits\.max"):
         sim.run_sim(str(path), backend="local", dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("limits", "value", "expected", "margin"),
+    [
+        ({"max": 0, "exclusive_max": True}, 0, "fail", 0),
+        ({"min": 0, "exclusive_min": True}, 0, "fail", 0),
+        ({"max": 0, "exclusive_max": False}, 0, "pass", 0),
+        ({"min": 0, "max": 2, "exclusive_min": True}, 2, "pass", 0),
+        ({"min": 0, "max": 2, "exclusive_max": True}, 1, "pass", 1),
+        (
+            {"min": {"frac_of": "vdd", "fraction": 0.5}, "exclusive_min": True},
+            0.9,
+            "fail",
+            0,
+        ),
+    ],
+)
+def test_exclusive_limits_grade_and_cover_the_bound(
+    tmp_path, monkeypatch, limits, value, expected, margin
+):
+    path = _request(tmp_path, limits, corners={"supply_v": {"vdd": [1.8]}})
+    _stub_subprocess_run(monkeypatch, log_text=f"level = {value}\nplain = 1.65\n")
+    report = sim.run_sim(str(path), backend="local")
+    measurement = report["corners"][0]["measurements"][0]
+    assert (measurement["status"], measurement["margin"]) == (expected, margin)
+    assert report["status"] == report["measurements"][0]["status"] == expected
+    assert report["measurements"][0]["limits"] == limits
+    coverage = report["coverage"]
+    assert coverage["skipped"] == coverage["unrecognized_limit_keys"] == []
+    assert len(coverage["checked"]) == 1 + sum(key in limits for key in ("min", "max"))
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max": 1, "exclusive_max": "true"},
+        {"exclusive_min": True},
+        {"exclusive_max": True, "max": None},
+        {"exclusive_min": True, "min": False},
+    ],
+)
+def test_invalid_exclusive_limit_refused_before_dispatch(tmp_path, limits):
+    with pytest.raises(sim.SimError, match="exclusive_(max|min)"):
+        sim.run_sim(str(_request(tmp_path, limits)), backend="local", dry_run=True)
+
+
+@pytest.mark.parametrize("stepped", [True, False])
+def test_older_batch_runner_refused_for_strict_bounds(stepped):
+    from klayout_tools import sim_batch_contract_spec as contract
+
+    limits = {"min": 1, "exclusive_min": True}
+    scope = {"measurements": [{"limits": limits}]}
+    request = {"analysis_steps": [scope]} if stepped else scope
+    features = contract._request_features(request)
+    assert "exclusive_bounds" in contract._MANDATORY_RUNNER_FEATURES
+    assert "exclusive_bounds" in contract._missing_runner_features(features, "0.9.2")
+    assert "exclusive_bounds" not in contract._missing_runner_features(
+        features, "0.9.3"
+    )
+    limits["exclusive_min"] = False
+    assert "exclusive_bounds" not in contract._request_features(request)

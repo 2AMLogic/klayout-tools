@@ -9,6 +9,7 @@ post-hoc ``model_bin_range`` message and the non-fatal pre-run
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -16,6 +17,14 @@ from . import sim_model_bins
 
 #: ``(instance, model, w_um, nf)`` as returned by the culprit search.
 Culprit = tuple[str, str, float, float]
+
+
+MODELNAME_ABORT_RE = re.compile(
+    r"(?:^Error:[ \t]*|^[ \t]*Error on line \d+ or its substitute:[ \t]*\n"
+    r"[ \t]*m\S*(?:[ \t]+[^\s=]+){5}[ \t]+[^\n]*\b[wl]=[^\n]+\n)"
+    r"could not find a valid modelname",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _cause(culprit: Culprit) -> str:
