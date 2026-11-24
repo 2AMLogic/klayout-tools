@@ -1,0 +1,57 @@
+{
+  "engine": {
+    "binary": "OpenROAD-flow-scripts image openroad/orfs@sha256:bb7f31697fb8466ab61852fc796376cc16d9df38f762ccb733218b8a5e55824b, tools/install/OpenROAD/bin/sta (the plain OpenSTA binary -- no LEF needed for a netlist session)",
+    "version": "26Q3-1510-g6cb3f2b704",
+    "captured": "2026-11-23"
+  },
+  "liberty": "sg13g2_stdcells_tt_1p20v_25c.lib (2AMLogic/sg13g2-stdcells `klt characterize` output: sg13g2_inv_1/2, sg13g2_nand2_1)",
+  "netlist": "module top(input a, input b, output y1, output y2, output y3);\n  wire n1, n2, n3, n4, n5, n6;\n  sg13g2_inv_1 i1 (.A(a), .Y(n1));\n  sg13g2_inv_2 i2 (.A(n1), .Y(n2));\n  sg13g2_inv_1 i3 (.A(n2), .Y(y1));\n  sg13g2_inv_1 i4 (.A(b), .Y(n3));\n  sg13g2_inv_1 i5 (.A(n3), .Y(n4));\n  sg13g2_inv_2 i6 (.A(n4), .Y(n5));\n  sg13g2_inv_1 i7 (.A(n5), .Y(y2));\n  sg13g2_nand2_1 i8 (.A(a), .B(b), .Y(n6));\n  sg13g2_inv_1 i9 (.A(n6), .Y(y3));\nendmodule\n",
+  "constraints_sdc": [
+    "create_clock -name vclk -period 1.0",
+    "create_clock -name oclk1 -period 1.0",
+    "create_clock -name oclk2 -period 1.0",
+    "set_input_delay 0.6 -clock vclk -max [get_ports {a b}]",
+    "set_input_delay 0.1 -clock vclk -min [get_ports {a b}]",
+    "set_output_delay 0.5 -clock oclk1 -max [get_ports {y1 y2}]",
+    "set_output_delay -0.4 -clock oclk1 -min [get_ports {y1 y2}]",
+    "set_output_delay 0.5 -clock oclk2 -max [get_ports {y3}]",
+    "set_output_delay -0.4 -clock oclk2 -min [get_ports {y3}]"
+  ],
+  "path_group_names_observed": "vclk oclk1 oclk2 asynchronous {path delay} {gated clock} unconstrained",
+  "violating_endpoints_tcl_ask_11": [
+    "puts \"===KLT_STA_VIOLATING_ENDPOINTS_BEGIN===\"",
+    "if {[catch {",
+    "    foreach klt_ve_side {max min} {",
+    "        set klt_ve_seen {}",
+    "        foreach klt_ve_group [sta::path_group_names] {",
+    "            if {[lsearch -exact $klt_ve_seen $klt_ve_group] >= 0} {",
+    "                continue",
+    "            }",
+    "            lappend klt_ve_seen $klt_ve_group",
+    "            foreach klt_pe [find_timing_paths -path_delay $klt_ve_side -path_group [list $klt_ve_group] -group_path_count 11 -endpoint_path_count 1 -slack_max 0 -sort_by_slack] {",
+    "                set klt_ve_s [$klt_pe slack]",
+    "                if {$klt_ve_s < 0} {",
+    "                    puts \"VPATH\\t$klt_ve_side\\t[$klt_pe check_role]\\t$klt_ve_s\\t[get_full_name [get_property $klt_pe startpoint]]\\t[get_full_name [get_property $klt_pe endpoint]]\\t$klt_ve_group\"",
+    "                }",
+    "            }",
+    "        }",
+    "    }",
+    "} klt_ve_error]} {",
+    "    puts \"ERROR\\t[string map [list \\n { } \\t { }] $klt_ve_error]\"",
+    "}",
+    "puts \"===KLT_STA_VIOLATING_ENDPOINTS_END===\""
+  ],
+  "scenarios": {
+    "two_group_violators": {
+      "stdout_block_ask_11": "===KLT_STA_VIOLATING_ENDPOINTS_BEGIN===\nVPATH\tmax\toutput setup\t-1.7954226994021383e-10\tb\ty2\toclk1\nVPATH\tmax\toutput setup\t-1.5888057536272981e-10\ta\ty1\toclk1\nVPATH\tmax\toutput setup\t-1.5110634965509462e-10\tb\ty3\toclk2\nVPATH\tmin\toutput hold\t-2.444912050592052e-10\ta\ty1\toclk1\nVPATH\tmin\toutput hold\t-2.2057647375284262e-10\tb\ty2\toclk1\nVPATH\tmin\toutput hold\t-2.662399190000997e-10\ta\ty3\toclk2\n===KLT_STA_VIOLATING_ENDPOINTS_END===",
+      "stdout_block_ask_2": "===KLT_STA_VIOLATING_ENDPOINTS_BEGIN===\nVPATH\tmax\toutput setup\t-1.7954226994021383e-10\tb\ty2\toclk1\nVPATH\tmax\toutput setup\t-1.5888057536272981e-10\ta\ty1\toclk1\nVPATH\tmax\toutput setup\t-1.5110634965509462e-10\tb\ty3\toclk2\nVPATH\tmin\toutput hold\t-2.444912050592052e-10\ta\ty1\toclk1\nVPATH\tmin\toutput hold\t-2.2057647375284262e-10\tb\ty2\toclk1\nVPATH\tmin\toutput hold\t-2.662399190000997e-10\ta\ty3\toclk2\n===KLT_STA_VIOLATING_ENDPOINTS_END===",
+      "report_check_types_max_family": "\nmax_delay/setup group oclk1\n\n                                        Required      Actual\nEndpoint                                   Delay       Delay       Slack\n------------------------------------------------------------------------\ny2 (output)                             0.500000    0.679542   -0.179542 (VIOLATED)\ny1 (output)                             0.500000    0.658881   -0.158881 (VIOLATED)\n\nmax_delay/setup group oclk2\n\n                                        Required      Actual\nEndpoint                                   Delay       Delay       Slack\n------------------------------------------------------------------------\ny3 (output)                             0.500000    0.651106   -0.151106 (VIOLATED)\n\n",
+      "report_check_types_hold_family": "\nmin_delay/hold group oclk1\n\n                                        Required      Actual\nEndpoint                                   Delay       Delay       Slack\n------------------------------------------------------------------------\ny1 (output)                             0.400000    0.155509   -0.244491 (VIOLATED)\ny2 (output)                             0.400000    0.179424   -0.220576 (VIOLATED)\n\nmin_delay/hold group oclk2\n\n                                        Required      Actual\nEndpoint                                   Delay       Delay       Slack\n------------------------------------------------------------------------\ny3 (output)                             0.400000    0.133760   -0.266240 (VIOLATED)\n\n",
+      "violator_counts": {
+        "setup": 3,
+        "hold": 3
+      }
+    }
+  },
+  "note": "Real engine output captured live (not synthesized): the stdout blocks are the verbatim marker-delimited regions the shipped Tcl emits, and the two report_check_types regions are the same session's violator reports behind setup_violation_count/hold_violation_count. The design is combinational-only (the available liberty has no flip-flops), so every row is an output-setup / output-hold check against virtual capture clocks -- two path groups per side (oclk1: y1,y2; oclk2: y3), which is what exercises the global worst-first resort across groups. Engine facts verified on this capture: -slack_max is inclusive (<=) at the boundary, so the emitter's strict $s < 0 filter is what keeps zero-slack ends out; -group_path_count caps per path group, so the Python side re-sorts globally and trims to the request cap; path ends expose no path_group_name property, so the emitter iterates sta::path_group_names and -path_group [list $name] (list-quoting is load-bearing: a bare multi-word name like {gated clock} splits, warns 'unknown path group', and silently disables the filter). 2026-11-24 (PR #7449 review): violating_endpoints_tcl_ask_11 was refreshed for the per-side distinct-group dedupe (a design clock named asynchronous makes sta::path_group_names list that name twice). The stdout blocks above were produced by the pre-dedupe Tcl; re-running the refreshed Tcl on this same design with the same engine image returned identical VPATH rows, because every group name here is distinct."
+}

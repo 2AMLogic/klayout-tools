@@ -549,6 +549,7 @@ Consequences:
   `0.6666778`, yet `(vout - 0.6666778) * 1e9` evaluates to `-22.59...`, not `0`.
 - Defaults are unchanged: with no `ngspice_init`, formatting is whatever the
   installed ngspice defaults to.
+- For a bounded transient interval, use [windowed transient expression reductions](#windowed-transient-expression-reductions).
 - `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
   `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
   transient value at a time, use a `.meas ... FIND ... AT=` card; to use a
@@ -5497,6 +5498,37 @@ threshold as `measurements[].crossings` with a supply-relative `level`
 literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
+
+### Windowed transient expression reductions
+
+Use `measurements[].windowed` to reduce an expression over a time interval
+in an ngspice transient analysis. For example, this measures the minimum
+combined supply current between 3 and 17 microseconds and grades it in amps.
+
+```json
+{
+  "name": "isumpk",
+  "unit": "A",
+  "windowed": {"reduce": "min", "of": "i(vdd1)+i(vdd2)", "from": "3u", "to": "17u"},
+  "limits": {"min": -0.002, "max": 0}
+}
+```
+
+The supported reductions are `min`, `max`, `avg`, `rms`, and `pp`
+(peak-to-peak). Both bounds are required. Use seconds or SPICE literals and
+a start earlier than the end. Both bounds must fall within the transient analysis
+interval, including its endpoints. The expression must fit on one line and cannot
+contain quotes or braces. A windowed entry takes exactly one measurement form.
+Use it with a scalar transient analysis. Xyce and `analysis_steps[]` refuse it.
+
+The client expands this example to the card below before local execution or
+batch submission. ngspice applies its inclusive FROM/TO window to the solver
+grid. The reported last time point can differ by reduction. See the following
+section for the corresponding `par()` syntax in a hand-written card.
+
+```spice
+.meas tran isumpk MIN par('i(vdd1)+i(vdd2)') FROM=3u TO=17u
+```
 
 ### An expression in a `.meas` signal position must be wrapped in `par('...')`
 
