@@ -14,22 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt signoff` grades a `sta` envelope's own `status`; opt-in
-  `require_routed_geometry`** (issue #7711, 2026-11-24): item 5 graded a cited
-  `klt sta` envelope `met` from per-corner timing alone, so an envelope
-  declaring `status` other than `"ok"` (which `klt sta` never emits; only a
-  hand-edited or foreign envelope can) still counted as passing. It now grades
-  `unmet`/`check_failed` with `detail.sta_status`, in `--manifest` and
-  aggregation mode. `geometry_source` is deliberately **not** part of the
-  default predicate (item 5 is the pre-layout timing item, and `klt sta`
-  characterises pre-route DEFs), so existing `met` verdicts on
-  `placement_estimate`/`netlist_estimate` envelopes are unchanged; an evidence
-  entry may now set `"require_routed_geometry": true` to grade `unmet`
-  (`check_failed`, `detail.sta_geometry_not_routed`) unless it is literal
-  `"routed"`. Off by default; a non-boolean value is `invalid_evidence`. Every
-  `sta` citation additively carries `detail.geometry_source`. No
-  `schema_version` change; `grading_ruleset_id` changes with the grading code.
-  See `docs/cli/signoff.md`.
+- **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
+  revision token case-insensitively** (issue #6362, 2026-11-24, additive —
+  `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already
+  ignored case but the `open_pdks <token>` arm was an exact compare, so a
+  declared `options.pdk_revision` spelled in a different case than the
+  worker's token (e.g. upper-case hex) reported a spurious advisory
+  `mismatch` plus a `warning` on a worker that *has* that revision. Both
+  arms now fold case. Matching stays otherwise exact: an abbreviated
+  revision (a 7-character prefix) is still a `mismatch`, and the advisory
+  field still never changes a run's outcome. See `docs/cli/sim.md`.
 - The `klt lvs` report category `device.implausible_dimensions` has severity
   `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
