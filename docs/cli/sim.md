@@ -9139,14 +9139,17 @@ values), *and* reduced to a per-measurement statistical verdict under
     `sg13g2_hv_svaricap_*_mm` geometry sigmas, and `mismatch_params` lists
     them. Refused before any corner is dispatched when no selected section
     is a `mos_*_mismatch` section, when the libraries cannot be read on the
-    submitting host, when they define no `_mm` sigma at all, or when a
+    submitting host, when they define no `_mm` sigma at all, when a
     sigma they *do* define has a value that is not a plain numeric literal
     (an expression such as `'0.5*2'`, or a reference to another parameter;
-    a scale-factor suffix like `4n` is read normally). That last refusal
-    names the parameter and the file: leaving one sigma at nominal while
-    its siblings are scaled would be a *partially* scaled run, and
-    `mismatch_params` — which lists only what was written — would not show
-    the omission. Never a silently unscaled, or partially scaled, run.
+    a scale-factor suffix like `4n` is read normally), or when the selected
+    section itself contains a one-argument `.lib <token>` line (#7671) —
+    ambiguous between a section name and an include, and reading it as a
+    section opener would end the scan mid-section. Those refusals
+    name the offending parameter or line and the file: leaving one sigma at
+    nominal while its siblings are scaled would be a *partially* scaled run,
+    and `mismatch_params` — which lists only what was written — would not
+    show the omission. Never a silently unscaled, or partially scaled, run.
 
     **Not yet measured on real models.** Unlike the switch families above,
     the effect of these cards on the sampled `stddev` of an ngspice run
