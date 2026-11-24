@@ -4,7 +4,7 @@ the ``klt`` verb modules.
 Offers: ``_resolve_relative`` (anchor a user-supplied path at the request's
 directory), ``_load_request_json`` / ``_load_spec_json`` (read a JSON
 request or spec file), ``validate_request_shape`` / ``load_request_arg``
-(request dispatch and shape checks), ``_parse_layer_datatype`` and
+(request dispatch and shape checks), ``parse_layer_datatype`` and
 ``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
 ``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
 (``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``).
@@ -22,6 +22,8 @@ import shutil
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+
+from ._layer_spec import parse_layer_datatype_strict
 
 
 def _resolve_relative(path: str, base_dir: str) -> str:
@@ -216,24 +218,20 @@ def _reject_unknown_keys(
     )
 
 
-def _parse_layer_datatype(
+def parse_layer_datatype(
     raw: str, spec_path: str, field: str, error_cls: type[Exception]
 ) -> tuple[int, int]:
     """Parse a ``"<layer>/<datatype>"`` string into an ``(layer, datatype)``
     int pair, raising ``error_cls`` with ``field`` named in the message for
-    anything malformed (wrong shape, non-integer parts).
+    anything malformed (wrong shape, non-integer parts, signed numbers).
     """
-    parts = raw.split("/")
-    malformed = error_cls(
-        f"spec '{spec_path}': {field} must be '<layer>/<datatype>' with "
-        f"integer layer/datatype (got {raw!r})"
-    )
-    if len(parts) != 2:
-        raise malformed
     try:
-        return int(parts[0]), int(parts[1])
-    except ValueError as exc:
-        raise malformed from exc
+        return parse_layer_datatype_strict(raw)
+    except ValueError:
+        raise error_cls(
+            f"spec '{spec_path}': {field} must be '<layer>/<datatype>' with "
+            f"integer layer/datatype (got {raw!r})"
+        ) from None
 
 
 ViaEntry = tuple[int, dict[str, Any], str, tuple[int, int], tuple[str, str]]
@@ -251,7 +249,7 @@ def _validate_via_entries(
     """Validate the ``"vias"`` array shared shape used by ``erc.py``'s and
     ``power.py``'s ``_validate_vias``: default/type-check ``spec["vias"]``,
     require each entry be a JSON object containing ``required_keys``, parse
-    ``"layer"`` via :func:`_parse_layer_datatype`, check that ``"between"``
+    ``"layer"`` via :func:`parse_layer_datatype`, check that ``"between"``
     names two distinct entries from ``stackup_names``, and reject duplicate
     via/stackup names (tracked cumulatively against ``stackup_names``).
 
@@ -285,7 +283,7 @@ def _validate_via_entries(
             if key not in entry:
                 raise error_cls(f"spec '{spec_path}': vias[{i}] missing {key!r}")
 
-        layer = _parse_layer_datatype(
+        layer = parse_layer_datatype(
             str(entry["layer"]), spec_path, f"vias[{i}].layer", error_cls
         )
 

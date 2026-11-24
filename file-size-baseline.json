@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10779
+      "lines": 10705
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 593
+      "lines": 589
     },
     {
       "path": "src/klayout_tools/trajectory.py",
