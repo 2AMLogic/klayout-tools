@@ -255,11 +255,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from . import _liberty_warnings, _sta_wire_load, env_provenance
+from . import _liberty_warnings, _sta_spef_inputs, _sta_wire_load, env_provenance
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
-from . import _sta_spef_inputs, _sta_wire_load, env_provenance
 from . import _sta_timing_derate as _derate
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
