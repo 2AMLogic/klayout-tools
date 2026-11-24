@@ -352,7 +352,9 @@ def check_tier_report(
     """
     from .signoff import build_tier_report
 
-    committed = _load_committed_signoff_report(report_path, "items", "--manifest")
+    committed = _load_committed_signoff_report(
+        report_path, "items", "--manifest --check"
+    )
     fresh = build_tier_report(
         manifest,
         tiers_doc=tiers_doc,
@@ -386,7 +388,7 @@ def check_fleet_report(
     """
     from .signoff_fleet import build_fleet_report
 
-    committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
+    committed = _load_committed_signoff_report(report_path, "blocks", "--fleet --check")
     fresh = build_fleet_report(
         fleet,
         tiers_doc=tiers_doc,
@@ -397,10 +399,11 @@ def check_fleet_report(
 
 
 def _load_committed_signoff_report(
-    report_path: str, required_key: str, flag: str
+    report_path: str, required_key: str, mode_flag: str
 ) -> dict[str, Any]:
-    """Load the committed report ``--check`` will diff against, refusing one
-    the requested mode could not have produced (issue #2249).
+    """Load the committed report ``--check``/``--diff-reports`` will diff
+    against, refusing one the requested mode could not have produced (issue
+    #2249).
 
     :func:`~._report_verify.load_committed_report` already rejects a missing,
     unparseable, or non-object file. This adds the one shape question that
@@ -409,13 +412,14 @@ def _load_committed_signoff_report(
     roll-up (or at an unrelated JSON object) is refused as a *failure to
     verify* -- exit ``1`` -- rather than diffed into a "drifted" verdict
     listing every field of both shapes, which would read as evidence drift
-    when the real fault is the wrong file path.
+    when the real fault is the wrong file path. ``mode_flag`` names the
+    invocation the refusal message prints (``"--manifest --check"`` etc.).
     """
     committed = load_committed_report(report_path, SignoffError)
     if required_key not in committed:
         raise SignoffError(
             f"committed report '{report_path}' carries no '{required_key}' key "
-            f"-- {flag} --check expects a report this mode produced (a "
+            f"-- {mode_flag} expects a report this mode produced (a "
             f"'{required_key}' array is what identifies one); check the path"
         )
     return committed

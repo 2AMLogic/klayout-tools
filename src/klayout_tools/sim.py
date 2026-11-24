@@ -75,6 +75,7 @@ real failure.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -118,6 +119,7 @@ from . import (
     sim_op_args,
     sim_passes,
     sim_portable,
+    sim_probit_sigma,
     sim_search,
     sim_settled,
     sim_slope_band_meas,
@@ -429,9 +431,9 @@ from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
     _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
-    _refuse_corner_only_flags,
     _with_capacity_retries_override,
     _with_capacity_wait_override,
+    refuse_corner_only_flags,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -2476,7 +2478,7 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
+    refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -3312,6 +3314,9 @@ def _prepare_sim_request(
             "quantiles": quantiles,
             "k_sigma": k_sigma,
             "window_scope": window_scope,
+            "probit_sigma": sim_probit_sigma.validate(
+                monte_carlo_spec, measurements_spec
+            ),
         }
         # Echo only what the request actually declared, so a sampling-only
         # request's `environment.monte_carlo` keeps its `{n, seed, vary}`
@@ -3530,14 +3535,12 @@ def _open_resume_checkpoint(
     checkpoint_path: str,
     *,
     resume: bool,
-    **fingerprint_inputs: Any,
+    fingerprint: Callable[[], str],
 ) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
     """Hash the request inputs and open a checkpoint only when resuming."""
     if not resume:
         return {}, None, None
-    return restore_checkpoint(
-        checkpoint_path, _checkpoint_fingerprint(**fingerprint_inputs)
-    )
+    return restore_checkpoint(checkpoint_path, fingerprint())
 
 
 def _run_sim_corners(
@@ -3681,8 +3684,12 @@ def _run_sim_corners(
         "ngspice_options": ngspice_options,
         "stimulus_lines": stimulus_lines,
     }
+    # The checkpoint, run history and shard map share one digest of these inputs.
+    shard_fingerprint = functools.cache(
+        functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
+    )
     pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
-        checkpoint_path, resume=bool(resume), **fingerprint_inputs
+        checkpoint_path, resume=bool(resume), fingerprint=shard_fingerprint
     )
 
     # Issue #5775: a sharded batch run keeps its shard map even without
@@ -3968,15 +3975,12 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
-            shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
+            shard_fingerprint=shard_fingerprint,
         )
 
-    shard_fingerprint = (
-        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
-    )
     history = sim_batch_history.begin(
         artifacts_dir,
-        shard_fingerprint,
+        shard_fingerprint if backend == "batch" else None,
         request,
         hosts,
         bool(resume),
@@ -4029,12 +4033,10 @@ def _run_sim_corners(
         # needs its own S3 job contract and launch. See this function's
         # docstring on `hosts`.
         fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
-        # Issue #3300: a sharded batch run keeps a shard-to-job-id map keyed
-        # by the resume fingerprint, so `--resume` re-attaches to shards that
-        # already ran instead of paying for them again.
+        # The explicit fleet needs its fingerprint for the shard-to-job-id map.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": shard_fingerprint,
+                "shard_fingerprint": shard_fingerprint(),
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4229,7 +4231,11 @@ def _run_sim_corners(
                 entry, specs_by_name.get(entry["name"]), plots_by_corner
             )
 
-    coverage = _build_coverage(measurements_spec, corners, capture_only=capture_only)
+    grid_stats = sim_probit_sigma.rollup(monte_carlo_stats, corner_points, corners)
+    measurements_rollup.extend(grid_stats)
+    coverage = _build_coverage(
+        measurements_spec, corners, capture_only=capture_only, grid_stats=grid_stats
+    )
     graded = _grade_corners(corners, measurements_rollup, coverage)
     passed = graded["passed"]
     failed = graded["failed"]
@@ -4508,27 +4514,10 @@ def _grade_corners(
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
-    # Issues #2492 + #2493: ONE count for the single "this corner produced
-    # numbers, but they are not trustworthy enough to grade" status -- see
-    # :data:`_INCONCLUSIVE_STATUS` for why the two increments' originally
-    # separate `inconclusive`/`implausible_solution` statuses are one token
-    # with two *reason codes* rather than two parallel statuses and two
-    # parallel counts. Counted separately from `passed`/`failed`/`errored`
-    # (a distrusted corner is none of the three), always present, and always
-    # `0` for a request that declares neither `options.fail_on_diagnostic`
-    # nor a plausibility bound -- so
-    # `passed + failed + errored + inconclusive == corner_count` holds and a
-    # caller scanning only the original three cannot silently miscount the
-    # corners that moved to the new status. *Which* reason applied is read
-    # off `diagnostic_counts` (issue #2491), which already counts the
-    # `inconclusive`/`implausible_solution` marker diagnostics by code.
+    # Count distrusted corners separately from report-wide population verdicts.
     inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
-    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
-    # design failure even when every individual sample passed -- it is only
-    # reachable via a declared sigma window, since every other rollup `fail`
-    # is already inherited from a corner that failed above -- so it feeds
-    # the same `failed` precedence input as a failed corner, rather than
-    # being reported and ignored.
+    # A Monte Carlo sigma window or a grid-wide probit sigma can fail its
+    # bound even when every corner passes. Either fails the report.
     measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
     # Issue #2109: the common rollup rule is the single decision table for
     # real failures/errors, zero/partial/unknown/malformed coverage and full
@@ -4559,19 +4548,13 @@ def _grade_corners(
     # no number at all is strictly less information than a number the run
     # declines to trust.
     #
-    # This mints a top-level `status: "inconclusive"` rather than folding
-    # into `"error"`. `docs/json-contract.md` frames status/exit codes as
-    # *additive per verb* ("a command may ship a new code above 2 in a later
-    # release ... the new code is a new verdict"), and `klt lvs` already
-    # ships exactly this token at exactly this exit code
-    # (`lvs.py`'s `STATUS_INCONCLUSIVE`, issue #1370) -- so `klt sim`
-    # reporting `"inconclusive"`/exit `4` for "ran fine, cannot vouch for
-    # the numbers" is the established house spelling, not a new invention,
-    # and it keeps "the simulator broke" (`"error"`) distinguishable from
-    # "I do not trust this solve" at the top level and not only in the
-    # counts. Never fires unless the request opted in, so an unmodified
-    # request's `status` is byte-identical to before either issue.
-    if status != "error" and inconclusive:
+    if status != "error" and (
+        inconclusive
+        or any(
+            m.get("statistic") == "probit_sigma" and m["status"] == "inconclusive"
+            for m in measurements_rollup
+        )
+    ):
         status = _INCONCLUSIVE_STATUS
     return {
         "passed": passed,
@@ -10004,6 +9987,7 @@ def _build_coverage(
     corners: list[dict[str, Any]],
     *,
     capture_only: bool = False,
+    grid_stats: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Common checked-work v1 plus the existing simulation coverage counters.
 
@@ -10017,8 +10001,10 @@ def _build_coverage(
         measurements_spec
     )
 
-    checked = []
-    skipped = []
+    grid_stats = grid_stats or []
+    checked: list[str] = []
+    skipped: list[dict[str, str]] = []
+    sim_probit_sigma.coverage(grid_stats, checked, skipped)
     inapplicable = []
     for corner_index, corner in enumerate(corners):
         if not measurements_spec:
@@ -10045,8 +10031,8 @@ def _build_coverage(
 
     block = {
         "corners_simulated": len(corners),
-        "measurements_declared": len(measurements_spec),
-        "measurements_with_limits": measurements_with_limits,
+        "measurements_declared": len(measurements_spec) + len(grid_stats),
+        "measurements_with_limits": measurements_with_limits + len(grid_stats),
         "unrecognized_limit_keys": unrecognized,
         **build_check_coverage(
             checked=checked,

@@ -126,3 +126,65 @@ def test_unmapped_library_uses_conventional_discovery(tmp_path, monkeypatch):
         assert list_sweep_corners(
             LIBRARY, info, PlaceAndRouteError
         ) == list_lib_corners(LIBRARY, info)
+
+
+def test_retained_library_limits_match_the_sweep_and_clear_on_rerun(
+    tmp_path, monkeypatch
+):
+    request, _ = _install(
+        tmp_path, monkeypatch, {"TT": "inv.lib", "slow/low": "buf.lib"}
+    )
+    _stub_openroad_success(
+        monkeypatch,
+        max_transition_violations=6,
+        max_transition_violations_vs_library=2,
+        max_capacitance_violations_vs_library=1,
+        per_corner_design_rule_violations_vs_library={
+            "TT": (0, 0),
+            "slow%2Flow": (1, 0),
+        },
+    )
+    report = run_place_and_route(request)
+    combined = Path(report["library_limit_report_path"])
+    assert report["stages"][-1]["library_limit_report_path"] == str(combined)
+    assert combined.read_text().count("(VIOLATED)") == 3
+    fast, slow = report["corners"]
+    assert fast["library_limit_report_path"] is None
+    corner_file = Path(slow["library_limit_report_path"])
+    assert corner_file.name == "corner-slow%2Flow.rpt"
+    assert (
+        corner_file.read_text()
+        == "max_transition\npin_0/A 0.75 1.20 -0.45 (VIOLATED)\n\nmax_capacitance\n"
+    )
+    assert str(combined) != str(corner_file)
+
+    corner_file.unlink()
+    resumed = run_place_and_route(request, resume=True)
+    assert "route" not in resumed["resume"]["resumed_stages"]
+    assert corner_file.is_file()
+
+    _stub_openroad_success(monkeypatch)
+    clean = run_place_and_route(request)
+    assert clean["library_limit_report_path"] is None
+    assert all(c["library_limit_report_path"] is None for c in clean["corners"])
+    assert not combined.exists()
+    assert not corner_file.exists()
+
+
+def test_library_limits_report_handles_truncated_and_unwritable_output(tmp_path):
+    from klayout_tools import place_and_route_library_limits as limits
+
+    start = limits.SLEW_BEGIN
+    output = start + "\n  pin/Z (VIOLATED)\n"
+    assert (
+        limits.library_limit_fields(output, tmp_path, None)[
+            "max_transition_violation_count_vs_library"
+        ]
+        == 0
+    )
+    unavailable = tmp_path / "not-a-directory"
+    unavailable.write_text("existing file")
+    result = limits.library_limit_fields(output + limits.SLEW_END, unavailable, None)
+    assert result["max_transition_violation_count_vs_library"] == 1
+    assert result["library_limit_report_path"] is None
+    assert unavailable.read_text() == "existing file"
