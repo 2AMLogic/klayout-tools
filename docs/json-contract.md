@@ -1407,13 +1407,14 @@ stability statement, concrete precedents, and drift-detection guidance, and
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
     from the `.fetched-version` file `scripts/fetch-*.sh` writes (searched at
-    the variant dir and up to two parents), else `git:<40-hex HEAD>` — with a
-    `-dirty` suffix when the work tree has uncommitted changes — when the
-    variant dir or its parent *is* a git work tree root. A tree nested inside
-    an unrelated checkout (e.g. klt's own) never reports that checkout's
-    `HEAD`; a missing or failing `git` yields `null`. Last, a bundle's
-    `.pdk-store.json` string `version` (one level above the real variant dir)
-    gives `store:<version>`; absent/malformed yields `null`.
+    the variant dir and up to two parents), else `git:<40-hex HEAD>` when the
+    variant dir or its parent is a Git work tree root. The `-dirty` suffix
+    marks changes in the index or to tracked files in the checkout. An
+    untracked file leaves the stamp unchanged until it is added to the index.
+    A variant nested inside an unrelated checkout skips the Git fallback.
+    When the preceding sources yield no version, a `.pdk-store.json` string
+    `version` at the real variant directory or its parent gives
+    `store:<version>`. The final fallback is `null`.
   - `linked_trees` (issue #3070) — present **only** when the model library the
     run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
     variant tree than `name` (a cross-variant symlink): a list of

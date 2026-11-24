@@ -14,7 +14,6 @@ derivation): together they exceeded the 500-line per-file ratchet ceiling.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -200,31 +199,15 @@ def test_wheel_force_includes_the_schema_directory():
     assert force["docs/schemas"] == expected
 
 
-def test_built_wheel_carries_every_schema(tmp_path):
-    """The schemas must be in the artifact, not only in a source checkout
-    (acceptance criterion 3): build this repo's wheel and read its namelist."""
-    import shutil
+def test_built_wheel_carries_every_schema(built_wheel):
+    """Every schema served from a source checkout must also ship in the wheel."""
     import zipfile
 
-    uv = shutil.which("uv")
-    if uv is None:
-        pytest.skip("needs the `uv` CLI to build a wheel")
     from klayout_tools import mcp_resources
-
-    out = tmp_path / "dist"
-    build = subprocess.run(
-        [uv, "build", "--wheel", "--out-dir", str(out)],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert build.returncode == 0, f"uv build failed:\n{build.stdout}\n{build.stderr}"
-    (wheel,) = out.glob("*.whl")
 
     package_dir = Path(mcp_resources.__file__).resolve().parent
     prefix = str(mcp_resources._PACKAGED_SCHEMA_DIR.relative_to(package_dir.parent))
-    with zipfile.ZipFile(wheel) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         shipped = {
             n.rsplit("/", 1)[1]
             for n in archive.namelist()
