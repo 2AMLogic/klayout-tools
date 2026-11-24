@@ -203,7 +203,10 @@ def _validate_batch_request_knobs(batch_spec: dict[str, Any]) -> None:
     :func:`~klayout_tools.sim_batch._resolve_batch_config` once both resolve.
     Check ``max_job_seconds`` here only when the request supplies it, since
     its fallback values come from the environment and the fleet file.
-    Keep the resolver calls in the same order as the submit path.
+    Keep the resolver calls in the same order as the submit path;
+    ``tests/test_sim_dry_run_batch_knobs.py`` fails when a resolver added to
+    ``_resolve_batch_config`` is neither mirrored here nor allowlisted there
+    (issue #6646).
     """
     resolve_capacity_wait_s(batch_spec)
     _resolve_runner_version_check(batch_spec)
