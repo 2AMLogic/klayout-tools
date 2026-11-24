@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- The `klt lvs` report category `device.implausible_dimensions` has severity
+  `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
   `batch.poll_timeout_s` through the error envelope** (issue #7543,
   2026-11-23): the last two `request.batch` seconds knobs still parsed with
@@ -540,6 +542,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
   section.
 
+- **`klt gen-compose` label-derived-port landing search (`ports_from_labels`
+  `access`) rejects a same-net notch (#5608)**: a landing pad wider than the run
+  it lands on protrudes past it, and the merged polygon's concave gap —
+  net-agnostic and intra-polygon to the deck's `space` rule — is a real
+  `met*.space.*` finding the search used to certify as legal. Every pad layer of
+  the ladder is now also notch-checked at its own pad size and spacing
+  (`self_notch`, a new category in the no-legal-landing error's per-category
+  counts), so the search can no longer certify a point `compose()`'s own #1520
+  self-notch check (or signoff DRC) later rejects. `derived_ports[].landing`
+  gains an additive `pad_sides_um` map (`"layer/datatype"` -> pad side
+  certified) so a caller drawing the ladder itself draws exactly the checked
+  footprint. `schema_version` is unchanged.
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
