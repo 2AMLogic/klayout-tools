@@ -291,7 +291,7 @@ def _scope_errors(scope: list[str], request_sources: list[str]) -> list[str]:
     """The scope-subset failure, naming both the unmatched entries and the
     ``request.sources`` strings actually available (matching stays an exact
     string compare -- issue #5679 only improves the diagnostic)."""
-    missing = [entry for entry in scope if entry not in request_sources]
+    missing = dict.fromkeys(entry for entry in scope if entry not in request_sources)
     if not missing:
         return []
     available = ", ".join(request_sources) if request_sources else "(none)"

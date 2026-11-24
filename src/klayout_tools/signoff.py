@@ -3225,9 +3225,9 @@ def _check_input_hashes(
     comparison exactly as before instead of dropping into a bucket of its
     own and quietly weakening the gate.
 
-    A merged sim report compares on its common shard digest. Mixed or
-    missing shard hashes produce a mismatch even within one report.
-    The mismatch preserves the original values and their artifact role.
+    Mixed or missing shard hashes in a merged sim report also produce a
+    mismatch. Each disagreeing role gets one entry with ``field`` set to
+    ``"input.content_hash"``, that ``role``, and its original ``values``.
     """
     by_role: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
