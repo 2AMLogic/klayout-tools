@@ -245,7 +245,7 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no *submit-side* probe of the launched
 instance, but the pin is not post-run-only either. `batch` first checks it
-*before submitting*: the AMI manifest publishes each image's
+*before submitting*: the batch image pointer publishes the runner's
 `ngspice_version`, and when **every** candidate image for the request's
 `models.pdk`/`batch.region` carries one the pin excludes, `klt sim` refuses
 with `engine_version_unmet` before any S3 write or launch (no job
@@ -1151,21 +1151,12 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 [2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
 [#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
 
-**A runner older than a request feature fails the job, not the submit.**
-The client has no per-feature runner capability signal: the AMI manifest
-publishes only the runner's `klt_version`/`klt_ref`, which
-`runner_version_check` compares by major.minor release. A request that uses
-a newer feature — e.g. a `corners.process[].sections[]` `{"lib","section"}`
-object (#2522) — is therefore not refused up front when the version check is
-`warn`, or the manifest has no entry to compare (`batch_runner_version_unknown`).
-The job then fails in seconds with `batch job <id> finished 'failed' without a
-usable report: job command exited 1`, followed by the engine-log tail or
-`engine log unavailable` (a submit-only credential cannot read `harness.log`).
-When that is the only evidence, suspect a runner that predates a feature the
-request uses, and keep `runner_version_check` at `enforce` (the default). A
-real pre-submit feature check needs a machine-readable runner capability
-field and is tracked with the `analysis_steps[]` equivalent in
-[#3249](https://github.com/2AMLogic/klayout-tools/issues/3249).
+Batch preflight compares features with known minimum runner versions when
+the image pointer supplies a klt build. For request fields with no
+registered minimum, validation still runs on the worker. If validation
+fails before the simulator writes a report, inspect the per-corner
+`batch_job_failed` diagnostic and the retrieved engine-log tail.
+
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -1177,7 +1168,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.poll_interval_s` | number ≥ 0 | How often `status.json` is re-read. Defaults to `30`; `0` is accepted. A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
 | `batch.poll_timeout_s` | number ≥ 0 | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s; `0` is accepted (give up on the first poll). On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`, which also harvests the retained shard map; for the non-blocking form, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
-| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
+| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the batch image pointer's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
@@ -2552,12 +2543,12 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
-| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
-| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
@@ -2580,7 +2571,7 @@ for a runner that predates it (e.g. `0.7.0`), and `status` is `unsupported`,
 `supported`, or `unknown` (`missing: null`) when the runner version cannot be
 established. `runner_compatibility` itself stays a major.minor gate.
 
-- **Before launch**: when every image the AMI manifest publishes predates a
+- **Before launch**: when every image the batch image pointer publishes predates a
   feature the request uses, the request is refused once with
   `batch_runner_feature_unsupported` naming the feature and both versions.
   Nothing is uploaded or launched.
@@ -2611,7 +2602,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-When the AMI manifest has no candidate images, the client cannot verify
+When the batch image pointer is unavailable, the client cannot verify
 mandatory features before launch. A configured batch dry-run reports
 `batch_runner_request_feature_unverified` with the affected feature names.
 Submission prints the warning before upload and proceeds under either
@@ -2625,7 +2616,7 @@ undriven), so
 this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
 not tolerated on the runner side:
 
-- **Before launch**: if every image the AMI manifest publishes predates
+- **Before launch**: if every image the batch image pointer publishes predates
   `transfer`, the request is refused with `batch_runner_feature_unsupported`
   even under `warn`; nothing is uploaded or launched. A manifest with no
   `klt_version` for the image (or no manifest) defers to the runner.
@@ -2662,36 +2653,25 @@ client's submit-only credential cannot read `harness.log` itself). The change is
 additive -- only the message grows; no field is added or changed. A job whose
 envelope *was* recovered keeps its structured `runner_error` diagnostic.
 
-#### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
+<a id="pre-launch-check-from-the-ami-manifest-2851"></a>
 
-The runner-side preflight only runs once a Spot instance has booted. To catch
-a known mismatch before that, the client also checks the runner `klt` that
-the **AMI manifest** publishes. This is the same `remote-sim-ami-manifest.json`
-that `remote` resolves its AMI from, found by the same search order:
-`request.remote.ami_manifest` is not consulted here, so the order is
-`$KLT_AMI_MANIFEST`, then `~/.config/klt/remote-sim-ami-manifest.json`, then
-the packaged `data/` copy. See
-[`docs/schemas/remote-sim-ami-manifest.schema.json`](../schemas/remote-sim-ami-manifest.schema.json).
+#### Pre-launch check from the published batch image ([#6430](https://github.com/2AMLogic/klayout-tools/issues/6430))
 
-- **Source.** Each manifest entry may carry `klt_version` (the build string
-  the image's `klt --version` reports, without `klt `) and `klt_ref` (the git
-  ref it was installed from, for audit only).
-  `scripts/aws/build-remote-sim-ami.sh` publishes both for every new or
-  copied image. `klt_ref` is the pinned `--klt-ref` that the build installs
-  `klayout-tools` from, and `klt_version` is what that install reported on
-  the build instance. The script refuses to publish an image whose version
-  it could not read. `--emit-manifest-entry <ami_id> <klt_version>` prints
-  the entry a build would write, with no AWS call. Entries written before
-  #2851 have neither field, which means unknown. **Every rebake must
-  update the packaged `data/remote-sim-ami-manifest.json`** with the new
-  entry's `klt_version`/`klt_ref`; an entry without them leaves the
-  pre-submit check unable to fire, so a skewed client only fails after the
-  submit (runner-side exit 87).
-- **Which images.** For each `(pdk, region)` pair, the check uses the most
-  recently built entry, the same entry `resolve_ami()` would pick. Only the
-  request's `models.pdk` is considered (every PDK when it names none), and
-  only `batch.region` (every region when none is configured, because the
-  fleet chooses its own Spot pool).
+Once fleet configuration resolves, batch preflight makes one read of
+`images/eda-batch-runner/current.json` in the job bucket using the
+configured submit profile and region. This also applies to a configured
+dry run. All checks and shards share that snapshot. The 2am sim launch
+template publishes the `eda-batch-image/1` record, including its AMI ID
+and region. A separate image profile, such as `ihp-sg13cmos5l`, has its
+own runner and reports unknown here.
+
+- **Source.** `tools.klt_build` supplies the runner version, with
+  `tools.klt` as fallback. `tools.ngspice` supplies the engine version.
+  `pdk.variants` lists the installed variants. For sky130 and gf180mcu,
+  `open_pdks_commit` comes from the corresponding family field.
+  Unpublished ref and snapshot fields are null. The report includes the
+  requested PDK family or, for a request without a PDK, the families in
+  the published inventory.
 - **`--dry-run`.** `klt sim --backend batch --dry-run` runs this same
   pre-launch check (version mismatch, request-feature gaps, and the
   `engine_version` pin against the published images), so a request the
@@ -2764,27 +2744,14 @@ the packaged `data/` copy. See
   once, not once per shard.
 - **`warn`.** Prints the same message to stderr and submits as before. The
   runner-side preflight then runs in its `warn` mode.
-- **Unknown.** If no manifest is found, no image is published for the
-  request, any candidate is a legacy entry without `klt_version`, a version
-  is unreadable, or the candidates disagree, nothing is refused locally. The
-  request is submitted unchanged and the runner-side preflight above
-  decides, exactly as before #2851. No historical manifest entry becomes
-  unusable.
-- **PDK variant (#3251).** A manifest entry may publish `pdk_variants`, the
-  PDK variant directories its image ships (e.g. `["gf180mcuD"]`;
-  `build-remote-sim-ami.sh --pdk-variants`). The family-level check only maps
-  `gf180mcuC` to `gf180mcu`, so without this field an unshipped variant fails
-  on the runner as one `batch_job_failed` per corner. When **every** candidate
-  image (same selection as above) publishes `pdk_variants` and none lists the
-  request's `models.pdk`, the whole request is refused with a `SimError`
-  naming the variants the image carries, before any S3 write or launch. A
-  legacy entry without the field, an absent manifest, or a request without
-  `models.pdk` is unchanged.
-- <a name="gf180mcu-image-variants"></a>**Which gf180mcu variants an image ships.**
-  Find the `gf180mcu` entry matching the runner's region and AMI ID in the
-  [AMI manifest](../../data/remote-sim-ami-manifest.json). Its optional
-  `pdk_variants` array lists the installed variant directories. If the field
-  is absent, the inventory for that image is unknown.
+- **Unknown.** A missing or unreadable pointer, a malformed record, or a
+  different region yields `published_runner.status: "unknown"`. Submission
+  proceeds to the existing runner-side checks. A pointer whose klt
+  version cannot be parsed also yields an unknown version assessment.
+- <a name="gf180mcu-image-variants"></a>**PDK variants (#3251).** A valid
+  inventory lets preflight refuse a requested variant missing from that image
+  before uploading a job. For example, the gf180mcu family alone does not
+  identify which of its installed variants are available.
   AMI `ami-04591566329422a44` lacked a supported `gf180mcuC` install
   ([#4947](https://github.com/2AMLogic/klayout-tools/issues/4947)).
   Later deck probes found the model file under both `gf180mcuC` and
@@ -2792,17 +2759,11 @@ the packaged `data/` copy. See
   ([#6854](https://github.com/2AMLogic/klayout-tools/issues/6854)).
   If the image lacks the variant you need, you can use `--backend local`
   on a host where it is installed.
-- **Discovering the runner version before submit.** Read the manifest:
-  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref,
-  ngspice_version, pdk_snapshot}'
-  "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
-  For a given pair, the entry with the latest `built_at` is the one in use.
-- **Limit.** A manifest `klt_version` is publication metadata, not proof of
-  the bytes a job executes. The fleet's own launch configuration, not this
-  repository, decides which image boots. That is why a `match` or `unknown`
-  still goes through the runner-side preflight, and why
-  `environment.remote.runner_klt_version` (what the job actually ran) stays
-  the authoritative record.
+- **Inspecting the published identity.** Run `klt sim request.json --backend
+  batch --dry-run --format json` and inspect `published_runner.images`.
+  The running worker records its observed build in
+  `environment.remote.runner_klt_version`. A template rollback can leave
+  the published pointer stale.
 
 - **What the gate cannot see (`corners.params`, #3035).** The gate compares
   major.minor only, so a same-minor image built *before* a request field
@@ -2822,8 +2783,7 @@ the packaged `data/` copy. See
 minor from your client, either:
 
 1. **Rebuild or publish a runner image** of your client's minor. Run
-   `scripts/aws/build-remote-sim-ami.sh` with a matching `--klt-ref`, or have
-   the fleet image rebuilt. This is the supported fix.
+   the 2am sim image bake with the intended klt pin and publish the adopted image.
 2. **Submit from a client of the image's minor.** Released `klt 0.5.0` has
    no `batch` backend at all ("unsupported backend 'batch'"). So against a
    `0.5.x` image, no client can both submit and pass the gate. Option 1 is
@@ -3261,12 +3221,10 @@ equivalent.
 Only a reproducible difference from these steps justifies a simulator or
 model change; none is made on the strength of the original report.
 
-**Prerequisites live in 2am, not here.** The batch AMI bake, the job
-bucket's `provision --apply`, the `batch-runner-submit` access key, and the
-scheduled `reconcile` timer are all 2am-side operator steps. The backend and
-its tests need none of them (every AWS/launch call goes through an
-injectable command runner — no test in this repo touches AWS or the
-network), but a *live* run does.
+2am operates the batch AMI bake, job bucket, security group, submit role
+and scheduled reconciliation. A configured batch preflight uses the submit
+profile's existing GetObject access to read the published sim image identity.
+The test suite exercises this through an injected command runner.
 
 **Worked example: [`examples/sim-batch/`](../../examples/sim-batch/README.md).**
 The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
@@ -3611,7 +3569,7 @@ capability arrived mid-`0.7` line), so a deck-list batch submit has its own
 check, which `runner_version_check: "warn"` does **not** relax (the job could
 not run either way):
 
-- **Before submit** — if the AMI manifest publishes a `klt_version` for every
+- **Before submit** — if the batch image pointer publishes a `klt_version` for every
   image the request could boot and none of them knows `decks[]` (`0.7.0` or
   earlier, or `0.7.1.devN` with `N` < 307; `0.7.1` and later releases do),
   the request is refused with `error.code` `batch_runner_lacks_decks`: no S3
@@ -4655,7 +4613,7 @@ and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
 with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
 runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
-AMI manifest whose every image predates it is refused with
+image pointer whose runner predates it is refused with
 `batch_runner_feature_unsupported` before anything is uploaded or launched --
 and `--dry-run` reports the refusal -- rather than the grid running first and
 the echo check refusing the result afterward.
@@ -8262,15 +8220,12 @@ client uploaded, and the report lets you verify that:
   deliberately `not_comparable` with reason `models_staged`, because the
   runner's model card is then your staged copy, not the image's.
 
-To judge *before* a run whether an image carries the PDK build you need
-without staging, read the AMI manifest entry (`data/remote-sim-ami-manifest.json`):
-for sky130A/gf180mcu images built after
-[#6156](https://github.com/2AMLogic/klayout-tools/issues/6156), the optional
-`open_pdks_commit` is the 40-hex open_pdks commit the build pinned
-(`build-remote-sim-ami.sh`'s `PDK_VERSION`), alongside the date-label
-`pdk_snapshot`. It is absent on historical entries (unknown, never guessed)
-and on sg13g2 images, which have no single commit. It is publication
-metadata, not proof of the bytes a job executes; the digests above are.
+For a configured batch dry run, inspect
+`published_runner.images[].open_pdks_commit` for the published sky130 or
+gf180mcu build. The field is null when the bake omitted the pin. The
+`remote` backend publishes its own open_pdks pin in
+`data/remote-sim-ami-manifest.json`. The post-run digests above identify the
+actual model data used by a job.
 
 ## OSDI (Verilog-A) model preload
 
@@ -10261,7 +10216,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `ngspice_model_selection_init_hint` | Corner-mode report warning on a local or batch ngspice model-selection abort with no request-declared init lines. Gives the request setting for a library-specific compatibility mode. |
 | `batch_ngspice_init_unverified` | Report-level warning. Corner-mode batch workers lack simulator acknowledgement for explicit `options.ngspice_init`. See the per-job request identities in `diagnostics[].jobs`. |
-| `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
+| `batch_runner_request_feature_unverified` | Report-level warning. The batch image identity is unavailable for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): a missing off-host expression value on an older or unidentified runner. `measurements` lists the affected names. |
 | `expr_no_value` | Report-level warning for missing off-host expression values when every identified runner supports expressions. Includes client and worker versions, affected names, and the first matching corner diagnostic for a step or top-level derived measurement. The warning appears in the report’s top-level `diagnostics[]`. Selecting `expr_no_value` in `options.fail_on_diagnostic` leaves corner verdicts unchanged. |
