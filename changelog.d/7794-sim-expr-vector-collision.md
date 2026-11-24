@@ -1,0 +1,1 @@
+- An ngspice expression that fails to evaluate now reports a missing measurement even when a circuit node has the same name. Its voltage can no longer satisfy the failed expression’s limit or signoff item 5 (#7794).
