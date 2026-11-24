@@ -160,9 +160,9 @@ from .output import emit_error, emit_success, render_rerun_drift
 from .signoff_attest_cmd import maybe_run_attest
 from .signoff_diff_cmd import run_diff_reports
 from .signoff_flags import (
-    artifact_manifest_problem,
     describe_grader_problem,
     mode_flag_problem,
+    pre_dispatch_problem,
 )
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
@@ -203,7 +203,7 @@ def run(args: argparse.Namespace) -> int:
         return run_diff_reports(args)
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
-    problem = artifact_manifest_problem(args, manifest_source, fleet_source)
+    problem = pre_dispatch_problem(args, manifest_source, fleet_source)
     if problem:
         return emit_error("signoff", problem, args.format)
     if getattr(args, "repin", False):

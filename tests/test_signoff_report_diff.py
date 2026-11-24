@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools.build_identity import grading_ruleset_id
 from klayout_tools.cli import main
 from klayout_tools.signoff import build_fleet_report, build_tier_report
 from klayout_tools.signoff_report_diff import diff_tier_reports
@@ -418,6 +419,19 @@ def test_refuses_malformed_row_identity(tmp_path, capsys, field, value):
     assert main(["signoff", "--diff-reports", good, bad, "--format", "json"]) == 1
     message = json.loads(capsys.readouterr().err)["error"]["message"]
     assert "bad.json" in message and "items[0]" in message
+
+
+@pytest.mark.parametrize("pin", ["current", "sha256:" + "0" * 64, "malformed"])
+def test_diff_rejects_grading_pin_before_reading_reports(tmp_path, capsys, pin):
+    if pin == "current":
+        pin = grading_ruleset_id()
+    args = ["signoff", "--diff-reports", str(tmp_path / "old"), str(tmp_path / "new")]
+    rc = main([*args, "--require-grading-ruleset", pin, "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    message = json.loads(captured.err)["error"]["message"]
+    assert "--diff-reports cannot be combined with --require-grading-ruleset" in message
 
 
 def test_refuses_the_flags_of_every_other_mode(tmp_path, capsys):
