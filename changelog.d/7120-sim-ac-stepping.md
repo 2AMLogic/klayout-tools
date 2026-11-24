@@ -1,1 +1,0 @@
-- A capture-only ngspice AC corner that completes its frequency sweep now reports recovered stepping as warnings, including when no complex-vector sidecar was requested (#7120).

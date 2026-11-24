@@ -1,1 +1,0 @@
-- **`klt gen compose` checks endpoint blocks for conductive pad contact with other nets' ports** (#7603, 2026-11-23). An intermediate landing or widened stub touching metal connected to another declared port can trigger a reroute or refusal, including when the other net appears later in the request.

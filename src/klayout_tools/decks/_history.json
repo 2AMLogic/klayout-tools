@@ -631,7 +631,7 @@
     },
     {
       "deck": "asap7_rules",
-      "content_hash": "sha256:0da2383d236f808c3542160a9c6e49646f0fcf6cf37b46e14cee0f39643bbe44",
+      "content_hash": "sha256:134c7c4a52dd438cde69cbe2db9909cd8d41753ac7c65b285e196d384bd48bad",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
@@ -707,6 +707,13 @@
       "package_version": "0.10.0"
     },
     {
+      "deck": "plain_rules",
+      "content_hash": "sha256:8077f38178171d68fd96a465cab8da5a8c11356cedfb5b24b31f2e1a1492ddf6",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
       "deck": "rules",
       "content_hash": "sha256:6411a8ce2d01e403ad32797d081bab5ec24757553d9639d44267d988ce8ab771",
       "git_tag": "v0.10.0",
@@ -722,7 +729,7 @@
     },
     {
       "deck": "sg13g2",
-      "content_hash": "sha256:e5459fe971c6c008d99bd59da48f6dc87cdb6d601ce7aabcc755fa134c19da20",
+      "content_hash": "sha256:b2634caf6d96c00579ce3340e47a24b84d8671937d9886ff3aa92f7cdc539ea8",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
@@ -793,7 +800,7 @@
     {
       "deck": "asap7",
       "artifact": "drc_deck",
-      "content_hash": "sha256:fa303c032c18f91c5185bcdb08a8f76067aa234558f60442e0e0e4ea7c7dc61d",
+      "content_hash": "sha256:c8555396e0ac1555e3a49cc45ed7277ca5448fbbef42f06556348c90069afa61",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"

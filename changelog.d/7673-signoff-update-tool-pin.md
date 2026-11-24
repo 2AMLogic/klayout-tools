@@ -1,1 +1,0 @@
-- **Signoff can re-attest an item-9 inventory at the running tool pin and record the previous version** (#7673, 2026-11-23).

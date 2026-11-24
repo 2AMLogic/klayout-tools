@@ -1,1 +1,0 @@
-- **Gen-compose reports an invalid routing.minimal_ladder value before searching for a legal landing pad** (#7600, 2026-11-23).

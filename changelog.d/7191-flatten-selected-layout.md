@@ -1,1 +1,0 @@
-- LVS can flatten a layout netlist rooted at a selected subcircuit inside a wrapper (#7191, 2026-11-22).

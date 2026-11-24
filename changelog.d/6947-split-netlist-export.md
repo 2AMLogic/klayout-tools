@@ -1,1 +1,0 @@
-- **Export a split xschem hierarchy with `klt netlist --output-dir DIR`**. Local single-file generation warns when it omits per-symbol netlists (#6947, 2026-11-21).

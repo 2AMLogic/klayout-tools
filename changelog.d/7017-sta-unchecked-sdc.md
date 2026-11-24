@@ -1,1 +1,0 @@
-- **`klt sta` records unsupported SDC forms in `unchecked` and compares every parsed value without inferring a missing constraint from an unreadable command** (#7017, 2026-11-21).

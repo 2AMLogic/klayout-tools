@@ -1,1 +1,0 @@
-- **Powered ASAP7 RVT routes can omit the library overrides** (#6932, 2026-11-23). Both `asap7sc7p5t_rvt` and `asap7sc7p5t_28_R` supply the verified cell, routing and wire-RC defaults. Explicit request keys take precedence.

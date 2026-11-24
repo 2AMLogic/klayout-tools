@@ -1,1 +1,0 @@
-- `klt sim-merge` preserves measurement spec rows and cases and rejects disagreement between shards. Signoff can verify a shared netlist digest and derive item 5 coverage from the merged report (#7225).

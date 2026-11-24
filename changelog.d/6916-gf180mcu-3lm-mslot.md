@@ -1,1 +1,0 @@
-- **Native gf180mcu DRC checks metal slotting on 3LM** (#6916, 2026-11-20). The family deck loads a packaged Metal4 fallback and records its SHA-256 in the report.

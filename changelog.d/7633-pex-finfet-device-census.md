@@ -1,1 +1,0 @@
-- **Hierarchical curated FinFET PEX reports include instantiated device counts** (#7633, 2026-11-23). The direct count remains available beside the hierarchy totals.

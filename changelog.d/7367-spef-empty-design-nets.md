@@ -1,1 +1,0 @@
-- Standalone STA and in-flow SPEF coverage exclude internal nets with no pins or ports from the design-side counts and missing-net sample. Nets with a port or an unresolved connectivity query remain in the comparison.

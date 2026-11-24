@@ -1,1 +1,0 @@
-- **Signoff grader JSON lists the input flag and envelope kind for each attestable T1 item** (#7675, 2026-11-23).

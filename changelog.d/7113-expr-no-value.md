@@ -1,1 +1,0 @@
-- **`klt sim` explains missing off-host expression values using the runner version and corner diagnostic** (#7113, 2026-11-22). A runner with verified expression support reports `expr_no_value` and identifies the first failing measurement when available.

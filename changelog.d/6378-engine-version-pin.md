@@ -1,1 +1,0 @@
-- Batch image selection and simulator reports now use the same component comparison for engine version pins (#6378, 2026-11-22).

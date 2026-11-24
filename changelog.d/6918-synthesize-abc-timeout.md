@@ -1,1 +1,0 @@
-- **Synthesis can retain a generic-gate checkpoint when ABC times out.** Set `synthesis.abc_timeout_s` to receive the pre-ABC Verilog and cell counts with an inconclusive verdict and exit 4 (#6918, 2026-11-22).

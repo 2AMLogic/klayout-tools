@@ -1,1 +1,0 @@
-- **Mapped-netlist multicycle timing in synthesis** (#6924, 2026-11-23). Requests with named clocks and `constraints.multicycle_paths` run standalone STA on the emitted Verilog and return `constrained_timing` with measured setup and hold results.
