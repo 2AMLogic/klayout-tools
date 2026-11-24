@@ -72,16 +72,10 @@ def _diagonal_pairs(boxes, max_distance):
             if other <= index:
                 continue
             second = boxes[other]
-            dx = second.left - first.right
-            dx = dx if dx > 0 else first.left - second.right
-            if dx <= 0 or dx > max_distance:
-                continue
-            dy = second.bottom - first.top
-            dy = dy if dy > 0 else first.bottom - second.top
-            if dy <= 0:
-                continue
+            dx = max(second.left - first.right, first.left - second.right)
+            dy = max(second.bottom - first.top, first.bottom - second.top)
             d2 = dx * dx + dy * dy
-            if d2 < max_distance * max_distance:
+            if dx > 0 and dy > 0 and d2 < max_distance * max_distance:
                 yield first, second, d2
 
 
