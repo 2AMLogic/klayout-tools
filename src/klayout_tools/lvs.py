@@ -309,6 +309,7 @@ from .lvs_replay import (
     _reference_conversion_replay,
     _supply_nets_replay_options,
     _validate_omit_mismatches,
+    rerun_with_conversion_paths,
 )
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
@@ -2295,16 +2296,15 @@ def rerun_lvs_report(
             reference_path=reference_path,
         )
     )
-    fresh = _run_reconstructed_lvs(request)
-    # Pair-dependent additions only: the static `_LVS_RERUN_EXCLUDE_PATHS`
-    # part arrives from the one place that pairs it with this kind, so
-    # `klt evidence canonicalize --kind lvs` cannot fall behind it (#5541).
+    fresh = rerun_with_conversion_paths(
+        request, committed, report_path, _run_reconstructed_lvs
+    )
+    # Pair-dependent exclusions supplement the shared LVS policy (#5541).
     exclude: set[tuple[str, ...]] = set()
     if isinstance(committed.get("reference"), str) and not isinstance(
         fresh.get("reference"), str
     ):
-        # Issue #4984: pre-v3 bare string vs fresh `{path, scope}` is a shape
-        # change, not drift (content stays diffed via reference_sha256).
+        # Pre-v3 path shapes differ. Content is still compared by SHA-256 (#4984).
         exclude.update({("reference",), ("schema_version",)})
     exclude.update(
         (field,)

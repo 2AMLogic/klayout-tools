@@ -77,7 +77,7 @@ The 30 residuals retain the same rule and location in both streams:
 with zero attributed to router fill. Issue #6992 tracks the separate
 population of pad-free wire tips.
 
-The packaged deck leaves the per-side `V1.M1.EN.1` rule unimplemented. A
+The deck used for this measurement predated the `V1.M1.EN.1` check. A
 direct polygon comparison found all 2,336 V1 cuts identical and fully
 covered by M1 in both streams. M1 only gained area, 1,890 nm², and every
 other polygon layer had an empty XOR. At all 14 affected cuts, vertical M1

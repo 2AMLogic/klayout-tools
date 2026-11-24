@@ -19,6 +19,7 @@ from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._sta_multicycle import multicycle_lines
 from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_fences import placement_fence_lines
 from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
@@ -1040,6 +1041,7 @@ def _stage_script_lines(
         # Insert tap cells and build the PDN after rows, macros and tracks exist.
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
+        lines += placement_fence_lines(instance_groups)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
