@@ -114,9 +114,7 @@ def _check_claim_row(row: Any) -> None:
         raise EvidenceClaimsError("claims 'agg' must be 'min' or 'max'")
     if "decimals" in row and not is_int(row["decimals"]):
         raise EvidenceClaimsError("claims 'decimals' must be an integer")
-    if "scale" in row and (
-        not isinstance(row["scale"], (int, float)) or isinstance(row["scale"], bool)
-    ):
+    if "scale" in row and not is_number(row["scale"]):
         raise EvidenceClaimsError("claims 'scale' must be a number")
 
 

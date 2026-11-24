@@ -2560,7 +2560,9 @@ def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _layout_connectivity_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the layout-side DEF and implicit-connect options for replay."""
+    """Rebuild the layout-side DEF and implicit-connect options for replay.
+    ``join_same_named_nets`` and ``def_pins`` pass through verbatim, so a
+    malformed recorded value is rejected by the request parsers on replay."""
     replay: dict[str, Any] = {}
     if "join_same_named_nets" in committed:
         replay["join_same_named_nets"] = committed["join_same_named_nets"]
@@ -2891,13 +2893,11 @@ def _resolve_layout(
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
-            # guarantees. The 8th return (unmodelled_poly, #324) is likewise a
-            # report-only structured view of `klt extract`'s own warnings,
-            # not surfaced in `klt lvs`'s response. The 9th return
-            # (voltage_domain_warnings, #552) is likewise a report-only
-            # structured view of `klt extract`'s own warnings, not surfaced
-            # in `klt lvs`'s response -- the compare itself is unaffected by
-            # which voltage-domain model a MOS device happens to bind to.
+            # guarantees. The 8th (unmodelled_poly, #324) and 9th
+            # (voltage_domain_warnings, #552) returns are likewise report-only
+            # structured views of `klt extract`'s own warnings, not surfaced
+            # in `klt lvs`'s response; for the 9th, the compare is unaffected
+            # by which voltage-domain model a MOS device happens to bind to.
             # The 10th return (abstracted_cells, #620) is `klt extract
             # --abstract-cells`'s own report; `klt lvs` forwards
             # `request.layout.abstract_cells` (issue #2853) and echoes this
@@ -2948,12 +2948,11 @@ def _resolve_layout(
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
-                # The source cells locate the declared pins in the layout (#1513).
+                # The source cells locate the declared pins in the layout (#1513);
+                # `None` when never given, unchanged from requests that predate it.
                 pin_source_cells=pin_source_cells,
-                # Issue #2854: `request.layout.rename_declared_pins` --
-                # validated by `_parse_layout_rename_declared_pins` above;
-                # `False` when the field was never given, unchanged from
-                # every request that predates it.
+                # Issue #2854: validated above; `False` when the field was never
+                # given, unchanged from every request that predates it.
                 rename_declared_pins=rename_declared_pins,
                 # Issue #559: defer the resistor `fixed_offset_ohm`
                 # correction when `combine_devices` will run -- applying it

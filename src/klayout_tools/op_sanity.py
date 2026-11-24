@@ -101,7 +101,7 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -1597,7 +1597,7 @@ def run_op_sanity(
 
     margin_v = _triode_margin_v(point.temperature_c, thresholds)
     off_current_a = thresholds.get("off_current_a", _DEFAULT_OFF_CURRENT_A)
-    if not isinstance(off_current_a, (int, float)) or isinstance(off_current_a, bool):
+    if not is_number(off_current_a):
         off_current_a = _DEFAULT_OFF_CURRENT_A
     off_current_a = float(off_current_a)
 

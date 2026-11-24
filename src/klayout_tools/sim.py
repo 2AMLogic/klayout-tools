@@ -316,6 +316,7 @@ from .sim_environment_report import (
     corner_coverage_environment as _corner_coverage_environment,
 )
 from .sim_expr_hint import unsupported_function_hint
+from .sim_expr_log import expr_control_lines
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -3145,11 +3146,7 @@ def _prepare_sim_request(
 
     budget_s = budget_s if budget_s is not None else options.get("wall_clock_budget_s")
     if budget_s is not None:
-        if (
-            not isinstance(budget_s, (int, float))
-            or isinstance(budget_s, bool)
-            or budget_s <= 0
-        ):
+        if not is_number(budget_s) or budget_s <= 0:
             raise SimError(
                 "options.wall_clock_budget_s must be a positive number of seconds"
             )
@@ -8527,9 +8524,7 @@ def _corner_deck_control_lines(
     expr_specs = sim_noise.emittable_exprs(_expr_measurements(measurements_spec))
     lines.extend(sim_noise.alias_lines(analysis, expr_specs))
     for spec in expr_specs:
-        lines.extend(spec.get("expr_prelude", ()))
-        lines.append(f"let {spec['name']} = {spec['expr']}")
-        lines.append(f"print {spec['name']}")
+        lines.extend(expr_control_lines(spec, spec.get("expr_prelude", ())))
     lines.extend(sim_op_check.control_lines(analysis))  # issue #5077
     lines.extend(crossings_lines)
     lines.extend(energy_lines)

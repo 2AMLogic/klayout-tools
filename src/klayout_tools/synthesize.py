@@ -236,7 +236,7 @@ from . import synthesize_abc_stages as abc_stages
 from . import synthesize_timeout as ytimeout
 from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
-from ._jsonnum import is_finite_number, is_int
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -2126,9 +2126,7 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
         if clocks:
             return int(round(min(c["period_ns"] for c in clocks) * 1000))
         return None
-    if isinstance(clock_period_ns, bool) or not isinstance(
-        clock_period_ns, (int, float)
-    ):
+    if not is_number(clock_period_ns):
         raise SynthesizeError(
             "request.constraints.clock_period_ns must be a positive number "
             "(nanoseconds) or null"

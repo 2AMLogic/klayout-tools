@@ -265,7 +265,7 @@ from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
 from . import macros as macro_spec
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_number
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -335,6 +335,7 @@ from ._sta_period_maps import (
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
+    SPEF_NO_PIN_ATTACH_HINT,
     SPEF_SKIP_DRIVER_ONLY,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
@@ -1780,9 +1781,8 @@ def _spef_annotation_block(
     if not names_correlated:
         reasons.append(
             f"only {design_nets_annotated} of {design_nets_total} nets in "
-            "the linked design are named by this SPEF"
+            f"the linked design are named by this SPEF{SPEF_NAME_MISMATCH_HINT}"
         )
-        reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
     if reader_warnings:
         discarded = {
@@ -1799,7 +1799,7 @@ def _spef_annotation_block(
         reasons.append(
             "every timing path reported after read_spef is byte-identical to "
             "the same report taken before it, so this run's delays are the "
-            "unannotated ones"
+            f"unannotated ones{SPEF_NO_PIN_ATTACH_HINT}"
         )
     if gating_unannotated:
         reason = (
@@ -1935,11 +1935,7 @@ def _validate_constraints(
         clock_period_ns = validate_period(  # values reach create_clock -period
             clock_period_ns, "request.constraints", "clock_period_ns"
         )
-    elif (
-        isinstance(clock_period_ns, bool)
-        or not isinstance(clock_period_ns, (int, float))
-        or clock_period_ns <= 0
-    ):
+    elif not is_number(clock_period_ns) or clock_period_ns <= 0:
         raise PostRouteStaError(
             "request.constraints.clock_period_ns must be a positive number"
         )
@@ -2064,13 +2060,7 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     per-module-copy convention ``_clock_lines`` already follows."""
     if value is None:
         return None
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or value < 0
-        or value != value  # NaN
-        or value in (float("inf"), float("-inf"))
-    ):
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )
