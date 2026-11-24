@@ -28,10 +28,9 @@ table is the Region construction**:
 * ``kdb.Region(cell.shapes(layer_index))`` keeps the shape properties, so a
   tagged wire stays its own polygon (merged M4 count 2, one violation);
 * ``kdb.Region(cell.begin_shapes_rec(layer_index))`` -- the flattening idiom
-  ``klt drc``'s native engine uses (``drc._cell_region_or_empty``) -- does
-  **not** (merged M4 count 1, no violation) however the file was read. That
-  is also why a rebuild written against ``begin_shapes_rec`` cannot
-  reproduce the table.
+  ``klt drc``'s native engine uses (``drc._cell_region_or_empty``) -- ignores
+  the properties by default (merged M4 count 1, no violation). Enabling
+  properties on the iterator includes the tag when the reader retained it.
 
 Measured with the klayout module 0.30.13 (this venv) and 0.30.14 (the
 reporter's version); only the ``enclosing_check`` rebuild is exercised here
@@ -87,8 +86,12 @@ def _region(layout, cell, layer: tuple[int, int], construction: str):
     index = layout.layer(*layer)
     if construction == "shapes":
         return kdb.Region(cell.shapes(index))
-    assert construction == "recursive"
-    return kdb.Region(cell.begin_shapes_rec(index))
+    iterator = cell.begin_shapes_rec(index)
+    if construction == "recursive_with_properties":
+        iterator.enable_properties()
+    else:
+        assert construction == "recursive"
+    return kdb.Region(iterator)
 
 
 def _native_two_side_enclosure(layout, cell, construction: str) -> tuple[int, int]:
@@ -144,8 +147,10 @@ def test_shapes_region_table(tmp_path, tagged, properties_enabled, expected):
 @pytest.mark.parametrize(
     ("tagged", "properties_enabled"), [(False, True), (True, True), (True, False)]
 )
-def test_recursive_region_ignores_properties(tmp_path, tagged, properties_enabled):
-    """``Region(cell.begin_shapes_rec(layer))`` never sees the properties.
+def test_recursive_region_ignores_properties_by_default(
+    tmp_path, tagged, properties_enabled
+):
+    """``Region(cell.begin_shapes_rec(layer))`` ignores the properties by default.
 
     Control for the table above, and the construction ``klt drc``'s native
     engine uses: one merged M4 polygon and no violation in every row, tagged
@@ -157,6 +162,19 @@ def test_recursive_region_ignores_properties(tmp_path, tagged, properties_enable
     layout, cell = _read(path, properties_enabled=properties_enabled)
 
     assert _native_two_side_enclosure(layout, cell, "recursive") == (0, 1)
+
+
+@pytest.mark.parametrize(("tagged", "properties_enabled", "expected"), SHAPES_TABLE)
+def test_recursive_iterator_can_include_properties(
+    tmp_path, tagged, properties_enabled, expected
+):
+    path = _write_layout(tmp_path / "m4.gds", tagged_wire=tagged)
+    layout, cell = _read(path, properties_enabled=properties_enabled)
+
+    assert (
+        _native_two_side_enclosure(layout, cell, "recursive_with_properties")
+        == expected
+    )
 
 
 def test_klt_drc_native_engine_report_is_unchanged_by_the_wire_property(

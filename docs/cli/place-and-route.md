@@ -1820,8 +1820,8 @@ keeps a wire that ends inside a via pad as its own polygon, and
 not. For such a rebuild, read the GDS with
 `LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
 properties); keep the default read for `klt extract --def-net-names`, which
-needs them. A `Region` built from `cell.begin_shapes_rec(layer)` never sees
-the properties, and neither `klt drc` engine is affected. Measured on the
+needs them. Recursive regions ignore properties by default. Both
+`klt drc` engines gave the same results with and without the tag. Measured on the
 `klayout` module 0.30.13 and 0.30.14 for the `enclosing_check` rebuild only
 -- no claim for other primitives. The minimal repro, its numbers and the
 `klt drc` measurements are in [`drc.md`](drc.md#re-deriving-a-deck-rule-natively-over-a-routed-gds-issue-7715).

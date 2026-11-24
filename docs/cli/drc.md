@@ -3965,9 +3965,11 @@ Whether a `Region` sees the properties depends on how it is built:
 - `kdb.Region(cell.shapes(layer_index))` **keeps** them — read the file with
   `LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
   properties) before rebuilding a rule this way.
-- `kdb.Region(cell.begin_shapes_rec(layer_index))` **never sees** them, however
-  the file was read. `klt drc`'s own curated engine builds its regions this
-  way, and the packaged deck is likewise unaffected (both measured below).
+- `kdb.Region(cell.begin_shapes_rec(layer_index))` ignores properties by
+  default. If the file was read with properties, calling `enable_properties()`
+  on the iterator before constructing the region includes them. On KLayout
+  0.30.12 this reproduced the tagged-wire result of one violation and two
+  merged M4 polygons. The curated engine uses the default construction.
 
 Do not drop the properties in a shared reader: `klt extract --def-net-names`
 needs them.
