@@ -25,13 +25,17 @@ design, `constraints.clocks` (a list of {port, period_ns}; the first is
 primary) instead, with optional `constraints.clock_groups` declaring
 asynchronous clock groups (issue #4241). With `pdk.corners`, a
 `constraints.clocks[].period_ns` may be a {corner: period} map whose keys
-equal `pdk.corners` exactly (issue #5240). An optional `spef` path feeds a
-caller-supplied SPEF (e.g. from `klt extract --parasitics`) in via
-`read_spef`, with the same net-name-correlation sanity check `klt place-and-
-route`'s own `post_route_spef` pass runs. See docs/cli/sta.md for the full
-request/response contract. Runs `openroad` as a subprocess -- requires an
-`openroad` binary on `$PATH`. Takes a request-document path (like `klt place-
-and-route`/`klt synthesize`), not positional file args.
+equal `pdk.corners` exactly (issue #5240). A per-port
+`constraints.input_delays`/`.output_delays` entry may name the declared clock
+it is relative to via an optional `clock` key (issue #7399) -- e.g. a data pin
+against a secondary strobe clock -- defaulting to the primary clock. An
+optional `spef` path feeds a caller-supplied SPEF (e.g. from `klt extract
+--parasitics`) in via `read_spef`, with the same net-name-correlation sanity
+check `klt place-and-route`'s own `post_route_spef` pass runs. See
+docs/cli/sta.md for the full request/response contract. Runs `openroad` as a
+subprocess -- requires an `openroad` binary on `$PATH`. Takes a request-
+document path (like `klt place-and-route`/`klt synthesize`), not positional
+file args.
 
 positional arguments:
   request path to a klt sta request JSON file

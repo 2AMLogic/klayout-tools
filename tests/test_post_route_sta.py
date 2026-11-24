@@ -481,7 +481,7 @@ def test_resolve_liberty_ihp_single_underscore_fallback(tmp_path, monkeypatch):
     resolve via the single-underscore fallback rather than raising "liberty
     not found" (issue #1790, missed in `post_route_sta.py`'s own copy of
     `_resolve_liberty` until issue #1652 folded it into the shared
-    `klayout_tools.pdk.resolve_liberty_for_cell_library` implementation
+    `klayout_tools.pdk_cells.resolve_liberty_for_cell_library` implementation
     `synthesize.py`/`place_and_route.py` already carried this fallback in)."""
     _isolate_pdk(monkeypatch, tmp_path)
     install_root = tmp_path / "install"
@@ -923,13 +923,12 @@ def test_spef_reader_warnings_counts_delimited_stdout_region():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
     # Only the two inside the region count -- the reader is the only thing
     # running there, but a liberty/clock warning outside it is not evidence
     # of a failed annotation.
-    assert count == 2
-    assert sample == [line.strip() for line in _READER_WARNINGS]
+    assert warnings == [line.strip() for line in _READER_WARNINGS]
 
 
 def test_spef_reader_warnings_counts_unknown_codes_inside_region():
@@ -938,10 +937,9 @@ def test_spef_reader_warnings_counts_unknown_codes_inside_region():
     the region check is deliberately broader than the STA-1648/1650 pair."""
     stdout = _spef_read_block("[WARNING STA-9999] some future reader warning.")
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 1
-    assert sample == ["[WARNING STA-9999] some future reader warning."]
+    assert warnings == ["[WARNING STA-9999] some future reader warning."]
 
 
 def test_spef_reader_warnings_matches_stderr_narrowly():
@@ -956,35 +954,24 @@ def test_spef_reader_warnings_matches_stderr_narrowly():
         ]
     )
 
-    count, sample = post_route_sta._spef_reader_warnings(stdout, stderr)
+    warnings = post_route_sta._spef_reader_warnings(stdout, stderr)
 
-    assert count == 2
-    assert all("STA-16" in line for line in sample)
+    assert len(warnings) == 2
+    assert all("STA-16" in line for line in warnings)
 
 
 def test_spef_reader_warnings_without_markers_falls_back_to_known_codes():
     stdout = "\n".join([*_READER_WARNINGS, "[WARNING STA-1234] unrelated"])
 
-    count, _sample = post_route_sta._spef_reader_warnings(stdout, "")
+    warnings = post_route_sta._spef_reader_warnings(stdout, "")
 
-    assert count == 2
-
-
-def test_spef_reader_warnings_sample_is_capped():
-    warnings = [f"[WARNING STA-1650] net n{i} not found." for i in range(50)]
-    stdout = _spef_read_block(*warnings)
-
-    count, sample = post_route_sta._spef_reader_warnings(stdout, "")
-
-    assert count == 50
-    assert len(sample) == post_route_sta._SPEF_READER_WARNING_SAMPLE_LIMIT
+    assert len(warnings) == 2
 
 
 def test_spef_reader_warnings_clean_run_reports_zero():
-    count, sample = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
+    warnings = post_route_sta._spef_reader_warnings(_spef_read_block(), "")
 
-    assert count == 0
-    assert sample == []
+    assert warnings == []
 
 
 def _delay_blocks(pre: str, post: str) -> str:
@@ -2124,16 +2111,11 @@ def test_run_sta_def_mode_wire_load_fields_are_null(tmp_path, monkeypatch):
 
 
 def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
-    """When the ``-metrics`` JSON carries no ``timing__hold__ws``/
-    ``timing__hold__tns`` keys at all (e.g. an older OpenROAD build, or a
-    design OpenSTA finds no hold path to measure in), the two new fields
-    degrade to ``null`` -- the same null-handling the existing setup-side
-    fields already have, never a ``KeyError``."""
+    """Older engines or unmeasurable paths can omit hold and frequency metrics."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     metrics_without_hold = {
         "timing__setup__ws": -0.15,
         "timing__setup__tns": -1.2,
-        "timing__fmax": 500_000_000.0,
         "power__total": 0.0084,
         "clock__skew__setup": 0.021,
     }
@@ -2142,6 +2124,7 @@ def test_run_sta_hold_metrics_absent_degrade_to_null(tmp_path, monkeypatch):
     report = run_sta(request_path)
 
     assert report["worst_slack_ns"] == -0.15
+    assert report["fmax_mhz"] is None
     assert report["worst_hold_slack_ns"] is None
     assert report["total_negative_hold_slack_ns"] is None
 
@@ -2857,6 +2840,8 @@ def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
     assert "corner: ss_100C_1v60" in out
     assert "worst_slack_ns: -0.15" in out
     assert "worst_slack_ns: -0.42" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "fmax_mhz: 300.0 (clock estimate excludes opposite-edge paths" in out
     assert "def_path:" in out
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -2872,6 +2857,8 @@ def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status: ok" in out
     assert "worst_slack_ns: -0.15" in out
+    assert "fmax_mhz: 500.0 (clock estimate excludes opposite-edge paths" in out
+    assert "can overstate achievable frequency" in out
     assert "worst_hold_slack_ns: 0.03812" in out
     assert "total_negative_hold_slack_ns: 0.0" in out
     with pytest.raises(json.JSONDecodeError):
@@ -4873,11 +4860,24 @@ def _live_sky130_env() -> str | None:
     return "sky130A"
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+def _LIVE_ONLY(func):
+    """Issue #7541: skip gate + lane registration in one decorator.
+
+    The skipif keeps the test quiet wherever `_live_sky130_env()` is
+    unsatisfied; the `live_openroad` mark registers it in the
+    post-route-sta-live CI lane, which selects `-m live_openroad`, so a new
+    live test joins the lane by construction.
+    tests/test_live_sta_lane_registration.py guards the link.
+    """
+    marked = pytest.mark.live_openroad(func)
+    return pytest.mark.skipif(
+        _live_sky130_env() is None,
+        reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+        "KLT_SKIP_OPENROAD_TESTS unset",
+    )(marked)
+
+
+@_LIVE_ONLY
 def test_live_engine_boundary_paths(tmp_path):
     """Engine integration: the same boundary request against a real
     OpenROAD session must reproduce the captured identities."""
@@ -5292,11 +5292,7 @@ def test_print_text_renders_port_paths(capsys):
     assert "port_paths[a_in].hold: hold a_in -> ff_a/D slack_ns=0.33143 (ok)" in out
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_report_ports(tmp_path):
     """Engine integration (issue #3042): the boundary request with
     ``report_ports`` against a real session must give the boundary ports'
@@ -5505,13 +5501,6 @@ def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch)
     )
 
 
-_LIVE_ONLY = pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
-
-
 def _live_verilog_request(tmp_path, **constraint_overrides) -> str:
     _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
     return _write_request(
@@ -5638,11 +5627,7 @@ def _write_clock_fixtures(tmp_path) -> dict[str, str]:
     return {name: _write(tmp_path / name, text) for name, text in paths.items()}
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_propagated_boundary_timing(tmp_path):
     """Engine integration (issue #2739 test plan): the same small post-CTS
     tree DEF timed ideal vs propagated vs propagated+SPEF on the real
@@ -6184,11 +6169,7 @@ def test_cli_text_prints_unavailable_not_zero(tmp_path, monkeypatch, capsys):
 # -- live engine -------------------------------------------------------------#
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_completeness_matches_check_setup(tmp_path):
     """Engine integration (issue #2780 test plan): `run_sta` on the mixed
     design reproduces the captured identities, and they equal what the
@@ -6793,11 +6774,7 @@ def test_cli_text_prints_sdf_line(tmp_path, monkeypatch, capsys):
     assert f"sdf: <outside repo> ({_sha256_of(sdf_file)})" in out
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_sdf_per_corner(tmp_path):
     """Engine integration (issue #2886): the captured post-CTS DEF + SPEF at
     two corners writes two real SDFs whose delays differ by corner, each
@@ -7154,11 +7131,7 @@ def test_run_sta_spef_map_detects_concurrent_def_mutation(tmp_path, monkeypatch)
         run_sta(request_path)
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     """Engine integration (issue #3228 test plan): two SPEFs of different
     wire RC on the same DEF and liberty corner give different slack, with
@@ -7260,11 +7233,7 @@ def test_electrical_check_tcl_ends_redirect_on_error_path():
 _ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_spef_name_map_annotation(tmp_path):
     """Engine integration (issue #3776, closing the live-verification gap of
     #3755): a SPEF written by OpenROAD's own `write_spef` (so with its real
@@ -7293,11 +7262,7 @@ def test_live_engine_spef_name_map_annotation(tmp_path):
     assert annotation["design_nets_missing_sample"] == []
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_driving_cell_and_output_load(tmp_path):
     """Engine integration (issue #3776): OpenSTA accepts the generated
     `set_driving_cell -lib_cell/-pin/-from_pin` and `set_load` commands, and
@@ -7336,11 +7301,7 @@ def test_live_engine_driving_cell_and_output_load(tmp_path):
     assert driven["worst_slack_ns"] is not None
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_electrical_checks_match_hand_run(tmp_path):
     """Engine integration (issue #3005 AC4 / #3621): the fast-corner routed
     DEF/SPEF fixture reports the violation counts recorded from a hand-run

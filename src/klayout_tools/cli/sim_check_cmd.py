@@ -10,7 +10,7 @@ import argparse
 
 from ..sim_errors import SimError
 from ..sim_report_check import check_sim_report
-from . import sim_cmd
+from . import sim_cmd, sim_regrade_cmd
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_check_text
 
 EXIT_MATCH = 0
@@ -30,6 +30,15 @@ def _render(result: dict) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "regrade", None) is not None:
+        if args.check is not None:
+            return emit_error(
+                "sim",
+                "--check cannot be combined with --regrade",
+                args.format,
+                exit_code=EXIT_USAGE_ERROR,
+            )
+        return sim_regrade_cmd.run(args)
     if args.check is None:
         if args.root is not None:
             return emit_error(

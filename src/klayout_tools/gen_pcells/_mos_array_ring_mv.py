@@ -18,13 +18,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..gen_base import WELL_ENCLOSURE_MARGIN_UM
+from ._common_params import declare_device_well_enclosure
+
 
 def declare_ring_mv_params(pcell: Any) -> None:
-    """Declare ``voltage_flavor_ring_margin_um`` (issue #6503): the
-    harness-resolved margin the voltage-flavor marker box additionally
-    grows past the guard ring's final tap edge when both are drawn. ``0.0``
-    (every family but gf180mcu) keeps the marker anchored to the array
-    alone, byte-for-byte."""
+    """Declare the device well enclosure and MV marker margin over the ring."""
+    declare_device_well_enclosure(pcell, WELL_ENCLOSURE_MARGIN_UM)
     pcell.param(
         "voltage_flavor_ring_margin_um",
         pcell.TypeDouble,

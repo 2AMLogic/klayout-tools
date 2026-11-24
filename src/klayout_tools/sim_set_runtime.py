@@ -12,6 +12,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+#: Report written in each member's assigned directory once collection succeeds.
+REPORT_FILENAME = "report.json"
+
 #: Schema version of the manifest file.
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -51,13 +54,13 @@ class _Manifest:
             self._entries[index].update(fields)
             self._flush()
 
-    def finalize(self, index: int, **fields: Any) -> None:
-        """Write a member's last state, then ignore later writes from its
-        abandoned worker thread."""
+    def finalize(self, index: int, **fields: Any) -> dict[str, Any]:
+        """Freeze a member and return the recorded state at that instant."""
         with self._lock:
             self._entries[index].update(fields)
             self._frozen.add(index)
             self._flush()
+            return dict(self._entries[index])
 
     def job_ids(self, index: int) -> list[str]:
         with self._lock:
@@ -204,9 +207,9 @@ def _unfinished_entry(
 ) -> dict[str, Any]:
     """An ``error`` entry for a member that never produced a report. Its job
     ids come from the manifest so the caller can cancel or attach them."""
-    job_ids = list(manifest.job_ids(index))
-    manifest.finalize(index, status="error", error_code=code)
-    return {
+    member = manifest.finalize(index, status="error", error_code=code)
+    job_ids = member["job_ids"]
+    entry = {
         "index": index,
         "request": path,
         "status": "error",
@@ -217,6 +220,9 @@ def _unfinished_entry(
         "error": {"message": message, "code": code},
         "shards": tracker.summary(None),
     }
+    if code == NOT_LAUNCHED_CODE and job_ids:
+        entry["expected_report"] = os.path.join(member["dir"], REPORT_FILENAME)
+    return entry
 
 
 class _MemberScheduler:

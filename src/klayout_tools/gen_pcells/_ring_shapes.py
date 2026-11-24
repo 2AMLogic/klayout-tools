@@ -1,19 +1,10 @@
-"""Shared drawing step for composed guard/collector rings (issue #6837).
+"""Draw the shared tap, metal, contact and implant geometry of ring PCells.
 
-Four generators -- ``mos_array``, ``diff_pair``, ``esd_device`` and
-``bjt_array`` -- draw the same shapes from a composed ``_ring_layout``
-result (issue #1493's automatically-sized ring): the tap/collector band, the
-metal band over it, its contacts at the ring offset, and -- when the resolved
-family needs one -- the implant ring tracking the band. An AST comparison
-found those four calls, arguments included, identical in all four generators;
-they are factored here once.
-
-Each generator keeps at its own call site only what genuinely differs: the
-PFET ring well tie (``mos_array``/``diff_pair``), the collector ring's
-tap-role decision (``bjt_array``), and every marker drawing. This module
-imports from :mod:`klayout_tools.gen` lazily inside the function, mirroring
-the package's import discipline (``gen.py`` imports the factories, never the
-reverse).
+The standalone guard ring and well island draw at the origin. Composed MOS,
+differential pair, ESD and BJT rings use the offset computed by the generator.
+Each caller selects its tap and implant layers and draws its own well ties,
+voltage markers and labels. The drawing functions are imported lazily because
+:mod:`klayout_tools.gen` imports these PCell factories.
 """
 
 from __future__ import annotations
@@ -29,17 +20,34 @@ def _draw_composed_guard_ring(
     dbu: float,
     info: dict[str, Any],
 ) -> None:
-    """Draw a composed ring's shared shapes: the tap band, the metal band
-    over it, its contacts (all translated by ``info["ring_offset_um"]``,
-    which also carries any routing opening cut through both bands), and the
-    implant ring tracking the band when the resolved family needs one.
+    """Draw the translated ring supplied by a composed generator."""
+    _draw_ring_shapes(
+        pcell,
+        li_tap,
+        li_metal,
+        li_contact,
+        dbu,
+        info["ring"],
+        offset_um=info["ring_offset_um"],
+        implant_layer=pcell.ring_implant_layer if pcell.ring_implant_present else None,
+    )
 
-    Shape insertion order per layer is unchanged from the four inlined
-    sequences this replaces: tap band, metal band, contacts, implant. A
-    caller's own ring shapes drawn on ``well_layer`` (the PFET ring well
-    tie) may sit anywhere around this call -- ``well`` never coincides with
-    any role layer drawn here, so per-layer order is unaffected (issue
-    #6837's verification basis).
+
+def _draw_ring_shapes(
+    pcell: Any,
+    li_tap: int,
+    li_metal: int,
+    li_contact: int,
+    dbu: float,
+    ring: dict[str, Any],
+    *,
+    implant_layer: Any | None,
+    offset_um: tuple[float, float] = (0.0, 0.0),
+) -> None:
+    """Draw the tap, metal, contacts and implant in per-layer insertion order.
+
+    The well occupies a separate layer from these four roles. The caller can
+    therefore draw its well before or after this step (#6837).
     """
     from klayout_tools.gen import (
         _insert_boxes,
@@ -48,8 +56,7 @@ def _draw_composed_guard_ring(
         _shift_box,
     )
 
-    ring = info["ring"]
-    ox, oy = info["ring_offset_um"]
+    ox, oy = offset_um
     gap_box = (
         _shift_box(ring["gap"]["box_um"], ox, oy) if ring["gap"] is not None else None
     )
@@ -74,15 +81,13 @@ def _draw_composed_guard_ring(
         pcell.mfg_grid_um,
     )
     _insert_boxes(pcell.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy)
-    # The implant tracks the tap/collector band, extended
-    # ``ring_implant_margin_um`` past every edge of it (issue #2369's
-    # NP.5b/PP.5b extension-beyond-COMP fix to #1580's originally coincident
-    # implant) -- still a ring, never a blanket over the enclosed array
-    # (mirrors ``well_island``'s own ``well_tap_implant`` ring precedent).
-    if pcell.ring_implant_present:
+    # NP.5b/PP.5b require the implant to extend past each edge of the tap
+    # band (#2369, following #1580). Keep the enclosed devices and the
+    # routing opening clear when applying that margin.
+    if implant_layer is not None:
         _insert_implant_ring(
             pcell.cell,
-            pcell.layout.layer(pcell.ring_implant_layer),
+            pcell.layout.layer(implant_layer),
             dbu,
             outer_box_um,
             inner_box_um,

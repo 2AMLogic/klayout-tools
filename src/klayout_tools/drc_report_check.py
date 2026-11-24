@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from ._deck_hash import source_file_hash
+from ._drc_gf180_3lm import prelude_checks
 from ._provenance import content_hash
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -21,6 +22,26 @@ from ._report_verify import (
 from ._report_verify_hints import deck_not_found_entry, input_hash_check
 from .decks import deck_source_path
 from .evidence_canonicalize import rerun_result_for
+
+
+def recorded_negative_control_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
+    """Read the inputs needed to run the saved report's control again."""
+    control = committed.get("negative_control")
+    if control is None:
+        return {}
+    from .drc import DrcError
+
+    path = get_path(control, ("file",))
+    categories = get_path(control, ("expected_categories",))
+    if not isinstance(path, str) or not path:
+        raise DrcError("recorded negative_control.file must be a non-empty path")
+    if not isinstance(categories, list) or not all(
+        isinstance(c, str) for c in categories
+    ):
+        raise DrcError(
+            "recorded negative_control.expected_categories must be a list of names"
+        )
+    return {"negative_control": path, "negative_control_categories": categories}
 
 
 def _packaged_deck_path(name: Any) -> str | None:
@@ -128,6 +149,7 @@ def _report_hash_checks(
                 content_hash(waivers_file),
             )
         )
+    checks.extend(prelude_checks(committed, prefix))
     recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
     if recorded_tree is not None:
         from .drc_klayout_engine import _deck_tree_identity

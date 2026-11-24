@@ -29,12 +29,23 @@ proc get_nets {quiet pattern} {
     return {}
 }
 proc get_full_name {net} {return $net}
+namespace eval sta {}
+proc sta::sta_to_db_net {net} {
+    if {$net eq "unknown_db"} {error "net lookup failed"}
+    interp alias {} dbnet_$net {} term_count $net
+    return dbnet_$net
+}
+proc term_count {net method} {
+    if {$method ne "getTermCount"} {error "unexpected method"}
+    return [expr {$net in {physical_only empty_port} ? 1 : 0}]
+}
 proc get_pins {quiet option net} {
     switch -exact -- $net {
         loaded - missed {return {driver sink}}
         unknown_pins {error "pin lookup failed"}
         sink_only {return sink}
-        empty {return {}}
+        empty - empty_port - empty_unknown_ports -
+        physical_only - unknown_db {return {}}
         unknown_dir {return broken}
         default {return driver}
     }
@@ -45,8 +56,8 @@ proc get_property {pin prop} {
     return input
 }
 proc get_ports {quiet option net} {
-    if {$net eq "port_net"} {return different_output_port_name}
-    if {$net eq "unknown_ports"} {error "port lookup failed"}
+    if {$net in {port_net empty_port}} {return different_output_port_name}
+    if {$net in {unknown_ports empty_unknown_ports}} {error "port lookup failed"}
     return {}
 }
 """
@@ -56,6 +67,15 @@ proc get_ports {quiet option net} {
     ("nets", "spef", "counts", "missing"),
     [
         (["loaded", "u/bus[0]"], ["loaded"], (1, 1), []),
+        (["loaded", "empty"], ["loaded"], (1, 1), []),
+        (["empty"], [], (0, 0), []),
+        (["physical_only", "unknown_db"], [], (0, 2), ["physical_only", "unknown_db"]),
+        (
+            ["empty_port", "empty_unknown_ports"],
+            [],
+            (0, 2),
+            ["empty_port", "empty_unknown_ports"],
+        ),
         (["loaded", "u/bus[0]"], ["loaded", "u/bus[0]"], (1, 1), []),
         (
             ["loaded", "u/bus[0]", "missed", "port_net"],
@@ -74,8 +94,8 @@ proc get_ports {quiet option net} {
                 "empty",
             ],
             ["loaded"],
-            (1, 6),
-            ["unknown_pins", "unknown_dir", "unknown_ports", "sink_only", "empty"],
+            (1, 5),
+            ["unknown_pins", "unknown_dir", "unknown_ports", "sink_only"],
         ),
     ],
 )
@@ -124,8 +144,9 @@ def test_in_flow_loop_splices_the_shared_driver_only_skip():
         net_names=["_019_"],
     )
     at = lines.index("foreach klt_design_net [get_nets -quiet *] {")
-    assert lines[at + 1 : at + 7] == list(SPEF_SKIP_DRIVER_ONLY)
-    assert lines[at + 7] == "    incr klt_design_total"
+    end = at + 1 + len(SPEF_SKIP_DRIVER_ONLY)
+    assert lines[at + 1 : end] == list(SPEF_SKIP_DRIVER_ONLY)
+    assert lines[end] == "    incr klt_design_total"
 
 
 @pytest.mark.parametrize(
@@ -136,6 +157,10 @@ def test_in_flow_loop_splices_the_shared_driver_only_skip():
         (["loaded", "dangling"], ["loaded"], (1, 1), True),
         # Driver-only nets leave both design-side counters, named or not.
         (["loaded", "u/bus[0]"], ["loaded", "u/bus[0]"], (1, 1), True),
+        (["loaded", "empty"], ["loaded"], (1, 1), True),
+        (["empty"], [], (0, 0), False),
+        (["physical_only", "unknown_db"], [], (0, 2), False),
+        (["empty_port", "empty_unknown_ports"], [], (0, 2), False),
         (["loaded", "missed"], ["loaded"], (1, 2), False),
         (["loaded", "port_net"], ["loaded"], (1, 2), False),
         (["u/bus[0]"], ["u/bus[0]"], (0, 0), False),
@@ -149,7 +174,7 @@ def test_in_flow_loop_splices_the_shared_driver_only_skip():
                 "empty",
             ],
             ["loaded"],
-            (1, 6),
+            (1, 5),
             False,
         ),
     ],
@@ -198,3 +223,21 @@ def test_in_flow_design_counts_skip_driver_only(tmp_path, nets, spef, counts, co
     assert (design_annotated, design_total) == counts
     assert (nets_annotated, nets_total) == (len(spef), len(spef))
     assert (design_total > 0 and design_annotated == design_total) is complete
+
+
+def test_discarded_net_count_uses_full_reader_output_and_excludes_instances():
+    warnings = ["[WARNING STA-1650] file.spef line 2, net bus[1] not found."] * 6
+    stdout = "\n".join([sta._SPEF_READ_BEGIN, *warnings, sta._SPEF_READ_END])
+    stderr = (
+        "[WARNING STA-1648] file.spef line 3, instance gate:A not found.\n"
+        "[WARNING STA-1650] file.spef line 4, net mod|bus[2] not found."
+    )
+    run = sta._OpenRoadResult(
+        returncode=0, stdout=stdout, stderr=stderr, engine_log=None
+    )
+    block = sta._spef_annotation_block(run, ["bus[1]"])
+    assert block["reader_warning_count"] == 8
+    assert block["reader_warning_sample"] == warnings[:5]
+    assert "2 distinct unresolved net name(s)" in block["annotation_warning"]
+    assert "design_nets_annotated counts name matches" in block["annotation_warning"]
+    assert block["annotation_complete"] is False

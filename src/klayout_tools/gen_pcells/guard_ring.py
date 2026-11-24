@@ -22,6 +22,7 @@ from ._common_params import (
     declare_tap_and_well_layers,
     declare_well_present,
 )
+from ._ring_shapes import _draw_ring_shapes
 
 
 def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -41,8 +42,6 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _ring_layout,
         _snap_ring_box_um,
         _well_box_um,
@@ -197,26 +196,17 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 mfg_grid_um=self.mfg_grid_um,
                 contact_fixed_size_um=self.contact_fixed_size_um,
             )
-            gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
-            _insert_ring(
-                self.cell,
+            _draw_ring_shapes(
+                self,
                 li_tap,
-                dbu,
-                info["outer_box_um"],
-                info["inner_box_um"],
-                gap_box,
-                self.mfg_grid_um,
-            )
-            _insert_ring(
-                self.cell,
                 li_metal,
+                li_contact,
                 dbu,
-                info["outer_box_um"],
-                info["inner_box_um"],
-                gap_box,
-                self.mfg_grid_um,
+                info,
+                implant_layer=self.ring_implant_layer
+                if self.ring_implant_present
+                else None,
             )
-            _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.add_well and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
                 # Grows the well onto the manufacturing grid (issue #3364): an
@@ -231,26 +221,6 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # deck rule needing the whole well inside it (sky130 nwell.9)
                 # holds for a ring abutting a flavour-marked device.
                 _draw_voltage_flavor_marks(self, dbu, well_box)
-            if self.ring_implant_present:
-                # Tracks the tap ring, extended `ring_implant_margin_um`
-                # past every one of its edges (issue #2369's NP.5b/PP.5b
-                # extension-beyond-COMP fix to #1580's originally coincident
-                # implant) -- still a ring, never a blanket over the
-                # enclosed area, which would re-dope whatever a caller later
-                # places inside it (mirrors `well_island`'s own
-                # `well_tap_implant` ring precedent).
-                _insert_implant_ring(
-                    self.cell,
-                    self.layout.layer(self.ring_implant_layer),
-                    dbu,
-                    info["outer_box_um"],
-                    info["inner_box_um"],
-                    gap_box,
-                    info["gap"]["side"] if info["gap"] is not None else None,
-                    self.ring_implant_margin_um,
-                    self.mfg_grid_um,
-                )
-
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
             _clamp_cut_boxes(
