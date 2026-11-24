@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import characterize_cmd
-from .parser_sim import add_wait_for_capacity_arg
+from ._batch_parser_args import add_wait_for_capacity_arg
 
 
 def add_characterize_parser(

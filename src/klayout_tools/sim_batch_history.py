@@ -158,23 +158,26 @@ class RunHistory:
 
 def begin(
     artifacts_dir: str,
-    fingerprint: str | None,
+    fingerprint: sim_batch_shards.ShardFingerprint | None,
     request: dict[str, Any],
     hosts: int,
     resume: bool,
     reused: bool,
     attach: str | None,
 ) -> RunHistory | None:
-    if fingerprint is None or attach is not None:
-        return None
-    root = Path(artifacts_dir)
     batch = request.get("batch")
-    digest = sim_batch_shards.receipt_request_sha256(request)
-    prior = _previous(root / _FILENAME, fingerprint, digest) if resume else {}
-    entries = _map(root, fingerprint, request)
     split = isinstance(batch, dict) and (
         batch.get("max_units_per_job") or batch.get("job_ceiling_check") == "split"
     )
+    if attach is not None or (hosts == 1 and not (resume or split)):
+        return None
+    fingerprint = sim_batch_shards.resolve_fingerprint(fingerprint)
+    if fingerprint is None:
+        return None
+    root = Path(artifacts_dir)
+    digest = sim_batch_shards.receipt_request_sha256(request)
+    prior = _previous(root / _FILENAME, fingerprint, digest) if resume else {}
+    entries = _map(root, fingerprint, request)
     if hosts == 1 and not (split or prior or (resume and entries)):
         return None
     legacy = resume and bool(entries or reused)
