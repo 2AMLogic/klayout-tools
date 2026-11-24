@@ -51,6 +51,7 @@ from .extract_validate import validate_run_extract_args
 from .pex import (
     SCHEMA_VERSION,
     PexError,
+    _bound_testbenches,
     _check_dut_declares_a_circuit,
     _find_dut_include,
     _load_testbench_request,
@@ -304,6 +305,7 @@ def run_pex_dry_run(
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
     flatten_schematic: bool = False,
+    schematic_top: str | None = None,
     device_only_leg: bool = False,
     extract_only: bool = False,
     submit_only: bool = False,
@@ -349,6 +351,7 @@ def run_pex_dry_run(
         timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
+        schematic_top=schematic_top,
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
@@ -357,7 +360,7 @@ def run_pex_dry_run(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    _body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
+    body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
     resolved_top = _extraction_preflight(
         layout_path,
         deck_name,
@@ -394,6 +397,8 @@ def run_pex_dry_run(
     reference_netlist_path = _resolve_reference_netlist_path(
         extract_only, measured_reference_netlist, dut_paths
     )
+
+    _bound_testbenches(schematic_top, resolved_top, reference_netlist_path, body_paths)
 
     # Issue #4616/#4624/#5280: the shard flags the schematic leg would pass,
     # so the nested dry run expands exactly the unit list a real leg would.
