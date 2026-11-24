@@ -1,0 +1,1 @@
+- **`klt lvs` preserves a subcircuit reached through a corner-selected `.lib '<file>' <section>` line when it shares a deck's drawn-resistor or MoM-capacitor class name** (#6705, 2026-11-23).

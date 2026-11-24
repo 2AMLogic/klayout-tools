@@ -1325,6 +1325,13 @@ pattern are affected, and everything else in the same layout — routing
 metal, vias, fill, unmatched devices — extracts exactly as it does today,
 in the same run.
 
+A terminal drawn on poly can connect through abutting leaf instances. The
+extractor preserves the exact poly component that carries an in-cell pin text
+when it touches another terminal, parent poly, or a contact. This conductor is
+used only for connectivity. A gap between polygons keeps the two nets separate.
+With `--top-cell-pins`, the generated name of a genuinely unconnected abstract
+pin stays internal. Its instance connection and warning remain in the output.
+
 **Pin resolution**, once per *distinct* matched cell type (cached across
 every occurrence of that type):
 

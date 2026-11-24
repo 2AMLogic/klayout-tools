@@ -9,14 +9,14 @@ timing-free (structural) Liberty can still reach ``place``/``route``.
 These helpers live outside ``place_and_route.py``/``place_and_route_script.py``
 to keep those files under their size ceilings (the ``place_and_route_hints.py``
 precedent, issue #4914); moving the ``cts`` Tcl assembly here also returns
-``_stage_script_lines`` to its complexity-ratchet baseline. ``STAGE_ORDER``
-lives in ``place_and_route``, which imports this module, so it is imported
-lazily where needed -- the same cycle-avoidance
-``place_and_route_request``'s target-stage validation uses."""
+``_stage_script_lines`` to its complexity-ratchet baseline. The stage order is
+shared with request validation."""
 
 from __future__ import annotations
 
 import os
+
+from .place_and_route_base import STAGE_ORDER
 
 
 def run_is_unconstrained(clock_port: str | None, clock_period_ns: float | None) -> bool:
@@ -42,9 +42,6 @@ def unconstrained_warnings(
     unoptimised result."""
     if not run_is_unconstrained(clock_port, clock_period_ns):
         return []
-    # cycle: place_and_route imports this module (see module docstring)
-    from .place_and_route import STAGE_ORDER
-
     if STAGE_ORDER.index(target_stage) < STAGE_ORDER.index("place"):
         return []
     skipped = ["repair_design", "repair_timing"]
