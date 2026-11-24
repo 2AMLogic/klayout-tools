@@ -10,16 +10,12 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any
 
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number as _is_finite_number
 from ._tcl import tcl_literal
 
 _GROUP_KEYS = frozenset(
     {"name", "instances", "max_extent_um", "region_um", "enforce_region", "order"}
 )
-
-
-def _is_finite_number(value: Any) -> bool:
-    return is_finite_number(value)
 
 
 def _check_region_um(region: Any, where: str, error: type[Exception]) -> None:
@@ -43,7 +39,7 @@ def _fixed_origin(
     if (
         not isinstance(origin, list)
         or len(origin) != 2
-        or not all(map(is_finite_number, origin))
+        or not all(map(_is_finite_number, origin))
     ):
         raise error(
             f"{where}.order.fixed_origin_um must be two finite coordinates [x, y]"

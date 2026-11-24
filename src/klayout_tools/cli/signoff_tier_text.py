@@ -87,7 +87,10 @@ def status_marker(status: str, palette: Palette) -> tuple[str, str]:
 
 
 def _print_composed_from(item: dict) -> None:
-    """Print the sub-block evidence for a composed or partly composed row."""
+    """Print sub-block citations for composed rows (#6927) and unmet rows (#7361).
+
+    Evidence hashes let readers spot stale citations in a saved text report.
+    """
     if item["status"] == STATUS_MET_BY_COMPOSITION:
         label = "composed from"
         entries = item.get("composed_from") or []

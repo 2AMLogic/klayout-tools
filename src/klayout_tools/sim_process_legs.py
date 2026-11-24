@@ -15,19 +15,12 @@ import json
 import re
 from typing import Any
 
+from ._jsonnum import is_finite_number
+
 PROCESS_LEG_CHECK_CODE = "process_leg_check"
 
 _ABSENT_STATUS = "absent"
 _MC_SUFFIX = re.compile(r"/mc(\d+)$")
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value
-        and value not in (float("inf"), float("-inf"))
-    )
 
 
 def _point_key(corner: dict[str, Any]) -> str:
@@ -51,7 +44,7 @@ def _signature(corner: dict[str, Any]) -> tuple[tuple[str, float], ...]:
         sorted(
             (m["name"], m["value"])
             for m in corner.get("measurements") or []
-            if m.get("status") != _ABSENT_STATUS and _is_finite_number(m.get("value"))
+            if m.get("status") != _ABSENT_STATUS and is_finite_number(m.get("value"))
         )
     )
 

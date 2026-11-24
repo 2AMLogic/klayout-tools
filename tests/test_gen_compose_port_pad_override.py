@@ -138,6 +138,7 @@ def test_no_connectivity_preserves_default_access_size(tmp_path, pdk_root, capsy
     path = _request(tmp_path, pdk_root, "unused")
     request = json.loads(path.read_text())
     request["connectivity"] = []
+    request["routing"]["minimal_ladder"] = "unused"
     path.write_text(json.dumps(request))
     assert main(["gen-compose", str(path), "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -172,4 +173,19 @@ def test_non_boolean_minimal_ladder_rejects_truthy_values(
     message = json.loads(capsys.readouterr().err)["error"]["message"]
     assert "must be a boolean when given" in message
     assert "cannot be combined" not in message
+    assert not (tmp_path / "top.gds").exists()
+
+
+@pytest.mark.parametrize("value", ["yes", 1])
+def test_invalid_minimal_ladder_precedes_blocked_label_search(
+    tmp_path, pdk_root, capsys, value
+):
+    path = _request(tmp_path, pdk_root, 0.8, blocked=True)
+    request = json.loads(path.read_text())
+    request["routing"]["minimal_ladder"] = value
+    path.write_text(json.dumps(request))
+
+    assert main(["gen-compose", str(path), "--format", "json"]) == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert message == "request.routing.minimal_ladder must be a boolean when given"
     assert not (tmp_path / "top.gds").exists()
