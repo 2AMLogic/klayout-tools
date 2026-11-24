@@ -336,12 +336,12 @@ def _group_coverage(
             {"id": observation + "/limits", "reason": "characterization_without_limits"}
         )
         if group["value"] is None:
-            reason = (
+            observation_reason = (
                 REASON_SOURCE_INCONCLUSIVE
                 if group["reason"] == REASON_SOURCE_INCONCLUSIVE
                 else "unavailable_measurement"
             )
-            skipped.append({"id": observation, "reason": reason})
+            skipped.append({"id": observation, "reason": observation_reason})
         else:
             checked.append(observation)
     for key, value in limits.items():
