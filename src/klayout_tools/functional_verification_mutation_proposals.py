@@ -266,15 +266,15 @@ def load_mutation_proposals(path: str) -> tuple[list[str], list[_ProposalRecord]
 def _index_errors(indices: list[int]) -> list[str]:
     """One message per duplicate or non-positive ``index`` (spike §3b)."""
     seen: set[int] = set()
-    errors: list[str] = []
+    invalid: dict[int, None] = {}
     for index in indices:
         if index <= 0 or index in seen:
-            errors.append(
-                "mutation proposals[].index must be unique and positive "
-                f"(got {index!r})"
-            )
+            invalid[index] = None
         seen.add(index)
-    return errors
+    return [
+        f"mutation proposals[].index must be unique and positive (got {index!r})"
+        for index in invalid
+    ]
 
 
 def _validate_proposal_indices(proposals: list[_ProposalRecord]) -> None:

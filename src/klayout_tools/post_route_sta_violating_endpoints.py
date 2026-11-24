@@ -201,8 +201,8 @@ def _violating_endpoints(
     only, so both sides are re-sorted globally here (a stable sort, keeping
     engine order on ties) and trimmed to the cap. ``status`` is ``"ok"``
     when each side agrees with its violation count -- truncated, that means
-    the count exceeds the cap (truncation itself proves the engine found
-    more than N); untruncated, that the list length equals the count -- and
+    the count covers every row returned before trimming to the cap;
+    untruncated, the list length equals the count -- and
     ``"inconsistent"`` with a ``reason`` naming the disagreeing side
     otherwise, mirroring the ``worst_*_path`` aggregate cross-check: the
     lists are still reported, never silently shortened. A failed parse is
@@ -228,12 +228,19 @@ def _violating_endpoints(
         listed = [
             _violating_endpoint_entry(row) for row in ordered[:max_violating_endpoints]
         ]
-        agrees = count > max_violating_endpoints if truncated else len(listed) == count
+        agrees = (
+            count > max_violating_endpoints and count >= len(ordered)
+            if truncated
+            else len(listed) == count
+        )
         if not agrees:
-            listed_n = "more than the cap" if truncated else f"{len(listed)}"
+            observed = (
+                f"returned {len(ordered)} before truncation"
+                if truncated
+                else f"listed {len(listed)}"
+            )
             mismatches.append(
-                f"{list_key} side listed {listed_n} but {list_key}_violation_count "
-                f"is {count}"
+                f"{list_key} side {observed} but {list_key}_violation_count is {count}"
             )
         sides[list_key] = listed
         sides[f"{list_key}_truncated"] = truncated

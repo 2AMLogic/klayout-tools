@@ -105,6 +105,20 @@ def test_bad_index_reported_alongside_other_entry_missing_field(tmp_path):
     assert "proposals[1] is missing required field: file" in text
 
 
+@pytest.mark.parametrize(
+    ("indices", "invalid"), [([0, 0], [0]), ([-1, 0, 0, 2, 2], [-1, 0, 2])]
+)
+def test_repeated_invalid_indices_are_reported_once(tmp_path, indices, invalid):
+    doc = {"scope": ["dut.v"], "proposals": [_full_entry(index=i) for i in indices]}
+    text = _error_text(tmp_path, doc)
+    messages = [
+        f"mutation proposals[].index must be unique and positive (got {i})"
+        for i in invalid
+    ]
+    assert text.endswith("; ".join(messages))
+    assert text.count("must be unique and positive") == len(invalid)
+
+
 def test_duplicate_index_survives_type_error_on_another_entry(tmp_path):
     doc = {
         "scope": ["dut.v"],

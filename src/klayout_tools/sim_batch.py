@@ -141,7 +141,7 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_echo_checks import check_ngspice_options_echo
+from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
@@ -3188,7 +3188,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
-        check_ngspice_options_echo(request, report)
+        check_runner_option_echoes(request, report)
         sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
         identity = _read_job_identity(collected, request, report=report)
         environment = {**environment, **identity}
@@ -3682,11 +3682,11 @@ class _BatchFleetRun:
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Retry capacity-refused shards in order with a fresh wait budget."""
-        refused = sorted(self.capacity_refused)
+        """Reset the wait budget and pending count for the capacity-refused shards."""
         self.started = time.monotonic()
         self.budget_spent.clear()
-        return refused
+        self.watch.start_retry_pass(self.capacity_refused)
+        return sorted(self.capacity_refused)
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         return self._guarded(shard_points, self._run_one_shard)

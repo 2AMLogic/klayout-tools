@@ -53,6 +53,7 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from ._engine_proc import run_in_group
@@ -243,6 +244,65 @@ def _build_resume_block(
     }
 
 
+@dataclass(frozen=True)
+class _YosysRunResult:
+    """One ``yosys -s`` invocation's captured outcome (see
+    :func:`_run_yosys_subprocess`)."""
+
+    timed_out: bool
+    returncode: int | None
+    stdout: str
+    stderr: str
+    elapsed_s: float
+
+
+def _run_yosys_subprocess(
+    script_path: str, timeout_s: float, binary: str = "yosys"
+) -> _YosysRunResult:
+    """Run ``<binary> -s <script_path>``, bounded by ``timeout_s`` -- the
+    one Yosys launcher behind every stage of both engines. ``binary``
+    (issue #2423) is the path ``_resolve_yosys_binary`` settled on for the
+    run; the ``"yosys"`` default only spares a direct test a resolution
+    stub. A process timeout is returned, never raised; only a binary that
+    cannot be launched raises :class:`EquivError`."""
+    started = time.monotonic()
+    timed_out = False
+    stdout = stderr = ""
+    returncode: int | None = None
+    try:
+        completed = run_in_group(
+            [binary, "-s", script_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired:
+        # Mirrors `sim.py`'s `_run_corner`: a killed process's partial
+        # output is not trusted -- the run is classified purely on
+        # `timed_out`, never on whatever text happened to be captured
+        # before the kill.
+        timed_out = True
+    except OSError as exc:
+        raise EquivError(f"could not launch yosys: {exc}") from exc
+    return _YosysRunResult(
+        timed_out, returncode, stdout, stderr, round(time.monotonic() - started, 3)
+    )
+
+
+def _write_yosys_log(log_path: str, run: _YosysRunResult) -> None:
+    try:
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(run.stdout)
+            if run.stderr:
+                handle.write("\n--- stderr ---\n")
+                handle.write(run.stderr)
+    except OSError:
+        pass
+
+
 def run_equiv(
     request: str,
     *,
@@ -377,10 +437,8 @@ def run_equiv(
             request_dir=request_dir,
         )
 
-    # engine == "yosys" (combinational, Phase 0/1) continues below, unchanged.
-    # `resume` is deliberately unused on this path beyond the envelope block:
-    # a single Yosys subprocess has no earlier stage artifact to re-enter
-    # from (see `run_equiv`'s docstring), so re-entry *is* the re-run.
+    # engine == "yosys" (combinational, Phase 0/1): `resume` has no effect
+    # here beyond the envelope block -- re-entry *is* the re-run.
     script_path = os.path.join(output_dir, "equiv.ys")
     netlist_path = os.path.join(output_dir, "equiv_netlist.v")
     log_path = os.path.join(output_dir, "equiv.log")
@@ -395,112 +453,60 @@ def run_equiv(
         sat_timeout_s=int_timeout,
     )
 
-    started = time.monotonic()
-    timed_out = False
-    stdout = stderr = ""
-    returncode: int | None = None
-    try:
-        completed = run_in_group(
-            [yosys_binary, "-s", script_path],
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout_s,
-        )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        returncode = completed.returncode
-    except subprocess.TimeoutExpired:
-        # Mirrors `sim.py`'s `_run_corner`: a killed process's partial
-        # output is not trusted -- the run is classified purely on
-        # `timed_out`, never on whatever text happened to be captured
-        # before the kill.
-        timed_out = True
-    except OSError as exc:
-        raise EquivError(f"could not launch yosys: {exc}") from exc
-    elapsed_s = round(time.monotonic() - started, 3)
+    run = _run_yosys_subprocess(script_path, effective_timeout_s, yosys_binary)
+    _write_yosys_log(log_path, run)
 
-    try:
-        with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write(stdout)
-            if stderr:
-                handle.write("\n--- stderr ---\n")
-                handle.write(stderr)
-    except OSError:
-        pass
-
-    # Issue #2423: re-derive `engine_version` from the *same* binary that
-    # was actually invoked above, so a `request.yosys_binary`/
-    # `$KLT_YOSYS_BINARY` override never reports the bare-PATH `yosys`'s
-    # version (or `None`, if no bare `yosys` is even on PATH) for a run
-    # that used a different build entirely.
+    # Issue #2423: re-derive `engine_version` from the *same* binary that was
+    # actually invoked above, so a `request.yosys_binary`/`$KLT_YOSYS_BINARY`
+    # override never reports the bare-PATH `yosys`'s version (or `None`) instead.
     engine_version = _yosys_version(yosys_binary)
 
-    if timed_out:
-        return _build_report(
-            resume=resume_block,
-            engine=engine,
-            engine_version=engine_version,
-            yosys_binary=yosys_binary,
-            sim_backend=effective_sim_backend,
-            status="inconclusive",
-            gold=gold,
-            gate=gate,
-            port_map=port_map,
-            timeout_s=effective_timeout_s,
-            elapsed_s=elapsed_s,
-            counterexample=None,
-            diagnostics=[
-                {
-                    "severity": "error",
-                    "code": "process_timeout",
-                    "message": (
-                        f"yosys did not complete within {effective_timeout_s}s "
-                        "(process killed) -- proof is inconclusive, not "
-                        "'equivalent'"
-                    ),
-                }
-            ],
-            script_path=script_path,
-            netlist_path=netlist_path,
-            log_path=log_path,
-        )
-
-    if returncode != 0:
-        message = _sequential_error_message(stdout, stderr)
-        if message is None:
-            message = _yosys_error_message(stdout, stderr, returncode)
-        raise EquivError(message)
-
-    status, diagnostics = _classify_sat_result(stdout)
-
+    status = "inconclusive"
     counterexample = None
-    if status == "counterexample":
-        signals = _parse_signal_table(stdout)
-        counterexample = _build_counterexample(signals)
-        confirm_counterexample(
-            counterexample=counterexample,
-            netlist_path=netlist_path,
-            output_dir=output_dir,
-            diagnostics=diagnostics,
-            sim_backend=effective_sim_backend,
-            request_doc=request_doc,
-            request_dir=request_dir,
-        )
-        if replay_evidence_is_untrustworthy(counterexample):
-            # Either the solver reported a counterexample whose own replay
-            # through the flattened netlists did not reproduce a diverging
-            # output (`counterexample_not_reproduced`, appended above) -- an
-            # unsound `$equiv`/miter artifact, not a demonstrated functional
-            # difference -- or (`sim_backend: "both"`) the two replay
-            # backends disagreed. Either way "inconclusive" is the honest
-            # verdict, matching the downgrade the sequential engine's own
-            # stage-2 path already applies for its analogous "unproven, no
-            # counterexample either" case below. Never reported when
-            # `confirmed_by_simulation` is `None` *because* simulation could
-            # not be attempted at all (e.g. no `iverilog` on $PATH) -- that
-            # case has no evidence either way, so the solver's own verdict
-            # stands.
-            status = "inconclusive"
+    diagnostics: list[dict[str, str]] = []
+    if run.timed_out:
+        diagnostics = [
+            {
+                "severity": "error",
+                "code": "process_timeout",
+                "message": (
+                    f"yosys did not complete within {effective_timeout_s}s "
+                    "(process killed) -- proof is inconclusive, not "
+                    "'equivalent'"
+                ),
+            }
+        ]
+    elif run.returncode != 0:
+        message = _sequential_error_message(run.stdout, run.stderr)
+        if message is None:
+            message = _yosys_error_message(run.stdout, run.stderr, run.returncode)
+        raise EquivError(message)
+    else:
+        status, diagnostics = _classify_sat_result(run.stdout)
+
+        if status == "counterexample":
+            signals = _parse_signal_table(run.stdout)
+            counterexample = _build_counterexample(signals)
+            confirm_counterexample(
+                counterexample=counterexample,
+                netlist_path=netlist_path,
+                output_dir=output_dir,
+                diagnostics=diagnostics,
+                sim_backend=effective_sim_backend,
+                request_doc=request_doc,
+                request_dir=request_dir,
+            )
+            if replay_evidence_is_untrustworthy(counterexample):
+                # Either the replay through the flattened netlists did not
+                # reproduce a diverging output (`counterexample_not_reproduced`,
+                # appended above) -- an unsound `$equiv`/miter artifact, not a
+                # demonstrated functional difference -- or (`sim_backend: "both"`)
+                # the two replay backends disagreed. Either way "inconclusive" is
+                # the honest verdict, as in the sequential engine's stage 2
+                # (equiv_sequential). Never when `confirmed_by_simulation` is
+                # `None` because no simulator was available (e.g. no `iverilog` on
+                # $PATH): no evidence either way, so the solver's verdict stands.
+                status = "inconclusive"
 
     return _build_report(
         resume=resume_block,
@@ -513,7 +519,7 @@ def run_equiv(
         gate=gate,
         port_map=port_map,
         timeout_s=effective_timeout_s,
-        elapsed_s=elapsed_s,
+        elapsed_s=run.elapsed_s,
         counterexample=counterexample,
         diagnostics=diagnostics,
         script_path=script_path,
@@ -882,21 +888,17 @@ def _build_report(
     netlist_path: str,
     log_path: str,
     resume: dict[str, Any] | None = None,
+    induction_depth: int | None = None,
+    extra_artifacts: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
-    all_sources = gold["sources"] + gate["sources"]
-    if len(all_sources) == 1:
-        # Issue #2027: `klt equiv`'s inputs are HDL sources (the golden and
-        # gate-level designs), never a layout stream -- see
-        # `docs/json-contract.md`'s `provenance.input.role`.
-        provenance = build_provenance(
-            input_path=all_sources[0], input_role=INPUT_ROLE_SOURCE
-        )
-    else:
-        provenance = build_provenance()
-        provenance["input"] = {
-            "content_hash": _combined_content_hash(all_sources),
-            "role": INPUT_ROLE_SOURCE,
-        }
+    provenance = build_provenance()
+    # Issue #2027: `klt equiv`'s inputs are HDL sources (the golden and
+    # gate-level designs), never a layout stream -- see
+    # `docs/json-contract.md`'s `provenance.input.role`.
+    provenance["input"] = {
+        "content_hash": _equiv_input_hash(gold, gate),
+        "role": INPUT_ROLE_SOURCE,
+    }
 
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -916,15 +918,19 @@ def _build_report(
         "port_map": port_map,
         "timeout_s": timeout_s,
         "elapsed_s": elapsed_s,
+        "induction_depth": induction_depth,
         "counterexample": counterexample,
         "diagnostics": diagnostics,
         "artifacts": {
             "script_path": script_path,
             "netlist_path": netlist_path if os.path.isfile(netlist_path) else None,
             "log_path": log_path if os.path.isfile(log_path) else None,
+            **(extra_artifacts or {}),
         },
         "provenance": provenance,
     }
+    if induction_depth is None:
+        del report["induction_depth"]
     if resume is not None:
         report["resume"] = resume
     return report
@@ -991,15 +997,9 @@ def _canonicalize_equiv_report_for_rerun_diff(
 
 def _equiv_input_hash(gold: dict[str, Any], gate: dict[str, Any]) -> str | None:
     """The ``provenance.input.content_hash`` a fresh run of this request
-    would record -- re-derived **without invoking Yosys**, mirroring
-    :func:`_build_report`/``_build_sequential_report``'s own hashing step
-    for step (the same rule ``synthesize._synthesize_provenance_hashes``
-    documents: any divergence here would show up as permanent, unexplained
-    drift on a report that never moved, so there is exactly one recipe and
-    both call sites follow it). A single source across both sides hashes
-    through ``content_hash`` (what ``build_provenance``'s ``input_path``
-    records); multiple sources through the order-independent
-    ``_combined_content_hash``."""
+    would record -- the one recipe :func:`_build_report` writes for both
+    engines and :func:`check_equiv_report` re-derives **without invoking
+    Yosys**, so a committed report can never drift from its own ``--check``."""
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
         return content_hash(all_sources[0])
