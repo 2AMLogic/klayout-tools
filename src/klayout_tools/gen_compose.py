@@ -155,7 +155,8 @@ Scope (phase 2, this module's current state):
 to a nonexistent block ``id``/port name is an application error, exit code
 1); geometry is *advisory* -- ``klt drc`` remains the rule-compliance
 authority on the composed output, so a routed net (``routed: true``) is not a
-DRC-clean guarantee.
+DRC-clean guarantee. Set ``options.check_placement`` to fail before writing
+on declared overlap or measured footprint growth (:func:`check_placement_overlap`).
 
 PDK resolution goes through the one resolver every other verb uses
 (:func:`klayout_tools.pdk.find_pdk`) -- this module never implements its own
@@ -241,6 +242,10 @@ from .gen_compose_draw import (
 from .gen_compose_draw import (
     _insert_via_cuts as _insert_via_cuts,
 )
+from .gen_compose_footprints import _bbox_contains, check_composed_footprints
+from .gen_compose_footprints import (
+    check_placement_overlap as check_placement_overlap,
+)
 from .gen_compose_ladder_floors import (
     _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
 )
@@ -252,6 +257,7 @@ from .gen_compose_landing_pads import (
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
+from .gen_compose_pad_conflicts import leg_pad_notch_conflict
 from .gen_compose_pad_ports import endpoint_pad_ports
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
@@ -679,29 +685,6 @@ def _explicit_placement_clearance_warnings(
     return clearance_warnings, abutment_notes
 
 
-# Tolerance (um) for comparing a block's declared ``bbox_um`` against its own
-# real, stream-read ``kdb.Cell.dbbox()`` in
-# :func:`_declared_bbox_overlap_warnings` below -- large enough to absorb dbu
-# quantization noise between an analytically-computed declared bbox and the
-# same geometry's dbu-rounded drawn extent (dbu is typically 0.001um, so
-# quantization alone can differ by up to half a dbu step), far too small to
-# ever mask a real "declared bbox undershoots the block's own guard ring/seal
-# ring" discrepancy (#1679), which is always at least tens of nm.
-_BBOX_REALITY_TOLERANCE_UM = 1e-4
-
-
-def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
-    """Whether ``outer`` fully contains ``inner`` (within
-    :data:`_BBOX_REALITY_TOLERANCE_UM`)."""
-    tol = _BBOX_REALITY_TOLERANCE_UM
-    return (
-        inner["x0"] >= outer["x0"] - tol
-        and inner["y0"] >= outer["y0"] - tol
-        and inner["x1"] <= outer["x1"] + tol
-        and inner["y1"] <= outer["y1"] + tol
-    )
-
-
 def _block_real_placed_bbox_um(
     block_id: str, block: dict[str, Any], offset_um: dict[str, float]
 ) -> dict[str, float] | None:
@@ -710,11 +693,8 @@ def _block_real_placed_bbox_um(
     declared ``bbox_um`` already is -- or ``None`` when it cannot be read
     (bad ``gds_path``/``cell_name``, or an empty cell).
 
-    Never raises: this is an advisory cross-check (#1679), and a block whose
-    stream genuinely cannot be read fails identically -- loudly, as a
-    :class:`GenComposeError` -- later in :func:`compose` regardless (when its
-    geometry is actually copied into the composed output), so silently
-    skipping the advisory here for that block costs nothing.
+    An unreadable stream has no measurement. Compose reports the underlying
+    read error when copying the source geometry.
     """
     try:
         real_bbox_um = read_cell_bbox_um(
@@ -800,11 +780,27 @@ def _read_all_block_layers_geometry(
     return geometry
 
 
+def _measure_placed_bboxes(
+    order: list[str],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    measured = {}
+    for block_id in order:
+        box = _block_real_placed_bbox_um(
+            block_id, blocks[block_id], offsets_um[block_id]
+        )
+        if box is not None:
+            measured[block_id] = box
+    return measured
+
+
 def _declared_bbox_overlap_warnings(
     order: list[str],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
     placed_bboxes_um: dict[str, dict[str, float]],
+    real_placed_bbox_um: dict[str, dict[str, float]] | None = None,
 ) -> list[str]:
     """Real per-layer geometry overlap advisory for a block whose declared
     ``bbox_um`` understates its own real drawn extent (#1679).
@@ -839,19 +835,16 @@ def _declared_bbox_overlap_warnings(
 
     Never raises and never blocks composition, matching every other check in
     this module's "geometry is advisory" philosophy.
+
+    Compose shares its measured boxes with the optional strict check.
     """
     warnings: list[str] = []
-    real_placed_bbox: dict[str, dict[str, float]] = {}
-    for block_id in order:
-        real_bbox = _block_real_placed_bbox_um(
-            block_id, blocks[block_id], offsets_um[block_id]
-        )
-        if real_bbox is not None:
-            real_placed_bbox[block_id] = real_bbox
+    if real_placed_bbox_um is None:
+        real_placed_bbox_um = _measure_placed_bboxes(order, blocks, offsets_um)
 
     leaky_ids = [
         block_id
-        for block_id, real_bbox in real_placed_bbox.items()
+        for block_id, real_bbox in real_placed_bbox_um.items()
         if not _bbox_contains(placed_bboxes_um[block_id], real_bbox)
     ]
     if not leaky_ids:
@@ -868,7 +861,7 @@ def _declared_bbox_overlap_warnings(
 
     reported_pairs: set[frozenset[str]] = set()
     for leaky_id in leaky_ids:
-        leaky_real_bbox = real_placed_bbox[leaky_id]
+        leaky_real_bbox = real_placed_bbox_um[leaky_id]
         for other_id in order:
             if other_id == leaky_id:
                 continue
@@ -3026,6 +3019,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
     boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
+    check_placement = options.get("check_placement", False)
+    if not isinstance(check_placement, bool):
+        raise GenComposeError("request.options.check_placement must be a boolean")
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -3082,21 +3078,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         warnings.extend(clearance_warnings)
         notes.extend(abutment_notes)
 
-    # #1679: every check above (and every placement strategy's own math)
-    # trusts a block's *declared* bbox_um -- accurate for a `klt gen` block,
-    # but a `generator_report` block's bbox_um is taken verbatim
-    # (_parse_blocks) and never cross-checked against its own stream. A
-    # block whose real drawn geometry (e.g. a guard/seal ring) extends past
-    # its declared bbox can silently overlap a neighbour placed just outside
-    # the *declared* box -- a `klt drc`-clean same-layer merge that only
-    # surfaces later via `klt extract`'s merged_net_labels diagnostic.
-    # Real-geometry-based, so (unlike the declared-bbox check above) it
-    # applies to every strategy -- "row"/"array" place from the same
-    # unreliable declared bbox_um and are no less exposed; "array" is a
-    # no-op here in practice (exactly one blocks[] entry, so no pairwise
-    # comparison is possible).
+    # The placement gate and the advisory share one measurement for each source.
+    if check_placement:
+        local_boxes = _measure_placed_bboxes(
+            order, blocks, {name: {"x": 0.0, "y": 0.0} for name in order}
+        )
+        real_placed_bboxes_um = check_composed_footprints(
+            order,
+            bboxes_um,
+            local_boxes,
+            offsets_um,
+            target_bbox_um,
+            spacing_um if strategy == "row" else None,
+        )
+    else:
+        real_placed_bboxes_um = _measure_placed_bboxes(order, blocks, offsets_um)
+
     warnings.extend(
-        _declared_bbox_overlap_warnings(order, blocks, offsets_um, placed_bboxes_um)
+        _declared_bbox_overlap_warnings(
+            order, blocks, offsets_um, placed_bboxes_um, real_placed_bboxes_um
+        )
     )
 
     # --- Routing (phase 2) --------------------------------------------------
@@ -3733,21 +3734,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             Automatic climbs and GF180 9K/11K top-metal landings also
             check intermediate and far pads for spacing.
 
-            A literal positive-area overlap is still always rejected first,
-            then, on both entries, a shared edge or corner (#7024, #7221):
-            ``kdb.Region.interacting`` -- shares at least one point, as
-            ``LayoutToNetlist`` connects -- is the contact test, and needs no
-            space rule. For the primary entry, when the two regions neither
-            overlap nor touch but sit closer together than the resolved deck's
-            own same-layer ``"space"`` rule for ``layer``
-            (:func:`_min_spacing_um_for_layer`), one side is grown by that
-            threshold (``kdb.Region.sized`` -- the standard "distance < d"
-            Minkowski-sum test, symmetric regardless of which side grows)
-            before the same intersection test -- catching the class of
-            violation issue #1386 reported (`nets[].legs[].routed: true` legs
-            that still failed `klt drc`'s `li1.space.1`/`met1.space.1`) that
-            the overlap-only version could not see. A layer with no known
-            ``"space"`` rule keeps those two tests only (#6961)."""
+            Reject intersections and conductive contacts before checking the
+            deck's spacing rule. A via-drop leg also needs room between its
+            landing pad and its own backbone on the primary route layer."""
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None
             if candidate_width_um is None:
@@ -3917,11 +3906,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return own_via_cut_clearance_reason(
+            cut_conflict = own_via_cut_clearance_reason(
                 via_drops,
                 pdk_info["variant"],
                 _min_spacing_um_for_layer,
                 _own_block_layer_geometry,
+            )
+            if cut_conflict is not None or not via_drops:
+                return cut_conflict
+            return leg_pad_notch_conflict(
+                layer_regions[layer], layer, own_spacing, _drawing_dbu()
             )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs

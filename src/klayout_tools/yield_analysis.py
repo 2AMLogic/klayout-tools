@@ -375,9 +375,7 @@ def _is_distrusted(corner: dict[str, Any], measurement: dict[str, Any]) -> bool:
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
-    Only corners carrying a non-null ``monte_carlo`` block contribute samples
-    -- a report that mixes a plain PVT matrix with a Monte Carlo request has
-    both, and the deterministic corners are not draws from any distribution.
+    Only corners with a non-null ``monte_carlo`` block contribute draws.
     """
     corners = report.get("corners")
     if not isinstance(corners, list):
@@ -403,6 +401,8 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
     for entry in rollup:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             raise YieldError("sim report has a malformed 'measurements' entry")
+        if "statistic" in entry:  # Grid statistics have no per-draw observations.
+            continue
         name = entry["name"]
         samples, errored, inconclusive, source_corners = _draw_from_mc_corners(
             mc_corners, name

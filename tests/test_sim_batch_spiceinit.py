@@ -390,3 +390,52 @@ def test_collected_init_diagnostic_by_job(
         )
         assert row["request_identity"] == expected
     assert len(by_job) == len(observations)
+
+
+def test_collected_model_selection_abort_suggests_declaring_init(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    error = json.loads(_sim_report())
+    error.update(status="error", errored=1, passed=0)
+    error["corners"][0].update(
+        status="error",
+        diagnostics=[
+            {
+                "code": "ngspice_fatal",
+                "severity": "error",
+                "message": "Error on line 4: could not find a valid modelname",
+            }
+        ],
+    )
+    runner.outputs = {"report.json": json.dumps(error)}
+    _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "models.lib"},
+            "backend": "batch",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {
+                "process": ["tt"],
+                "supply_v": {"vdd": [1.8]},
+                "temperature_c": [27],
+            },
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0,
+            },
+        },
+    )
+    report = sim.run_sim(str(request))
+    assert report["status"] == "error"
+    hints = [
+        d
+        for d in report.get("diagnostics", [])
+        if d["code"] == "ngspice_model_selection_init_hint"
+    ]
+    assert len(hints) == 1
+    assert hints[0]["feature"] == "options.ngspice_init"

@@ -69,6 +69,17 @@ def test_missing_unreleased_heading_is_an_error() -> None:
 EMPTY_CHANGELOG = "# Changelog\n\n## Unreleased\n\n## 0.8.0 (2026-10-24)\n\n- old\n"
 
 
+def test_changelog_fragments_start_with_a_bullet() -> None:
+    offenders = []
+    for path in sorted((REPO_ROOT / "changelog.d").glob("*.md")):
+        if path.name == "README.md" or not path.is_file():
+            continue
+        entry = path.read_text(encoding="utf-8")
+        if entry.strip() and not entry.startswith("- "):
+            offenders.append(path.name)
+    assert not offenders, "Expected a leading '- ' in " + ", ".join(offenders)
+
+
 def test_prepare_releases_fragments_in_filename_order(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     fragments = repo / "changelog.d"
@@ -316,3 +327,76 @@ def test_publish_refuses_non_tag_refs() -> None:
 
 def test_release_lag_workflow_is_retired() -> None:
     assert not (REPO_ROOT / ".github/workflows/release-lag.yml").exists()
+
+
+def test_refresh_collects_late_notes_once_and_leaves_history_intact(tmp_path):
+    repo = _repo(tmp_path)
+    rp.prepare(repo, "0.9.0", "2026-11-01")
+    changelog = repo / "CHANGELOG.md"
+    original = changelog.read_text()
+    history = original.split("## 0.8.0", 1)[1]
+    changelog.write_text(
+        original.replace("## Unreleased", "## Unreleased\n\n- late legacy")
+    )
+    fragments = repo / "changelog.d"
+    fragments.mkdir()
+    pending = fragments / "99-late.md"
+    pending.write_text("- late fragment: the first release after `v0.8.0`\n")
+    note = repo / "docs/cli/signoff.md"
+    note.write_text(SIGNOFF)
+    before = changelog.read_text()
+    assert (
+        rp.main(["--repo", str(repo), "refresh", "--version", "0.9.0", "--check"]) == 1
+    )
+    assert (
+        changelog.read_text() == before
+        and pending.is_file()
+        and note.read_text() == SIGNOFF
+    )
+    args = ["--repo", str(repo), "refresh", "--version", "0.9.0"]
+    assert rp.main(args) == 0
+    refreshed = changelog.read_text()
+    assert refreshed.startswith("# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-01)")
+    assert "- a fix\n\n- late legacy\n\n- late fragment: `klt 0.9.0`" in refreshed
+    assert refreshed.split("## 0.8.0", 1)[1] == history
+    assert not pending.exists() and "`klt 0.9.0`" in note.read_text()
+    assert rp.main([*args, "--check"]) == rp.main(args) == 0
+    assert changelog.read_text() == refreshed
+    (fragments / "next.md").write_text("- next version\n")
+    assert rp.prepare(repo, "0.10.0", "2026-12-01")["version"] == "0.10.0"
+
+
+@pytest.mark.parametrize("invalid", ["branch", "fragment", "unreleased", "prepared"])
+def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid, capsys):
+    repo = _repo(tmp_path)
+    rp.prepare(repo, "0.9.0", "2026-11-01")
+    directory = repo / "changelog.d"
+    directory.mkdir()
+    fragment = directory / "late.md"
+    fragment.write_text("- another fragment\n")
+    stale = "- stale: first release after `v0.7.0`"
+    source = fragment
+    if invalid == "fragment":
+        fragment.write_text(f"\n\n{stale}\n")
+    elif invalid in {"unreleased", "prepared"}:
+        source = repo / "CHANGELOG.md"
+        heading = (
+            "## Unreleased" if invalid == "unreleased" else "## 0.9.0 (2026-11-01)"
+        )
+        source.write_text(source.read_text().replace(heading, f"{heading}\n\n{stale}"))
+    paths = [
+        repo / "pyproject.toml",
+        repo / "CHANGELOG.md",
+        repo / "docs/cli/signoff.md",
+        fragment,
+    ]
+    before = [p.read_bytes() for p in paths]
+    version = "0.9.1" if invalid == "branch" else "0.9.0"
+    assert rp.main(["--repo", str(repo), "refresh", "--version", version]) == 2
+    assert [p.read_bytes() for p in paths] == before
+    if invalid != "branch":
+        line = source.read_text().splitlines().index(stale) + 1
+        assert (
+            f"release_prep.py: {source.relative_to(repo)}:{line}:"
+            in capsys.readouterr().err
+        )

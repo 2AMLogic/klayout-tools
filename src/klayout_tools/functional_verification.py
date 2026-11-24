@@ -205,14 +205,17 @@ import subprocess
 import sys
 from typing import Any
 
-from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import ANCHOR_CWD as ANCHOR_CWD
+from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import path_envelope as _path_envelope
 from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from .env_provenance import find_repo_root, repo_relative_path
+from .env_provenance import find_repo_root
+from .env_provenance import repo_relative_path as repo_relative_path
 from .functional_verification_base import (  # noqa: F401 - public re-exports
     DEFAULT_SDF_CORNER,
     DEFAULT_SDF_ENTRIES,
@@ -282,6 +285,7 @@ from .functional_verification_sdf_internal_bus import (
     SDF_INTERNAL_BUS_NET_REASONS,
     _apply_sdf_internal_bus_net_drop,
 )
+from .functional_verification_sdf_output_concat import _sdf_output_concat_report
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
@@ -853,18 +857,6 @@ class _Report(dict):
     ``{path, scope}`` envelope (docs/json-contract.md, #2224)."""
 
     local_paths: dict[str, str | None]
-
-
-def _path_envelope(
-    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
-) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape (never absolute),
-    relative to ``repo_root`` (default: the cwd's repo -- a run passes the
-    request's, so its report does not vary with the invoking directory)."""
-    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
 
 
 def _initial_state_run_specs(
@@ -2165,6 +2157,7 @@ def run_functional_verification(
     # Instances renamed by issue #2897's escaped-divider rewrite, reported
     # as `environment.sdf.renamed` (absent when empty).
     sdf_renamed: list[dict[str, str]] = []
+    sdf_output_concat: list[dict[str, Any]] = []
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2286,22 +2279,20 @@ def run_functional_verification(
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )
-        # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
-        # (any real design's bus ports produce these) can poison a sibling
-        # INTERCONNECT entry on its own net within one $sdf_annotate call.
-        # Deferring those entries to their own, later call (see the module
-        # comment above :func:`_split_sdf_bus_port_interconnects` for which
-        # of the two confirmed mechanisms this actually fixes) is a no-op
-        # for a design with only scalar top-level ports (#1069's own case)
-        # -- `sdf_paths` stays a single-element list in that case.
-        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the
-        # netlist drives through an `assign` alias (a P&R backend's
-        # tie-cell shape) cannot be annotated by Icarus at all and cannot
-        # be made annotatable by rewriting the endpoint either; a
-        # zero-delay-at-every-corner entry is dropped up front and counted
-        # in `environment.sdf.dropped` instead of failing the run (the
-        # helper refuses nonzero delays on separately assigned bits).
-        annotate_source_path = _apply_sdf_alias_port_drop(
+        # Issue #1619: a bit-selected top-level-port INTERCONNECT entry (any
+        # real design's bus ports produce these) can poison a sibling entry
+        # on its own net within one $sdf_annotate call. Deferring those
+        # entries to their own, later call -- the module comment above
+        # :func:`_split_sdf_bus_port_interconnects` records which of the two
+        # confirmed mechanisms this fixes, and the scalar-ports-only no-op
+        # (#1069's own case) -- keeps `sdf_paths` single-element there.
+        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the netlist
+        # drives through an `assign` alias cannot be annotated by Icarus at all
+        # and cannot be made annotatable by rewriting the endpoint either; a
+        # zero-delay-at-every-corner entry is dropped up front and counted in
+        # `environment.sdf.dropped` instead of failing the run (the helper
+        # refuses nonzero delays on separately assigned bits).
+        annotate_source_path, sources, sdf_output_concat = _apply_sdf_alias_port_drop(
             annotate_source_path,
             output_dir,
             sources,
@@ -2600,9 +2591,9 @@ def run_functional_verification(
                         "dropped": _sdf_dropped_report(
                             sdf_dropped_counts, sdf_pre_dropped_arcs
                         ),
-                        # Additive (issue #2897): `{from, to}` per escaped-
-                        # divider instance renamed for annotation.
+                        # Additive (#2897): `{from, to}` per escaped-divider rename.
                         **_sdf_renamed_report(sdf_renamed),
+                        **_sdf_output_concat_report(sdf_output_concat, repo_root),
                     }
                 ),
             },
