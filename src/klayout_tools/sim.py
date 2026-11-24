@@ -432,9 +432,9 @@ from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
     _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
-    _refuse_corner_only_flags,
     _with_capacity_retries_override,
     _with_capacity_wait_override,
+    refuse_corner_only_flags,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -2479,7 +2479,7 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
+    refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -3541,14 +3541,12 @@ def _open_resume_checkpoint(
     checkpoint_path: str,
     *,
     resume: bool,
-    **fingerprint_inputs: Any,
+    fingerprint: Callable[[], str],
 ) -> tuple[dict[str, dict[str, Any]], str | None, _Checkpoint | None]:
     """Hash the request inputs and open a checkpoint only when resuming."""
     if not resume:
         return {}, None, None
-    return restore_checkpoint(
-        checkpoint_path, _checkpoint_fingerprint(**fingerprint_inputs)
-    )
+    return restore_checkpoint(checkpoint_path, fingerprint())
 
 
 def _run_sim_corners(
@@ -3694,8 +3692,12 @@ def _run_sim_corners(
         "transient_noise_seed": transient_noise_seed,
         "stimulus_lines": stimulus_lines,
     }
+    # The checkpoint, run history and shard map share one digest of these inputs.
+    shard_fingerprint = functools.cache(
+        functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
+    )
     pre_completed, loaded_engine_version, checkpoint = _open_resume_checkpoint(
-        checkpoint_path, resume=bool(resume), **fingerprint_inputs
+        checkpoint_path, resume=bool(resume), fingerprint=shard_fingerprint
     )
 
     # Issue #5775: a sharded batch run keeps its shard map even without
@@ -3969,7 +3971,6 @@ def _run_sim_corners(
             staged_model_environment=staged_model_environment,
         )
 
-    shard_fingerprint = functools.partial(_checkpoint_fingerprint, **fingerprint_inputs)
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
         refuse_hosts_over_units(hosts, len(dispatch_points))
@@ -3987,12 +3988,9 @@ def _run_sim_corners(
             shard_fingerprint=shard_fingerprint,
         )
 
-    shard_fingerprint = (
-        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
-    )
     history = sim_batch_history.begin(
         artifacts_dir,
-        shard_fingerprint,
+        shard_fingerprint if backend == "batch" else None,
         request,
         hosts,
         bool(resume),
@@ -4048,7 +4046,7 @@ def _run_sim_corners(
         # The explicit fleet needs its fingerprint for the shard-to-job-id map.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": shard_fingerprint,
+                "shard_fingerprint": shard_fingerprint(),
                 "resume": bool(resume),
             }
             if backend == "batch"

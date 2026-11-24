@@ -213,24 +213,11 @@ BATCH_JOB_TOOL = "ngspice"
 
 
 def _batch_job_tool_label(remote_request: dict[str, Any]) -> str:
-    """``job.json``'s ``tool`` label for this batch job (issue #2423):
-    ``options.ngspice_binary`` when the forwarded request document
-    explicitly names one, else :data:`BATCH_JOB_TOOL`.
+    """Name the tool in the job and status documents (issue #2423).
 
-    Purely cosmetic, matching :data:`BATCH_JOB_TOOL`'s own "informational
-    only, the harness echoes it into ``status.json`` and never inspects it"
-    contract -- **never** resolved against ``$PATH`` here. This process (the
-    *submitting* host) and the job instance that actually runs
-    ``ngspice_binary`` are different machines with different filesystems and
-    `$PATH`s; a `shutil.which()` lookup on the submit side would answer a
-    question about the wrong host. The job instance's own `klt sim`
-    invocation (the ``cmd`` :func:`_build_batch_job_spec` builds) resolves
-    the real binary itself, fresh, from this same forwarded
-    ``options.ngspice_binary``/its own ``$KLT_NGSPICE_BINARY`` -- see
-    ``sim.py``'s ``_resolve_ngspice_binary``. ``$KLT_NGSPICE_BINARY`` itself
-    is not read here either, for the same "describes the submit host, not
-    the job host" reason ``_host_max_workers_cap``'s own docstring gives for
-    ``$KLT_SIM_MAX_WORKERS``.
+    Use the forwarded request's ngspice binary name, defaulting to
+    :data:`BATCH_JOB_TOOL`. The worker resolves the executable using its own
+    PATH and KLT_NGSPICE_BINARY. The submitting host only supplies the label.
     """
     options = remote_request.get("options") or {}
     override = options.get("ngspice_binary")
