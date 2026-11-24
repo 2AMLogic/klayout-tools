@@ -8,6 +8,58 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-24
 
+- **PR #7760**: fix: reject only the notches a gen-compose pad introduces, on the polygons it touches
+- **PR #7742**: fix(place-and-route): run request-level validation in the batch preflight
+- **PR #7793**: Record measured direction ambiguity for lower-metal via widths
+- **PR #7795**: Measure SG13G2 inductor winding and port-label controls
+- **PR #7738**: test: cover SHA-256 upstream_source commit width; type fleet-row field as object
+- **PR #7735**: docs(changelog): add fragment for SG13G2 unchecked pSD implant-to-active rules
+- **PR #7759**: refactor: replace inline int-not-bool guards with _jsonnum.is_int
+- **PR #7730**: docs: describe --top shape-presence semantics in drc coverage note
+- **PR #7728**: docs: restore _leg_conflict check-sequence rationale beside the checks
+- **PR #7732**: fix: let an empty job id reach the job-id validator in klt sim
+- **PR #7733**: docs: add changelog fragment for the signoff upstream_source pin
+- **PR #7731**: test: pin touch-inclusive neighbour lookup in the M1 repair merge
+- **PR #7338**: feat(pex): write Kron-reduced terminal networks for multi-terminal nets
+- **PR #7690**: Suggest ngspice init on remote corner and raw deck model-selection errors
+- **PR #7335**: feat(sim): grade cross-corner derived figures via measurements[].derive
+- **PR #7788**: Preserve PEX correspondence for resistor port strips under metal landing pads
+- **PR #7736**: docs: state the recognised min/max bound rule where signoff docs say "limits-bearing"
+- **PR #7729**: Correct the model-staging reference in the sim options table
+- **PR #7597**: Apply multicycle constraints in every place-and-route timing session
+- **PR #7725**: klt sim: refuse non-object options on deck-list and command-list requests
+- **PR #7330**: Defer every pre-error stderr warning through _warn under --format json
+- **PR #7765**: feat: add klt place-and-route --from-def merge-only entry point
+- **PR #7779**: Check the runner capability for step-scoped unreached measurements
+- **PR #7769**: fix: grade a sta envelope's own status in signoff and add opt-in require_routed_geometry
+- **PR #7790**: Expose declared top ports on merged runset PEX netlists
+- **PR #7791**: docs(sim): scope options.transient_noise_seed to one seed per deck and deck-list inertness
+- **PR #7789**: Check V3 width across horizontal ASAP7 M4 tracks
+- **Issue #6314** (closed): gen-compose landing search: the self-notch test merges the whole layer per candidate, and a pre-existing notch rejects every point
+- **Issue #7583** (closed): klt place-and-route --backend batch skips every request-level validator before upload
+- **Issue #7574** (closed): signoff: upstream_source's SHA-256 commit width is untested, and the fleet-row schema table types it nullable when it is optional
+- **Issue #7704** (closed): Add a changelog.d fragment for the SG13G2 pSD implant-to-active coverage disclosure
+- **Issue #7599** (closed): Update docs/cli/drc.md coverage-table note for --top layer scoping
+- **Issue #7617** (closed): Restore the _leg_conflict check-sequence rationale (#1386/#6961/#7024/#7221) lost to the gen_compose.py size ratchet
+- **Issue #7651** (closed): klt sim --job-status '' changed from batch_job_id_invalid (exit 1) to a usage error (exit 2)
+- **Issue #7611** (closed): signoff: add an Unreleased changelog entry for upstream_source
+- **Issue #7654** (closed): place-and-route (asap7): pin the touch-inclusive region-query semantics the M1 repair's neighbour lookup depends on
+- **Issue #6899** (closed): extract/pex: opt-in netlist mode that writes a multi-terminal net's resistance from the resistance graph, so dead stub branches are not in series with the current path
+- **Issue #7616** (closed): klt sim: the ngspice model-selection init hint skips the remote backend and deck-mode reports
+- **Issue #7184** (closed): klt sim / signoff: a deterministic spec figure derived across a swept axis of separate corner runs (knob range, step resolution, box-method spread over temperature) has no gradeable form
+- **Issue #7786** (closed): klt pex --engine klayout-runset --deck: synthetic non-metal resistor port strips under Metal1 landing pads poison net_correspondence as unidentified_layer
+- **Issue #7352** (closed): docs: signoff reference still says "limits"-bearing where grading requires a recognised min/max bound
+- **Issue #6599** (closed): docs(sim): options.pdk_revision table row cites "Staging the request's model inputs" as below, it is above
+- **Issue #6908** (closed): Support auditable multicycle timing for enable-sequenced register paths
+- **Issue #6923** (closed): Apply multicycle constraints throughout place-and-route timing
+- **Issue #7199** (closed): Under --format json, warnings still precede the envelope/payload for klt sim (stderr) and place-and-route (stdout)
+- **Issue #7720** (closed): klt sim: malformed options crash deck-list requests and falsey non-objects pass on deck and command lists
+- **Issue #7203** (closed): Route remaining stderr warning emitters (sim, extract, netlist, erc/power) through _warn deferral under --format json
+- **Issue #7721** (closed): place-and-route: the merge-time repair passes are unreachable for a committed routed stream — a pre-repair stream re-graded on a post-fix pin reproduces its tip-family hits exactly
+- **Issue #7770** (closed): sim batch runner grades an unreached .meas FIND/WHEN target as status "error" despite measurements[].on_unreached: "null" and the documented log pattern
+- **Issue #7711** (closed): klt signoff grades a klt sta envelope met regardless of its status and geometry_source
+- **Issue #7787** (closed): klt pex --engine klayout-runset --deck: merged netlist emits a 0-pin .SUBCKT (pin_count_mismatch) when ports are labelled on the curated deck's .pin layer and --pins is refused
+- **Issue #7709** (closed): Document the two scope limits of `options.transient_noise_seed` discovered after #5772 shipped: per-process RNG advance, and deck-list inertness
 - **PR #7744**: test(drc): cover notched and flush ASAP7 V1 enclosures
 - **PR #7053**: feat(lvs): surface runset strict-port findings, name mirrored-inductor2 terminal-order limit
 - **PR #7752**: ci: gate changelog fragments on bullet shape and issue reference
