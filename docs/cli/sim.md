@@ -6889,8 +6889,9 @@ sim` reduces it in Python once every corner has reported:
   (a declared `(group, axis_value)` corner is absent -- `exclude`, a lost
   shard, a corner that never ran; `missing_axis_values` lists them),
   `source_unavailable` (a missing, errored, unreached, absent or non-finite
-  source value) or `zero_reference` (`range_rel`/`box_spread` whose
-  reference value is `0`). A group whose inputs are all finite but include an
+  source value), `zero_reference` (a zero reference value), or
+  `numeric_range` (the arithmetic produces a non-finite value or margin,
+  or the scaled box-method denominator overflows or rounds to zero). A group whose inputs are all finite but include an
   `inconclusive` corner or source grades `inconclusive` (`reason`:
   `source_inconclusive`), as does a derived value outside a declared
   `plausible_range` (`implausible_value`). The entry's aggregate follows

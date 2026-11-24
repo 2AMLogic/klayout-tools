@@ -11,6 +11,8 @@ itself (decks, harvest, coverage, grading, exit codes) is covered by
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from klayout_tools import sim, sim_derive, sim_validate
@@ -390,6 +392,41 @@ def test_an_errored_corner_is_unavailable_whatever_its_measurement_reads():
     corners = grid({("a", 1.0): [0.8, 1.0, 1.15]})
     corners[0]["status"] = "error"
     assert one_group(corners, derive())["reason"] == "source_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("reduction", "divisor", "positions", "values", "limits"),
+    [
+        ("range_rel", 1e-310, [0, 1, 2], [0.5, 1.0, 0.75], {"min": 0}),
+        ("range", None, [0, 1, 2], [-1e308, 0.0, 1e308], {}),
+        ("max_abs_step", None, [0, 1, 2], [-1e308, 1e308, 0.0], {}),
+        ("box_spread", 5e-324, [1.0, 1.05, 1.1], [0.5, 1.0, 0.75], {}),
+        ("box_spread", 1e308, [0, 1, 2], [0.5, 1.0, 0.75], {}),
+        ("range", None, [0, 1, 2], [0.0, 5e307, 1e308], {"min": -1e308}),
+    ],
+)
+def test_unrepresentable_derived_arithmetic_is_a_serializable_group_error(
+    reduction, divisor, positions, values, limits
+):
+    corners = grid({("a", 1.0): values})
+    for corner, coordinate in zip(corners, positions, strict=True):
+        corner["params"]["code"] = coordinate
+    body = {"reduce": reduction}
+    if divisor is not None:
+        body["divisor"] = divisor
+    spec = {**derive(**body), "limits": limits}
+    declared = {"params": {"code": positions}}
+    report = entry(on_grid(spec, declared), corners)
+    json.dumps(report, allow_nan=False)
+    group = report["derive"]["groups"][0]
+    assert group["status"] == "error" and group["reason"] == "numeric_range"
+    assert group["value"] is None and group["margin"] is None
+
+
+def test_tiny_divisor_with_representable_result_remains_gradeable():
+    corners = grid({("a", 1.0): [0.5, 1.0, 0.75]})
+    group = one_group(corners, derive(reduce="range_rel", divisor=1e-308))
+    assert group["status"] == "pass" and group["value"] == 0.5 / 1e-308
 
 
 def test_a_zero_reference_is_an_error_not_a_pass():

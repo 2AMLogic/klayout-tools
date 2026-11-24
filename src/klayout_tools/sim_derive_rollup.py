@@ -23,6 +23,7 @@ from .sim_errors import SimError
 REASON_MISSING_AXIS_POINTS = "missing_axis_points"
 REASON_SOURCE_UNAVAILABLE = "source_unavailable"
 REASON_ZERO_REFERENCE = "zero_reference"
+REASON_NUMERIC_RANGE = "numeric_range"
 REASON_SOURCE_INCONCLUSIVE = "source_inconclusive"
 REASON_IMPLAUSIBLE_VALUE = "implausible_value"
 
@@ -114,7 +115,11 @@ def _reduce_group(
     value, reason = _reduce(body, points)
     if reason is not None:
         return {**record, "reason": reason}
+    if not is_finite_number(value):
+        return {**record, "reason": REASON_NUMERIC_RANGE}
     status, margin, diagnostics = _sim()._grade_measurement_value(spec, value)
+    if margin is not None and not is_finite_number(margin):
+        return {**record, "reason": REASON_NUMERIC_RANGE}
     if status == _sim()._INCONCLUSIVE_STATUS:
         return {
             **record,
@@ -154,8 +159,7 @@ def _reduce(
     body: dict[str, Any], points: list[Point]
 ) -> tuple[float | None, str | None]:
     """``(value, reason)``: the reduction in double precision over the
-    group's trusted values, in the axis's own order, or ``(None,
-    "zero_reference")``."""
+    group's trusted values in axis order, or a reason it cannot be graded."""
     ordered = sorted(points, key=lambda point: point[1])
     values = [_value(corner, body["from"]) for corner, _ in ordered]
     span = max(values) - min(values)
@@ -166,12 +170,22 @@ def _reduce(
         steps = [b - a for a, b in zip(values, values[1:], strict=False)]
         return max(map(abs, steps)), None
     denominator, reason = _denominator(body, ordered)
-    if reason is not None:
+    if denominator is None:
         return None, reason
-    if reduce == "range_rel":
-        return span / denominator, None
-    positions = [position for _, position in ordered]
-    return span / ((positions[-1] - positions[0]) * denominator), None
+    if reduce == "box_spread":
+        axis_span = ordered[-1][1] - ordered[0][1]
+        if not is_finite_number(axis_span):
+            return None, REASON_NUMERIC_RANGE
+        denominator *= axis_span
+    # Finite inputs can still overflow the span or round the scaled divisor
+    # to zero or infinity. Infinity as a divisor would give a spurious zero.
+    if (
+        not is_finite_number(span)
+        or not is_finite_number(denominator)
+        or denominator == 0
+    ):
+        return None, REASON_NUMERIC_RANGE
+    return span / denominator, None
 
 
 def _denominator(
