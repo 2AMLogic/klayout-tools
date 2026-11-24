@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from ..signoff_require_build import require_grading_ruleset_problem
+
 
 def repo_root_problem(repo_root: str | None) -> str | None:
     """Issue #2878: an explicit ``--repo-root`` that is not an existing
@@ -87,6 +89,15 @@ def describe_grader_problem(
             "grades no evidence, so there are no repo-scoped inputs to resolve"
         )
     return None
+
+
+def pre_dispatch_problem(
+    args: argparse.Namespace, manifest_source: str | None, fleet_source: str | None
+) -> str | None:
+    """Validate the grading pin and artifact manifest before any mode reads inputs."""
+    return require_grading_ruleset_problem(
+        getattr(args, "require_grading_ruleset", None), manifest_source, fleet_source
+    ) or artifact_manifest_problem(args, manifest_source, fleet_source)
 
 
 def artifact_manifest_problem(
