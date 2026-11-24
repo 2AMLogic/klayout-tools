@@ -1,5 +1,5 @@
-"""Request identity and shard scoping for sharded ``--submit-only`` /
-``--attach`` (issues #4620, #4878); split out of :mod:`sim_batch_async`."""
+"""Request identity and shard scoping for ``--submit-only``, ``--attach``
+and ``--resume`` (issues #4620, #4878); split out of :mod:`sim_batch_async`."""
 
 from __future__ import annotations
 
@@ -186,6 +186,44 @@ def mismatch_error(
             f"({difference}); delete it or drop --resume"
         )
     return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
+
+
+def load_resume_shard_map(
+    path: str, fingerprint: str, request: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]], int] | None:
+    """Read + validate the retained shard map at ``path`` (issue #5775):
+    ``None`` when there is no map, or a well-formed one listing no shards --
+    an inert file, not a stale one. An unreadable map, or one written for a
+    different fingerprint/request, refuses with
+    :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
+    stale results."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        entries = [dict(entry) for entry in document["shards"]]
+        hosts = int(document["hosts"])
+        map_fingerprint = str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--resume: shard map {path} is unreadable ({exc}); delete it "
+            "or drop --resume",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    if not entries:
+        return None
+    if map_fingerprint != fingerprint:
+        raise mismatch_error(path, document, fingerprint, False)
+    mismatch = shard_map_mismatch(document, request)
+    if mismatch is not None:
+        raise SimError(
+            f"--resume: shard map {path} was submitted from a different "
+            f"request ({mismatch}); re-run with exactly the request the "
+            "shards were submitted from",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    return document, entries, hosts
 
 
 def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:

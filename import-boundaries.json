@@ -74,6 +74,7 @@
         "klayout_tools.cli.__main__",
         "klayout_tools.cli._arg_types",
         "klayout_tools.cli._argv_flags",
+        "klayout_tools.cli._batch_parser_args",
         "klayout_tools.cli._deck_hash_parser_args",
         "klayout_tools.cli._doc_paths",
         "klayout_tools.cli._parsing",

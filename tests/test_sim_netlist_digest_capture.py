@@ -261,8 +261,8 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
 
     resumed = _run(path, tmp_path, hosts=requested_hosts, resume=True)
 
-    if hosts == 1:
-        assert fingerprint_calls.call_count == 1  # Opening the checkpoint.
+    # Checkpoint restoration, history and shard dispatch use the same identity.
+    assert fingerprint_calls.call_count == 1
     assert len(_launches(runner)) == hosts + replace_job
     assert [corner["status"] for corner in resumed["corners"]] == ["pass"] * hosts
     expected_scope = "staged" if replace_job else "client-at-collection"
