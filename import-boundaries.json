@@ -1154,6 +1154,7 @@
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_transient_noise",
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
@@ -2396,12 +2397,6 @@
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.equiv_sequential",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_combined_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
