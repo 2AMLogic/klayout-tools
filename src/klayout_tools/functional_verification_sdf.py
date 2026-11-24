@@ -66,6 +66,10 @@ from .functional_verification_base import (
     SDF_WRAPPER_MODULE,
     FunctionalVerificationError,
 )
+from .functional_verification_sdf_instance import (
+    _describe_sdf_unresolvable_endpoints,
+    _parse_sdf_inventory_module,
+)
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
 from .request_paths import resolve_request_path
 
@@ -1337,13 +1341,10 @@ def _find_gate_level_instances(
     that function's cyclomatic complexity stays low.
 
     Returns an empty list -- never raises -- whenever the instance list
-    cannot be derived: no such module in any source, or a top module outside
-    :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s narrow
-    gate-level grammar (notably an **ANSI-style** module header, which that
-    grammar does not model).
+    cannot be derived, including a missing module, an ANSI-style module header
+    or a behavioral statement outside the gate-level grammar. Continuous
+    assignments do not affect the inventory.
     """
-    from .verilog_netlist import parse_gate_level_verilog
-
     chunk_re = re.compile(
         _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
     )
@@ -1352,11 +1353,9 @@ def _find_gate_level_instances(
         if chunk_match is None:
             continue
         try:
-            modules = parse_gate_level_verilog(chunk_match.group(0))
+            modules = _parse_sdf_inventory_module(chunk_match.group(0))
         except Exception:
-            # Not parseable as gate-level Verilog (a hand-written RTL top, a
-            # construct outside verilog_netlist's narrow grammar) -- no
-            # instance list. Never fatal.
+            # An unsupported module still has no reliable instance inventory.
             return []
         for module in modules:
             if module["name"] == hdl_toplevel:
@@ -2214,13 +2213,12 @@ def _reject_sdf_unresolvable_interconnect_instances(
     if not offenders:
         return
 
-    shown = "; ".join(f"line {line}: {token}" for line, token in offenders[:3])
+    shown = _describe_sdf_unresolvable_endpoints(offenders, divider)
     raise FunctionalVerificationError(
         "options.sdf: this SDF has an INTERCONNECT entry whose endpoint "
-        f"names an instance that is not in '{hdl_toplevel}' ({shown}"
-        f"{'; ...' if len(offenders) > 3 else ''}; {len(offenders)} "
-        "unresolvable endpoint(s)). Icarus Verilog cannot report such an "
-        "endpoint: its $sdf_annotate INTERCONNECT resolver aborts vvp "
+        f"names an instance that is not in '{scope_module}' ({shown}). "
+        "Icarus Verilog cannot report such an endpoint: its $sdf_annotate "
+        "INTERCONNECT resolver aborts vvp "
         "outright ('ERROR: NULL handle passed to vpi_scan.', SIGABRT). "
         "Regenerate the SDF from the same netlist the simulation reads, and "
         "write top-level ports as bare names (no design-name prefix)"
