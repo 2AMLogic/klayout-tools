@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- The `klt lvs` report category `device.implausible_dimensions` has severity
+  `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
   `batch.poll_timeout_s` through the error envelope** (issue #7543,
   2026-11-23): the last two `request.batch` seconds knobs still parsed with
@@ -585,6 +587,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   relax a per-row finding, never tighten one, so a layout that failed only
   because of the row split now passes while a real over-limit still fails.
   Distributed pad/load injection and the IR solver are unchanged.
+- **`klt gen --pdk-pcell` refuses `--cell-name` equal to the vendor PCell's
+  own name** (#6128, 2026-11-17): the vendor child keeps its own name (no
+  `<cell-name>__core` rename), so an equal `--cell-name` made KLayout
+  uniquify the **top** to `<name>$1` while the report still said
+  `cell_name: <name>` — the stream's top cell silently differed from both
+  the flag and the contract field. The request now fails before anything is
+  written, with an application error naming the collision and the flag. The
+  default (`<cell>_0`) and every non-colliding name behave exactly as before.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated

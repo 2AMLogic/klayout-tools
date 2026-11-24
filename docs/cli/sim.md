@@ -549,6 +549,7 @@ Consequences:
   `0.6666778`, yet `(vout - 0.6666778) * 1e9` evaluates to `-22.59...`, not `0`.
 - Defaults are unchanged: with no `ngspice_init`, formatting is whatever the
   installed ngspice defaults to.
+- For a bounded transient interval, use [windowed transient expression reductions](#windowed-transient-expression-reductions).
 - `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
   `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
   transient value at a time, use a `.meas ... FIND ... AT=` card; to use a
@@ -5508,6 +5509,37 @@ literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
 
+### Windowed transient expression reductions
+
+Use `measurements[].windowed` to reduce an expression over a time interval
+in an ngspice transient analysis. For example, this measures the minimum
+combined supply current between 3 and 17 microseconds and grades it in amps.
+
+```json
+{
+  "name": "isumpk",
+  "unit": "A",
+  "windowed": {"reduce": "min", "of": "i(vdd1)+i(vdd2)", "from": "3u", "to": "17u"},
+  "limits": {"min": -0.002, "max": 0}
+}
+```
+
+The supported reductions are `min`, `max`, `avg`, `rms`, and `pp`
+(peak-to-peak). Both bounds are required. Use seconds or SPICE literals and
+a start earlier than the end. Both bounds must fall within the transient analysis
+interval, including its endpoints. The expression must fit on one line and cannot
+contain quotes or braces. A windowed entry takes exactly one measurement form.
+Use it with a scalar transient analysis. Xyce and `analysis_steps[]` refuse it.
+
+The client expands this example to the card below before local execution or
+batch submission. ngspice applies its inclusive FROM/TO window to the solver
+grid. The reported last time point can differ by reduction. See the following
+section for the corresponding `par()` syntax in a hand-written card.
+
+```spice
+.meas tran isumpk MIN par('i(vdd1)+i(vdd2)') FROM=3u TO=17u
+```
+
 ### An expression in a `.meas` signal position must be wrapped in `par('...')`
 
 A `.meas` card's *signal* positions -- `WHEN`, `FIND`, `AVG`, `MAX`, `TRIG`,
@@ -9117,14 +9149,17 @@ values), *and* reduced to a per-measurement statistical verdict under
     `sg13g2_hv_svaricap_*_mm` geometry sigmas, and `mismatch_params` lists
     them. Refused before any corner is dispatched when no selected section
     is a `mos_*_mismatch` section, when the libraries cannot be read on the
-    submitting host, when they define no `_mm` sigma at all, or when a
+    submitting host, when they define no `_mm` sigma at all, when a
     sigma they *do* define has a value that is not a plain numeric literal
     (an expression such as `'0.5*2'`, or a reference to another parameter;
-    a scale-factor suffix like `4n` is read normally). That last refusal
-    names the parameter and the file: leaving one sigma at nominal while
-    its siblings are scaled would be a *partially* scaled run, and
-    `mismatch_params` — which lists only what was written — would not show
-    the omission. Never a silently unscaled, or partially scaled, run.
+    a scale-factor suffix like `4n` is read normally), or when the selected
+    section itself contains a one-argument `.lib <token>` line (#7671) —
+    ambiguous between a section name and an include, and reading it as a
+    section opener would end the scan mid-section. Those refusals
+    name the offending parameter or line and the file: leaving one sigma at
+    nominal while its siblings are scaled would be a *partially* scaled run,
+    and `mismatch_params` — which lists only what was written — would not
+    show the omission. Never a silently unscaled, or partially scaled, run.
 
     **Not yet measured on real models.** Unlike the switch families above,
     the effect of these cards on the sampled `stddev` of an ngspice run
