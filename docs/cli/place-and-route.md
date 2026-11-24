@@ -1847,6 +1847,21 @@ design's DEF net names, which is what
 `tests/test_extract.py::test_def_net_names_recovers_the_routed_corpus_designs_own_net_names`
 asserts.
 
+**Re-deriving a deck rule natively over this GDS (issue #7715).** The
+property sits on the routed wires only; library cell and via-cell shapes
+carry none. A native `klayout.db` rebuild of a deck rule that builds its
+regions with `kdb.Region(cell.shapes(layer))` sees it: merged semantics then
+keeps a wire that ends inside a via pad as its own polygon, and
+`Edges.enclosing_check` reports wire-to-pad abutments the packaged deck does
+not. For such a rebuild, read the GDS with
+`LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
+properties); keep the default read for `klt extract --def-net-names`, which
+needs them. Recursive regions ignore properties by default. Both
+`klt drc` engines gave the same results with and without the tag. Measured on the
+`klayout` module 0.30.13 and 0.30.14 for the `enclosing_check` rebuild only
+-- no claim for other primitives. The minimal repro, its numbers and the
+`klt drc` measurements are in [`drc.md`](drc.md#re-deriving-a-deck-rule-natively-over-a-routed-gds-issue-7715).
+
 **Why the two ratios differ so much.** Extraction is flat, so the SPEF also
 carries every standard cell's *internal* nodes (819 of `gcd`'s 1356
 `*D_NET` blocks). A gate-level linked design has no counterpart for those

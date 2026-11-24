@@ -36,6 +36,7 @@ from . import (
     sim_tian,
     sim_transfer_meas,
 )
+from .sim_expr_log import discard_stale_expr_prints
 from .sim_measurement_grading import (
     _INCONCLUSIVE_STATUS,
     _grade_measurement_value,
@@ -114,6 +115,8 @@ def _corner_measurement_results(
     """
     from . import sim as _sim
 
+    if not is_xyce:
+        discard_stale_expr_prints(measurement_values, log_text, measurements_spec)
     if sim_steps.is_steps_analysis(analysis):
         return sim_steps.grade_step_measurements(
             measurement_values,

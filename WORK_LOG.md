@@ -8,6 +8,22 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-24
 
+- **PR #7803**: Repair M1 enclosure at individual placed ASAP7 V1 landings
+- **PR #7802**: Use shared numeric validation in cell characterization
+- **PR #7763**: docs(lvs): record live verification of the subckt-call path against sg13g2.lvs
+- **PR #7761**: feat: resolve functional-verification cell models from a descriptor verilog view
+- **PR #7758**: fix: classify OSDI-required PDKs via pdk_variant_family, share ngspice version parser
+- **PR #7755**: fix(signoff): name a declared item-7 corner_box when it changes a refusal
+- **PR #7751**: docs: restore extract_netlist_from_layout and extract_netlist_tuple contract docstrings
+- **PR #7748**: fix: reject landing pads that sit sub-space from a separate own-net shape
+- **PR #7739**: test: run the placement-fence Tcl under OpenROAD
+- **Issue #7798** (closed): Repair safe M1 enclosures at placed ASAP7 VIA_VIA12 cuts
+- **Issue #7747** (closed): docs(lvs): replace stale "Not live-verified against the IHP sg13g2.lvs" note in docs/cli/lvs.md
+- **Issue #7700** (closed): signoff: a declared item-7 corner_box changes two refusal reasons without naming itself
+- **Issue #7695** (closed): klt functional-verification request.pdk: resolve behavioural cell models for a descriptor-declared ASAP7 root (pdk_no_verilog_view)
+- **Issue #7657** (closed): pdk_osdi should classify the SG13G2 family through pdk_variant_family, not a hardcoded variant tuple
+- **Issue #7602** (closed): Restore the extract.py / extract_finfet.py docstrings condensed for a size budget that no longer binds
+- **Issue #7587** (closed): place-and-route: no automated regression test covers the placement-fence Tcl (klt_install_fence / klt_fence_instance)
 - **PR #7760**: fix: reject only the notches a gen-compose pad introduces, on the polygons it touches
 - **PR #7742**: fix(place-and-route): run request-level validation in the batch preflight
 - **PR #7793**: Record measured direction ambiguity for lower-metal via widths

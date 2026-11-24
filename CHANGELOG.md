@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` `spef_annotation.annotation_warning` names a re-extraction
+  recipe that works on a FinFET deck** (issue #7808, 2026-11-24, additive —
+  `klt sta` `schema_version` unchanged; only the wording of an existing
+  string changes): the hint on a name-mismatched SPEF told the caller to
+  re-run `klt extract` with `--def-net-names` and `--def-pins <routed.def>`,
+  but `--def-pins` is refused by name on a FinFET deck (`asap7`) and the
+  flag that attaches parasitics to pins, `--def-net-connections`, was never
+  named, so following it left every path unannotated. The hint now names
+  `--def-net-names`, `--def-net-connections <routed.def>` and the declared
+  pins (`--def-pins <routed.def>` on a planar deck, `--pins <A,B,...>` from
+  the routed DEF `PINS` section where `--def-pins` is refused). The
+  `delay_changed: false` reason now also points at
+  `--def-net-connections <routed.def>`, since a SPEF without instance
+  `*CONN` attaches nothing to any pin. `klt extract` flag support is
+  unchanged.
 - **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
   revision token case-insensitively** (issue #6362, 2026-11-24, additive —
   `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already

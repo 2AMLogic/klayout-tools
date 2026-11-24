@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._jsonnum import is_int
+from ._jsonnum import is_int, is_number
 from .sim_errors import SimError
 
 #: Error-severity diagnostic codes that can accompany a ``nonconvergence``
@@ -98,11 +98,7 @@ def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
             "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
         )
     reltol = resolved["reltol"]
-    if (
-        isinstance(reltol, bool)
-        or not isinstance(reltol, (int, float))
-        or not 0 < reltol < 1
-    ):
+    if not is_number(reltol) or not 0 < reltol < 1:
         raise SimError(
             "options.retry_on_convergence_error.reltol must be a number "
             "between 0 and 1 (exclusive)"

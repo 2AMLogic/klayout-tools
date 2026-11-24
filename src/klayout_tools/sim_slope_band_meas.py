@@ -33,12 +33,12 @@ token from :data:`ERROR_CODES` -- never a silent pass or a substituted value.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_measurement_kind, sim_slope_band
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_measurement_grading import _vector_measurement_result
@@ -90,15 +90,6 @@ def normalize_selector(selector: Any) -> str | None:
         return None
     match = _SELECTOR_RE.match(selector)
     return None if match is None else f"v({match.group(1).lower()})"
-
-
-def _is_number(value: Any) -> bool:
-    """A finite real number. ``bool`` is excluded: ``True`` is not a slope."""
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
 
 
 def _pair(spec: dict[str, Any]) -> tuple[str, str]:
@@ -185,7 +176,7 @@ def validate_slope_band_spec(name: Any, body: Any) -> None:
                 f"whitespace, comma or parenthesis); got {body.get(key)!r}"
             )
     for key in _NUMBER_KEYS:
-        if not _is_number(body.get(key)):
+        if not is_finite_number(body.get(key)):
             raise SimError(
                 f"measurement '{name}': slope_band.{key} must be a finite "
                 f"number; got {body.get(key)!r}"

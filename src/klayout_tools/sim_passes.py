@@ -51,6 +51,7 @@ from typing import Any
 from . import sim_measurement_kind, sim_raw, sim_steps
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+from .sim_expr_log import expr_control_lines
 
 #: What an ``alter`` entry changes.
 FIELDS = ("ac", "dc")
@@ -321,8 +322,7 @@ def control_lines(
     if exprs:
         lines.append("op")
         for spec in exprs:
-            lines.append(f"let {spec['name']} = {spec['expr']}")
-            lines.append(f"print {spec['name']}")
+            lines.extend(expr_control_lines(spec))
     for index, passed in enumerate(analysis["passes"]):
         for target, value, field in passed["alter"]:
             suffix = " ac" if field == "ac" else ""

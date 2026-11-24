@@ -114,6 +114,7 @@ class BatchJobSpec:
     cores_per_job: int | None = None
     timeout_seconds: int | None = None
     inputs: tuple[BatchJobInput, ...] = ()
+    image_profile: str | None = None
 
     def to_job_json(self) -> dict[str, Any]:
         """The ``job.json`` document, in ``batch-fleet.md``'s own field
@@ -128,6 +129,8 @@ class BatchJobSpec:
             value = getattr(self, key)
             if value is not None:
                 document[key] = value
+        if self.image_profile not in (None, "sim"):
+            document["image_profile"] = self.image_profile
         return document
 
 

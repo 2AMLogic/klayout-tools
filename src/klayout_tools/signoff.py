@@ -52,7 +52,7 @@ from . import signoff_foundry_cell as foundry_cell
 from . import signoff_malformed_coverage as disclosure
 from . import signoff_nothing_checked as vacuous
 from ._git_tracked import is_untracked_working_tree_file
-from ._jsonnum import is_finite_number, is_int
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from .build_identity import build_version, version_report
 from .coverage import (
@@ -2161,13 +2161,13 @@ def _sta_corner_timing_passed(fields: dict[str, Any]) -> bool:
         return False
 
     setup = fields.get("worst_slack_ns")
-    if not isinstance(setup, (int, float)) or isinstance(setup, bool) or setup < 0:
+    if not is_number(setup) or setup < 0:
         return False
 
     hold = fields.get("worst_hold_slack_ns")
     if hold is None:
         return True
-    if not isinstance(hold, (int, float)) or isinstance(hold, bool):
+    if not is_number(hold):
         return False
     return hold >= 0
 

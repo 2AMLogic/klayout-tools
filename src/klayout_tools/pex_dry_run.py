@@ -64,6 +64,7 @@ from .pex_resistance_graph import (
     _reject_resistance_graph_with_distributed_rc,
     _reject_resistance_network_without_graph,
 )
+from .pex_runset import PexExtractOptions
 from .pex_sim_evidence import schematic_probes
 from .sim import SimError, run_sim
 
@@ -109,30 +110,7 @@ def _extraction_preflight(
     layout_path: str,
     deck_name: str,
     *,
-    top: str | None,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-    deck_options: Mapping[str, str] | None,
-    declared_pins: frozenset[str] | None,
-    rename_declared_pins: bool,
-    tie_declared_pins: bool,
-    label_layers: Mapping[str, tuple[int, int] | None] | None,
-    device_models: Mapping[str, str] | None,
-    critical_nets: Sequence[str] | None,
-    critical_net_patterns: Sequence[str] | None,
-    critical_net_all: bool,
-    critical_net_excludes: Sequence[str] | None,
-    distributed_rc: bool,
-    resistance_graph: bool,
-    resistance_graph_r_cut_ohm: float | None,
-    resistance_network: bool,
-    resistance_graph_caps: Mapping[str, int] | None,
-    parasitic_variants: Sequence[str] | None,
-    substrate_tie_ohms: float | None,
-    mom_rlc_net: str | None,
-    mom_rlc_resistance_ohm: float | None,
-    mom_rlc_capacitance_ff: float | None,
-    mom_rlc_inductance_nh: float | None,
+    options: PexExtractOptions,
 ) -> str:
     """Every engine-free check ``run_extract`` makes, in its own order, for
     the ``parasitics=True`` call ``klt pex`` always issues. Returns the
@@ -146,10 +124,10 @@ def _extraction_preflight(
     try:
         pdk_info, _model_bindings = resolve_pdk_and_model_bindings(
             deck_name=deck_name,
-            deck_options=deck_options,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            device_models=device_models,
+            deck_options=options.deck_options,
+            pdk_variant=options.pdk_variant,
+            pdk_root=options.pdk_root,
+            device_models=options.device_models,
         )
         try:
             get_parasitics_deck(deck_name)
@@ -162,29 +140,29 @@ def _extraction_preflight(
                 spef_output=None,
                 report_parasitics="full",
                 substrate_spreading_net=None,
-                substrate_tie_ohms=substrate_tie_ohms,
-                critical_nets=critical_nets,
+                substrate_tie_ohms=options.substrate_tie_ohms,
+                critical_nets=options.critical_nets,
                 parasitics_nets=None,
-                parasitic_variants=parasitic_variants,
+                parasitic_variants=options.parasitic_variants,
                 parasitics_top_cell_only=False,
-                resistance_graph=resistance_graph,
-                resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-                resistance_graph_caps=resistance_graph_caps,
-                emit_selected_resistance=resistance_graph,
-                emit_resistance_network=resistance_network,
-                critical_net_patterns=critical_net_patterns,
-                critical_net_all=critical_net_all,
-                critical_net_excludes=critical_net_excludes,
+                resistance_graph=options.resistance_graph,
+                resistance_graph_r_cut_ohm=options.resistance_graph_r_cut_ohm,
+                resistance_graph_caps=options.resistance_graph_caps,
+                emit_selected_resistance=options.resistance_graph,
+                emit_resistance_network=options.resistance_network,
+                critical_net_patterns=options.critical_net_patterns,
+                critical_net_all=options.critical_net_all,
+                critical_net_excludes=options.critical_net_excludes,
                 parasitics_net_patterns=None,
                 strict_net_patterns=False,
-                distributed_rc=distributed_rc,
+                distributed_rc=options.distributed_rc,
                 resistance_paths=False,
                 resistance_path_max_nodes=None,
                 resistance_path_max_resistors=None,
-                mom_rlc_net=mom_rlc_net,
-                mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-                mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-                mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+                mom_rlc_net=options.mom_rlc_net,
+                mom_rlc_resistance_ohm=options.mom_rlc_resistance_ohm,
+                mom_rlc_capacitance_ff=options.mom_rlc_capacitance_ff,
+                mom_rlc_inductance_nh=options.mom_rlc_inductance_nh,
                 matched_device_groups=None,
                 parasitics=True,
             )
@@ -193,9 +171,9 @@ def _extraction_preflight(
         preflight = preflight_layout(
             layout_path,
             deck_name,
-            top=top,
-            deck_options=deck_options,
-            label_layers=label_layers,
+            top=options.top,
+            deck_options=options.deck_options,
+            label_layers=options.label_layers,
             refuse_options={
                 "--top-cell-pins": False,
                 "--abstract-cells": False,
@@ -211,17 +189,22 @@ def _extraction_preflight(
                 ),
                 "--def-pins": False,
                 "--pin-source-cells": False,
-                "--rename-declared-pins": rename_declared_pins,
-                "--tie-declared-pins": tie_declared_pins,
+                "--rename-declared-pins": options.rename_declared_pins,
+                "--tie-declared-pins": options.tie_declared_pins,
                 "--subcircuit": False,
                 "--hierarchical-cells": False,
                 "--substrate-spreading": False,
                 "--pdk": pdk_info is not None,
             },
         )
-        require_declared_set_for_rename(rename_declared_pins, declared_pins, None)
         require_declared_set_for_rename(
-            tie_declared_pins, declared_pins, None, flag="--tie-declared-pins"
+            options.rename_declared_pins, options.declared_pins, None
+        )
+        require_declared_set_for_rename(
+            options.tie_declared_pins,
+            options.declared_pins,
+            None,
+            flag="--tie-declared-pins",
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -368,9 +351,10 @@ def run_pex_dry_run(
     )
 
     body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
-    resolved_top = _extraction_preflight(
-        layout_path,
-        deck_name,
+    # Issue #7818: the 24 extraction options `_extraction_preflight` reads,
+    # bundled once -- the flat keyword signature above is the public
+    # contract and stays unchanged.
+    options = PexExtractOptions(
         top=top,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
@@ -395,6 +379,11 @@ def run_pex_dry_run(
         mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
         mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    )
+    resolved_top = _extraction_preflight(
+        layout_path,
+        deck_name,
+        options=options,
     )
 
     measured_reference_netlist = (

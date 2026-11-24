@@ -88,7 +88,9 @@ def _tmax_token(raw: Any, *, analysis: dict[str, Any] | None, steps: bool) -> st
             'kind "tran" (not analysis_steps[]): tmax is the transient '
             "analysis's maximum internal timestep"
         )
-    if isinstance(raw, bool) or isinstance(raw, (int, float)):
+    # ``bool`` is an ``int``, so it lands here too and ``is_finite_number``
+    # (which excludes it) refuses it with the same message as any bad number.
+    if isinstance(raw, (int, float)):
         if not is_finite_number(raw) or raw <= 0:
             raise SimError(
                 f"options.{TIGHTENED_RERUN_OPTION}.tmax must be a positive number "
