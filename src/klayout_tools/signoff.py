@@ -100,7 +100,9 @@ from .signoff_base import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
     _HASH_KIND_BYTES,
     _HASH_KIND_GEOMETRY,
+    _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     _REGENERATED_HASH_RE,
+    ATTESTATION_INPUT_FLAGS,
     DESCRIBE_GRADER_SCHEMA_VERSION,
     SCHEMA_VERSION,
     TIER_REPORT_SCHEMA_VERSION,
@@ -574,25 +576,6 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
 
-#: T1 item ids whose **only** accepted evidence is an artifact-anchored
-#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
-#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
-#: native envelope of any recognised kind satisfied them, topical relevance
-#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
-#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
-#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
-#: restricts them to ``{"generic"}``, so a native citation renders
-#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
-#:
-#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
-#: and keeps accepting any passing native envelope as before.
-#:
-#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
-#: decides :func:`_is_structurally_ungradeable_item` and
-#: :func:`_is_graded_by_build`, and moving these ids into it would silently
-#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
-#: behaviour change this tightening does not make.
-_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: Native kinds a **digital** partition may cite for an otherwise
 #: attested-only item, in addition to ``"generic"`` (issue #4015): item 1's
@@ -1047,6 +1030,10 @@ def describe_grader() -> dict[str, Any]:
         "grading_ruleset_id": report["grading_ruleset_id"],
         "source_doc": CANONICAL_DOC_LABEL,
         "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+        "attestable_items": {
+            str(item): {"input_flag": flag, "envelope_kind": "generic"}
+            for item, flag in sorted(ATTESTATION_INPUT_FLAGS.items())
+        },
         # Additive (issue #2655): derived from the grader's own table.
         "opt_in_evidence_kinds": opt_in_kind_scopes(),
         "opt_in_kinds_by_item": opt_in_kinds_by_item(),

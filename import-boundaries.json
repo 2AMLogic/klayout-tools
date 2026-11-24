@@ -338,6 +338,7 @@
         "klayout_tools.extract_resistance_graph_caps",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
+        "klayout_tools.extract_spef_rc",
         "klayout_tools.extract_split_terminal",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
@@ -715,6 +716,7 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_binding",
         "klayout_tools.pex_errors",
         "klayout_tools.pex_merged_leg",
         "klayout_tools.pex_net_correspondence",
@@ -946,6 +948,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_item9_depends_on",
         "klayout_tools.signoff_attest_live",
+        "klayout_tools.signoff_attest_pin_bump",
         "klayout_tools.signoff_attest_pins",
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
@@ -1212,6 +1215,7 @@
         "klayout_tools._sta_timing_derate",
         "klayout_tools._sta_wire_load",
         "klayout_tools.post_route_sta",
+        "klayout_tools.post_route_sta_clock_propagation",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_errors",
         "klayout_tools.post_route_sta_instance_paths",
@@ -2393,12 +2397,6 @@
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.equiv_sequential",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_combined_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
