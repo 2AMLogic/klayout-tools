@@ -4309,7 +4309,12 @@ def _stub_openroad_clock_capture(
     monkeypatch, scenario_by_corner: dict[str | None, str]
 ) -> list[str]:
     """Replay a captured #2739 scenario per corner (`None` key for every
-    run in the request); returns the generated scripts."""
+    run in the request); returns the generated scripts.
+
+    The captured stdout predates the #7417 sink-count query, so a scenario
+    listed in the fixture's `clock_sink_counts` gets the synthesized count
+    block spliced in after the latency markers -- the counts themselves
+    were verified live on the same pinned build."""
     scripts: list[str] = []
 
     def fake_run(cmd, **kwargs):
@@ -4323,10 +4328,25 @@ def _stub_openroad_clock_capture(
             (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
             None,
         )
-        captured = _clock_capture_scenario(scenario_by_corner[corner])
+        tag = scenario_by_corner[corner]
+        captured = _clock_capture_scenario(tag)
+        stdout = captured["stdout"]
+        count = _CLOCK_CAPTURES.get("clock_sink_counts", {}).get(tag)
+        if count is not None:
+            block = (
+                f"{post_route_sta._CLOCK_SINK_COUNT_BEGIN}\n"
+                f"KLT_STA_CLOCK_SINK_COUNT {count}\n"
+                f"{post_route_sta._CLOCK_SINK_COUNT_END}\n"
+            )
+            latency_end = f"{post_route_sta._CLOCK_LATENCY_END}\n"
+            stdout = (
+                stdout.replace(latency_end, latency_end + block, 1)
+                if latency_end in stdout
+                else block + stdout
+            )
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(captured["metrics"], handle)
-        return fake_completed(returncode=0, stdout=captured["stdout"])
+        return fake_completed(returncode=0, stdout=stdout)
 
     monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
     return scripts
@@ -4354,6 +4374,11 @@ def test_clock_capture_fixture_matches_module_tcl():
         _CLOCK_CAPTURES["tcl_fragments"]["clock_latency_lines"]
         == post_route_sta._clock_latency_lines()
     )
+    # Authored (not captured) on the same pinned build the captures came
+    # from: the capture sessions predate the #7417 sink-count query.
+    assert _CLOCK_CAPTURES["tcl_fragments"][
+        "clock_sink_count_lines"
+    ] == post_route_sta._clock_sink_count_lines("clk")
     placeholders = {
         "<TLEF>": "/t/tech.lef",
         "<CLEF>": "/t/cells.lef",
@@ -4386,6 +4411,12 @@ def test_clock_capture_fixture_matches_module_tcl():
     pin_idx = pinned.index(post_route_sta._UNIT_PIN_LINE)
     assert pinned[pin_idx + 1].startswith("create_clock")
     current = pinned[:pin_idx] + pinned[pin_idx + 1 :]
+    # ...and the #7417 sink-count query, spliced in right after the
+    # latency block the captured sessions end their evidence with.
+    sink_block = post_route_sta._clock_sink_count_lines("clk")
+    sink_at = current.index(sink_block[0])
+    assert current[sink_at : sink_at + len(sink_block)] == sink_block
+    current = current[:sink_at] + current[sink_at + len(sink_block) :]
     # The historical capture includes every linked net. Its buffered design
     # has no driver-only nets, so the #6970 predicate leaves its counts intact.
     at = stored.index("    incr klt_design_total")
@@ -4502,6 +4533,12 @@ def test_sta_script_lines_propagated_marks_clock_right_after_create_clock():
     assert any(ln.startswith("catch {report_clock_latency -digits 6}") for ln in lines)
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
     assert prop_idx < latency_begin < latency_end < first_report_idx
+    # The #7417 sink-count query follows the latency dump, still before the
+    # metrics: `clock_sinks` is this enumeration, never the report's pins.
+    sink_begin = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
+    assert latency_end < sink_begin < sink_end < first_report_idx
+    assert any(ln.strip().startswith("llength [all_registers -clock") for ln in lines)
 
 
 def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
@@ -4525,9 +4562,15 @@ def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
     parasitic_end = lines.index(f'puts "{post_route_sta._PARASITIC_ANNOTATION_END}"')
     latency_begin = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
+    sink_end = lines.index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_END}"')
     first_report_idx = lines.index("report_worst_slack_metric -setup")
     assert (
-        read_spef_idx < parasitic_end < latency_begin < latency_end < first_report_idx
+        read_spef_idx
+        < parasitic_end
+        < latency_begin
+        < latency_end
+        < sink_end
+        < first_report_idx
     )
 
 
@@ -4546,7 +4589,9 @@ def test_sta_script_lines_ideal_has_no_propagation_tcl():
     script = "\n".join(lines)
     assert "set_propagated_clock" not in script
     assert "report_clock_latency" not in script
+    assert "all_registers" not in script
     assert post_route_sta._CLOCK_LATENCY_BEGIN not in script
+    assert post_route_sta._CLOCK_SINK_COUNT_BEGIN not in script
 
 
 def test_sta_netlist_script_lines_never_propagates():
@@ -4568,123 +4613,18 @@ def test_sta_netlist_script_lines_never_propagates():
 # -- evidence parsing --------------------------------------------------------#
 
 
-def test_parse_clock_latency_sinks_max_and_sample():
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "Clock clk",
-            "rise -> rise",
-            "    min     max",
-            "0.000000 0.000000 source latency",
-            "0.302855         network latency ff/CLK",
-            "        0.302855 network latency ff/CLK",
-            "---------------",
-            "0.302855 0.302855 latency",
-            "        0.000000 skew",
-            "",
-            "fall -> fall",
-            "    min     max",
-            "0.000000 0.000000 source latency",
-            "0.335104         network latency ff/CLK",
-            "        0.335104 network latency ff/CLK",
-            "---------------",
-            "0.335104 0.335104 latency",
-            "        0.000000 skew",
-            "",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
-
-    assert evidence == {
-        "clock_sinks": 1,
-        "max_network_latency_ns": 0.335104,
-        "clock_sinks_sample": ["ff/CLK"],
-    }
-
-
-def test_parse_clock_latency_dedupes_sinks_and_caps_sample():
-    lines = [f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"', "Clock clk"]
-    for i in range(post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5):
-        lines.append(f"0.0{i}         network latency ff{i}/CLK")
-    lines += [
-        "        0.990000 network latency ff1/CLK",  # max col of an early sink
-        f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-    ]
-
-    evidence = post_route_sta._parse_clock_latency("\n".join(lines), "clk")
-
-    assert evidence["clock_sinks"] == post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5
-    assert len(evidence["clock_sinks_sample"]) == (
-        post_route_sta._CLOCK_SINK_SAMPLE_LIMIT
-    )
-    assert evidence["clock_sinks_sample"][0] == "ff0/CLK"
-    assert evidence["max_network_latency_ns"] == 0.99
-
-
-def test_parse_clock_latency_ignores_other_clock_sections():
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "Clock other",
-            "1.000000         network latency x/CLK",
-            "Clock clk",
-            "0.200000         network latency ff/CLK",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
-
-    assert evidence == {
-        "clock_sinks": 1,
-        "max_network_latency_ns": 0.2,
-        "clock_sinks_sample": ["ff/CLK"],
-    }
-
-
 def test_parse_clock_latency_empty_section_is_zero_sinks():
     """The tree-less contract: the clock's section printed with no rows --
     the explicit machine-readable "propagation could not be established"
     signal. This is the real captured output of the fixture's `notree`
-    scenario."""
+    scenario, which predates the #7417 count marker -- so it also pins
+    the marker-less fallback: an empty section stays `0`, not unknown."""
     evidence = post_route_sta._parse_clock_latency(
         _clock_capture_scenario("propagated_notree")["stdout"], "clk"
     )
 
     assert evidence == {
         "clock_sinks": 0,
-        "max_network_latency_ns": None,
-        "clock_sinks_sample": [],
-    }
-
-
-def test_parse_clock_latency_missing_block_is_unknown():
-    evidence = post_route_sta._parse_clock_latency("no markers here", "clk")
-
-    assert evidence == {
-        "clock_sinks": None,
-        "max_network_latency_ns": None,
-        "clock_sinks_sample": [],
-    }
-
-
-def test_parse_clock_latency_error_text_is_unknown():
-    """A `catch`-swallowed command failure (e.g. an OpenSTA build without
-    `report_clock_latency`) leaves the command's error text inside the
-    markers and no `Clock <name>` section -- unknown, never a fabricated
-    sink count."""
-    stdout = "\n".join(
-        [
-            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
-            "invalid command name report_clock_latency",
-            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
-        ]
-    )
-
-    assert post_route_sta._parse_clock_latency(stdout, "clk") == {
-        "clock_sinks": None,
         "max_network_latency_ns": None,
         "clock_sinks_sample": [],
     }
@@ -4821,6 +4761,8 @@ def test_run_sta_propagated_script_emits_set_propagated_clock_per_corner(
     latency_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
     metrics_idx = scripts[0].index("report_worst_slack_metric -setup")
     assert create_idx < prop_idx < latency_idx < metrics_idx
+    sink_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_SINK_COUNT_BEGIN}"')
+    assert latency_idx < sink_idx < metrics_idx
 
 
 def test_run_sta_verilog_mode_response_is_always_ideal(tmp_path, monkeypatch):

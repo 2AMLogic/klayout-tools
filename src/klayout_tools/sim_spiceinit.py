@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterable
 from typing import Any
 
 from . import _warn
@@ -210,15 +211,25 @@ def report_init_diagnostic(
     """Explain a declared batch init or suggest one on a model-selection abort."""
     if declared:
         return batch_init_diagnostic(backend, engine, declared, remote)
-    if engine != "ngspice" or backend not in ("local", "local-parallel", "batch"):
+    if engine != "ngspice" or backend not in (
+        "local",
+        "local-parallel",
+        "remote",
+        "batch",
+    ):
         return None
-    aborted = any(
-        is_model_selection_abort(diagnostic)
+    return _model_selection_hint(
+        diagnostic
         for corner in corners
         if corner.get("status") == "error"
         for diagnostic in corner.get("diagnostics", [])
     )
-    if not aborted:
+
+
+def _model_selection_hint(
+    diagnostics: Iterable[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not any(is_model_selection_abort(diagnostic) for diagnostic in diagnostics):
         return None
     return {
         "code": MODEL_SELECTION_INIT_HINT,
@@ -231,3 +242,18 @@ def report_init_diagnostic(
             "See docs/cli/sim.md under ngspice's working directory and .spiceinit."
         ),
     }
+
+
+def add_deck_init_hints(report: dict, declared: tuple[str, ...]) -> dict:
+    """Qualify failed deck units, including units collected from older workers."""
+    if declared:
+        return report
+    for unit in report.get("units", []):
+        if unit.get("status") != "error":
+            continue
+        diagnostics = unit.get("diagnostics", [])
+        if any(d.get("code") == MODEL_SELECTION_INIT_HINT for d in diagnostics):
+            continue
+        if hint := _model_selection_hint(diagnostics):
+            diagnostics.append(hint)
+    return report

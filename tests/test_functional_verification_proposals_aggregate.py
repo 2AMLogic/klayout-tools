@@ -83,6 +83,22 @@ def test_report_quoted_sequence_collapses_into_one_run(tmp_path):
         assert f"proposals[0] is missing required field: {field}" in text
 
 
+def test_missing_scope_paths_reported_once_in_first_seen_order(tmp_path):
+    doc = {
+        "scope": ["z.v", "dut.v", "a.v", "z.v", "./dut.v", "a.v"],
+        "proposals": [_full_entry(index=0)],
+    }
+    text = _error_text(tmp_path, doc)
+    assert (
+        "not present in request.sources: z.v, a.v, ./dut.v (request.sources has: dut.v)"
+    ) in text
+    assert "unique and positive (got 0)" in text
+
+
+def test_repeated_valid_scope_paths_are_accepted():
+    fv._validate_mutation_scope(["dut.v", "dut.v"], ["dut.v"])
+
+
 def test_errors_accumulate_across_entries(tmp_path):
     doc = {
         "scope": ["dut.v"],
@@ -103,6 +119,20 @@ def test_bad_index_reported_alongside_other_entry_missing_field(tmp_path):
     text = _error_text(tmp_path, doc)
     assert "unique and positive (got 0)" in text
     assert "proposals[1] is missing required field: file" in text
+
+
+@pytest.mark.parametrize(
+    ("indices", "invalid"), [([0, 0], [0]), ([-1, 0, 0, 2, 2], [-1, 0, 2])]
+)
+def test_repeated_invalid_indices_are_reported_once(tmp_path, indices, invalid):
+    doc = {"scope": ["dut.v"], "proposals": [_full_entry(index=i) for i in indices]}
+    text = _error_text(tmp_path, doc)
+    messages = [
+        f"mutation proposals[].index must be unique and positive (got {i})"
+        for i in invalid
+    ]
+    assert text.endswith("; ".join(messages))
+    assert text.count("must be unique and positive") == len(invalid)
 
 
 def test_duplicate_index_survives_type_error_on_another_entry(tmp_path):

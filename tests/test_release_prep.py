@@ -217,26 +217,6 @@ def test_cli_prepare_empty_section_exits_2(tmp_path: Path, capsys) -> None:
     assert "nothing to release" in capsys.readouterr().err
 
 
-def test_fragment_notes_resolve_only_in_new_section(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
-    fragment = repo / "changelog.d" / "1234-added.md"
-    fragment.parent.mkdir()
-    current = "the first release after `v0.8.0`"
-    future = "the next release after v0.9.5"
-    fragment.write_text(f"- {current}, {future}, and {current}.\n")
-    changelog = repo / "CHANGELOG.md"
-    historic = f"- historical: {current}.\n"
-    changelog.write_text(CHANGELOG + historic)
-
-    rp.prepare(repo, None, "2026-11-09")
-    assembled = changelog.read_text()
-    assert f"- `klt 0.9.0`, {future}, and `klt 0.9.0`." in assembled
-    assert assembled.endswith(historic)
-    assert not fragment.exists()
-    rp.prepare(repo, "0.9.0", "2026-11-10")
-    assert changelog.read_text() == assembled
-
-
 def test_stale_fragment_note_reports_source_line_before_writes(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     fragments = repo / "changelog.d"
@@ -440,15 +420,28 @@ def test_refresh_collects_late_notes_once_and_leaves_history_intact(tmp_path):
     assert rp.prepare(repo, "0.10.0", "2026-12-01")["version"] == "0.10.0"
 
 
-@pytest.mark.parametrize("invalid", ["branch", "fragment", "unreleased", "prepared"])
-def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid, capsys):
+@pytest.mark.parametrize(
+    ("invalid", "anchor"),
+    [
+        ("branch", "0.7.0"),
+        ("fragment", "0.7.0"),
+        ("unreleased", "0.7.0"),
+        ("prepared", "0.7.0"),
+        # Every refresh input lands in a release section, so a newer anchor
+        # would be orphaned there too (issue #7493).
+        ("fragment", "0.9.5"),
+        ("unreleased", "0.9.5"),
+        ("prepared", "0.9.5"),
+    ],
+)
+def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid, anchor, capsys):
     repo = _repo(tmp_path)
     rp.prepare(repo, "0.9.0", "2026-11-01")
     directory = repo / "changelog.d"
     directory.mkdir()
     fragment = directory / "late.md"
     fragment.write_text("- another fragment\n")
-    stale = "- stale: first release after `v0.7.0`"
+    stale = f"- stale: first release after `v{anchor}`"
     source = fragment
     if invalid == "fragment":
         fragment.write_text(f"\n\n{stale}\n")
@@ -474,3 +467,13 @@ def test_invalid_refresh_preserves_all_inputs(tmp_path, invalid, capsys):
             f"release_prep.py: {source.relative_to(repo)}:{line}:"
             in capsys.readouterr().err
         )
+
+
+def test_refresh_keeps_newer_signoff_anchor_for_a_later_cut(tmp_path):
+    repo = _repo(tmp_path)
+    rp.prepare(repo, "0.9.0", "2026-11-01")
+    future = "- later: the first release\n  after `v0.9.5`.\n"
+    note = repo / "docs/cli/signoff.md"
+    note.write_text(f"- now: the first\n  release after `v0.8.0`.\n{future}")
+    assert rp.main(["--repo", str(repo), "refresh", "--version", "0.9.0"]) == 0
+    assert note.read_text() == f"- now: `klt 0.9.0`.\n{future}"

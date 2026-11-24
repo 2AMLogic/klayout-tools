@@ -36,6 +36,7 @@ CASES = {
     "_sta_spef_inputs": ("resolve_spef", [False, "."]),
     "_sta_timing_derate": ("validate_timing_derate", [{"timing_derate": False}]),
     "_sta_wire_load": None,
+    "post_route_sta_clock_propagation": None,
     "post_route_sta_electrical": None,
     "post_route_sta_errors": None,
     "post_route_sta_instance_paths": (

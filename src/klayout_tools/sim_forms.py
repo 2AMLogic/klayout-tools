@@ -1,8 +1,9 @@
 """Shared measurement-form registry and checks for ``request.measurements[]``.
 
 Every exclusive form module (``transfer``, ``tian``, ``snm``, ``search``,
-``eye``, ``step_resolution``, ``settled``) declares its own keyword and body
-validator; the "declare exactly one form" rule is identical, so it lives here
+``eye``, ``step_resolution``, ``settled``, ``slope_band``, ``windowed``, ``derive``)
+declares its own keyword and body validator; the "declare exactly one form"
+rule is identical, so it lives here
 -- and so does the list of forms it refuses, derived from the one registry
 below (:data:`FORMS`) rather than hand-copied per module (issue #5695).
 """
@@ -43,6 +44,7 @@ EXCLUSIVE_FORMS = (
     "settled",
     "slope_band",
     "windowed",
+    "derive",
 )
 
 #: Every measurement form, in declaration order.

@@ -24,15 +24,33 @@ from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
 from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
+from ..signoff_attest_pin_bump import ToolPinUsageError, update_tool_pin
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label, note_lines
 from ..signoff_output import non_attest_problem
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_rerun_drift
 
 #: ``--attest`` passed and its envelope still reproduces and passes.
 EXIT_PASS = 0
 #: ``--attest`` ran, but the envelope fails or no longer reproduces.
 EXIT_FAIL = 3
+
+
+def tool_pin_usage_error(args: argparse.Namespace) -> int | None:
+    """Reject an inapplicable inventory mutation before dispatching a report mode."""
+    if getattr(args, "update_tool_pin", False) and (
+        args.attest != 9
+        or args.check
+        or args.repin
+        or getattr(args, "diff_reports", None)
+    ):
+        return emit_error(
+            "signoff",
+            "--update-tool-pin requires --attest 9 and excludes --check and --repin",
+            args.format,
+            EXIT_USAGE_ERROR,
+        )
+    return None
 
 
 def maybe_run_attest(
@@ -121,7 +139,13 @@ def _run_attest(
     if problem is not None:
         return emit_error("signoff", problem, args.format)
     try:
-        result = _compute_attestation(args, inventory, stream, committed)
+        if getattr(args, "update_tool_pin", False):
+            assert inventory is not None  # Required above for item 9.
+            result = update_tool_pin(args, inventory)
+        else:
+            result = _compute_attestation(args, inventory, stream, committed)
+    except ToolPinUsageError as exc:
+        return emit_error("signoff", str(exc), args.format, EXIT_USAGE_ERROR)
     except SignoffError as exc:
         return emit_error("signoff", str(exc), args.format)
 
@@ -132,7 +156,11 @@ def _run_attest(
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
 
-    if result["status"] == "pass" and output:
+    if (
+        result["status"] == "pass"
+        and output
+        and not getattr(args, "update_tool_pin", False)
+    ):
         try:
             envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
             write_attestation(envelope, output)
