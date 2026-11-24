@@ -268,6 +268,26 @@ def test_violating_endpoints_truncated_count_below_cap_is_inconsistent():
     assert len(block["setup"]) == 2
 
 
+@pytest.mark.parametrize(("side", "list_key"), [("max", "setup"), ("min", "hold")])
+def test_violating_endpoints_count_must_cover_all_returned_rows(side, list_key):
+    rows = [
+        f"VPATH\t{side}\t{list_key}\t-{n}e-10\tstart\tend{n}\tgroup{(n - 1) // 3}"
+        for n in range(1, 10)
+    ]
+    stdout = "\n".join([_VIOLATING_ENDPOINTS_BEGIN, *rows, _VIOLATING_ENDPOINTS_END])
+    for count, status in [(3, "inconsistent"), (9, "ok"), (10, "ok")]:
+        setup, hold = (count, 0) if side == "max" else (0, count)
+        block = _violating_endpoints(stdout, 2, setup, hold)
+        assert block["status"] == status
+        if count == 3:
+            assert f"{list_key} side returned 9" in block["reason"]
+            assert f"{list_key}_violation_count is 3" in block["reason"]
+        else:
+            assert block["reason"] is None
+        assert block[f"{list_key}_truncated"] is True
+        assert [row["endpoint"] for row in block[list_key]] == ["end9", "end8"]
+
+
 def test_violating_endpoints_both_sides_disagree_names_both():
     block = _violating_endpoints(_capture_block_stdout(), 2, 1, 1)
     assert block["status"] == "inconsistent"
