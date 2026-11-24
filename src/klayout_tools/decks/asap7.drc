@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 271 --format json
+#       --expect-rule-categories 272 --format json
 #
 # or directly:
 #
@@ -689,6 +689,10 @@ two_side_enclosure_violation(v3, m3, 5.nm)
   .output("V3.M3.EN.1", "Table 3.13.1: min enclosure of V3 by M3 on at least two opposite sides 5 nm (note 2)")
 two_side_enclosure_violation(v3, m4, 11.nm)
   .output("V3.M4.EN.2", "Table 3.13.1: min enclosure of V3 by M4 on at least two opposite sides 11 nm")
+# Section 3.14 fixes M4's routing direction as horizontal. Both horizontal
+# edges of an overlapping V3 must coincide with the local M4 boundary.
+(horz(v3.overlapping(m4)) - horz(m4))
+  .output("V3.M4.AUX.2", "Table 3.13.1: V3 must be exactly as wide as M4 across the M4 length")
 # The upper metal's end-cap "(5 & 5) | (5 & 0)" (V2.M3.EN.2 by section 3.13).
 missing_end_cap_violation(v1, m2)
   .output("V1.M2.EN.2", "Table 3.13.1: M2 enclosure of V1 on opposite sides at least 5 nm, and 5 nm or 0 nm")
