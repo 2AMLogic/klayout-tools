@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- The `klt lvs` report category `device.implausible_dimensions` has severity
+  `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
   `batch.poll_timeout_s` through the error envelope** (issue #7543,
   2026-11-23): the last two `request.batch` seconds knobs still parsed with
