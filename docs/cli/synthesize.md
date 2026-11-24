@@ -1931,6 +1931,10 @@ core shipped as LEF + liberty + GDS.
 | `gds` | string \| omitted | The macro's GDS view. Unused by `klt synthesize` itself (no layout step here); accepted so one declaration serves all three verbs without per-verb pruning. |
 | `verilog_blackbox` | string \| omitted | A hand-written `(* blackbox *)` Verilog module declaration. Must declare a module named exactly the macro's `cell` (other modules may sit beside it); otherwise the request is rejected naming both, since `macro_instance_count*` is keyed on the cell. Only `klt synthesize` consumes this field — see "Making the macro visible to Yosys" below. |
 
+When `constraints.multicycle_paths` requests mapped-netlist STA, a macro
+with only a Verilog blackbox is linked by cell name and has no timing arcs.
+To use a macro liberty in that analysis, also supply its LEF.
+
 **Making the macro visible to Yosys.** Before `hierarchy -check -top`, this
 command emits one line per declared macro, in precedence order:
 

@@ -311,6 +311,7 @@ from .synthesize_constrained_timing import (
 from .synthesize_constrained_timing import (
     constrained_timing_fields,
     mapped_sta_constraints,
+    mapped_sta_macros,
 )
 from .synthesize_driving_cell import (
     ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
@@ -995,10 +996,9 @@ def run_synthesize(
     latch_map_request = _resolve_latch_map(request)
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # with everything else that needs no PDK resolution; the one
-    # corner-dependent half (which of a macro's per-corner liberties applies)
-    # necessarily waits for `_resolve_liberty` below, exactly as
-    # `dont_use`'s own liberty-dependent half already does.
+    # corner-dependent half waits for `_resolve_liberty` below.
     macros = _validate_macros(request.get("macros"), request_dir)
+    sta_macros = mapped_sta_macros(sta_constraints, macros)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -1416,7 +1416,7 @@ def run_synthesize(
             hdl_toplevel=hdl_toplevel,
             cell_library=cell_library,
             corner=corner,
-            macros=macros,
+            sta_macros=sta_macros,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
         ),
