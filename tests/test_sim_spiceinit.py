@@ -184,3 +184,59 @@ def test_fail_fast_probe_spiceinit_matches_corner_pin(
     else:
         assert probe_init.read_text() == expected
         assert probe_init.read_text() == corner_init.read_text()
+
+
+@pytest.mark.parametrize(
+    ("log", "lines", "expect_hint"),
+    [
+        ("Error: could not find a valid modelname\n", [], True),
+        (
+            "Error on line 4 or its substitute:\n  could not find a valid modelname\n",
+            [],
+            True,
+        ),
+        ("Error on line 4: unknown parameter\n", [], False),
+        ("Error: could not find a valid modelname\n", ["set ngbehavior=hsa"], False),
+    ],
+)
+def test_local_model_selection_init_hint(
+    tmp_path, monkeypatch, log, lines, expect_hint
+):
+    _write_body(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text=log)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"ngspice_init": lines},
+        },
+    )
+    report = sim.run_sim(str(request))
+    assert report["status"] == "error"
+    hints = [
+        d
+        for d in report.get("diagnostics", [])
+        if d["code"] == "ngspice_model_selection_init_hint"
+    ]
+    assert len(hints) == int(expect_hint)
+    if hints:
+        assert hints[0]["severity"] == "warning"
+        assert "options.ngspice_init" in hints[0]["message"]
+        assert "set ngbehavior=hsa" in hints[0]["message"]
+
+
+def test_xyce_and_successful_corners_have_no_model_selection_hint():
+    from klayout_tools.sim_spiceinit import report_init_diagnostic
+
+    corner = {"status": "error", "diagnostics": [{"code": "model_bin_range"}]}
+    assert report_init_diagnostic("local", "xyce", (), None, [corner]) is None
+    assert (
+        report_init_diagnostic(
+            "batch", "ngspice", (), None, [{**corner, "status": "pass"}]
+        )
+        is None
+    )

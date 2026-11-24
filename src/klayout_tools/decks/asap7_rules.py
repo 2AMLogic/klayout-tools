@@ -105,8 +105,8 @@ def _sadp_metal_family(layer: str, t1: str, t2: str) -> tuple[Asap7Rule, ...]:
         Asap7Rule(
             f"{layer}.W.3",
             t1,
-            "even multiples are enumerated up to the W.2 maximum; wider shapes "
-            f"are reported by {layer}.W.2 only",
+            "even multiples are enumerated up to the W.2 maximum, measured per "
+            f"polygon across the track; wider shapes are reported by {layer}.W.2 only",
         ),
         Asap7Rule(f"{layer}.W.5", t1),
         Asap7Rule(f"{layer}.S.1", t1),
@@ -448,6 +448,7 @@ RULES: tuple[Asap7Rule, ...] = (
     *_via_family("V1", "M2"),
     *_via_family("V2", "M3"),
     *_via_family("V3", "M4"),
+    Asap7Rule("V1.M1.EN.1", "Table 3.13.1"),
     Asap7Rule("V2.M2.EN.1", "Table 3.13.1"),
     Asap7Rule("V3.M3.EN.1", "Table 3.13.1", "stated by Table 3.13.1 note 2"),
     Asap7Rule("V3.M4.EN.2", "Table 3.13.1"),
@@ -498,7 +499,7 @@ RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
 
 #: Opt-in absolute grid-origin rules (#4082). Not in :data:`RULES`: they run
 #: only when the caller declares an origin with the matching ``--deck-var``,
-#: so the default 267-category contract is unchanged. The DRM gives the fin
+#: so the default category count excludes the opt-in rules. The DRM gives the fin
 #: and gate pitches (Tables 3.3.1 / 3.4.1) but no absolute origin, so the
 #: origin is the caller's; the checked reference is the FIN lower edge and
 #: the GATE left edge.
@@ -538,8 +539,8 @@ _END_CAP = (
     "per-via end-cap classification against the upper metal"
 )
 _EXACT_EN = (
-    "exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') "
-    "needs routing direction and a per-side enclosure predicate"
+    "the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap "
+    "lengths between flush and 5 nm have not been validated"
 )
 _LISD_EXACT_3 = (
     "'== 3 nm on at least two opposite sides' is expressible without a routing "
@@ -656,7 +657,6 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
     *_v123_gaps("V1", "M2"),
-    Asap7RuleGap("V1.M1.EN.1", "Table 3.13.1", _EXACT_EN, "#3147"),
     Asap7RuleGap("V1.M2.EN.2", "Table 3.13.1", _EXACT_EN, "#3147"),
     *_v123_gaps("V2", "M3"),
     Asap7RuleGap("V2.M3.EN.2", "Table 3.13.1", _EXACT_EN, "#3147"),

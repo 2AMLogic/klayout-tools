@@ -38,6 +38,10 @@ from .netlist_construct_scan import (
 )
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
+from .place_and_route_base import STAGE_ORDER
+from .place_and_route_base import PlaceAndRouteError as PlaceAndRouteError
+from .place_and_route_cell_libraries import _NO_TAPCELL_LIBRARIES
 from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
@@ -279,7 +283,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
-        "also_cell_libraries": ("asap7sc7p5t_rvt", "asap7sc7p5t_28_R"),
+        "also_cell_libraries": RVT_LIBRARIES,
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -406,40 +410,6 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
         "connects": (),
     },
 }
-
-
-class PlaceAndRouteError(Exception):
-    """Raised when a place-and-route run cannot even reach the requested
-    ``target_stage``: a missing/malformed request file, an unresolvable/
-    unreadable netlist, an unresolvable ``pdk.cell_library``/``corner``/LEF,
-    a floorplan spec naming more than one method, or an OpenROAD engine
-    error partway through a stage.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching ``klt synthesize``'s ``SynthesizeError``. Per the
-    contract spike section 5's "Partial-completion design": a run that
-    reaches (or exceeds) the requested ``target_stage`` is *always* a
-    success (``exit 0``, ``stage_reached`` >= ``target_stage``) even when it
-    stopped short of a *later* stage the request never asked for -- this
-    exception is raised only when a run fails to reach the stage it was
-    actually asked to reach.
-
-    Optional fields carry a machine-readable ``code``, a batch ``job_id``
-    and structured ``details``, such as congestion evidence from a failed
-    local route.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
 
 
 # --------------------------------------------------------------------------- #
@@ -658,7 +628,7 @@ def _validate_io(
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
@@ -669,7 +639,7 @@ def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
         _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
         for index, entry in enumerate(raw)
     ]
-    groups_spec.validate_fixed_members(groups, PlaceAndRouteError)
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
@@ -1110,10 +1080,6 @@ def _validate_tapcell(
 ) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _NO_TAPCELL_LIBRARIES
-
     if tapcell is None:
         return None
     if not isinstance(tapcell, dict):
@@ -1798,33 +1764,22 @@ _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-def _validate_library(library: Any) -> dict[str, Any] | None:
-    """Optional ``request.library`` (issue #4086): per-library inputs for a
-    standard-cell library the built-in tables
-    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
-    override of a built-in entry. ``None`` (field omitted) leaves every
-    generated script byte-identical. Returns only the keys that were given:
-    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
-    primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
-    the library has no antenna diode, so no antenna repair; issue #4274),
-    ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells), ``filler`` (tuple of masters), and ``dont_use`` (tuple of globs).
-    """
-    if library is None:
+def _validate_library(library: Any, cell_library: str = "") -> dict[str, Any] | None:
+    """Normalize effective library inputs for stage Tcl, STA and the power audit."""
+    if library is None and cell_library not in RVT_LIBRARIES:
         return None
-    if not isinstance(library, dict):
-        raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - _LIBRARY_VALIDATORS.keys())
-    if unknown:
-        raise PlaceAndRouteError(
-            f"request.library has unknown key(s): {', '.join(unknown)}"
-        )
-    out: dict[str, Any] = {}
-    for key, validate in _LIBRARY_VALIDATORS.items():
-        if key in library:
-            out[key] = validate(library[key])
-    return out
+    raw = _library_object(
+        {} if library is None else library,
+        "request.library",
+        tuple(_LIBRARY_VALIDATORS),
+    )
+    if cell_library in RVT_LIBRARIES:
+        raw = RVT_LIBRARY_DEFAULTS | raw
+    return {
+        key: validate(raw[key])
+        for key, validate in _LIBRARY_VALIDATORS.items()
+        if key in raw
+    }
 
 
 def _validate_seed(seed: Any) -> int:
@@ -1834,10 +1789,6 @@ def _validate_seed(seed: Any) -> int:
 
 
 def _validate_target_stage(target_stage: Any) -> str:
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import STAGE_ORDER
 
     if target_stage not in STAGE_ORDER:
         raise PlaceAndRouteError(
@@ -1948,9 +1899,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
 def _validate_sweep_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
     post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
-    a caller-named subset of the ``.lib`` corners ``request.pdk.cell_library``
-    ships, instead of always sweeping every shipped corner
-    (:func:`klayout_tools.pdk.list_lib_corners`'s own unfiltered return).
+    a caller-named subset of the library's available corners. The full set
+    comes from the PDK descriptor's corner keys for a mapped library, otherwise
+    from the unfiltered :func:`klayout_tools.pdk_cells.list_lib_corners` enumeration.
 
     A design has exactly one operating supply -- for a cell library shipping
     several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
@@ -1964,9 +1915,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     own empty-``corners``-list short-circuit), distinct from omitting the
     field entirely.
 
-    Each requested name is validated against the *unfiltered* shipped-corner
-    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
-    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    Once ``cell_library`` and ``pdk_info`` are resolved, the post-route sweep
+    checks each requested name against that corner set. An unknown name raises
     :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
     this module's existing unresolvable-request-field convention (e.g.
     :func:`_validate_route_critical_nets_percentage`'s sibling validators).
@@ -2092,7 +2042,7 @@ def _resolve_liberty(
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``post_route_sta.py``'s own ``_resolve_liberty``

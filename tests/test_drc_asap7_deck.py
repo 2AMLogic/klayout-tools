@@ -300,23 +300,23 @@ def test_pad_number_facts_in_pinned_pdk():
     """The facts behind the PAD disposition, pinned so a lambdapdk bump that
     changes them fails visibly (#3807)."""
     layermap = _ASAP7_LAYERMAP.read_text()
-    pad_lines = [
-        ln.split()
-        for ln in layermap.splitlines()
-        if ln.split()[:2]
-        and ln.split()[1].startswith("Pad/")
-        and not ln.lstrip().startswith("#")
-    ]
-    assert {ln[1]: ln[2] for ln in pad_lines} == {
-        "Pad/SPNET": "95/251",
-        "Pad/PIN": "95/251",
-        "Pad/LEFPIN": "95/251",
+    pad_entries = {
+        tuple(fields[1:])
+        for line in layermap.splitlines()
+        if len(fields := line.partition("#")[0].split()) == 4
+        and fields[0] == "NAME"
+        and fields[1].startswith("Pad/")
+    }
+    assert pad_entries == {
+        ("Pad/SPNET", "95", "251"),
+        ("Pad/PIN", "95", "251"),
+        ("Pad/LEFPIN", "95", "251"),
     }
     assert any(
         ln.split()[:2] == ["NAME", "V9"] or ln.split()[:1] == ["V9"]
         for ln in layermap.splitlines()
     )
-    assert re.search(r"^\s*#.*Pad/NET\s+95/1", layermap, re.M)
+    assert re.search(r"^\s*#.*Pad/NET\s+95\s+1\b", layermap, re.M)
     lyp_names = {
         name.lower() for name, _, _ in _LYP_ENTRY_RE.findall(_ASAP7_LYP.read_text())
     }
@@ -869,7 +869,7 @@ def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
     for var in OPT_IN_DECK_VARS:
         assert f"${var} = nil unless defined? ${var}" in text
     # The default contract is untouched: nothing opt-in leaked into RULES.
-    assert len(RULE_IDS) == 267
+    assert len(RULE_IDS) == 268
 
 
 def test_docs_list_opt_in_grid_rules_and_vars():

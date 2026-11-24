@@ -35,9 +35,9 @@ exactly one code path that assembles either.
 
 The exclusion sets and canonicalizers themselves stay where the knowledge
 belongs -- the shared ones in :mod:`klayout_tools._report_verify`, the
-verb-local ones in the verb module whose report shape they describe (and
-``extract``'s canonicalizer is built from extract-internal helpers, so it
-could not move). :data:`_KIND_SOURCES` names them by module attribute and
+verb-local ones in the module that owns the report transformation.
+The extract view and its connectivity hash share a module that operates
+on serialized reports. :data:`_KIND_SOURCES` names them by module attribute and
 :func:`_resolve` imports the owning module **lazily**, at call time: a verb
 module imports this one at module scope, so a module-scope import back the
 other way would be a cycle.
@@ -119,7 +119,7 @@ _KIND_SOURCES: dict[str, _KindSource] = {
     "erc": _KindSource(("_report_verify", "VOLATILE_PROVENANCE_PATHS"), None),
     "extract": _KindSource(
         ("_report_verify", "VOLATILE_PROVENANCE_PATHS"),
-        ("extract", "_canonicalize_extract_report_for_rerun_diff"),
+        ("extract_report_canonicalize", "_canonicalize_extract_report_for_rerun_diff"),
     ),
     "synthesize": _KindSource(
         ("_report_verify", "VOLATILE_FLOW_PATHS"),

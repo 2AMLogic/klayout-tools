@@ -12,7 +12,7 @@ the antenna + ERC signoff epic
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
                       [--findings-only] [--omit-antenna-tables]
-                      [--format text|json]
+                      [--format text|json] [-o PATH]
 klt erc --check <report> [--rerun] [--format text|json]
 klt erc --validate-spec <spec> [--format text|json]
 klt erc --pnr-response <run.json> [--format json]
@@ -71,6 +71,12 @@ klt erc --pnr-response <run.json> [--format json]
   running a fresh check. Mutually exclusive with `<file>`/`<spec>`. See
   "`--check` / `--rerun`" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `-o PATH` / `--output PATH` also saves the full JSON report on a fresh layout
+  run, including a completed `violations` or `not_checked` verdict. A `.gz`
+  suffix selects deterministic gzip compression. The report is staged as a
+  sibling temporary file and renamed into place once the write completes, so
+  `PATH`'s **parent directory must be writable**; a failed write preserves
+  the previous report. Stdout follows `--format`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
@@ -84,7 +90,8 @@ then run ERC on the GDS from that route.
 ```sh
 klt erc --pnr-response run.json --format json > supply.json
 klt erc --validate-spec supply.json --format json
-klt erc routed.gds supply.json --findings-only --format json > erc.json
+klt erc routed.gds supply.json --findings-only -o erc.json
+klt erc --check erc.json --format json
 ```
 
 Generation writes the spec itself. It uses the Sky130 extraction deck's
@@ -723,7 +730,22 @@ draws that the spec never declared" below.
     `left`/`bottom`/`right`/`top` must satisfy `left < right` and
     `bottom < top`.
   - `connect_to` (string, required) — the `stackup` role name the tap is
-    wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
+    wired up to (e.g. `"li1"`) — must name an entry in `stackup`. For a
+    tie with no `through`, the join is plan-view overlap, so the role's
+    conductor region must actually reach the tap sites: a `connect_to`
+    whose role never interacts with any of this tie's tap sites anywhere
+    in the stream is skipped as `degenerate_connect_target` (issue #7419)
+    — the tie cannot pass by construction, and the skip says so without
+    hiding the per-well findings. Check the stackup declares the conductor
+    path the PDK uses (e.g. LISD for ASAP7, where a tap reaches M1 only
+    through SDT -> LISD -> V0); a genuinely untied block can legitimately
+    carry both the skip and the findings, so the skip alone is not a
+    verdict of "untied".
+    The skipped record names the missing physical contact in `missing`.
+    A tap qualifier that removes no geometry retains the primary reason
+    `degenerate_tap_declaration`. On the ASAP7 tap cell, that reason applies
+    to both M1 and LISD when layer 12/0 covers the entire well. Only the M1
+    record lists `"tap-site contact with connect_to 'M1'"`.
   - `through` (optional string) names a `vias[]` entry whose `between`
     includes `connect_to`. For example, a tie with `"connect_to": "met1"`
     and `"through": "cont"` reaches Metal1 only through a drawn `cont` cut
@@ -1028,7 +1050,9 @@ drawn geometry actually ties them together. An LVS run built on a deck like
 that does not independently verify this specific property — check what the
 LVS deck's own connectivity setup actually does before trusting its "match"
 verdict as proof that a `klt erc` multi-island finding is a false positive
-rather than a real one.
+rather than a real one. The same limitation applies when a `klt lvs` request explicitly
+sets [`layout.join_same_named_nets`](lvs.md#implicit-connections-by-label).
+The inline extractor follows drawn connections by default.
 
 This is a documented modeling limitation, not a commitment to a fix
 timeline: expressing "this well/tap geometry conducts, scoped only to its
@@ -2709,7 +2733,7 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
 - **`erc_status: "clean_partial"`** — no finding, but some requested
   connectivity work was skipped: today that means a **degenerate `ties[]`
   declaration**, whose `erc.missing_tie` verdict could not be told apart
-  from one that never looked at a tap. Four forms, all under "Well/tap
+  from one that never looked at a tap. Five forms, all under "Well/tap
   connectivity" above: a degenerate *tap* (issue #2199,
   `degenerate_tap_declaration` — the declared tap region is
   indistinguishable from an ordinary source/drain contact reaching the
@@ -2724,8 +2748,13 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   in this stream: a typo'd layer/datatype, a PDK whose tub layer number
   changed, a GDS written without the tub layer; never applicable to an
   asserted `well_boxes` region, which cannot be empty after spec
-  validation). A successful, but not unconditional, result: read
-  `erc_coverage.skipped` for which tie, and which of the four.
+  validation), and a *disjoint connect target* (issue #7419,
+  `degenerate_connect_target` — a through-less tie whose `connect_to`
+  role interacts with none of its tap sites anywhere in the stream, so
+  the join cannot fire: most often a stackup missing the conductor path
+  the PDK uses, e.g. ASAP7 without LISD). A successful, but not
+  unconditional, result: read `erc_coverage.skipped` for which tie, and
+  which of the five.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
   listed for completeness: `erc_coverage` grades at least one gate, or --
   on a passive-only cell with no transistor gate (issue #2896) -- at least
@@ -3211,7 +3240,7 @@ rather than skipped for the same reason the empty-`ties` disclosure is, so
 it never moves `erc_status`.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**:
-work that was requested and could not be performed. Four reasons today —
+work that was requested and could not be performed. Five reasons today —
 `degenerate_tap_declaration` (issue #2199: the declared tap region is
 indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
@@ -3220,12 +3249,20 @@ is indistinguishable from the whole top-cell extent),
 selection — marker layers, or issue #2540's literal-geometry
 `well_requires_boxes`/`well_excludes_boxes`, one test for all four — kept every
 merged shape of the drawn `well_layer`, or none of
-them), and `empty_well_region` (issue #2377: a *drawn* `well_layer` that
+them), `empty_well_region` (issue #2377: a *drawn* `well_layer` that
 draws no geometry at all in this stream — a typo'd layer/datatype, a PDK
 whose tub layer number changed, a GDS written without the tub layer; never
 applicable to an asserted `well_boxes` region, which cannot be empty after
-spec validation). The well tests are applied first when more than one would
-hold, since the tap narrowing is measured inside the well region. Any of
+spec validation), and `degenerate_connect_target` (issue #7419: a
+through-less tie whose `connect_to` stackup role interacts with none of
+its tap sites anywhere in the stream — no tap site of this tie touches
+`connect_to`, so the tie cannot pass; check the stackup declares the
+conductor path the PDK uses, e.g. LISD for ASAP7. The findings stand: a
+genuinely untied block can legitimately carry both this skip and the
+per-well findings, which is the residual ambiguity the skip exists to
+name). The well tests are applied first when more than one would
+hold, since the tap narrowing is measured inside the well region, and the
+connect-target test last, after the tap test. Any of
 them is a requested skip, so it does make the scope partial — see "A
 degenerate tie is reported as skipped, not as a pass", "A block with no
 drawn well at all", and "One well layer, two bias classes" above.
@@ -3419,9 +3456,10 @@ verdict, and emits no label-layer warning. A defect is the same exit-1
 field-path error a normal run gives.
 
 `--validate-spec` is mutually exclusive with the positional `<file>` and with
-`--check` (argparse usage error, exit 2). The layout-only flags `--top`,
-`--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`, `--compact`
-and `--rerun` are rejected with a clean exit-1 error rather than ignored.
+`--check` (argparse usage error, exit 2). The layout-only flags `--output`,
+`--top`, `--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`,
+`--compact` and `--rerun` are rejected with a clean exit-1 error rather than
+ignored.
 
 ```json
 {

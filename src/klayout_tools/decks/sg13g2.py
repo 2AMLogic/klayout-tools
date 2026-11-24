@@ -976,17 +976,9 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_8_gatpoly.drc", "Gat.d"),
     ),
     # --- pSD (sg13g2_maximal.drc; issue #3787) -----------------------
-    # Unlike every other group here, pSD's width/space/area rules are
-    # defined only in the stricter top-level `sg13g2_maximal.drc` runset
-    # (`feol/5_10_psd.drc` implements just `pSD.c1`). They are transcribed
-    # so a stream drawing pSD (14/0) is not reported as a vacuous `clean`
-    # with `14/0` under `coverage.layers_in_stream_without_rules`.
-    #
-    # Not transcribed (out of scope, need multi-layer derived regions):
-    # `pSD.c`/`c1`/`d`/`d1` (enclosure/separation vs Activ/NWell/PWell) and
-    # `pSD.e`/`f`/`g`/`h` (abutted-tie rules). `UNCHECKED_RULES` is wired
-    # only for `sg13cmos5l` (`get_unchecked_rules`), so they are named here
-    # rather than registered.
+    # Width, space and area come from the maximal runset. UNCHECKED_RULES
+    # describes the implant-to-active checks omitted by the curated deck.
+    # The pSD.e/f/g/h abutted-tie rules also remain unimplemented.
     DrcRule(
         id="psd.width.1",
         description="minimum pSD width",
@@ -1851,6 +1843,11 @@ UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
         "check; wells on different nets closer than 1.80 um are not "
         "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
     ),
+    # sg13g2_maximal.drc (c, d, d1) and feol/5_10_psd.drc (c1).
+    "pSD.c": ((14, 0), "Minimum pSD enclosure of P+ Activ in NWell is 0.18 um."),
+    "pSD.c1": ((14, 0), "Minimum pSD enclosure of P+ Activ in PWell is 0.03 um."),
+    "pSD.d": ((14, 0), "Minimum pSD space to unrelated N+ Activ in PWell is 0.18 um."),
+    "pSD.d1": ((14, 0), "Minimum pSD spacing to N+ Activ in NWell is 0.03 um."),
 }
 
 LAYER_NAMES: dict[tuple[int, int], str] = {

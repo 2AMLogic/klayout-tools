@@ -46,6 +46,15 @@ from ._layout import region as _region
 from .decks import ExtractionDeck
 from .extract_abstract_pin_join import AbstractPinJoins, tied_instances
 from .extract_spef import ExtractError
+from .extract_warnings import (
+    _collapsed_abstract_pin_warning as _collapsed_abstract_pin_warning,
+)
+from .extract_warnings import (
+    _tied_abstract_pin_warning as _tied_abstract_pin_warning,
+)
+from .extract_warnings import (
+    isolated_substrate_global_warning as isolated_substrate_global_warning,
+)
 from .lef_header import read_lef_macro_pin_ports
 from .pdk import load_gds_to_lef_layer_map, resolve_klayout_layer_map
 
@@ -93,39 +102,6 @@ _DEF_NET_NAME_PROBE_CANDIDATES = 4
 #: see :func:`_sanitize_instance_name`.
 _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 
-#: How many concrete ``<instance>: <pins> -> <net>`` examples
-#: :func:`_tied_abstract_pin_warning` spells out before falling back to a bare
-#: count. A block whose pin binding has genuinely gone wrong produces one
-#: entry per affected instance (126 of them in issue #1366's reported repro),
-#: which is a diagnostic, not a message a caller should have to read in full.
-_ABSTRACT_TIED_PIN_WARNING_EXAMPLES = 5
-
-#: The share of one abstracted instance's *declared* pins that must land on a
-#: **single** net before :func:`_collapsed_abstract_pin_warning` escalates the
-#: ordinary ":func:`_tied_abstract_pin_warning` ties exist" report into its own
-#: louder ``warnings[]`` entry -- issue #2695 (the deferred half of #2658).
-#:
-#: Compared **strictly** (``>``), so the natural "exactly half the pins" shapes
-#: a real library draws on purpose stay unescalated: sky130's four-pin
-#: `decap`/`tap` cells declare ``VPWR``/``VPB`` and ``VGND``/``VNB`` and tie
-#: each pair to its own rail, i.e. a dominant net carrying 2 of 4 pins == 0.5.
-#: The reported collapse this escalation exists for is ~95% (#2658: 109
-#: declared pins, nearly all on one parent net).
-_ABSTRACT_COLLAPSED_PIN_RATIO = 0.5
-
-#: How many separately declared pins a single net must carry before the
-#: majority-share test above is even applied -- issue #2695.
-#:
-#: The ratio alone cannot separate a collapse from the smallest legal ties: a
-#: deliberate two-pin tie cell (``tests/test_extract.py::
-#: test_abstract_cells_warns_when_one_instance_ties_two_declared_pins``) is a
-#: 2-of-2 == 100% dominant net by construction, and a three-pin
-#: ``VPWR``/``VPB``/``VGND`` fill cell is 2-of-3 == 67%, both entirely legal
-#: and both louder-than-useful if escalated. Four or more *separately
-#: declared* pins sharing one net, while being a majority of the macro's port
-#: list, is not a shape a correct library cell draws -- it is the signature of
-#: pins falling through onto one wide parent net.
-_ABSTRACT_COLLAPSED_PIN_MIN_PINS = 4
 
 #: The :func:`_wire_abstract_cells` ``probe_layers`` roles that are **body
 #: identity** rather than signal interconnect -- issue #2142.
@@ -1497,20 +1473,14 @@ def _probe_single_abstract_pin_point(
     point: kdb.Point,
     role: str | None,
     probe_layers: list[tuple[str, kdb.Region]],
-) -> kdb.Net | None:
-    """The extracted net at exactly one candidate ``point``, via
-    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
+) -> tuple[kdb.Net | None, bool]:
+    """Probe one access point and return its net and declared-conductor hit flag.
 
-    ``role`` names the conductor **this point** was read off -- the layer its
-    own label was drawn on, or the ``deck.metals`` level a
-    :func:`_local_pin_candidate_points` fragment was discovered on. It is a
-    property of the point, not of the pin (issue #2142): a hard macro
-    routinely labels one declared pin on several conductors, and probing all
-    of that pin's points against one cell-wide role is what sent the
-    off-role points into the cross-layer fallback below. That layer is
-    probed first and its answer is authoritative. ``None`` (the LEF
-    fallback, whose LEF layer name is not translated to a GDS layer) has no
-    declared layer to be authoritative about.
+    Each point carries its own label or fragment layer (#2142). A macro can
+    label the same pin on several layers. Probe the declared layer first.
+    A hit there returns ``(net, True)`` and supplies landing evidence for
+    :meth:`AbstractPinJoins.record` (#7561). A LEF point has no translated
+    GDS layer. A cross-layer hit returns ``(net, False)``.
 
     **The cross-layer fallback never reaches ``nwell``/``tap``** unless one
     of them *is* this point's own ``role`` (a ``deck.well_label`` pin) --
@@ -1525,28 +1495,22 @@ def _probe_single_abstract_pin_point(
     reports as a per-instance "no conductor found at its resolved access
     point" warning rather than silently shorting the pin into a rail.
 
-    Returns ``None`` when no eligible conductor carries geometry at that
-    point at all.
-
-    This is the single-candidate core :func:`_probe_abstract_pin_net` calls
-    once per access-point candidate for a pin (issue #1181) -- kept separate
-    so that per-point probing logic and the multi-point "pick the best
-    result" policy stay independently readable.
+    If every eligible layer misses, return ``(None, False)``.
+    :func:`_probe_abstract_pin_net` ranks hits across the pin's points (#1181).
     """
     if role is not None:
         for name, region in probe_layers:
             if name == role:
                 net = l2n.probe_net(region, point)
                 if net is not None:
-                    return net
-                break
+                    return net, True
     for name, region in probe_layers:
         if name in _BODY_IDENTITY_PROBE_ROLES and name != role:
             continue
         net = l2n.probe_net(region, point)
         if net is not None:
-            return net
-    return None
+            return net, False
+    return None, False
 
 
 def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
@@ -1662,6 +1626,10 @@ def _probe_abstract_pin_net(
     lands on no conductor anywhere" case the caller already reports as a
     per-instance warning.
 
+    :meth:`AbstractPinJoins.record` retains declared-layer hits for the group.
+    Joining an anonymous routed net to a differently named net requires a
+    declared-layer hit on each side (#7561).
+
     **``points`` order is pin-access provenance, and the tiebreak leans on
     that** (issue #1366). :func:`_resolve_abstract_cell_pins` always lists a
     pin's *primary*, declared access point(s) first -- its own drawn text
@@ -1683,183 +1651,17 @@ def _probe_abstract_pin_net(
     full derivation of both reported impossible bindings.
     """
     candidates: dict[int, kdb.Net] = {}
+    landed: set[int] = set()
     for point, role in points:
-        net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
+        net, declared = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
         if net is not None:
             candidates.setdefault(net.cluster_id, net)
+            if declared:
+                landed.add(net.cluster_id)
     winner = max(candidates.values(), key=_abstract_pin_net_score, default=None)
     if winner is not None:
-        joins.record(instance, pin, winner, candidates)
+        joins.record(instance, pin, winner, candidates, landed)
     return winner
-
-
-def _tied_abstract_pin_warning(
-    tied: list[tuple[str, str, str, list[str], int]],
-) -> list[str]:
-    """A single ``warnings[]`` entry naming abstracted-cell instances that
-    resolved two or more of their *separately declared* pins onto one net --
-    or ``[]`` when there are none (issue #1366).
-
-    ``tied`` is ``[(instance name, cell name, net name, [pin names],
-    <declared pin count for that cell type>), ...]`` in
-    :func:`_wire_abstract_cells`'s own deterministic instance/pin order. The
-    declared-pin count is unused here (this entry reports the *existence* of
-    ties, at any ratio) and carried for
-    :func:`_collapsed_abstract_pin_warning`, which escalates the subset of
-    these entries whose tied share of the macro's declared pins crosses
-    :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` (issue #2695).
-
-    **Why warn rather than fail.** Tying two declared pins together is legal
-    -- a deliberately tied-off input is the standard case -- so this cannot
-    be an error. But on a ``--abstract-cells`` black box it is also
-    *unverifiable* by the caller: the cell's interior was erased by
-    construction, there are no devices left to cross-check against, and the
-    extraction summary otherwise reports a completely healthy run (``status:
-    extracted``, the expected pin count, a device count of 0). That is
-    exactly how issue #1366's pin-to-net binding regression stayed silent
-    all the way to a downstream ``klt lvs`` verdict that read as a design
-    fault: both impossible bindings it reports collapse to this one
-    observable shape -- a ground-role pin resolved onto the power net leaves
-    that instance's ``VDD`` and ``VSS`` pins on one net, and an output
-    resolved onto one of its own instance's inputs leaves that instance's
-    output and input pins on one net.
-
-    **Why it is still a warning after issue #2658, and not escalated above
-    a ratio.** That issue reports the same observable shape at extreme
-    scale -- a 109-pin hard macro with ~104 pins on one net -- and proposes
-    (as an alternative to fixing the binding) raising this to an
-    application error once the tied-pin ratio crosses some threshold. The
-    binding fault behind it is fixed at source instead
-    (:func:`lef_layer_probe_roles`: a LEF port is now probed on its own
-    declared metal before the bottom-up fallback that collapsed it), so the
-    escalation would now fire almost exclusively on the *legal* case this
-    docstring opens with -- and a hard failure there needs an opt-out flag
-    (``--allow-tied-pins`` or a deck setting) that nothing else in the
-    extraction contract has a use for. The escalation is therefore
-    deliberately deferred, not dropped: it is tracked as issue #2695, as
-    defence-in-depth for a collapse this fix cannot reach (a run without
-    ``--pdk``, a PDK with no KLayout layer map, or a LEF whose port layers
-    the map does not name), where the role-free bottom-up fallback still
-    applies.
-
-    Deliberately *not* a separate "two supply-role pins on one net" check
-    (the first of the two self-checks issue #1366 proposes): an
-    :class:`~klayout_tools.decks.ExtractionDeck` declares no power/ground
-    net names -- supply nets get their names from the layout's own drawn
-    labels like any other net -- so there is no deck-side notion of a
-    "supply-role pin" to key that check on. This check subsumes it anyway,
-    since a supply short is a two-pins-one-net collision by definition.
-    """
-    if not tied:
-        return []
-    examples = [
-        f"{instance_name} (cell '{cell_name}'): pins "
-        f"{', '.join(pin_names)} -> net '{net_name}'"
-        for instance_name, cell_name, net_name, pin_names, _declared in tied[
-            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
-        ]
-    ]
-    remainder = len(tied) - len(examples)
-    if remainder > 0:
-        examples.append(f"... and {remainder} more instance(s)")
-    return [
-        f"{len(tied)} --abstract-cells instance(s) resolved two or more of "
-        "their separately declared pins onto the same net: "
-        + "; ".join(examples)
-        + ". This is legal for a deliberately tied-off pin, but an "
-        "abstracted cell is a black box whose interior cannot be inspected "
-        "to confirm that, and it is also the signature of a pin-to-net "
-        "binding fault (a ground-role pin resolved onto the power net, or "
-        "an output resolved onto one of its own instance's inputs) -- "
-        "confirm these against the design's intent before trusting a "
-        "downstream `klt lvs` verdict built on this netlist"
-    ]
-
-
-def _collapsed_abstract_pin_warning(
-    tied: list[tuple[str, str, str, list[str], int]],
-) -> list[str]:
-    """A second, deliberately **louder** ``warnings[]`` entry for the subset
-    of :func:`_tied_abstract_pin_warning`'s ties where *most* of one
-    abstracted instance's declared pins collapsed onto a **single** net --
-    or ``[]`` when none does (issue #2695, the deferred half of #2658).
-
-    ``tied`` is :func:`_wire_abstract_cells`'s accumulator,
-    ``[(instance name, cell name, net name, [pin names], <declared pin count
-    for that cell type>), ...]``. An entry is escalated when its net carries
-    both
-
-    - at least :data:`_ABSTRACT_COLLAPSED_PIN_MIN_PINS` of that instance's
-      separately declared pins, **and**
-    - strictly more than :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` of them.
-
-    Both bounds are load-bearing, and both exist to keep this entry off the
-    legal cases the plain tie warning is built to tolerate -- see each
-    constant's own derivation. The ratio is per *net*, not per instance: it is
-    the **dominant** net's share of the macro's port list, so a cell that ties
-    ``VPWR``/``VPB`` and ``VGND``/``VNB`` to their own two rails is 2-of-N
-    twice rather than 4-of-N once, and only a genuine single-net collapse
-    (#2658's report: 109 declared pins, nearly all on one parent net) crosses
-    the line.
-
-    **Why a warning and not an error** (the decision issue #2695 exists to
-    record). This stays in ``warnings[]``; there is deliberately no
-    ``ExtractError`` path and no ``--allow-tied-pins`` opt-out:
-
-    - Above the threshold the condition is *still legal*. Nothing in the
-      extraction contract forbids a macro from tying most of its ports
-      together, and an abstracted cell is unverifiable by construction (its
-      interior was erased), so the extractor cannot distinguish a deliberate
-      multi-way tie from a binding fault -- only the design's own intent can.
-      Failing the run would therefore reject correct netlists, exactly the
-      reasoning :func:`_tied_abstract_pin_warning` already records for the
-      unconditioned case and that ``docs/cli/extract.md`` records for issue
-      #2142's identical "make it an error" ask.
-    - A hard failure would need an escape hatch the CLI does not have, so the
-      strict half of the sketch costs a new flag plus its JSON-contract
-      surface to gate a check that cannot be made sound anyway. A distinct
-      warning string in the existing ``warnings: array<string>`` container
-      buys the whole diagnostic value at no contract cost.
-
-    So this function's job is purely to make the shape *unmissable* in a
-    ``warnings[]`` list that a whole-block run legitimately fills with
-    body-tie entries: it states the ratio and names the dominant net, which
-    the aggregated tie entry does not.
-    """
-    collapsed = [
-        (instance_name, cell_name, net_name, pin_names, declared)
-        for instance_name, cell_name, net_name, pin_names, declared in tied
-        if declared > 0
-        and len(pin_names) >= _ABSTRACT_COLLAPSED_PIN_MIN_PINS
-        and len(pin_names) / declared > _ABSTRACT_COLLAPSED_PIN_RATIO
-    ]
-    if not collapsed:
-        return []
-    examples = [
-        f"{instance_name} (cell '{cell_name}'): {len(pin_names)} of "
-        f"{declared} declared pins ({len(pin_names) / declared:.0%}) -> net "
-        f"'{net_name}' (pins {', '.join(pin_names)})"
-        for instance_name, cell_name, net_name, pin_names, declared in collapsed[
-            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
-        ]
-    ]
-    remainder = len(collapsed) - len(examples)
-    if remainder > 0:
-        examples.append(f"... and {remainder} more instance(s)")
-    return [
-        f"MOST PINS ON ONE NET: {len(collapsed)} --abstract-cells instance(s) "
-        "resolved a majority of their separately declared pins onto a single "
-        "net: " + "; ".join(examples) + ". This is the many-pins-one-net "
-        "collapse signature (issue #2658): when a pin's own access point "
-        "lands on no conductor of its own layer, the cross-layer fallback can "
-        "bind it to whatever wide parent shape happens to run under it, "
-        "collapsing most of a black box's port list onto that one net. It is "
-        "reported rather than failed because a deliberately tied-off pin is "
-        "legal and an abstracted cell's interior cannot be inspected to "
-        "confirm which this is -- so check the dominant net named above "
-        "against the macro's own declared port list before trusting a "
-        "downstream `klt lvs` verdict built on this netlist"
-    ]
 
 
 def _lef_pin_is_substrate(
@@ -1915,7 +1717,7 @@ def _wire_abstract_cells(
     global_net_ports_by_cell: dict[int, int] | None = None,
     lef_layer_roles: dict[str, str] | None = None,
     def_probes: dict[str, list[tuple[int, kdb.Point]]] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[kdb.Net]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
     ``abstracted_cells[]`` field alongside any ``warnings`` this pass itself
@@ -1974,11 +1776,9 @@ def _wire_abstract_cells(
     returned ``warnings`` alongside the per-instance geometric-miss entries
     above.
 
-    Instance/subckt naming is deterministic: cell types are visited in
-    ``instances``'s own order (already sorted by
-    :func:`_collect_abstract_instances`); each occurrence is named
-    ``"<cell type>_<n>"`` (0-based, per cell type), sanitized for SPICE via
-    :func:`_sanitize_instance_name`.
+    Instance names follow the deterministic placement order in ``instances``.
+    The third result identifies generated open nets by identity, so top-pin
+    reconciliation can keep them internal even when a user label has the same name.
 
     ``local_candidates_by_cell`` (issue #1183) is ``{<cell index>:
     <_local_pin_candidate_points() result>}`` for every matched cell type,
@@ -2016,8 +1816,11 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    unresolved: list[kdb.Net] = []
     joins = AbstractPinJoins()
     wired: list[tuple[kdb.SubCircuit, dict[str, int]]] = []
+    # Count LEF-merged substrate-role pins even when a verbose report is disabled.
+    substrate_pins_by_cell: dict[str, set[str]] = {}
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
@@ -2051,6 +1854,7 @@ def _wire_abstract_cells(
         substrate_pins = _substrate_pin_names(
             lef_macros, cell.name, lef_merged, global_net_ports
         )
+        substrate_pins_by_cell[cell.name] = substrate_pins
         if global_net_ports > len(substrate_pins):
             warnings.append(
                 f"--abstract-cells cell type '{cell.name}' "
@@ -2098,6 +1902,7 @@ def _wire_abstract_cells(
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
+                    unresolved.append(net)
                     warnings.append(
                         f"--abstract-cells instance '{instance_name}' (cell "
                         f"'{cell.name}') pin '{pin_name}': no conductor found "
@@ -2121,5 +1926,12 @@ def _wire_abstract_cells(
     tied = tied_instances(wired)
     warnings.extend(_tied_abstract_pin_warning(tied))
     warnings.extend(_collapsed_abstract_pin_warning(tied))
+    # Issue #5632: run after every matched instance is wired, so the
+    # substrate global's connection counts are final for this pass.
+    warnings.extend(
+        isolated_substrate_global_warning(
+            top_circuit, deck, substrate_pins_by_cell, report
+        )
+    )
     report.sort(key=lambda entry: entry["cell"])
-    return report, warnings
+    return report, warnings, unresolved

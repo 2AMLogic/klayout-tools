@@ -45,7 +45,7 @@ from typing import Any
 
 from . import env_provenance
 from ._drc_edge_pair_hull import _edge_pair_hull_points
-from ._layout import load_layout
+from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -98,9 +98,14 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
+from .drc_report_check import (
+    drc_rerun_result,
+    recorded_negative_control_kwargs,
+    report_checks,
+    resolve_report_deck,
+)
+from .drc_sg13g2_implant import implant_coverage
 from .drc_text_exempt import text_exempt
-from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -1234,6 +1239,7 @@ class _DrcSetup:
     # for a default run.
     tile: tuple[int, int] | None = None
     tile_windows: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    top: str | None = None
 
 
 @dataclass
@@ -1444,22 +1450,21 @@ def _prepare_drc(
     dbu_scale = nominal_dbu_um / layout.dbu
 
     top_cells = _select_top_cells(layout, top, DrcError)
+    if top is not None:
+        # Each rule looks up its inputs in this private layout. Remove layers
+        # absent from the selected hierarchy so execution and coverage share
+        # the same presence test, including for missing enclosure layers.
+        scope_cells = cells_in_hierarchy(layout, top_cells[0])
+        for index in layout.layer_indexes():
+            if all(cell.shapes(index).is_empty() for cell in scope_cells):
+                layout.delete_layer(index)
     tile_windows: dict[str, tuple[str, Any]] = {}
     if tile is not None:
         top_cells, tile_windows = _tile_top_cells(layout, top_cells, tile)
 
     deck_layer_tuples = _deck_layer_tuples(deck)
 
-    # Reuse layers.py's existing per-layer enumeration (used today by
-    # `klt layers`) for stream-layer enumeration, rather than a second
-    # `kdb.Layout` layer walk -- see #189. `top=top` keeps this scoped to the
-    # same cells `top_cells` above was just restricted to, so a scoped run's
-    # `coverage` reflects only what was actually checked, not the whole
-    # stream's layer usage.
-    stream_layer_tuples = {
-        (entry["layer"], entry["datatype"])
-        for entry in layers_report(path, top=top)["layers"]
-    }
+    stream_layer_tuples = {(info.layer, info.datatype) for info in layout.layer_infos()}
     return _DrcSetup(
         deck_name=deck_name,
         deck=deck,
@@ -1475,6 +1480,7 @@ def _prepare_drc(
         stream_layer_tuples=stream_layer_tuples,
         tile=tile,
         tile_windows=tile_windows,
+        top=top,
     )
 
 
@@ -2000,11 +2006,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-wide scopes, independent of stream geometry (#566).
-    deck_scope = sorted({rule.scope for rule in deck if rule.scope})
-
-    skipped_rule_ids = set(rules_skipped) | omitted_ids
-    voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
+    voltage_domain_warnings = _voltage_domain_warnings(
+        setup, set(rules_skipped) | omitted_ids
+    )
 
     # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
@@ -2040,8 +2044,9 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "unchecked_rules": unchecked_rules,
+        **implant_coverage(setup),
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
-        "deck_scope": deck_scope,
+        "deck_scope": sorted({rule.scope for rule in deck if rule.scope}),
         "unmodeled_rules": get_unmodeled_rules(deck_name),
         # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(
@@ -2144,6 +2149,7 @@ def _assemble_report(
             if setup.tile is None
             else {"tile": {"columns": setup.tile[0], "rows": setup.tile[1]}}
         ),
+        **({} if setup.top is None else {"top": setup.top}),
     }
     report["provenance"] = build_provenance(
         deck_name=setup.deck_name,
@@ -2181,6 +2187,7 @@ def run_drc(
             "schema_version": 3,
             "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
+            "top": <cell name>,  # only when `top` is given (issue #7000)
             "dbu_um": <database unit in micrometres, float>,
             "status": "clean" | "clean_partial" | "violations" | "not_checked",
             "violation_count": <int>,
@@ -2388,13 +2395,12 @@ def run_drc(
     ``nominal_dbu_um / layout.dbu`` so the same physical geometry produces
     identical violations regardless of the input stream's database unit.
 
-    ``top`` (issue #554) restricts the cells checked -- and the
-    ``coverage.layers_in_stream_without_rules``/``layers_checked``
-    denominator, which is recomputed from the same scope via
-    ``layers_report(path, top=top)`` -- to one named top cell, instead of
-    every top cell in the stream (today's default, unchanged when omitted).
+    ``top`` (issue #554) restricts rule evaluation and coverage to the named
+    cell and its descendants. When omitted, every top cell is checked.
     A named cell absent from the stream is a :class:`DrcError`, matching
-    ``klt ring-check --top``.
+    ``klt ring-check --top``. A given ``top`` is recorded verbatim as the
+    top-level ``top`` field (issue #7000) for :func:`rerun_drc_report` to
+    replay; an unscoped run omits the field.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) resolve no rule content -- this curated engine's rules come
@@ -2460,14 +2466,16 @@ def run_drc(
     tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
     control_result = None
     if negative_control is not None:
-        control_result = _run_curated_negative_control(
+        control = run_drc(
             negative_control,
-            negative_control_categories,
             deck_name=deck_name,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
             rules=rules,
+        )
+        control_result = _grade_negative_control(
+            control, negative_control, negative_control_categories
         )
     setup = _prepare_drc(
         path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
@@ -2487,17 +2495,12 @@ def run_drc(
     return report
 
 
-def _run_curated_negative_control(
+def _grade_negative_control(
+    control: dict[str, Any],
     control_path: str,
     categories: list[str] | None,
-    **run_kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the same curated deck over a known-bad fixture and require
-    findings (issue #4320), mirroring the native engine's control: proof the
-    deck can fail on this stream's own layers, so a clean verdict on the real
-    layout is not vacuous. Raises :class:`DrcError` (code
-    ``negative_control_failed``) on no violations or a missing category."""
-    control = run_drc(control_path, **run_kwargs)
+    """Require a known-bad fixture to trigger the specified categories on this deck."""
     found = sorted({v["rule"] for v in control["violations"]})
     missing = sorted(set(categories or []) - set(found))
     if control["violation_count"] < 1 or missing:
@@ -2592,18 +2595,11 @@ def rerun_drc_report(
     ``report_path`` by actually re-running the DRC deck it names and
     diffing the fresh report against the committed one.
 
-    Re-runs against exactly the ``file``/``deck``/``engine`` the committed
-    report itself names -- :func:`run_drc_klayout_engine` when
-    ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
-    engine) otherwise -- replaying a curated ``--rules`` subset's recorded
-    ``rule_selection.selectors`` (issue #2768; replay helpers in
-    :mod:`klayout_tools.drc_rerun_replay`).
-    **Known limitation**: neither the curated nor the
-    ``klayout`` engine's report records which ``--top`` (if any) the
-    original run used, so ``--rerun`` always re-checks every top cell
-    (``top=None``) -- a report originally scoped to one top cell via
-    ``--top`` will legitimately drift under ``--rerun`` if the stream has
-    others. Use ``--check`` (cheap mode) to avoid this if that matters.
+    Replays the recorded file and deck using the original engine. Both engines
+    replay the recorded ``top`` cell. Reports without it use each engine's
+    default (all tops for curated, a single top required for KLayout).
+    Curated reruns also replay the recorded rule selectors and tile dimensions.
+    Native reruns replay the negative control and its expected categories.
 
     Diffs the fresh report against the committed one via
     :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
@@ -2611,35 +2607,27 @@ def rerun_drc_report(
     ``provenance.klayout_module_version``, and the host-local
     ``environment.klayout_binary``. It also excludes ``deck_output`` because
     a native deck may print per-run timings and paths.
-    ``status: "drifted"`` names every other field that changed, including a
-    changed ``violation_count``/``violations`` (the DRC-outcome-changed
-    case) as well as a changed ``provenance.input.content_hash`` (the
-    input-moved case ``--check`` also catches, redundantly but harmlessly
-    here since this mode always re-hashes as a side effect of re-running).
+    ``status: "drifted"`` reports other differences, including violations
+    and the input content hash, which ``--check`` also verifies.
 
     Raises :class:`DrcError` for a missing/unparseable committed report, a
     report missing ``file``/``deck`` to rerun, or any error the rerun itself
     raises (bad file, unknown deck, engine error) -- never a traceback.
 
-    ``pdk_variant``/``pdk_root`` (the rerun invocation's own
-    ``--pdk``/``--pdk-root`` flags, issue #6986) select the PDK the fresh
-    run resolves into ``provenance.pdk``, so a report produced with a
-    resolved PDK can re-verify in full mode instead of always drifting
-    ``provenance.pdk`` with ``fresh: null``. Priority: the explicit flags,
-    then the variant name the committed report itself recorded, never
-    ``$PDK`` (:func:`klayout_tools.drc_rerun_replay._rerun_pdk_selection`);
-    the root keeps the existing ``--pdk-root``/``$PDK_ROOT``/search-order
-    machinery a fresh run uses. A report that records no PDK re-runs with
-    none -- ``fresh`` ``provenance.pdk`` stays ``null`` even on a host with
-    ``$PDK`` set -- and an unresolvable selection raises the fresh run's
-    own :class:`DrcError`.
+    Explicit ``--pdk`` and ``--pdk-root`` flags select the fresh run's PDK.
+    Without them, replay uses the recorded variant. For a native 3LM run
+    originally given an explicit root, replay recovers that install from
+    the deck path. Other runs use the usual root search. A report with no
+    recorded PDK or override keeps null PDK provenance, even with ``$PDK`` set.
     """
     # Replay helpers live in `.drc_rerun_replay` (this module's size
     # ceiling), function-level like the `drc_klayout_engine` import below.
     from .drc_rerun_replay import (
         _recorded_rule_selectors,
         _recorded_tile,
+        _recorded_top,
         _rerun_pdk_selection,
+        recorded_native_deck_vars,
     )
 
     committed = _load_committed_report(report_path, DrcError)
@@ -2662,10 +2650,7 @@ def rerun_drc_report(
         raise DrcError(
             "--deck-file cannot be combined with --check --rerun on a curated report"
         )
-    # Issue #6986: the fresh run resolves `provenance.pdk` too -- explicit
-    # flags first, then the variant the committed report itself recorded
-    # (never `$PDK`) -- so a PDK-resolved report re-verifies instead of
-    # always drifting `fresh: null`; a null-PDK report re-runs with none.
+    top = _recorded_top(committed)
     eff_variant, eff_root = _rerun_pdk_selection(committed, pdk_variant, pdk_root)
     if committed.get("engine") == "klayout":
         # Issue #5709: same resolver as --check (override, recorded, packaged).
@@ -2679,24 +2664,23 @@ def rerun_drc_report(
             raise DrcError(
                 f"committed report has no resolvable deck to rerun: {report_path}"
             )
+        from ._drc_gf180_3lm import recorded_pdk_root, replay_prelude_kwargs
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
-        # A committed report carrying `engine_deck_errors` was produced with
-        # `--allow-deck-errors` (issue #1941); re-running it strictly would
-        # fail the verification outright rather than diffing it, so the
-        # rerun reproduces the original invocation's own error tolerance.
+        native_kwargs = replay_prelude_kwargs(committed, deck)
+        if native_kwargs and pdk_variant is None and pdk_root is None:
+            eff_root = recorded_pdk_root(committed, deck, eff_variant)
+        native_kwargs["deck_vars"] = recorded_native_deck_vars(committed)
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
-            top=None,
+            top=top,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             pdk_variant=eff_variant,
             pdk_root=eff_root,
-            # Issue #2697: reproduce the original coverage assertion too,
-            # or a committed `clean` would always drift to `coverage_unknown`.
-            # Issue #2806: dispatched on its `kind`; a set assertion replays
-            # its embedded names, never the original manifest file.
             **_rerun_assertion_kwargs(committed),
+            **native_kwargs,
+            **recorded_negative_control_kwargs(committed),
         )
     else:
         # Issue #2768: a committed `--rules` subset replays its own recorded
@@ -2706,7 +2690,7 @@ def rerun_drc_report(
         fresh = run_drc(
             file_path,
             deck,
-            top=None,
+            top=top,
             pdk_variant=eff_variant,
             pdk_root=eff_root,
             rules=_recorded_rule_selectors(committed),

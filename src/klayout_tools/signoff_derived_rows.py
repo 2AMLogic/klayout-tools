@@ -73,6 +73,7 @@ from .signoff_evidence_pin import (
     content_hash_pin_state,
 )
 from .signoff_justified_gap import justified_gap_entries, structural_row_entries
+from .signoff_row_extent import row_credits
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
@@ -180,6 +181,14 @@ def _limit_keys(limits: Any) -> list[str]:
     if not isinstance(limits, dict):
         return []
     return [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
+
+
+def _recognised_bound(measurement: Any) -> bool:
+    """Whether ``measurement`` is a dict declaring a recognised, non-null
+    ``min``/``max`` bound (#7268 credit test, shared per #7329)."""
+    if not isinstance(measurement, dict):
+        return False
+    return bool(_limit_keys(measurement.get("limits")))
 
 
 def _bounds_checked(
@@ -417,6 +426,8 @@ def multi_row_info(
     failed: list[Any],
     spec_rows: list[dict[str, Any]] | None,
     credited: dict[int, tuple[list[str] | None, bool]] | None = None,
+    joint_covered: frozenset[str] = frozenset(),
+    joint_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
@@ -438,31 +449,20 @@ def multi_row_info(
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
 
-    Issue #6985: a row carrying the ``structural`` disposition is listed
-    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
-    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
-    covered nor a gap: its claim is evidenced by inspecting the pinned
-    artifact, not by a measurement). The key is omitted when no structural
-    row is declared, keeping a disposition-free report byte-identical.
+    Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
+    ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
+
+    Structural rows (#6985) appear separately in optional ``structural_rows``
+    entries with their id, claim and pinned artifact. They do not contribute
+    measured coverage, gaps or uncovered rows.
     """
     if spec_rows is None:
         return {}
-    credited = credited or {}
-    covered: set[str] = set()
-    row_sources: dict[str, str] = {}
-    for spec, rows, g in graded:
-        member_rows, derived = credited.get(id(spec), (rows, False))
-        # Issue #6027: a failed citation credits only derived rows -- those
-        # its tagged, limited, passing measurements grade; never asserted
-        # ones, and never from a refused (uncaptured) envelope.
-        if g[0] != "met" and not derived:
-            continue
-        for r in member_rows or []:
-            covered.add(r)
-            # A row covered by any derived citation is machine-checked.
-            if derived or r not in row_sources:
-                row_sources[r] = "derived" if derived else "asserted"
-    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    row_sources, slices, partial = row_credits(graded, credited or {}, spec_rows)
+    row_sources.update(dict.fromkeys(joint_covered, "derived"))
+    failed_rows = sorted(
+        {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
+    )
     justified = justified_gap_entries(spec_rows)
     structural = structural_row_entries(spec_rows)
     return {
@@ -473,7 +473,7 @@ def multi_row_info(
             if row["gap"] is None
             and row["justified_gap"] is None
             and row.get("structural") is None
-            and row["id"] not in covered
+            and row["id"] not in row_sources
             and row["id"] not in failed_rows
         ],
         "declared_gaps": [
@@ -491,5 +491,8 @@ def multi_row_info(
             and row.get("structural") is None
             and not row["ratified"]
         ],
+        **({"row_slices": slices} if slices else {}),
+        **({"partial_rows": partial} if partial else {}),
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
+        **({"joint_rows": joint_rows} if joint_rows else {}),
     }

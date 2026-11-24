@@ -3,7 +3,7 @@
 A MOS body is not a per-device port -- it is one well/substrate tie shared by
 every device a ``device_groups[]`` entry declares -- so
 ``layout_plan_execute`` binds it group-level, via
-``layout_plan_ports.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
+``layout_plan_body_nets.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
 (#4143), the shared ``WELL_TAP`` port a ring-less pfet array draws on
 sg13cmos5l (#1473, #5948), or, for a group that draws its own guard ring,
 that ring's first ``TAP_<side>`` port.
@@ -21,13 +21,13 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import pdk
+from klayout_tools.layout_plan_body_nets import body_tie_port, group_body_nets
 from klayout_tools.layout_plan_execute import (
     LayoutPlanExecuteError,
     execute_layout_plan_document,
     exit_code_for,
     partial_success,
 )
-from klayout_tools.layout_plan_ports import body_tie_port, group_body_nets
 from test_layout_plan_execute import _make_install, _write
 
 
@@ -204,8 +204,12 @@ def test_an_unroutable_body_tie_is_reported_not_dropped(tmp_path, gf180mcu_pdk_r
     """The behaviour change this issue ships: a plan that exited 0 with its
     bodies silently untied can now exit 3, because the tie it gained is a real
     net the router has to reach. It is never dropped silently -- the net is in
-    `unrouted_nets[]` with a parsed reason."""
+    `unrouted_nets[]` with a parsed reason. Since #6912 the automatic climb
+    may well rescue the tie (the self-net pad-crossing and ring classes are
+    climbable now), so the same-plane verdict is pinned by naming the net's
+    own plane (`routing.nets[<net>].layer_role`, #1655 -- never climbed)."""
     request = _gf180mcu_amp_request(tmp_path, gf180mcu_pdk_root, add_guard_ring=True)
+    request.setdefault("routing", {})["nets"] = {"VDD": {"layer_role": "metal"}}
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
     assert "VDD" in response["unrouted_nets"]

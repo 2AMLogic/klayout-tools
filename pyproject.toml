@@ -292,7 +292,14 @@ path = "hatch_build.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-markers = ["slow: long-running integration test"]
+markers = [
+    "slow: long-running integration test",
+    # Issue #7541: applied together with its skipif by the shared `_LIVE_ONLY`
+    # decorator in tests/test_post_route_sta.py; the post-route-sta-live CI
+    # lane selects `-m live_openroad`, so a new live test joins the lane by
+    # construction. tests/test_live_sta_lane_registration.py guards both ends.
+    "live_openroad: needs a live openroad on PATH, PDK_ROOT with a sky130A install, and KLT_SKIP_OPENROAD_TESTS unset (post-route-sta-live CI lane)",
+]
 
 # Report-only coverage (issue #3223): no `fail_under` on purpose -- measure
 # first, ratchet later. `_vendor/` is third-party code kept byte-exact.

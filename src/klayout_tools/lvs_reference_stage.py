@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_coverage import _implausible_dimensions
+from .lvs_flatten import root_selected_circuit
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
 
@@ -29,6 +31,7 @@ class _ReferenceStage(NamedTuple):
     reference_gate_level_case_folds: list[dict[str, str]]
     supply_universe: _lvs._SupplyPinUniverse | None
     unresolved_subckt_call_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     reference_pin_order_files: list[str]
     reference_netlist: Any
     reference_known_limit_counts: dict[str, int]
@@ -38,10 +41,7 @@ def _flatten_reference(
     netlist: Any, top: str | None, flatten: bool | list[str]
 ) -> dict[str, Any] | None:
     """Make a selected interior circuit the root before inlining its descendants."""
-    if top is not None:
-        selected = netlist.circuit_by_name(top)
-        if selected is not None and any(selected.each_ref()):
-            _lvs._prune_extra_top_circuits(netlist, selected)
+    root_selected_circuit(netlist, top)
     return _lvs._flatten_netlist_safely(
         netlist, "reference", keep=flatten if isinstance(flatten, list) else None
     )
@@ -190,6 +190,13 @@ def _read_reference_stage(
         finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
+    )
+    dimensions = _implausible_dimensions(
+        reference_netlist,
+        _lvs._reachable_circuits(
+            reference_netlist, reference_spec.get("top"), "reference"
+        ),
+        "reference",
     )
     # Issue #5676: the mirror image of the X-card form guard inside
     # `_read_reference_netlist` -- a plain-element reference whose `M` cards
@@ -367,6 +374,7 @@ def _read_reference_stage(
         reference_gate_level_case_folds=reference_gate_level_case_folds,
         supply_universe=supply_universe,
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        dimensions=dimensions,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
         reference_known_limit_counts=reference_known_limit_counts,
