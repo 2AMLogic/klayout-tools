@@ -469,7 +469,7 @@ envelope — see [`docs/json-contract.md`](../json-contract.md)).
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 | `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
 | `klt_sdf_renamed.sdf` / `klt_sdf_renamed_sources/<n>/<file>` | Written only when the input SDF names an instance whose escaped identifier contains a hierarchy divider (a flattened `generate` array's `\g[0].sub.u1`; issue #2897). The SDF copy and a copy of each request source declaring such an instance, with each one renamed to a plain identifier; `environment.sdf.renamed` lists the renames. The caller's own files are untouched. |
-| `klt_sdf_output_concat_sources/<n>/<file>` | Written only when the SDF carries a nonzero `INTERCONNECT` onto a bit of a top-level output port the netlist drives through separate per-bit assigns (issue #7534). A copy of each request source declaring such a port, with those assigns replaced by the equivalent whole-vector `assign y = {bN,…,b0};`; `environment.sdf.output_assign_rewritten` lists `{port, bits, file}` per rewritten port. The caller's own files are untouched, and shapes the rewrite cannot prove equivalent are never copied (the #6937 refusal fires instead). |
+| `klt_sdf_output_concat_sources/<n>/<file>` | Written only when the SDF carries a nonzero `INTERCONNECT` onto a bit of a top-level output port the netlist drives through separate per-bit assigns (issue #7534). A copy of each request source declaring such a port, with those assigns replaced by the equivalent whole-vector `assign y = {bN,…,b0};`; an escaped-identifier right-hand side — the `\sub.block_any` spelling a flattening P&R writer emits for every hierarchical net name — qualifies as the same scalar (issue #7693), its concat element keeping the terminating space (`assign y = {\sub.b1 ,\sub.b0 };`). `environment.sdf.output_assign_rewritten` lists `{port, bits, file}` per rewritten port. The caller's own files are untouched, and shapes the rewrite cannot prove equivalent are never copied (the #6937 refusal fires instead). |
 | `sim_build_icarus/<hdl_toplevel>.fst` (Icarus) or `dump.vcd` (Verilator) | The waveform trace, on `options.trace: true` runs only (Epic #1585 Phase 3, issue #1845) — location and format are cocotb's own per-engine convention, not a request choice: Icarus writes into `sim_build_icarus/`, Verilator writes directly into `.klt/functional-verification/`. Echoed by path/format/size in the response's `trace` field. Copy its `path` and `format` into a [wave-build request](wave.md) to query it. |
 
 ## Coverage
@@ -1027,11 +1027,15 @@ netlist and SDF stay byte-identical, no `dropped` class is recorded and
 `partial` stays `false`: no timing is discarded, only respelled. The
 rewrite fires only for a port klt can prove equivalent — every bit `0..N`
 of a plain `[N:0]` range assigned exactly once, each right-hand side a
-bare scalar identifier, and no other statement in the module driving or
-reading any bit (an instance port connection `.x(y[i])` counts as a
-driver). Everything else — a bit not assigned, assigned twice, or
-cell-driven, a non-identifier right-hand side, a range other than
-`[N:0]`, a top module not found — keeps the typed pre-build refusal above.
+bare scalar identifier (an escaped identifier — `\sub.block_any`, the
+spelling a flattening netlist writer emits for every hierarchical net
+name — is the same scalar and qualifies, keeping its terminating space in
+the concat: `assign y = {\sub.b1 ,\sub.b0 };`), and no other statement in
+the module driving or reading any bit (an instance port connection
+`.x(y[i])` counts as a driver). Everything else — a bit not assigned,
+assigned twice, or cell-driven, a non-identifier right-hand side, a range
+other than `[N:0]`, a top module not found — keeps the typed pre-build
+refusal above.
 An all-zero run is untouched: the rewrite applies only to a port with at
 least one nonzero arc onto one of its bits, so the
 `zero_delay_alias_port_interconnect` drop and `partial: true` behaviour of
