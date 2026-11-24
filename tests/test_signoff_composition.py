@@ -218,7 +218,7 @@ def test_own_passing_item_3_and_4_win_and_reach_tier_t1(tmp_path):
     assert "t1_composed_count" not in result
 
 
-def test_one_sub_block_unmet_leaves_the_row_unmet_with_detail(tmp_path):
+def test_one_sub_block_unmet_leaves_the_row_unmet_with_detail(tmp_path, capsys):
     """One sub-block unmet at item 3: the parent row stays
     unmet/no_evidence with `detail.composition` naming each sub-block and
     its status there -- and the composed sibling (item 4) is not counted
@@ -226,9 +226,8 @@ def test_one_sub_block_unmet_leaves_the_row_unmet_with_detail(tmp_path):
     sub_a = _write_sub(tmp_path, "A")
     sub_b = _write_sub(tmp_path, "B", drc=_DRC_VIOLATIONS)
 
-    result = build_tier_report(
-        _parent([sub_a, sub_b], evidence=_own_evidence_minus(tmp_path, "3", "4"))
-    )
+    parent = _parent([sub_a, sub_b], evidence=_own_evidence_minus(tmp_path, "3", "4"))
+    result = build_tier_report(parent)
 
     item_3 = _item(result, 3)
     assert item_3["status"] == "unmet"
@@ -249,6 +248,23 @@ def test_one_sub_block_unmet_leaves_the_row_unmet_with_detail(tmp_path):
     # Composed rows are not "unmet", so the reason rollup counts only the
     # genuinely-unmet item 3 -- decided and intended (issue #6927 AC).
     assert result["unmet_reason_counts"] == {"no_evidence": 1}
+
+    parent_path = _write(tmp_path, "parent.json", parent)
+    main(["signoff", "--manifest", parent_path, "--format", "text"])
+    text = capsys.readouterr().out
+    item_3_text, item_4_text = text.split("[UNMET] T1 #3 ", 1)[1].split(
+        "[COMP ] T1 #4 ", 1
+    )
+    assert "reason: no_evidence" in item_3_text
+    assert [
+        line.strip() for line in item_3_text.splitlines() if "sub-block:" in line
+    ] == [
+        f"sub-block: A (source={sub_a}, status=met, content_hash=sha256:layoutA)",
+        f"sub-block: B (source={sub_b}, status=unmet)",
+    ]
+    assert "composed from:" not in item_3_text
+    assert item_4_text.count("composed from:") == 2
+    assert text.count("sub-block:") == 2
 
 
 def test_items_outside_3_and_4_are_never_composed(tmp_path):
