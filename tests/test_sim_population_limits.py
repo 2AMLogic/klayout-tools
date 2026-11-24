@@ -404,17 +404,25 @@ def test_run_sim_population_limits_requires_a_resolvable_k_sigma(tmp_path):
         sim.run_sim(str(request))
 
 
-@pytest.mark.parametrize("malformed", ["typo", [1], False])
-def test_cli_preserves_malformed_monte_carlo_error(tmp_path, capsys, malformed):
-    request = _mc_request(
-        tmp_path,
-        malformed,
-        measurements=[{**_VOUT_MEAS, "population_limits": {"max_k_sigma": 1}}],
-    )
+@pytest.mark.parametrize(
+    ("malformed", "type_name"), [("typo", "str"), ([1], "list"), (False, "bool")]
+)
+@pytest.mark.parametrize("with_population_limit", [False, True])
+def test_cli_preserves_malformed_monte_carlo_error(
+    tmp_path, capsys, malformed, type_name, with_population_limit
+):
+    measurement = dict(_VOUT_MEAS)
+    if with_population_limit:
+        measurement["population_limits"] = {"max_k_sigma": 1}
+    request = _mc_request(tmp_path, malformed, measurements=[measurement])
+
     assert main(["sim", str(request), "--format", "json"]) == 1
-    assert json.loads(capsys.readouterr().err)["error"]["message"] == (
-        "request.monte_carlo must be an object"
-    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)["error"]
+    assert error["command"] == "sim"
+    expected = f"request.monte_carlo must be an object (got {type_name})"
+    assert error["message"] == expected
 
 
 def test_cli_sim_population_limits_failure_exits_3(tmp_path, monkeypatch, capsys):
