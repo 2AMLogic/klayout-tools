@@ -3064,7 +3064,12 @@ SDT horizontal edge is not on an ACTIVE edge); the list and rationale are in
 an `SDT.ACTIVE.AUX.2` hit that lies on an instance of one of those cells is
 expected library content, not a router error. The deck does not waive these
 hits, so they stay in the report; recognise them by the cell name, not by
-filtering the rule.
+filtering the rule. Match on the marker's `source_cell` after folding it to
+the listed name: drop a trailing `$VAR<n>` (a layout variant of the base cell,
+for example `BUFx4_ASAP7_75t_R$VAR1` or `BUFx4_ASAP7_75t_R$VAR12`), then the
+`_ASAP7_75t_<VT>` suffix, and compare what is left with the list (`BUFx4`). A
+cell whose folded name is not on the list stays unclassified. "Retained
+deviations" below says what the shipped-cell gate does and does not cover.
 
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
@@ -3793,9 +3798,11 @@ The gate has two parts, run for each library:
 
 **Retained deviations.** These ten cells violate `SDT.ACTIVE.AUX.2` as the
 DRM states it. They are the same in all three libraries (names drop the
-`_ASAP7_75t_<VT>` suffix). Table 3.8.1 says SDT horizontal edges (SDT not
-interacting with SRAMDRC) must coincide with ACTIVE horizontal edges, and
-Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE edge as illegal.
+`_ASAP7_75t_<VT>` suffix, and a `$VAR<n>` layout variant of a cell folds into
+its base name; see "Layout variants" after the table). Table 3.8.1 says SDT
+horizontal edges (SDT not interacting with SRAMDRC) must coincide with ACTIVE
+horizontal edges, and Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE
+edge as illegal.
 The rule is not loosened and the deck does not waive anything. Each deviation
 is an exact `(cell, rule)` entry, never a rule-wide or cell-wide waiver.
 Leaving a cell out of the clean run does not hide its other rules, because
@@ -3814,6 +3821,22 @@ rule:
 | `ICGx5p33DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 | `ICGx6p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 | `OAI22xp33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
+
+**Layout variants (`$VAR<n>`).** A placed block can also carry layout variants
+of these cells, named `<cell>_ASAP7_75t_<VT>$VAR<n>`. Fold a variant into its
+base cell before matching a marker's `source_cell` against the table: strip
+`$VAR<n>`, then the suffix. `BUFx4_ASAP7_75t_R$VAR1` is `BUFx4`, which is
+listed; `INVx1_ASAP7_75t_R$VAR1` is `INVx1`, which is not, so it stays
+unclassified. The table names library cells only and never variants, because
+a variant's name depends on the layout being checked.
+
+**Gate coverage, measured.** On lambdapdk v0.2.17 each of the three pinned GDS
+files holds 212 cells, all of them top cells, and none has a `$` in its name
+(read with KLayout 0.30.13). The gate places those cells by their library
+names, so it never places a `$VAR` variant and does not check that a variant's
+shapes equal its base cell's; the fold is a naming rule. A `$VAR` name in
+`source_cell` is a cell of the layout under check, since the pinned library
+holds none; what created it was not traced here.
 
 ### Per-rule fixtures
 
