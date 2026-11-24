@@ -267,6 +267,16 @@ def test_requires_composes_with_a_second_unbound_member(tmp_path):
         {"grid": {"supply_v": {"vdd": []}}},
         {"grid": {"supply_v": {"vdd": ["1.8"]}}},
         {"grid": {"supply_v": {"vdd": [1.8], "vio": [1.8, 3.3]}}},
+        # A value the reader cannot represent: `1e999` parses to infinity and
+        # `10**400` is an int too large for a float (the supply renders via
+        # `float(...)` when a missing point is labelled).
+        {"grid": {"supply_v": {"vdd": [float("inf")]}}},
+        {"grid": {"supply_v": {"vdd": [1.8, float("nan")]}}},
+        {"grid": {"supply_v": {"vdd": [10**400]}}},
+        {"grid": {"temperature_c": [float("inf")]}},
+        {"grid": {"temperature_c": [27, -float("inf")]}},
+        {"grid": {"temperature_c": [float("nan")]}},
+        {"grid": {"temperature_c": [10**400]}},
         {"ngspice_options": {}},
         {"ngspice_options": ["reltol"]},
         {"ngspice_options": {"reltol": [0.001]}},
@@ -282,6 +292,20 @@ def test_a_malformed_requires_is_invalid_evidence_never_a_raise(tmp_path, requir
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
     assert item["detail"]["problem"].startswith("member 2 'requires")
+
+
+def test_a_non_finite_joint_grid_axis_is_refused_by_the_same_validator(tmp_path):
+    # `joint_grid` and `requires.grid` share one axis validator by design.
+    a = _write(tmp_path, "a.json", _grid_envelope())
+    b = _write(tmp_path, "b.json", _grid_envelope())
+    joint = {"members": [a, b], "supply_v": {"vdd": [10**400]}}
+
+    item = _item5(
+        {"5": [{"file": a}, {"file": b}]}, [{"id": "pvt", "joint_grid": joint}]
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
 
 
 def test_a_lone_citation_names_the_entry_in_the_problem(tmp_path):
@@ -319,20 +343,130 @@ def test_a_monte_carlo_member_may_still_bind_its_solver_profile(tmp_path):
     assert item["status"] == "met"
 
 
-@pytest.mark.parametrize("item_id", [3, 6, 7])
-def test_requires_on_another_item_is_invalid_evidence(tmp_path, item_id):
-    path = _write(tmp_path, "a.json", _grid_envelope())
-    manifest = {
-        "block": "demo-block",
-        "kind": "analog",
-        "evidence": {str(item_id): [{"file": path, "requires": {"grid": _GRID}}]},
-    }
+_SHAPES = {  # the same citation as a lone entry, a list member, item 11's groups
+    "lone": lambda c: c,
+    "list": lambda c: [c],
+    "grouped": lambda c: [[c], [c]],
+}
+
+
+@pytest.mark.parametrize("readable", [True, False])
+@pytest.mark.parametrize("shape", _SHAPES)
+@pytest.mark.parametrize("item_id", [1, 2, 3, 4, 6, 7, 8, 9, 10, 11])
+def test_requires_on_another_item_is_invalid_evidence(
+    tmp_path, item_id, shape, readable
+):
+    # A lone object on item 2/3/4/7/8 (or item 11's compound entry) never
+    # reaches the multi-citation grader: it used to normalize without the key
+    # and grade `met` (#7807). An unreadable file proves the refusal comes
+    # before any citation is read -- else it would grade `unreadable_evidence`.
+    path = _write(tmp_path, "a.json", _grid_envelope()) if readable else "nowhere.json"
+    citation = {"file": path, "requires": {"grid": _GRID}}
+    evidence = {str(item_id): _SHAPES[shape](citation)}
+    manifest = {"block": "demo-block", "kind": "analog", "evidence": evidence}
 
     item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == item_id)
 
     assert item["status"] == "unmet"
     assert item["reason"] == "invalid_evidence"
+    assert item["citation"] is None
     assert item["detail"]["problem"] == "'requires' is supported on item 5 only"
+
+
+# --------------------------------------------------------------------------- #
+# A corner's own `options` override beats the request echo (#7807 review).
+# --------------------------------------------------------------------------- #
+
+
+def _override_corner(envelope: dict, index: int, options) -> dict:
+    """``envelope`` with corner ``index`` reporting ``options`` -- what a
+    ``corners.options`` point echoes as ``corners[].options``."""
+    corners = [dict(c) for c in envelope["corners"]]
+    corners[index] = {**corners[index], "options": options}
+    return {**envelope, "corners": corners}
+
+
+def test_a_corner_override_gives_the_same_request_echo_an_unmet_verdict(tmp_path):
+    # Two runs, one request echo (`reltol: 0.001`): only the second swept a
+    # tighter `corners.options` point, and it must not credit the same claim.
+    declared = _with_options(_grid_envelope(), {"reltol": 0.001})
+    overridden = _override_corner(declared, 4, {"reltol": 0.0001})
+    requires = {"ngspice_options": {"reltol": 0.001}}
+
+    _, plain_item = _graded(tmp_path, declared, requires, "plain.json")
+    path, item = _graded(tmp_path, overridden, requires, "tight.json")
+
+    assert plain_item["status"] == "met"
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["requires_unmet"] == [
+        {
+            "member": path,
+            "ngspice_options": {
+                "required": {"reltol": 0.001},
+                "observed": {"reltol": 0.001},  # the request echo stays reported
+                "corner_overrides": [
+                    {
+                        "corner_id": declared["corners"][4]["corner_id"],
+                        "option": "reltol",
+                        "observed": 0.0001,
+                    }
+                ],
+            },
+        }
+    ]
+
+
+def test_every_overriding_corner_is_named_with_its_observed_value(tmp_path):
+    envelope = _with_options(_grid_envelope(), OPTIONS)
+    envelope = _override_corner(envelope, 2, {"reltol": 1e-05, "abstol": 1e-09})
+    envelope = _override_corner(envelope, 9, {"reltol": 0.01})
+    requires = {"ngspice_options": {"reltol": 0.001, "abstol": 1e-12}}
+
+    _, item = _graded(tmp_path, envelope, requires)
+
+    ids = [c["corner_id"] for c in envelope["corners"]]
+    overrides = item["detail"]["requires_unmet"][0]["ngspice_options"][
+        "corner_overrides"
+    ]
+    assert overrides == [
+        {"corner_id": ids[2], "option": "abstol", "observed": 1e-09},
+        {"corner_id": ids[2], "option": "reltol", "observed": 1e-05},
+        {"corner_id": ids[9], "option": "reltol", "observed": 0.01},
+    ]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"reltol": 0.001},  # agrees with the requirement
+        {"reltol": 1e-3},  # the same number, spelled differently
+        {"itl4": 100},  # an option the member does not require
+        None,  # no `options` block, or a malformed one: nothing to compare
+        [],
+        "reltol",
+    ],
+)
+def test_a_corner_option_that_agrees_or_is_not_required_stays_met(tmp_path, options):
+    envelope = _override_corner(_with_options(_grid_envelope(), OPTIONS), 4, options)
+
+    _, item = _graded(tmp_path, envelope, {"ngspice_options": {"reltol": 0.001}})
+
+    assert item["status"] == "met"
+
+
+def test_a_corner_override_never_stands_in_for_the_request_echo(tmp_path):
+    # Every corner agreeing is still not a declared request profile.
+    envelope = _grid_envelope()
+    envelope["corners"] = [
+        {**c, "options": {"reltol": 0.001}} for c in envelope["corners"]
+    ]
+
+    _, item = _graded(tmp_path, envelope, {"ngspice_options": {"reltol": 0.001}})
+
+    assert item["status"] == "unmet"
+    entry = item["detail"]["requires_unmet"][0]["ngspice_options"]
+    assert entry == {"required": {"reltol": 0.001}, "observed": None}
 
 
 # --------------------------------------------------------------------------- #

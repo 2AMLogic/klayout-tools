@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 
 #: The PVT axes a grid declaration may carry. An absent (or ``null``) axis
 #: takes the request-side default when the required points are expanded
@@ -40,9 +40,11 @@ def _supply_problem(supply: Any) -> str | None:
             or not rail
             or not isinstance(values, list)
             or not values
-            or not all(is_number(v) for v in values)
+            or not all(is_finite_number(v) for v in values)
         ):
-            return f"'supply_v' rail {rail!r} must be a non-empty list of numbers"
+            return (
+                f"'supply_v' rail {rail!r} must be a non-empty list of finite numbers"
+            )
         lengths.add(len(values))
     if len(lengths) != 1:  # rails sweep zipped, as in a sim request
         return "'supply_v' rails must list the same number of values"
@@ -55,8 +57,12 @@ def grid_axes_problem(raw: Mapping[str, Any]) -> str | None:
     request-side default applies); a present one must be non-empty with
     well-typed values: ``process`` a list of non-empty strings,
     ``supply_v`` an object of equal-length numeric lists (one per rail),
-    ``temperature_c`` a list of numbers (``bool`` is not a number). Keys
-    other than the three axes are the caller's concern."""
+    ``temperature_c`` a list of numbers. A value must be a **finite** number
+    -- a ``bool`` is not a number, and NaN, an infinity or an integer too
+    large for a float (``1e999`` / ``10**400`` in a JSON manifest) are refused
+    here rather than reaching the point-label rendering, which converts a
+    supply value to ``float`` and would raise ``OverflowError``. Keys other
+    than the three axes are the caller's concern."""
     process = raw.get("process")
     if process is not None and (
         not isinstance(process, list)
@@ -71,7 +77,7 @@ def grid_axes_problem(raw: Mapping[str, Any]) -> str | None:
     if temperature is not None and (
         not isinstance(temperature, list)
         or not temperature
-        or not all(is_number(t) for t in temperature)
+        or not all(is_finite_number(t) for t in temperature)
     ):
-        return "'temperature_c' must be a non-empty list of numbers"
+        return "'temperature_c' must be a non-empty list of finite numbers"
     return None

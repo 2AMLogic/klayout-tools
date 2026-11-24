@@ -35,22 +35,37 @@ is already there::
     number). An envelope with **no** echo cannot prove a tolerance profile,
     so an absent echo is unmet, never credited.
 
+    The request echo is not what every corner solved with: a
+    ``corners.options`` axis writes its own ``.options`` card ahead of the
+    body's and the request's (ngspice honors the first card that sets a
+    name -- measured in ``tests/test_sim_options.py``), and each such corner
+    reports it as ``corners[].options``. So every corner is checked too: one
+    whose ``options`` sets a *required* option to another value fails the
+    assertion, however the request echo reads. An override that agrees with
+    the requirement, or one of an option the member does not require, is
+    fine.
+
 The assertion is an *additional* refusal: the member's own verdict, the
 ``rows`` it credits and every other check are unchanged. A shortfall grades
 the item ``unmet`` / ``partial_coverage`` with ``detail.requires_unmet``, one
 entry per failing member -- ``member``, plus ``missing_points`` (envelope
 ``corner_id`` spelling) when the grid fell short and ``ngspice_options`` =
 ``{"required", "observed"}`` when the solver profile did (``observed`` is
-``null`` for an absent echo). A member without ``requires`` is untouched, so
-a manifest that never uses the key renders byte-identically.
+``null`` for an absent echo), with ``corner_overrides`` -- one
+``{"corner_id", "option", "observed"}`` per conflicting corner option --
+added only when a corner overrode a required option. A member without
+``requires`` is untouched, so a manifest that never uses the key renders
+byte-identically.
 
 Malformed input is ``invalid_evidence`` with ``detail.problem``, never a
 raise: a non-object, an unknown key, an empty ``requires``/axis/option map,
-a non-numeric axis value, a non-scalar option, ``requires`` on any item
-other than 5, and a Monte Carlo member under ``requires.grid`` (sampled
-corners echo their base point's PVT values, and "a point counts only when
-every sample passed" is not a traced ``klt sim`` contract -- the same
-refusal ``joint_grid`` states).
+a non-numeric or non-finite axis value, a non-scalar option, ``requires`` on
+any item other than 5 (:func:`misplaced_requires_problem`: refused whatever
+the entry's shape, because an assertion the grader will not check must never
+be dropped silently into a ``met``), and a Monte Carlo member under
+``requires.grid`` (sampled corners echo their base point's PVT values, and
+"a point counts only when every sample passed" is not a traced ``klt sim``
+contract -- the same refusal ``joint_grid`` states).
 """
 
 from __future__ import annotations
@@ -61,8 +76,13 @@ from typing import Any, NamedTuple
 from ._jsonnum import is_finite_number, is_number
 from .signoff_base import _citation_label as citation_label
 from .signoff_grid_axes import GRID_AXIS_KEYS, grid_axes_problem
+from .signoff_joint_rows import _envelope_corners as envelope_corners
 from .signoff_joint_rows import has_mc_corners, missing_grid_points
-from .signoff_unmet_reasons import _REASON_INVALID_EVIDENCE, _REASON_PARTIAL_COVERAGE
+from .signoff_unmet_reasons import (
+    _REASON_INVALID_EVIDENCE,
+    _REASON_PARTIAL_COVERAGE,
+    _REASON_UNGRADEABLE_BY_BUILD,
+)
 
 #: The one T1 item whose members accept ``requires``.
 REQUIRES_ITEM_ID = 5
@@ -76,6 +96,50 @@ def has_requires(raw: Any) -> bool:
     """Whether a raw evidence entry carries a ``requires`` key (the routing
     test for a single, non-list citation, like ``covers``)."""
     return isinstance(raw, dict) and "requires" in raw
+
+
+def misplaced_requires_problem(item_id: int, raw: Any) -> str | None:
+    """The refusal for an item's raw evidence entry carrying ``requires`` on
+    any item but 5, or ``None``. Item 6 and 7 keep their own mechanisms, and
+    the other items have no solver profile or coordinate scope to bind.
+
+    One gate for every entry shape -- a lone citation object, a list of them,
+    and item 11's list of lists -- decided before any member is parsed,
+    resolved or run. The shapes that never reach the multi-citation grader
+    (a lone object on item 2, 3, 4, 7 or 8, or item 11's compound entry)
+    otherwise normalize without the key and grade ``met`` with the assertion
+    discarded, which a list-wrapped copy of the same object would not."""
+    if item_id != REQUIRES_ITEM_ID and _carries_requires(raw):
+        return f"'requires' is supported on item {REQUIRES_ITEM_ID} only"
+    return None
+
+
+def _carries_requires(raw: Any) -> bool:
+    """:func:`has_requires` for an entry or any citation nested in lists."""
+    if isinstance(raw, list):
+        return any(_carries_requires(part) for part in raw)
+    return has_requires(raw)
+
+
+def pre_grading_refusal(
+    item_id: int, raw: Any, graded_by_build: bool
+) -> tuple[str, dict[str, Any]] | None:
+    """The ``(reason, detail)`` of a cited item refused before any citation is
+    normalized, resolved or run, or ``None`` when it goes on to be graded.
+
+    Two refusals share this slot, both decided ahead of the evidence: an item
+    this build has no rules for (``ungradeable_by_build``, issue #2176 --
+    never run a command-backed entry whose answer this build could not
+    interpret) and a ``requires`` on any item but 5 (issue #7807,
+    :func:`misplaced_requires_problem`). An uncited item (``raw is None``) is
+    refused by neither."""
+    if raw is None:
+        return None
+    if not graded_by_build:
+        return _REASON_UNGRADEABLE_BY_BUILD, {}
+    if (problem := misplaced_requires_problem(item_id, raw)) is not None:
+        return _REASON_INVALID_EVIDENCE, {"problem": problem}
+    return None
 
 
 def _unknown_keys_problem(name: str, keys: Any) -> str:
@@ -130,18 +194,6 @@ def read_requires(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     return dict(raw), None
 
 
-def requires_item_problem(
-    members: list[tuple[dict[str, Any], list[str] | None]], requires_item: bool
-) -> str | None:
-    """The refusal for parsed ``(spec, rows)`` members carrying ``requires``
-    on any item but 5 (item 6 and 7 keep their own mechanisms, and the
-    per-cell report lists have no solver profile to bind); ``None``
-    otherwise. Checked before any member is graded or run."""
-    if not requires_item and any("requires" in spec for spec, _rows in members):
-        return f"'requires' is supported on item {REQUIRES_ITEM_ID} only"
-    return None
-
-
 def _option_matches(observed: Any, required: Any) -> bool:
     """Equality of one solver option: a ``bool`` only equals the same
     ``bool`` (``True == 1`` in Python, not in JSON), numbers compare as
@@ -161,6 +213,50 @@ def _observed_options(envelope: Mapping[str, Any] | None) -> dict[str, Any] | No
     return echo if isinstance(echo, dict) and echo else None
 
 
+def _corner_overrides(
+    envelope: Mapping[str, Any] | None, required: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """The corners whose own ``options`` set a *required* option to a value
+    other than the required one, as ``{"corner_id", "option", "observed"}``
+    in envelope order (options by name). Such a corner solved with its own
+    ``.options`` card, not the request echo's value."""
+    overrides: list[dict[str, Any]] = []
+    for corner in envelope_corners(envelope) if isinstance(envelope, dict) else []:
+        options = corner.get("options")
+        if not isinstance(options, dict):
+            continue
+        overrides.extend(
+            {
+                "corner_id": corner.get("corner_id"),
+                "option": name,
+                "observed": options[name],
+            }
+            for name in sorted(options, key=str)
+            if name in required and not _option_matches(options[name], required[name])
+        )
+    return overrides
+
+
+def _options_shortfall(
+    required: Mapping[str, Any], envelope: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The ``ngspice_options`` facet of a member's shortfall, ``None`` when
+    the request echo carries every required option at its value **and** no
+    corner overrides one (:func:`_corner_overrides`)."""
+    observed = _observed_options(envelope)
+    overrides = _corner_overrides(envelope, required)
+    echoed = observed is not None and all(
+        name in observed and _option_matches(observed[name], value)
+        for name, value in required.items()
+    )
+    if echoed and not overrides:
+        return None
+    facet: dict[str, Any] = {"required": required, "observed": observed}
+    if overrides:
+        facet["corner_overrides"] = overrides
+    return facet
+
+
 def _member_shortfall(
     requires: Mapping[str, Any], envelope: Mapping[str, Any] | None
 ) -> dict[str, Any]:
@@ -171,13 +267,9 @@ def _member_shortfall(
         if missing:
             shortfall["missing_points"] = missing
     if "ngspice_options" in requires:
-        required = requires["ngspice_options"]
-        observed = _observed_options(envelope)
-        if observed is None or not all(
-            name in observed and _option_matches(observed[name], value)
-            for name, value in required.items()
-        ):
-            shortfall["ngspice_options"] = {"required": required, "observed": observed}
+        facet = _options_shortfall(requires["ngspice_options"], envelope)
+        if facet is not None:
+            shortfall["ngspice_options"] = facet
     return shortfall
 
 

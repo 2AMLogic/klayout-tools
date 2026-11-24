@@ -275,13 +275,12 @@ from .signoff_justified_gap import (
     justified_gap_report_fields,
 )
 
-# The per-citation `requires` assertion (issue #7807): `_parse_multi_members`,
-# `grade_spec`, `_post_member_outcome`.
+# The per-citation `requires` assertion (issue #7807): `_build_tier_item`,
+# `_parse_multi_members`, `_post_member_outcome`.
 from .signoff_member_requires import (
-    REQUIRES_ITEM_ID,
     has_requires,
+    pre_grading_refusal,
     read_requires,
-    requires_item_problem,
     requires_outcome,
 )
 
@@ -404,7 +403,7 @@ from .signoff_unmet_reasons import (
     _REASON_STALE_EVIDENCE,
     _REASON_TIER_NOT_SUPPORTED,
     _REASON_UNANCHORED_EVIDENCE,
-    _REASON_UNGRADEABLE_BY_BUILD,
+    _REASON_UNGRADEABLE_BY_BUILD as _REASON_UNGRADEABLE_BY_BUILD,
     _REASON_UNREADABLE_EVIDENCE,
     _REASON_UNRECOGNIZED_ENVELOPE,
     _REASON_UNVERIFIABLE_PROVENANCE,
@@ -6028,8 +6027,11 @@ def _build_tier_item(
     report_list = corner_box is not None or (
         item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     )
-    if raw_entry is not None and not graded_by_build:
-        reason = _REASON_UNGRADEABLE_BY_BUILD
+    # Decided before the evidence is resolved at all: an item this build has no
+    # rules for, and (issue #7807) a `requires` on any item but 5.
+    refusal = pre_grading_refusal(item_id, raw_entry, graded_by_build)
+    if refusal is not None:
+        reason, failure_detail = refusal
     elif (
         item_id == _STATISTICAL_CLAIMS_ITEM_ID
         and isinstance(raw_entry, dict)
@@ -6083,7 +6085,6 @@ def _build_tier_item(
             require_coverage_invalid=item3_key_invalid(
                 item_id, require_coverage_disclosure_invalid
             ),
-            requires_item=item_id == REQUIRES_ITEM_ID,
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)
@@ -6179,7 +6180,6 @@ def _grade_multi_citation(
     corner_box: CornerBox | None = None,
     require_derived_invalid: bool = False,
     require_coverage_invalid: bool = False,
-    requires_item: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -6239,7 +6239,6 @@ def _grade_multi_citation(
         check_slices,
         require_derived_invalid=require_derived_invalid,
         corner_box=corner_box,
-        requires_item=requires_item,
     )
     if members is None:
         return invalid(problem or "malformed evidence entry")
@@ -6325,7 +6324,6 @@ def _checked_multi_members(
     *,
     require_derived_invalid: bool = False,
     corner_box: CornerBox | None = None,
-    requires_item: bool = False,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
@@ -6343,8 +6341,6 @@ def _checked_multi_members(
         ([], None) if raw_entry is None else _parse_multi_members(raw_entry)
     )
     if members is None:
-        return None, problem
-    if problem := requires_item_problem(members, requires_item):  # issue #7807
         return None, problem
     if not _members_rows_declared(members, spec_rows):
         return None, "a member names a row that is undeclared or a declared gap"

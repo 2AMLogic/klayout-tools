@@ -221,9 +221,16 @@ def grade_grouped_power_delivery(
     ``members_covered``/``members_total`` fields the per-cell items carry
     (issue #5031; :data:`~klayout_tools.signoff_multi_member.MEMBER_COUNT_ITEMS`
     includes item 11's grouped form).
+
+    A citation carrying ``requires`` (item 5 only, issue #7807) refuses the
+    item as ``invalid_evidence`` before any part is normalized or run, rather
+    than normalizing without the key and grading as if it were absent.
     """
+    from .signoff_member_requires import misplaced_requires_problem
     from .signoff_power_delivery import _grade_power_delivery
 
+    if (problem := misplaced_requires_problem(item_id, raw_entry)) is not None:
+        return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
     groups = normalize_evidence_groups(raw_entry)
     if groups is None:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {}, {}
