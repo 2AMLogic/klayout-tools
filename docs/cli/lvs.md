@@ -1791,7 +1791,14 @@ netlist, but the reference side had no code path at all. Setting
 `reference.form` to `"gate-level-verilog"` closes that gap: `klt lvs` reads
 `reference.netlist` as Verilog instead of SPICE and converts it to
 plain-element-shaped SPICE first, exactly like `"subckt-call"` converts a
-schematic flow's simulation-form SPICE.
+schematic flow's simulation-form SPICE. That conversion — and every
+reference-input error it can raise — happens **before the layout is
+extracted** (issue #7822): a reference the narrow grammar below rejects
+names the failing input immediately, rather than after a full device
+extraction (minutes on a large layout) has already run. LVS converts the Verilog once and reuses that conversion after extraction.
+Its `environment.reference_sha256` hashes those original file bytes, and
+`environment.reference_module_names` records any escaped names mapped from
+them, even if synthesis replaces the file during the run.
 
 **The layout side must be abstracted too.** Both sides of this compare
 describe a standard cell as a pin-only black box, so the layout netlist has
@@ -2027,10 +2034,14 @@ forms under "Vector-ported macros" below), a simple `assign
 vector alias or tie-off padding). A concatenation is expanded MSB-first into
 one per-bit alias using the module's own `wire`/`input`/`output`/`inout`
 declared widths; both sides must be exactly the same total width, and each
-operand must be a plain net, a single-index bit-select, a nested
+operand must be a plain net, a single-index bit-select, a fixed part-select
+of a declared bus in its declared direction (`a[7:4]`, also on an escaped
+base `\bus [7:0]`; issue #7822 — Yosys emits exactly this in a concatenated
+bus alias, `assign x = { a[7:0], a };`), a nested
 concatenation (`{ {a, b}, x }`), or a replication with a literal positive
-integer count (`{2{a}}`, `{2{ {a, b} }}`; issue #4117). Literals (`1'b0`) and
-part-selects (`a[7:4]`) inside a concatenation, a zero or non-integer
+integer count (`{2{a}}`, `{2{ {a, b} }}`; issue #4117). Literals (`1'b0`)
+inside a concatenation, a part-select with non-integer bounds, a part-select
+of an undeclared bus or against its declared direction, a zero or non-integer
 replication count, and unbalanced braces remain unsupported and fail with the
 same "only a plain `assign`" error. A Verilog **escaped identifier** (`\name`) is
 accepted wherever a name is, and is read exactly as Verilog defines it —
