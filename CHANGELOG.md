@@ -756,6 +756,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extract` / `sim` document, and an unset `$VAR` is a request error naming the
   variable instead of a bare "not found". Additive: a literal path keeps its
   meaning, no `schema_version` bump.
+- **Changed** (#5593, additive — `klt sim` `schema_version` unchanged): a
+  batch run's surfaced `could not find a valid modelname` diagnostic
+  (`model_bin_range`/`ngspice_fatal`, from the retrieved engine log) is now
+  self-attributing: with a usable `worker_environment` capture it names the
+  fleet's observed PDK `variant` and `stamp_sha256` (plus the `SOURCES`
+  revision token when parseable), the `pdk_stamp_comparison` status (and
+  `reason`), and names `options.stage_model_inputs: true` as the remedy --
+  instead of advising a comparison against the submitter's own bin cards,
+  which a local-pass/fleet-fail abort has typically already ruled out. A run
+  that already staged its models is not told to stage again; without a
+  usable capture the message is byte-for-byte unchanged. A declared
+  `options.pdk_revision` on a `batch` run with a readable worker stamp
+  additionally records the advisory `environment.pdk_revision_comparison`
+  (`match` by `stamp_sha256` or revision token, `mismatch`, or
+  `not_comparable`; per-`fleet[]` under sharding) beside
+  `pdk_revision_asserted` -- it never changes the run's outcome. See
+  `docs/cli/sim.md`.
 - **`klt drc --deck gf180mcu` reports fully orphan cuts** (#5915, 2026-11-17):
   the eight single-population conductor-over-cut enclosure rules
   (`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,

@@ -311,6 +311,7 @@ from .sim_environment_report import _corner_process_sections
 from .sim_environment_report import (
     corner_coverage_environment as _corner_coverage_environment,
 )
+from .sim_expr_hint import unsupported_function_hint
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -1320,9 +1321,7 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # own device instances to name a likely culprit before falling
         # back to ngspice's raw line.
         "model_bin_range",
-        re.compile(
-            r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
-        ),
+        sim_bin_range.MODELNAME_ABORT_RE,
     ),
     (
         # The generic shapes of an ngspice deck abort (issue #3879): `Error
@@ -4337,6 +4336,7 @@ def _run_sim_corners(
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
+            request=request,
             corners_lost=corners_lost,
             artifacts_dir=artifacts_dir,
             checkpoint_path=checkpoint_path if checkpoint_retained else None,
@@ -4385,7 +4385,6 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
     remote = environment.get("remote")
@@ -8205,32 +8204,10 @@ def _no_value_message(
             "complex result prints as a table instead; reduce it with e.g. "
             "vecmax()/mean()/db()/<expr>[0])"
         )
-        message += _unsupported_function_hint(spec["expr"])
+        message += unsupported_function_hint(spec["expr"])
     if save_mode == "netlist":
         message += SAVE_MODE_NETLIST_NO_VALUE_HINT
     return message
-
-
-#: ngspice control-language functions that do not exist, with the working
-#: replacement (issue #4290; docs/cli/sim.md "Functions `expr` does not have").
-_UNSUPPORTED_EXPR_FUNCTIONS = {
-    "sum": "mean(x)*length(x)",
-    "sgn": "(x gt 0) - (x lt 0)",
-    "max": "vecmax(x) (max() takes two arguments)",
-    "min": "vecmin(x) (min() takes two arguments)",
-}
-
-
-def _unsupported_function_hint(expr: str) -> str:
-    """Name the replacement for any unsupported ngspice function in ``expr``."""
-    found = [
-        f"{name}() -> {fix}"
-        for name, fix in _UNSUPPORTED_EXPR_FUNCTIONS.items()
-        if re.search(rf"(?<![\w.]){name}\(", expr)
-    ]
-    if not found:
-        return ""
-    return " -- ngspice has no such function; use: " + "; ".join(found)
 
 
 def _read_log_file(path: str) -> str:
@@ -9494,7 +9471,9 @@ def _classify_diagnostics(
                 # The follow-on "could not find a valid modelname" is a
                 # consequence of the superseding cause, not a bin range.
                 continue
-            message = _diagnose_modelname_error(netlist_path) or message
+            message = _diagnose_modelname_error(netlist_path) or _line_containing(
+                log_text, match.end() - 1
+            )
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:

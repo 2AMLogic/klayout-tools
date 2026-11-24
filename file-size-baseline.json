@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 593
+      "lines": 589
     },
     {
       "path": "src/klayout_tools/trajectory.py",

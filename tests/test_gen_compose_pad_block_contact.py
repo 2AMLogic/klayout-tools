@@ -3,6 +3,7 @@
 from collections import Counter
 
 import klayout.db as kdb
+import pytest
 
 from klayout_tools import gen_compose
 from klayout_tools.extract import run_extract
@@ -13,7 +14,7 @@ from test_gen_compose import _isolate as _isolate
 MET1, LI1 = (68, 20), (67, 20)
 
 
-def _compose_cell_strips(tmp_path, specs, connectivity):
+def _compose_cell_strips(tmp_path, specs, connectivity, *, extra_strips=None):
     """Hand-drawn ``blocks[].cell`` strips with declared ports, composed and
     extracted -- the fixture shape issue #7325's reproducer established.
 
@@ -28,26 +29,28 @@ def _compose_cell_strips(tmp_path, specs, connectivity):
     library = tmp_path / "library.gds"
     blocks = []
     for name, (layer, box, port_xy, direction_deg, _origin) in specs.items():
-        layout.create_cell(name).shapes(layout.layer(*layer)).insert(
-            kdb.DBox(*box).to_itype(layout.dbu)
-        )
+        cell = layout.create_cell(name)
+        ports = []
+        strips = [("P", layer, box, port_xy, direction_deg)]
+        strips.extend((extra_strips or {}).get(name, []))
+        for port, metal, rect, point, direction in strips:
+            cell.shapes(layout.layer(*metal)).insert(
+                kdb.DBox(*rect).to_itype(layout.dbu)
+            )
+            ports.append(
+                {
+                    "name": port,
+                    "x_um": point[0],
+                    "y_um": point[1],
+                    "width_um": rect[3] - rect[1],
+                    "direction_deg": direction,
+                    "layer": {"layer": metal[0], "datatype": metal[1]},
+                }
+            )
         blocks.append(
             {
                 "id": name,
-                "cell": {
-                    "gds_path": str(library),
-                    "cell_name": name,
-                    "ports": [
-                        {
-                            "name": "P",
-                            "x_um": port_xy[0],
-                            "y_um": port_xy[1],
-                            "width_um": box[3] - box[1],
-                            "direction_deg": direction_deg,
-                            "layer": {"layer": layer[0], "datatype": layer[1]},
-                        }
-                    ],
-                },
+                "cell": {"gds_path": str(library), "cell_name": name, "ports": ports},
             }
         )
     layout.write(str(library))
@@ -212,3 +215,35 @@ def test_contact_check_reads_each_bystander_block_layer_once_per_request(
     bystander_reads = {key: n for key, n in reads.items() if key[0].startswith("z")}
     assert bystander_reads, "the check never consulted a bystander block"
     assert {key: n for key, n in bystander_reads.items() if n > 1} == {}
+
+
+@pytest.mark.parametrize("y,conflict", [(-0.365, True), (-0.5, False)])
+@pytest.mark.parametrize("foreign_first", [True, False])
+def test_pad_near_another_nets_port_on_its_endpoint_block(
+    tmp_path, y, conflict, foreign_first
+):
+    # c.P is the LI endpoint of B. Independent c.Q anchors a longer M1 strip
+    # on A. The via ladder at c.P just touches the far part of c.Q's strip.
+    a = _net_a("a1", "c")
+    a["pins"][1]["port"] = "Q"
+    b = _net_b_on_metal3()
+    m1_stub = ("Q", MET1, (-0.31, -0.07 - y, 0.69, 0.07 - y), (-0.31, -y), 180)
+    result, extracted = _compose_cell_strips(
+        tmp_path,
+        {
+            "a1": (MET1, (0, 0, 1, 0.14), (1, 0.07), 0, (-1, -0.07)),
+            "c": (LI1, (0, 0, 1, 0.17), (0, 0.085), 0, (4.31, y)),
+            "d": (LI1, (0, 0, 1, 0.17), (0, 0.085), 0, (9.31, y)),
+        },
+        [a, b] if foreign_first else [b, a],
+        extra_strips={"c": [m1_stub]},
+    )
+    net_b = next(net for net in result["nets"] if net["net"] == "B")
+    assert net_b["routed"] is not conflict
+    if foreign_first:
+        assert result["unrouted_nets"] == (["B"] if conflict else [])
+    assert not extracted["merged_net_labels"]
+    if conflict:
+        reason = net_b["legs"][0]["reason"]
+        assert "c.Q" in reason
+        assert _climbable(reason)
