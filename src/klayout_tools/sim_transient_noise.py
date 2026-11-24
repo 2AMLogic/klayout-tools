@@ -22,6 +22,7 @@ import re
 from typing import Any
 
 from . import _warn, sim_steps
+from ._jsonnum import is_int
 from ._spice_text import logical_lines
 from .sim_errors import SimError
 
@@ -56,7 +57,7 @@ def validate_seed(value: Any, engine: str) -> int | None:
     """
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise SimError(
             "options.transient_noise_seed must be an integer (the value "
             "ngspice's `setseed` control command takes), got " + json.dumps(value)
