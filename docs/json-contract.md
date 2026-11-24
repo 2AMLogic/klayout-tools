@@ -3103,6 +3103,50 @@ name, type or meaning, output without the flag stays byte-identical, so
 [`cli/extract.md`](cli/extract.md)'s "Terminal-aware resistance graph"
 section.
 
+### `klt pex --resistance-network` per-net network disclosure (issue #6899)
+
+`--resistance-network` (requires `--resistance-graph`) writes the
+Kron-reduced terminal network of the solved graph in place of the star for
+every net whose graph solved `ok` with three or more terminals and whose
+device terminals map one-to-one onto its graph terminals, so a tree-routed
+net's stub arms stop adding series resistance to the current path. The
+additive fields, all absent without the flag (byte-identical output):
+
+- `parasitics.nets[].resistance_graph.network` (from `klt extract`, echoed
+  verbatim into `extraction.resistance_graph.nets[].network`):
+  `{written, resistor_count, fallback_reason}`. `written` is `reduced`
+  (the network was written; `resistor_count` pair resistors, at most
+  `T(T-1)/2` = 2016 at the graph's 64-terminal cap), `scalar` (a
+  two-terminal graph net kept issue #4037's `selected_resistance_ohm`) or
+  `legacy`. `fallback_reason` reuses issue #5747's vocabulary
+  (`resistance_source_reason`, first `unsupported` diagnostic `code`) and
+  adds only `terminal_mismatch` (the one-to-one device-terminal mapping
+  failed, or position cannot decide it: two terminals of one device on the
+  net share that device's single position), `mom_rlc_override` (a
+  `--mom-rlc-resistance-ohm` substitution won) and `parasitic_variant` (a
+  `--parasitic-variant` drop kept the star), which it cannot express. A
+  written reduced network reproduces every `pair_resistance_ohm` entry within
+  1e-6 relative tolerance. A disconnected filtered network reports
+  `pair_resistance_unavailable`, and an inaccurate connected reduction reports
+  `singular_system`. Both keep the existing fallback model. The net's ground
+  capacitance splits equally across its terminal nodes (the documented
+  first-increment rule; per-node capacitance from the graph itself is the
+  roadmap's open question).
+- `extraction.resistance_graph.resistance_network`: `true` when the request
+  enables the reduced network. The field is absent otherwise.
+- `parasitics.model.resistance_network` (echoed in
+  `extraction.model`): a string stating the mode, so a
+  `klt signoff --manifest` item-7 citation can tell a graph-derived
+  network extraction from a series-sum one.
+- `parasitics.nets[].rc_model` gains a third value, `"reduced"`, beside
+  `"lumped"` and `"distributed"` — only for nets that took the network;
+  their `integrity.open` runs the real terminal-connectivity check.
+
+No existing field changes name, type or meaning, so **no
+`schema_version` bump**. See [`cli/pex.md`](cli/pex.md)'s
+`--resistance-network` and [`cli/extract.md`](cli/extract.md)'s "Reduced
+terminal networks" paragraphs.
+
 ### `klt corner-matrix check` coverage verdict (issue #5865)
 
 `klt corner-matrix check` adds the always-present boolean

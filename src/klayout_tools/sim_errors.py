@@ -22,3 +22,20 @@ class SimError(Exception):
     def __init__(self, *args: object, code: str | None = None) -> None:
         super().__init__(*args)
         self.code = code
+
+
+def request_options(request: dict) -> dict:
+    """The request's top-level ``options`` object, ``{}`` when omitted or null.
+
+    Issue #7720: any other non-object raises a field-specific :class:`SimError`
+    (the message PR #7608 uses for corner requests), so a falsey ``false``/
+    ``[]``/``0`` is not run as the defaults and a truthy scalar never reaches a
+    later ``.get()`` as an uncaught ``AttributeError``.
+    """
+    options = request.get("options")
+    if options is None:
+        return {}
+    if not isinstance(options, dict):
+        kind = type(options).__name__
+        raise SimError(f"request.options must be an object (got {kind})")
+    return options
