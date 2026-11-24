@@ -18,7 +18,7 @@ The writer and its callers share :class:`~klayout_tools.extract_base.ExtractErro
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from typing import Any
 
 from .extract_base import ExtractError as ExtractError
@@ -463,14 +463,18 @@ def _def_spef(name: str) -> str:
 def _def_net_spellings(
     net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None,
     port_name_set: frozenset[str],
+    renamed_ports: Container[str] = (),
 ) -> dict[str, str]:
-    """Issue #2969: net name -> the SPEF spelling its DEF used (bare ``/`` =
-    hierarchy divider vs escaped ``\\/`` = literal slash). Port nets are left
-    out so they keep :func:`_spef_name` and ``*PORTS``/``*P`` agree."""
+    """Preserve DEF spelling for internal nets (#2969) and remapped dotted
+    nets with distinct port pins (#7694). Other ports keep their writer spelling."""
     return {
         str(name): name.spef
         for name in (net_instance_pins or {})
-        if isinstance(name, DefName) and name not in port_name_set
+        if isinstance(name, DefName)
+        and (
+            name not in port_name_set
+            or (name in renamed_ports and "." not in name and "." in name.spef)
+        )
     }
 
 
@@ -538,9 +542,7 @@ def _port_conn_lines(
     is_port: bool,
     renamed_ports: Mapping[str, Sequence[str]],
 ) -> list[str]:
-    """The ``*P`` entries a net's ``*CONN`` block opens with: one per DEF PIN
-    for a renamed port (issue #3257 gap B), else one under the net's own name
-    when it is a port."""
+    """Emit ``*P`` for each attached DEF pin (#3257), or for the ordinary port net."""
     if net in renamed_ports:
         return [f"*P {_def_spef(pin)} B" for pin in renamed_ports[net]]
     return [f"*P {spef_net} B"] if is_port else []
@@ -549,8 +551,7 @@ def _port_conn_lines(
 def _port_spellings(
     port_name_set: Iterable[str], renamed_ports: Mapping[str, Sequence[str]]
 ) -> dict[str, str]:
-    """``*PORTS`` names for ``port_name_set``, using the DEF PIN name(s) for
-    each renamed port (issue #3257 gap B)."""
+    """Spell ``*PORTS`` with the attached DEF pin names for renamed ports (#3257)."""
     spellings: dict[str, str] = {}
     for name in port_name_set:
         if name in renamed_ports:
@@ -710,14 +711,11 @@ def _write_spef(
     below is copied through unchanged -- no femtofarad/ohm rescaling, and
     therefore no unit-conversion error to introduce.
 
-    **A port whose PIN name differs from its NET name (issue #3257 gap B).**
-    A DEF ``- PortA + NET netA`` record makes the design port ``PortA`` while
-    the routed net -- and so the ``*D_NET`` -- is ``netA``. OpenSTA resolves a
-    bare node through the design's top-level *pin* names, so naming
-    ``netA`` in ``*PORTS``/``*P`` or as the RC hub is a non-existent port pin
-    (``STA-1656``). When ``net_instance_pins`` is a :class:`DefNetConnections`
-    whose ``port_pins`` names such a pin, ``*PORTS`` and the net's ``*P``
-    entries use the PIN name(s) and the hub is the internal ``<net>:1`` node.
+    **A port whose PIN name differs from its net (#3257 gap B, #7694).**
+    DEF connects `( PIN PortA )` to netA. Emit PortA in `*PORTS` and `*P`,
+    use the net spelling in `*D_NET`, and tie each pin to the net hub through
+    a zero-ohm resistor. A remapped dotted net keeps its DEF spelling here.
+    Matching pin and net names retain their usual port representation.
 
     **Floating duplicate-named nets are skipped (issue #3257 gap C).** With
     ``net_instance_pins`` given, a non-port net name that appears on several
@@ -764,7 +762,10 @@ def _write_spef(
     port_names = [_unescape_spice_safe_net_name(name) for name in port_names]
 
     port_name_set = frozenset(port_names)
-    def_net_spellings = _def_net_spellings(net_instance_pins, port_name_set)
+    renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
+    def_net_spellings = _def_net_spellings(
+        net_instance_pins, port_name_set, renamed_ports
+    )
 
     net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
         net_instance_pins or {}
@@ -797,7 +798,6 @@ def _write_spef(
             "(STA-1670). Check that the layout's routed shapes use the "
             "deck's layers (e.g. the PDK ships a LEF/DEF layer map)."
         )
-    renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
 
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
