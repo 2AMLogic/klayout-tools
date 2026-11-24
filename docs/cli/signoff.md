@@ -279,8 +279,10 @@ two steps:
    at least one passing test and no failures (skips are allowed —
    [`functional-verification.md`](functional-verification.md)), `klt sta` on
    its *reported timing* rather than a `status` field (that verb's `status`
-   is always `"ok"`: every corner it reports must be `timing_status:
-   "constrained"` with non-negative setup and hold slack — see "Digital-flow
+   is always `"ok"`, and a present non-`"ok"` one fails: every corner it
+   reports must be `timing_status: "constrained"` with non-negative setup and
+   hold slack; `geometry_source` is disclosed but not graded unless the entry
+   opts in with `require_routed_geometry` — see "Digital-flow
    evidence: `klt sta` and `klt functional-verification`" below), and a
    **generic**
    evidence envelope on its own `status: "pass"` (see "Generic evidence
@@ -4646,7 +4648,8 @@ newer `klt`"* versus *"this citation points at the wrong artifact"*.
 Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
 its own** — `status` is always `"ok"` (the verb reports timing, it does not
 judge it). So `klt signoff` derives a verdict from the reported timing
-instead. Every corner the run reported must satisfy both of:
+instead (a `status` other than `"ok"` still fails, see below). Every corner
+the run reported must satisfy both of:
 
 1. `timing_status == "constrained"`. OpenSTA's unconstrained-design sentinel
    is `1e+39` — a *positive* number, so a naive `worst_slack_ns >= 0` rule
@@ -4659,6 +4662,50 @@ instead. Every corner the run reported must satisfy both of:
 
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
+
+**The envelope's own `status` is graded (issue #7711).** `klt sta` always
+emits `status: "ok"` and a failed run never emits the envelope
+([`sta.md`](sta.md)). In manifest mode, a present top-level `status` with
+any other value grades `unmet` with reason `check_failed`. The value appears in
+`detail.sta_status`, including JSON `null`. An absent `status` still gives
+`unrecognized_envelope`. In envelope-aggregation mode, a non-ok string fails
+the check and a missing or non-string status fails envelope validation.
+Per-corner entries carry no `status`.
+
+**`geometry_source` is *not* part of the default predicate (issue #7711).** It
+is a caller-supplied label — `"routed"`, `"placement_estimate"` or
+`"netlist_estimate"` ([`sta.md`](sta.md)) — and item 5 is the pre-layout
+corner-timing item (item 7 is the post-layout one and does not accept `sta`),
+so a pre-route estimate with closed timing is deliberately still `met`. It is
+surfaced on every `sta` citation as `detail.geometry_source`, so a reader can
+see what a `met` rested on; require routed geometry with the opt-in below.
+
+**Opt-in: `require_routed_geometry` (issue #7711).** An evidence entry citing
+a `klt sta` envelope may add `"require_routed_geometry": true` (same
+entry-level shape as `require_annotation_complete`). Then the envelope's
+top-level `geometry_source` must be the literal string `"routed"`; otherwise
+the item is `unmet` with reason `check_failed` and
+`detail.sta_geometry_not_routed` is `{geometry_source: <value>}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `"placement_estimate"`, `"netlist_estimate"` and any other string → unmet.
+  The check is an exact string match, with no case folding.
+- An otherwise valid STA timing citation with a missing, `null` or non-string
+  `geometry_source` gives `check_failed` under this option. The diagnostic
+  carries the original JSON value, or `null` for an absent key. The default
+  still reports `unrecognized_envelope` for these shapes.
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- It composes with the two opt-ins below on one entry; when several fail,
+  the first of annotation, constraints, geometry is the one reported.
+
+It does not re-derive routedness from the DEF: the label is the caller's
+claim (see [`sta.md`](sta.md)), and the option only requires that the claim
+be `"routed"`.
+
+The key, `detail.sta_status`, `detail.sta_geometry_not_routed` and the
+citation's `detail.geometry_source` are additive: no existing field changes
+meaning, so `schema_version` is unchanged. The `status` guard changes the
+verdict only for an envelope `klt sta` cannot have produced.
 
 **Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
 say whether a SPEF was actually applied to the timing. An evidence entry

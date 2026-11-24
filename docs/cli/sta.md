@@ -296,7 +296,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. Versioned independently of `klt place-and-route`'s own `schema_version` (each command owns its own). |
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
-| `status` | string | Always `"ok"` — this command has no pass/fail concept of its own; a failed run never emits this envelope. |
+| `status` | string | Always `"ok"` — this command has no pass/fail concept of its own; a failed run never emits this envelope. `klt signoff` grades a cited envelope carrying any other `status` `unmet` ([`signoff.md`](signoff.md)). |
 | `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
 | `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
@@ -2276,6 +2276,10 @@ deliberately a *label*, not a behavior switch: the Tcl this command runs is
 identical either way, so getting the value wrong does not corrupt the
 result, only its self-description — always set it to match the DEF's actual
 provenance.
+
+`klt signoff` shows this label on a cited `sta` envelope but does not grade
+it by default; its opt-in `require_routed_geometry` evidence key grades the
+item `unmet` unless it is `"routed"` ([`signoff.md`](signoff.md)).
 
 See also "From-scratch netlist input" below, which resolves a stricter
 version of the same underlying "no pre-route path into `klt sta`" gap: no
