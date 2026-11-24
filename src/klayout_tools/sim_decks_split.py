@@ -237,6 +237,7 @@ def run_split(
         [summary for _r, summary in results],
         outdir=outdir,
         shard_map=_batch_common.repo_relative_str(manifest.path),
+        extra_remote={"image_profile": config0.image_profile or "sim"},
     )
 
 
@@ -324,9 +325,11 @@ def attach_split(
             )
         reports.append(report)
         shards.append(_shard_summary(index, ids, job_id, state))
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = {
+        "image_profile": sim_batch._resolve_image_profile(request.get("batch") or {})
+    }
     if unfinished:
-        extra = {"unfinished_shards": unfinished, "resumable": True}
+        extra.update(unfinished_shards=unfinished, resumable=True)
     return merge_reports(
         reports, shards, outdir=outdir, shard_map=manifest_path, extra_remote=extra
     )

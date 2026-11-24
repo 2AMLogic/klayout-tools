@@ -5326,10 +5326,86 @@ The per-spec-row table renders a joint row as one `state: "joint"` record —
 no single measurement is quotable — carrying `joint` = `{covered, members:
 [{member, missing_points, missing_probe}]}` from a static re-read of the same
 citations (a command-backed, unreadable or Monte Carlo member reads `null`/
-`null`, "not evaluable from the report alone"); `--format text` prints
-`[JOINT]` with one indented line per member shortfall. A manifest declaring
-no `joint_grid` row omits every new key and renders byte-identically;
-additive, no `schema_version` bump.
+`null`, "not evaluable from the report alone"). `joint.covered` is
+**tri-state** (issue #7701), reducing the members the same way: `false` when
+any member the projection *can* read has a shortfall (definitely not covered,
+whatever the unreadable members would show); `null` when none does but at
+least one member is unevaluable (unknown — the item axis, which re-runs
+command-backed members, may still derive the row); `true` only when every
+member is readable and clean. A consumer must not read `null` as "not
+covered". `--format text` prints `[JOINT]` with `covered`, `shortfall` or
+`not evaluable from the report alone` (the `null` case), then one indented line
+per member shortfall or unevaluable member. A manifest declaring no
+`joint_grid` row omits every new key and renders byte-identically; additive, no
+`schema_version` bump.
+
+**Binding a citation to the complete run: `requires` (issue #7807).** An item-5
+citation pins its run's *request netlist* (`content_hash`), and that artifact is
+the same for a 2-coordinate smoke probe and the 45-coordinate matrix minted from
+one request — and for a sensitivity companion run at tighter solver
+tolerances. Each is `met` in the others' place. An item-5 evidence member (a
+list member or a lone citation object) may carry an optional `requires` object;
+the grader checks it against the cited envelope itself, with no `klt sim`
+change:
+
+```json
+{"file": "sim/bench_a.json", "rows": ["gain"],
+ "requires": {
+   "grid": {"process": ["tt", "ss", "ff"],
+            "supply_v": {"vdd": [1.62, 1.8, 1.98]},
+            "temperature_c": [-40, 27, 125]},
+   "ngspice_options": {"reltol": 0.001}}}
+```
+
+- `requires.grid` is the `joint_grid` axis shape without `members` — the same
+  validator and the same reader, so supply rails sweep **zipped**, an absent
+  axis takes the request-side default, `27` and `27.0` are one point, and a
+  point swept twice must pass at *every* corner. The envelope's `corners[]`
+  must carry every required point with every corner at it `pass`.
+- `requires.ngspice_options` is a literal **subset** check against the
+  envelope's `environment.ngspice_options`: each named option must be present
+  and equal (numbers compare as numbers, so `0.001` and `1e-3` match; a boolean
+  never equals a number). `klt sim` echoes that field only when the run
+  declared options, so an envelope with **no** echo cannot prove a profile and
+  is unmet, never credited. The request echo is not what every corner solved
+  with, though: a `corners.options` point writes its own `.options` card ahead
+  of the request's (ngspice honors the first card that sets a name) and
+  reports it as `corners[].options`. So **every corner** is checked as well,
+  and one whose `options` sets a *required* option to another value fails the
+  assertion whatever the request echo reads. An override that agrees with the
+  requirement, or of an option the member does not require, is fine.
+- A shortfall grades the item `unmet` / `partial_coverage` with
+  `detail.requires_unmet`, one entry per failing member: `{"member": <citation
+  label>, "missing_points": [...]}` (labels in the envelope's own `corner_id`
+  PVT spelling, e.g. `ff/1.980V/-40C`) when the grid fell short, and
+  `"ngspice_options": {"required": {...}, "observed": {...} | null}` when the
+  solver profile did (`observed` is `null` for an absent echo), plus
+  `"corner_overrides": [{"corner_id", "option", "observed"}, ...]` — one entry
+  per conflicting corner option, in envelope order — only when a corner
+  overrode a required option. Either or both keys appear, only for the facet
+  that failed.
+- It is an *additional* refusal: it is checked once every member has graded
+  `met`, so a member's own failure keeps its own reason, and the `rows` a member
+  credits are unchanged. A member with no `requires` is untouched, and a
+  manifest using none renders byte-identically.
+- `invalid_evidence`, with `detail.problem` naming the member, never a raise:
+  a `requires` that is not an object, is empty, or carries an unknown key
+  (only `grid` and `ngspice_options` exist); a `grid` with no axis, an unknown
+  axis, an empty axis, a non-numeric or **non-finite** axis value (NaN, an
+  infinity, or an integer too large for a float — `joint_grid` shares the
+  validator and refuses the same) or supply rails of differing lengths; an
+  `ngspice_options` that is empty or whose value is not a finite number, a
+  boolean or a non-empty string; a **Monte Carlo** member under
+  `requires.grid` (the same unsupported case `joint_grid` states); and
+  `requires` on any other item, in any entry shape — a lone citation object, a
+  list, or item 11's grouped lists (`'requires' is supported on item 5 only` —
+  item 6 and item 7 keep their own mechanisms). The refusal is never a silent
+  drop: an assertion the grader will not check cannot grade `met`. A malformed
+  or misplaced `requires` is refused before any citation is read or run.
+- The grid binds the PVT axes only. A run whose coordinates vary a `params`
+  axis is not told apart by it.
+
+Additive: no `schema_version` bump.
 
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
 reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
@@ -5530,7 +5606,8 @@ because of it. Its rules:
   measurement is quotable, so the record carries the per-member projection
   under `joint` (`{covered, members: [{member, missing_points,
   missing_probe}]}`, `null`/`null` for a member the projection cannot read —
-  command-backed, unreadable, or Monte Carlo).
+  command-backed, unreadable, or Monte Carlo; `covered` is `true`/`false`/
+  `null` — `null` is unknown, see "Joint grid coverage across benches").
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the

@@ -266,7 +266,10 @@ def resolve_batch_config(
 
     try:
         return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
+            {"models": {"pdk": pdk}},
+            corner_count=1,
+            timeout_s=timeout_s,
+            sim_image_profiles=False,
         )
     except (SimError, sim_batch.BatchError) as exc:
         raise _ctor(err_cls)(
