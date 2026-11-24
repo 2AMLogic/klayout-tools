@@ -349,6 +349,7 @@ from .sim_analysis_overrides import (  # isort: skip
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from . import sim_regrade
 from .sim_errors import SimError as SimError
+from .sim_errors import request_options
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
 #: Moved to `sim_measurement_grading.py` (issue #7320) so the measurement
@@ -1619,10 +1620,13 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
-    # Command and deck lists have their own validators and no corner matrix.
-    if sim_commands.COMMANDS_FIELD in request:
-        return request
-    if "decks" in request:
+    # Command/deck lists have their own validators and no corner matrix, but
+    # `options` is checked before its first read in dispatch (issue #7720).
+    if sim_commands.COMMANDS_FIELD in request or "decks" in request:
+        if isinstance(request, dict):
+            request_options(request)
+        if sim_commands.COMMANDS_FIELD in request:
+            return request
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
