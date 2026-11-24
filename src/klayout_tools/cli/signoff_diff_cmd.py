@@ -47,6 +47,7 @@ _DIFF_REPORTS_EXCLUSIVE_FLAGS = (
     ("--check", "check"),
     ("--describe-grader", "describe_grader"),
     ("--repin", "repin"),
+    ("--require-grading-ruleset", "require_grading_ruleset"),
     ("--tiers-doc", "tiers_doc"),
     ("--repo-root", "repo_root"),
     ("--artifact-manifest", "artifact_manifest"),

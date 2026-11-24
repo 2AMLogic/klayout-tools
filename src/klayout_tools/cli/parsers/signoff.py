@@ -14,6 +14,7 @@ from typing import Any
 
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
+from ...signoff_require_build import add_require_grading_ruleset_argument
 from .. import signoff_cmd
 from .._doc_paths import RawDescriptionDocHelpFormatter
 from ..color import add_color_args
@@ -311,6 +312,7 @@ def add_signoff_parser(
             "'Identifying the grading build' section."
         ),
     )
+    add_require_grading_ruleset_argument(signoff_parser)
     _add_format_arg(signoff_parser)
     # Issue #2227: `signoff` is the one verb that colours its `--format text`
     # rendering, and the rendering it colours is also a *committed* artifact.
