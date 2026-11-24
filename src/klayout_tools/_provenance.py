@@ -927,12 +927,9 @@ def build_provenance(
     the resolved ``klayout_version`` differs from
     :func:`klayout_tools.build_identity.klayout_version_expected` (the
     version this ``klayout-tools`` build/commit was tested against), else
-    ``False``. Passed by ``klt drc``/``klt lvs`` and by ``klt extract``'s
-    default in-process engine (issue #7824) -- see
-    ``docs/design/klayout-engine-version-pin.md`` for why those verbs and
-    not every ``build_provenance`` caller. A ``True`` result also prints a
-    one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
-    caller sees the drift even without inspecting the JSON.
+    ``False``. DRC, LVS and in-process extraction opt in. A mismatch also
+    emits a stderr warning. See ``docs/design/klayout-engine-version-pin.md``
+    for the scope and :func:`_warn_klayout_version_mismatch` for the remedy.
     ``klayout_version_override`` (+ ``..._active``, issue #5660) repopulates
     ``klayout_version`` from the binary that ran the deck (``--engine klayout``
     sites); the wheel's version moves to ``klayout_module_version``.
@@ -965,15 +962,9 @@ def build_provenance(
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
-        # Build-time-recorded only -- deliberately *not* the live-checkout
-        # `git` fallback of `build_identity.klayout_version_expected()`
-        # (issue #1490): it is fine as a one-shot cost for `klt version`,
-        # but every `klt drc`/`klt lvs`/`klt extract` report would gain a
-        # subprocess call
-        # on a dev/editable install -- and no `uv tool install ... @<sha>`
-        # install (the case this field exists for) is ever editable. With
-        # no build-time record the field reports `False`, matching
-        # `_klayout_version_mismatch`'s "unresolvable renders as False" rule.
+        # Report generation uses the build-time record. The checkout fallback
+        # spawns git, which is appropriate for an explicit `klt version` call.
+        # Editable installs without a record cannot confirm a mismatch.
         expected_klayout_version = build_identity._recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version
