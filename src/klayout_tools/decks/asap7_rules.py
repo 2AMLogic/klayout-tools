@@ -624,9 +624,9 @@ def _v123_gaps(layer: str, upper: str) -> tuple[Asap7RuleGap, ...]:
     )
 
 
-_ONE_SIDE = (
-    "'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG "
-    "past V0) needs the LIG routing direction to pick the side pair"
+_V0_LIG_ENCLOSURE = (
+    "V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT "
+    "and SLVT library has 1,413 selected V0 wholly inside LIG."
 )
 
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
@@ -645,7 +645,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
     *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
-    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _ONE_SIDE, "#3147"),
+    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _V0_LIG_ENCLOSURE, "#3147"),
     Asap7RuleGap(
         "V0.LIG.AUX.2",
         "Table 3.11.2",

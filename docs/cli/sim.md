@@ -1780,6 +1780,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   a wait budget the pending wait is unbounded, as before.
 - **`--report-out`** writes the aggregate envelope to a file (also on a partial
   failure), in addition to stdout.
+- **`--portable-paths`** omits `environment.client_ngspice_binary` from
+  batch reports and preserves the worker binary and both build records.
+  In a batch set, resolve each non-null `requests[].report` from the
+  aggregate file's directory when using `--report-out`, including for the
+  copy on stdout. For stdout alone, use the directory containing
+  `set-manifest.json`. For example, `-o bundle/members --report-out
+  bundle/reports/set.json --portable-paths` records
+  `../members/amp/report.json` for a member named `amp.request.json`.
+  Moving the whole `bundle/` preserves this reference. Choose an aggregate
+  filename distinct from every member report.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
@@ -1939,15 +1949,15 @@ merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
 
 Sibling requests may use different model libraries for the same netlist.
-Each shard must declare the same measurement names, units, limits and
-provenance, including `spec_row` and `case` whenever present. A disagreement
+Each shard must agree on the measurement names, units and limits, and on
+the `spec_row` and `case` declarations whenever present. A disagreement
 returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
 those row and case labels and grades limits over every declared corner.
 
 You can cite the merged report for item 5 of a `klt signoff` manifest.
 List the intended rows on the citation. Passing tagged measurements with
-limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
-digest. Mixed or missing shard hashes leave the pin unverifiable.
+limits give those rows derived coverage. A manifest pin can verify the
+netlist when every shard records the same non-empty input digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -1972,7 +1982,7 @@ stdout carries `{"schema_version": 1, "status": "refused", "refusal": {"code",
 | `7` | `unexpected_shard` | a report shares no corner with the plan |
 | `8` | `corner_mismatch` | a report overlaps the plan but is not exactly one shard's corners |
 | `9` | `request_mismatch` | a planned request file is unreadable or not the one the plan pinned |
-| `10` | `inconsistent_shards` | shards disagree on measurement names/units/limits, the simulated netlist or `schema_version` |
+| `10` | `inconsistent_shards` | shards disagree on measurement names, units, limits, `spec_row`, `case`, the simulated netlist or `schema_version` |
 
 When several classes apply the exit code is the first in the order `9, 8, 7, 6,
 5, 10`; the message lists every problem. Other exits: `1` could not run, with the usual error envelope on stderr
