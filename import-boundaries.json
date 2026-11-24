@@ -1099,6 +1099,7 @@
         "klayout_tools.sim_errors",
         "klayout_tools.sim_exit_reason",
         "klayout_tools.sim_expr_hint",
+        "klayout_tools.sim_expr_log",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
         "klayout_tools.sim_homotopy",

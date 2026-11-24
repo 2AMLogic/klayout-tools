@@ -238,7 +238,14 @@ def test_expr_scalar_is_solved_in_an_op_plot_before_the_first_pass(tmp_path):
     lines = sim_passes.control_lines(
         analysis, str(tmp_path), [{"name": "vbias", "expr": "v(o)"}]
     )
-    assert lines[:4] == ["set filetype=ascii", "op", "let vbias = v(o)", "print vbias"]
+    assert lines[:6] == [
+        "set filetype=ascii",
+        "op",
+        "echo klt_expr_begin vbias",
+        "let vbias = v(o)",
+        "print vbias",
+        "echo klt_expr_end",
+    ]
     assert lines.index("op") < lines.index("alter VA ac = 1")
     # No scalar declared: the deck is exactly the pre-#3771 one.
     assert "op" not in sim_passes.control_lines(analysis, str(tmp_path))
