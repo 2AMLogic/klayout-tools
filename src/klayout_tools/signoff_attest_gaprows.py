@@ -21,13 +21,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ._jsonnum import is_int
-
-
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
+from .signoff_base import AttestationError
 
 
 def validated_gap_rows(
@@ -39,20 +33,24 @@ def validated_gap_rows(
     byte-identical error text."""
     raw = inventory.get(key, [])
     if not isinstance(raw, list):
-        raise _error(f"'{key}' must be a list of {{row, issue}}")
+        raise AttestationError(f"'{key}' must be a list of {{row, issue}}")
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, entry in enumerate(raw):
         field = f"{key}[{index}]"
         if not isinstance(entry, Mapping) or set(entry) != {"row", "issue"}:
-            raise _error(f"'{field}' must be an object with 'row' and 'issue'")
+            raise AttestationError(
+                f"'{field}' must be an object with 'row' and 'issue'"
+            )
         row, issue = entry["row"], entry["issue"]
         if not isinstance(row, str) or not row.strip():
-            raise _error(f"'{field}.row' must be a non-empty string")
+            raise AttestationError(f"'{field}.row' must be a non-empty string")
         if not is_int(issue) or issue <= 0:
-            raise _error(f"'{field}.issue' must be a positive integer")
+            raise AttestationError(f"'{field}.issue' must be a positive integer")
         if row in seen:
-            raise _error(f"{adjective} row '{row}' is declared more than once")
+            raise AttestationError(
+                f"{adjective} row '{row}' is declared more than once"
+            )
         seen.add(row)
         rows.append({"row": row, "issue": issue})
     return rows
