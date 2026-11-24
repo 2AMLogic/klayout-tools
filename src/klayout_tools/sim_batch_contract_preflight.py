@@ -356,7 +356,8 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         floor = _feature_release_key("step_on_unreached")
         checks += (
             f' if [ "$mk" -eq {floor} ] && [ "${{rv%%+*}}" != "$mr" ]; then '
-            f"step_probe=$( {_STEP_UNREACHED_PROBE} ) || step_probe=unknown; "
+            f"_klt_step_unreached_probe() {_STEP_UNREACHED_PROBE}; "
+            "step_probe=$(_klt_step_unreached_probe) || step_probe=unknown; "
             'if [ "$step_probe" != supported ]; then '
             'mmiss="${mmiss}${mmiss:+, }step_on_unreached"; fi; fi;'
         )

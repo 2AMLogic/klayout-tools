@@ -32,6 +32,18 @@ def test_only_step_scoped_null_uses_the_capability():
     assert sim_batch._request_features({"measurements": step["measurements"]}) == []
 
 
+@pytest.mark.skipif(not Path("/bin/bash").is_file(), reason="no system Bash")
+def test_step_preflight_parses_with_system_bash():
+    # The system shell can differ from the first Bash on PATH, e.g. macOS 3.2.
+    prefix = _runner_preflight_script(
+        "0.9.3.dev1", required_features=("step_on_unreached",), enforce=False
+    )
+    check = subprocess.run(
+        ["/bin/bash", "-n"], input=prefix, text=True, capture_output=True
+    )
+    assert check.returncode == 0, check.stderr
+
+
 @pytest.mark.parametrize(
     ("version", "replayed_status", "status"),
     [
