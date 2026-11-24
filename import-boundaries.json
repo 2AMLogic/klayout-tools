@@ -1109,6 +1109,7 @@
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_population_limits",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_post_commands",
         "klayout_tools.sim_report_check",
