@@ -92,6 +92,7 @@ _CLIMBABLE_REASON_MARKERS = (
     "shares a conductive edge with already-routed net",
     "shares a conductive corner with already-routed net",
     "a pad touches a block hosting no pin of its net",
+    "touches foreign port",
     "self-net backbone crosses",
     "self-net between two same-facing ports",
     "self-net's drawn",

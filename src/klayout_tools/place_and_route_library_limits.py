@@ -8,11 +8,18 @@ from typing import Any
 from urllib.parse import quote
 
 from ._sta_request_diag import extract_block
-
-SLEW_BEGIN = "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN==="
-SLEW_END = "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_END==="
-CAPACITANCE_BEGIN = "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN==="
-CAPACITANCE_END = "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END==="
+from .place_and_route_base import (
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN as CAPACITANCE_BEGIN,
+)
+from .place_and_route_base import (
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END as CAPACITANCE_END,
+)
+from .place_and_route_base import (
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN as SLEW_BEGIN,
+)
+from .place_and_route_base import (
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END as SLEW_END,
+)
 
 
 def prepare_reports(output_dir: str, top: str) -> Path:

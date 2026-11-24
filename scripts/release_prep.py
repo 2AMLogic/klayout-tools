@@ -23,10 +23,13 @@ version changes nothing):
   and removed after assembly. ``## Unreleased`` stays empty for the next
   cycle. With no entries from either source, the run refuses (``PrepError``,
   before any file is written) to cut an empty release (issue #6086);
-- ``docs/cli/signoff.md``: "first release after `vPREV`" availability notes
-  become "`klt X.Y.Z`" (PREV is the version being superseded). A placeholder
-  anchored on a release older than PREV can never be resolved again; the prep
-  run refuses (``PrepError``) naming the line rather than let it ship stale.
+- ``docs/cli/signoff.md``, each pending ``changelog.d/`` fragment, and the
+  ``## Unreleased`` body of ``CHANGELOG.md``: "first release after `vPREV`"
+  availability notes become "`klt X.Y.Z`" (PREV is the version being
+  superseded). A placeholder anchored on a release older than PREV can never
+  be resolved again; the prep run refuses (``PrepError``) naming the source
+  file and its physical line rather than let it ship stale. Historical
+  ``CHANGELOG.md`` sections are left untouched.
 
 The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
 RELEASING.md's batch-runner rule (a contract change never ships in a patch)
@@ -96,17 +99,14 @@ def bump_pyproject(text: str, new: str) -> str:
     return _BASE_VERSION_RE.sub(rf"\g<1>{new}\g<3>", text, count=1)
 
 
-def _unreleased_entries(text: str) -> str | None:
-    """Body of the ``## Unreleased`` section (to the next ``## `` or EOF).
-
-    None when there is no ``## Unreleased`` heading at all.
-    """
+def _unreleased_span(text: str) -> tuple[int, int]:
+    """Offsets of the Unreleased body in the original changelog."""
     match = _UNRELEASED_RE.search(text)
     if match is None:
-        return None
-    next_heading = re.search(r"^## ", text[match.end() :], re.MULTILINE)
-    end = match.end() + next_heading.start() if next_heading else len(text)
-    return text[match.end() : end]
+        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
+    start = match.end()
+    next_heading = re.compile(r"^## ", re.MULTILINE).search(text, start)
+    return start, next_heading.start() if next_heading else len(text)
 
 
 def _has_release_heading(text: str, version: str) -> bool:
@@ -126,7 +126,7 @@ def _read_changelog_fragments(directory: Path) -> dict[Path, str]:
 
 
 def add_changelog_heading(
-    text: str, new: str, date: str, *, fragments: str = ""
+    text: str, new: str, date: str, *, fragments: str = "", previous: str | None = None
 ) -> str:
     """Insert ``## new (date)`` below ``## Unreleased``; no-op if present.
 
@@ -136,17 +136,18 @@ def add_changelog_heading(
     """
     if _has_release_heading(text, new):
         return text
-    entries = _unreleased_entries(text)
-    if entries is None:
-        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
+    heading_end, section_end = _unreleased_span(text)
+    entries = text[heading_end:section_end]
     if not entries.strip() and not fragments:
         raise PrepError(
             "CHANGELOG.md '## Unreleased' section has no entries --"
             " nothing to release; refusing to insert an empty release section"
         )
-    match = _UNRELEASED_RE.search(text)
-    heading_end = match.end()
-    remaining = text[heading_end + len(entries) :]
+    remaining = text[section_end:]
+    if previous is not None and previous != new:
+        entries = _resolve_notes(
+            entries, previous, new, "CHANGELOG.md", text.count("\n", 0, heading_end) + 1
+        )
     if fragments:
         legacy = entries.strip("\n")
         body = f"{legacy}\n\n{fragments}" if legacy.strip() else fragments
@@ -161,6 +162,14 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
         return f"`klt {new}`" if match.group(1) == previous else match.group(0)
 
     return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
+
+
+def _resolve_notes(
+    text: str, previous: str, new: str, source: str, start_line: int = 1
+) -> str:
+    """Check anchors at their original lines before resolving this release."""
+    check_signoff_note_anchors(text, previous, source=source, start_line=start_line)
+    return update_signoff_notes(text, previous, new)
 
 
 def check_signoff_note_anchors(
@@ -222,7 +231,11 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
         changelog_text,
         new,
         date,
-        fragments="\n\n".join(entry.strip("\n") for entry in fragments.values()),
+        previous=current,
+        fragments="\n\n".join(
+            _resolve_notes(entry, current, new, f"changelog.d/{path.name}").strip("\n")
+            for path, entry in fragments.items()
+        ),
     )
     # On an idempotent re-run `current == new`; the notes were already resolved.
     new_signoff_text = None
@@ -248,11 +261,9 @@ def _refresh_changelog(
     text: str, version: str, fragments: dict[Path, str]
 ) -> tuple[str, str]:
     """Collect late release inputs between Unreleased and the previous release."""
-    unreleased = _UNRELEASED_RE.search(text)
-    entries = _unreleased_entries(text)
-    if unreleased is None or entries is None:
-        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
-    current = _DATED_RELEASE.match(text, unreleased.end() + len(entries))
+    heading_end, section_end = _unreleased_span(text)
+    entries = text[heading_end:section_end]
+    current = _DATED_RELEASE.match(text, section_end)
     if current is None or current[1] != version:
         raise PrepError(
             f"expected the prepared ## {version} heading immediately after Unreleased"
@@ -262,22 +273,25 @@ def _refresh_changelog(
         raise PrepError(f"cannot determine the previous release below ## {version}")
     previous = older[1]
 
-    def resolved(value: str, source: str, start_line: int = 1) -> str:
-        check_signoff_note_anchors(
-            value, previous, source=source, start_line=start_line
-        )
-        return update_signoff_notes(value, previous, version)
-
-    body = resolved(
+    body = _resolve_notes(
         text[current.end() : older.start()],
+        previous,
+        version,
         "CHANGELOG.md",
         text.count("\n", 0, current.end()) + 1,
     )
     additions = [
-        resolved(entries, "CHANGELOG.md", text.count("\n", 0, unreleased.end()) + 1)
+        _resolve_notes(
+            entries,
+            previous,
+            version,
+            "CHANGELOG.md",
+            text.count("\n", 0, heading_end) + 1,
+        )
     ]
     additions.extend(
-        resolved(entry, f"changelog.d/{path.name}") for path, entry in fragments.items()
+        _resolve_notes(entry, previous, version, f"changelog.d/{path.name}")
+        for path, entry in fragments.items()
     )
     for entry in additions:
         entry = entry.strip("\n")
@@ -285,7 +299,7 @@ def _refresh_changelog(
         existing = body.strip("\n")
         if entry.strip() and f"\n\n{entry}\n\n" not in f"\n\n{existing}\n\n":
             body = body.rstrip("\n") + "\n\n" + entry + "\n\n"
-    before = text[: unreleased.end()] + ("\n\n" if entries.strip() else entries)
+    before = text[:heading_end] + ("\n\n" if entries.strip() else entries)
     return before + current[0] + body + text[older.start() :], previous
 
 

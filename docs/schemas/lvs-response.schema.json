@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/lvs-response.schema.json",
-  "title": "klt lvs --format json success response, version 2",
+  "title": "klt lvs --format json success response",
   "description": "Success payload of `klt lvs` for every non-error result (status match, mismatch or inconclusive; engine klayout or netgen; layout.file or layout.netlist; plain-element, subckt-call or gate-level-verilog reference). The shared error envelope is out of scope. Fields documented as optional (label_layers, reference_conversion) are not required; unknown additive fields are accepted everywhere. See docs/cli/lvs.md.",
   "type": "object",
   "required": [
@@ -16,6 +16,11 @@
     "schema_version": {"type": "integer", "const": 3},
     "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
     "layout": {"$ref": "#/$defs/path_value", "description": "Resolved layout.file or layout.netlist used for the layout digest. By default, reports encode it as {path, scope}, with a repository-relative path for scope 'repo' or a null path for scope 'external'. Legacy reports can carry the request path as a string."},
+    "join_same_named_nets": {
+      "type": "boolean",
+      "const": true,
+      "description": "Inline extraction implicitly connected same-named top-level nets. Omitted when disabled."
+    },
     "label_layers": {
       "type": "object",
       "description": "Present only when a non-empty layout.label_layers override was applied: {role: [layer, datatype] | null}.",
