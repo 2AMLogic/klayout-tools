@@ -189,6 +189,36 @@ def test_parse_clock_latency_ignores_other_clock_sections():
     }
 
 
+@pytest.mark.parametrize(
+    "count_lines",
+    [
+        [
+            post_route_sta._CLOCK_SINK_COUNT_BEGIN,
+            "KLT_STA_CLOCK_SINK_COUNT_ERROR unavailable",
+            post_route_sta._CLOCK_SINK_COUNT_END,
+        ],
+        [
+            post_route_sta._CLOCK_SINK_COUNT_BEGIN,
+            "KLT_STA_CLOCK_SINK_COUNT unreadable",
+            post_route_sta._CLOCK_SINK_COUNT_END,
+        ],
+        [post_route_sta._CLOCK_SINK_COUNT_BEGIN, "KLT_STA_CLOCK_SINK_COUNT 4"],
+        [post_route_sta._CLOCK_SINK_COUNT_END],
+    ],
+    ids=["query-error", "bad-count", "missing-end", "missing-begin"],
+)
+def test_empty_latency_section_with_unusable_sink_count_is_unknown(count_lines):
+    stdout = "\n".join(
+        [
+            post_route_sta._CLOCK_LATENCY_BEGIN,
+            "Clock clk",
+            post_route_sta._CLOCK_LATENCY_END,
+            *count_lines,
+        ]
+    )
+    assert post_route_sta._parse_clock_latency(stdout, "clk")["clock_sinks"] is None
+
+
 def test_parse_clock_latency_count_zero_with_empty_section_is_zero():
     """The tree-less contract through the count query itself (a clock the
     engine says reaches zero register clock pins), live-verified shape."""

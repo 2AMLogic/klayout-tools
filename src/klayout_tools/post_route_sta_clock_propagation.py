@@ -17,10 +17,8 @@ from ._tcl import tcl_literal as _tcl_literal
 #: extremes the report names, not one row per sink (issue #7417: on a
 #: many-flop tree only those two pins per table ever print, so the rows can
 #: never yield the sink count; that comes from
-#: :func:`_clock_sink_count_lines`). A clock whose network reaches no clock
-#: pin prints the header and nothing else -- the explicit "propagation
-#: could not be established" signal :func:`_parse_clock_latency` turns into
-#: ``clock_sinks: 0``.
+#: :func:`_clock_sink_count_lines`). A header can appear on its own even
+#: when the clock reaches register pins.
 _CLOCK_LATENCY_BEGIN = "===KLT_STA_CLOCK_LATENCY_BEGIN==="
 _CLOCK_LATENCY_END = "===KLT_STA_CLOCK_LATENCY_END==="
 #: ``report_clock_latency``'s per-clock section header (``Clock clk``).
@@ -56,8 +54,8 @@ def _clock_latency_lines() -> list[str]:
     :func:`_clock_sink_count_lines`, which runs right after this block).
     Emitted after any ``read_spef`` and before the timing metrics, so the
     latencies it reports reflect the same parasitics the timing numbers
-    do. A clock whose network reaches no clock pin prints the header and
-    nothing else (:func:`_parse_clock_latency` -> ``clock_sinks: 0``).
+    do. The separate sink-count query also covers clocks for which the
+    latency report prints only a header.
     Wrapped in ``catch`` so an OpenSTA build without the command degrades
     the evidence to ``unknown`` rather than aborting the run (the same
     degradation :func:`_parasitic_annotation_lines` established)."""
@@ -123,10 +121,8 @@ def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
       returned zero (a clock reaching no clock pin), or, on a
       count-marker-less stdout (an older capture), the section header
       printed with no ``network latency`` row under it. ``None`` means
-      unknown -- the count query was absent or errored (an OpenSTA build
-      without ``all_registers``, a ``catch``-swallowed failure) **and**
-      the latency section did not carry the tree-less shape; a fabricated
-      number is never substituted.
+      unknown. A failed or incomplete count query yields ``None`` even
+      when the latency section consists only of its header.
     - ``max_network_latency_ns`` -- the worst ``network latency`` value the
       section reports (the max-column continuation values included);
       ``None`` when there are no sinks (or the section is absent).
@@ -153,13 +149,15 @@ def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
             if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
                 sample.append(pin)
     max_latency = _max_network_latency(rows)
-    sink_count = _parse_clock_sink_count(stdout)
-    if sink_count is not None:
-        clock_sinks: int | None = sink_count
-    elif section_seen and not rows:
+    clock_sinks = _parse_clock_sink_count(stdout)
+    if (
+        clock_sinks is None
+        and section_seen
+        and not rows
+        and _CLOCK_SINK_COUNT_BEGIN not in stdout
+        and _CLOCK_SINK_COUNT_END not in stdout
+    ):
         clock_sinks = 0
-    else:
-        clock_sinks = None
     return {
         "clock_sinks": clock_sinks,
         "max_network_latency_ns": (

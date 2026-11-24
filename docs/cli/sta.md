@@ -1296,9 +1296,8 @@ session.
 A DEF whose clock reaches **no clock pin** (pre-CTS netlist with the clock
 unconnected, a malformed DEF, ...) does not fail the run: OpenSTA accepts
 `set_propagated_clock` regardless. What the response does instead is make
-the absence visible — the sink-count query returns zero (and, on the
-capture the parser also accepts, the clock's `report_clock_latency`
-section prints with no rows), and the parsed evidence is:
+the absence visible. When the sink-count query succeeds and returns zero,
+the parsed evidence is:
 
 ```json
 "clock_propagation": {
@@ -1311,13 +1310,12 @@ section prints with no rows), and the parsed evidence is:
 `clock_sinks: 0` is the machine-readable "propagation could not be
 established" signal: whatever slack numbers sit next to it carry **no**
 real insertion delay, and a consumer gating on propagation must treat the
-run as untimed-in-propagated-mode rather than trust them. `clock_sinks:
-null` means unknown, never a fabricated count: the sink-count query was
-absent or errored (an OpenSTA build without `all_registers`, a
-`catch`-guarded failure) *and* the latency section did not carry the
-tree-less shape above — the distinct-pin count of the latency report is
-never substituted for it, because that count is exactly the
-under-report issue #7417 fixed.
+run as untimed-in-propagated-mode rather than trust them. A failed,
+malformed or incomplete sink-count query produces `clock_sinks: null`
+(unknown), including when the latency report shows only a clock header.
+Older captures with neither sink-count marker retain their original
+behavior. A header for the requested clock with no latency rows yields
+zero. Other legacy captures yield an unknown count.
 
 Note the honest middle case: a **pre-CTS** DEF whose clock port connects
 straight to the flops through plain wires *does* propagate (sinks ≥ 1) —
