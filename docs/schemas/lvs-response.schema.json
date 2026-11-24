@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/lvs-response.schema.json",
-  "title": "klt lvs --format json success response, version 2",
+  "title": "klt lvs --format json success response",
   "description": "Success payload of `klt lvs` for every non-error result (status match, mismatch or inconclusive; engine klayout or netgen; layout.file or layout.netlist; plain-element, subckt-call or gate-level-verilog reference). The shared error envelope is out of scope. Fields documented as optional (label_layers, reference_conversion) are not required; unknown additive fields are accepted everywhere. See docs/cli/lvs.md.",
   "type": "object",
   "required": [
