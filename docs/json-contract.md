@@ -1407,13 +1407,14 @@ stability statement, concrete precedents, and drift-detection guidance, and
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
     from the `.fetched-version` file `scripts/fetch-*.sh` writes (searched at
-    the variant dir and up to two parents), else `git:<40-hex HEAD>` — with a
-    `-dirty` suffix when the work tree has uncommitted changes — when the
-    variant dir or its parent *is* a git work tree root. A tree nested inside
-    an unrelated checkout (e.g. klt's own) never reports that checkout's
-    `HEAD`; a missing or failing `git` yields `null`. Last, a bundle's
-    `.pdk-store.json` string `version` (one level above the real variant dir)
-    gives `store:<version>`; absent/malformed yields `null`.
+    the variant dir and up to two parents), else `git:<40-hex HEAD>` when the
+    variant dir or its parent is a Git work tree root. The `-dirty` suffix
+    marks changes in the index or to tracked files in the checkout. An
+    untracked file leaves the stamp unchanged until it is added to the index.
+    A variant nested inside an unrelated checkout skips the Git fallback.
+    When the preceding sources yield no version, a `.pdk-store.json` string
+    `version` at the real variant directory or its parent gives
+    `store:<version>`. The final fallback is `null`.
   - `linked_trees` (issue #3070) — present **only** when the model library the
     run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
     variant tree than `name` (a cross-variant symlink): a list of
@@ -2720,14 +2721,38 @@ to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
 
-**Warning delivery (issue #6935).** The CLI defers engine-version mismatch
-warnings (see [shared `provenance`](#shared-provenance-block)) and the
-`klt sim` advisories for ambiguous PDK installs and an ambient ngspice
-init file. When a command emits a JSON error, the CLI discards these
-warnings so the caller can parse the whole error stream as one JSON value.
-When a command produces a report, the CLI sends the warnings to stderr,
-including for a violations report with exit code `3`. Under `--format text`,
-the warnings print as they happen, ahead of the plain-text error line.
+**Warning delivery (issues #6935, #7203).** The CLI defers `klt`'s
+human-readable warning lines for the duration of a `--format json`
+invocation; every emitter that can fire ahead of an application error
+routes through the one deferral (`klayout_tools._warn`): the engine-version
+mismatch warning (see [shared `provenance`](#shared-provenance-block)); the
+`klt sim` advisories for ambiguous PDK installs and an ambient ngspice init
+file; the `klt sim` batch-planning warnings (runner-version,
+runner-feature and job-ceiling checks under `warn`, features the client
+could not verify, an over-the-serial-bound job split, and a batch receipt
+that could not be written); the `klt sim` request-lint and disclosure
+warnings (`--meas-at` lint echoes, the local worker-pool clamp notice,
+unseeded transient-noise sources, and the device-multiplier findings
+summary); the `klt extract` job-ceiling warning; `klt netlist` batch
+warnings; and the `klt erc`/`klt power` stackup and `devices[]` warnings
+(an empty `label_layer`, a body layer whose carve-out subtracted nothing,
+and a stackup no antenna-rule layer matches). When a command emits a JSON
+error, the CLI discards these warnings so the
+caller can parse the whole error stream as one JSON value. When a command
+produces a report, the CLI sends the warnings to stderr, including for a
+violations report with exit code `3`. Under `--format text`, and for
+library callers that never arm the deferral, the warnings print as they
+happen, byte-identical to before, ahead of the plain-text error line.
+
+Not deferred, by design: streaming batch progress/heartbeat lines and
+`klt sim: notice:` lifecycle narration print as they happen (they are
+progress, not one-shot warnings), and so do the `--resume` recovery hints
+(`_warn_unlaunched`, `apply_unrun_signal`). One residual: a resume-path
+hint can fire just before an error envelope while an exception propagates;
+it stays direct on purpose, because dropping it would lose the only pointer
+to the resume path for a sweep whose process died mid-submit. A consumer
+parsing stderr as one JSON document after such a `klt sim` failure may
+therefore still see that one hint line ahead of the envelope.
 
 ```json
 {
@@ -3077,6 +3102,50 @@ name, type or meaning, output without the flag stays byte-identical, so
 **no `schema_version` bump**. See [`cli/pex.md`](cli/pex.md) and
 [`cli/extract.md`](cli/extract.md)'s "Terminal-aware resistance graph"
 section.
+
+### `klt pex --resistance-network` per-net network disclosure (issue #6899)
+
+`--resistance-network` (requires `--resistance-graph`) writes the
+Kron-reduced terminal network of the solved graph in place of the star for
+every net whose graph solved `ok` with three or more terminals and whose
+device terminals map one-to-one onto its graph terminals, so a tree-routed
+net's stub arms stop adding series resistance to the current path. The
+additive fields, all absent without the flag (byte-identical output):
+
+- `parasitics.nets[].resistance_graph.network` (from `klt extract`, echoed
+  verbatim into `extraction.resistance_graph.nets[].network`):
+  `{written, resistor_count, fallback_reason}`. `written` is `reduced`
+  (the network was written; `resistor_count` pair resistors, at most
+  `T(T-1)/2` = 2016 at the graph's 64-terminal cap), `scalar` (a
+  two-terminal graph net kept issue #4037's `selected_resistance_ohm`) or
+  `legacy`. `fallback_reason` reuses issue #5747's vocabulary
+  (`resistance_source_reason`, first `unsupported` diagnostic `code`) and
+  adds only `terminal_mismatch` (the one-to-one device-terminal mapping
+  failed, or position cannot decide it: two terminals of one device on the
+  net share that device's single position), `mom_rlc_override` (a
+  `--mom-rlc-resistance-ohm` substitution won) and `parasitic_variant` (a
+  `--parasitic-variant` drop kept the star), which it cannot express. A
+  written reduced network reproduces every `pair_resistance_ohm` entry within
+  1e-6 relative tolerance. A disconnected filtered network reports
+  `pair_resistance_unavailable`, and an inaccurate connected reduction reports
+  `singular_system`. Both keep the existing fallback model. The net's ground
+  capacitance splits equally across its terminal nodes (the documented
+  first-increment rule; per-node capacitance from the graph itself is the
+  roadmap's open question).
+- `extraction.resistance_graph.resistance_network`: `true` when the request
+  enables the reduced network. The field is absent otherwise.
+- `parasitics.model.resistance_network` (echoed in
+  `extraction.model`): a string stating the mode, so a
+  `klt signoff --manifest` item-7 citation can tell a graph-derived
+  network extraction from a series-sum one.
+- `parasitics.nets[].rc_model` gains a third value, `"reduced"`, beside
+  `"lumped"` and `"distributed"` — only for nets that took the network;
+  their `integrity.open` runs the real terminal-connectivity check.
+
+No existing field changes name, type or meaning, so **no
+`schema_version` bump**. See [`cli/pex.md`](cli/pex.md)'s
+`--resistance-network` and [`cli/extract.md`](cli/extract.md)'s "Reduced
+terminal networks" paragraphs.
 
 ### `klt corner-matrix check` coverage verdict (issue #5865)
 

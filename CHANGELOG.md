@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
+  revision token case-insensitively** (issue #6362, 2026-11-24, additive —
+  `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already
+  ignored case but the `open_pdks <token>` arm was an exact compare, so a
+  declared `options.pdk_revision` spelled in a different case than the
+  worker's token (e.g. upper-case hex) reported a spurious advisory
+  `mismatch` plus a `warning` on a worker that *has* that revision. Both
+  arms now fold case. Matching stays otherwise exact: an abbreviated
+  revision (a 7-character prefix) is still a `mismatch`, and the advisory
+  field still never changes a run's outcome. See `docs/cli/sim.md`.
 - The `klt lvs` report category `device.implausible_dimensions` has severity
   `warning` and can appear on either side of a matching comparison (#7494).
 - **`klt sim` rejects a malformed `batch.poll_interval_s` /
