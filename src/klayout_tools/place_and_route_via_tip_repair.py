@@ -138,7 +138,9 @@ def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, mode):
         return None
     target = _nm_to_dbu_ceil(_SHORT_MAX_NM, dbu)
     window = kdb.Region(pair.bbox().enlarged(2 * target))
-    nearby = metal.interacting(kdb.Region(window.bbox().enlarged(target)))
+    search = window.bbox().enlarged(target)
+    candidates = kdb.Region([shape.polygon for shape in metal.each_touching(search)])
+    nearby = candidates.interacting(kdb.Region(search))
     boundary = set(nearby.edges().each())
     if pair.first not in boundary or pair.second not in boundary:
         return None
@@ -152,6 +154,15 @@ def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, mode):
         if added is not None:
             return added, mixed
     return None
+
+
+def _merge_repair(kdb, metal, extra):
+    # A conductor outside the edit's bounds cannot join the added metal.
+    affected = list(metal.each_touching(extra.bbox()))
+    updated = kdb.Region([shape.polygon for shape in affected]) + extra
+    for shape in affected:
+        metal.erase(shape)
+    metal.insert(updated.merged())
 
 
 def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
@@ -183,18 +194,21 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     v0 = layout.find_layer(18, 0)
     if v0 is not None:
         cuts += kdb.Region(top.begin_shapes_rec(v0))
+    # Keep the full merged conductor polygons available for later boundary checks.
+    indexed_metal = kdb.Shapes()
+    indexed_metal.insert(metal)
     pad_count = wire_count = 0
     # S.4/S.5 first: a pad edge shared by an S.4/S.5 pair and an S.2 pair is
     # repaired once, and the S.2 pair is then already resolved.
     for pairs, mode in ((narrow_pairs, "s4"), (tip_pairs, "s5"), (side_pairs, "s2")):
         for pair in sorted(pairs.each(), key=lambda item: item.bbox()):
             result = _repair_pair(
-                kdb, pair, landings, pad_sides, metal, cuts, layout.dbu, mode
+                kdb, pair, landings, pad_sides, indexed_metal, cuts, layout.dbu, mode
             )
             if result is not None:
                 extra, mixed = result
                 top.shapes(metal_index).insert(extra)
-                metal = (metal + extra).merged()
+                _merge_repair(kdb, indexed_metal, extra)
                 if mixed:
                     wire_count += 1
                 else:

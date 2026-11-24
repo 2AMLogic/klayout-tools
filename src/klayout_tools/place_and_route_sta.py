@@ -52,6 +52,7 @@ from .place_and_route_base import (
     PlaceAndRouteError,
     _require_extract_deck_for_cell_library,
 )
+from .place_and_route_library_limits import library_limit_fields, prepare_reports
 from .place_and_route_script import (
     _clock_lines,
     _design_rule_check_lines,
@@ -811,6 +812,7 @@ def _run_corner_sweep(
     int | None,
     int | None,
     int | None,
+    str | None,
 ]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -820,15 +822,15 @@ def _run_corner_sweep(
     Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners,
     max_transition_violation_count, max_capacitance_violation_count,
     max_transition_violation_count_vs_library,
-    max_capacitance_violation_count_vs_library)``. The first two, each
-    rounded to 5 decimal places (matching
+    max_capacitance_violation_count_vs_library, library_limit_report_path)``.
+    The first two, each rounded to 5 decimal places (matching
     :func:`~klayout_tools.place_and_route._extract_stage_metrics`'s own
     ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
     ``-metrics`` dump didn't populate the corresponding key, are issue #949's
     original aggregate fields -- unchanged by issue #1092, still sourced from
     this same combined, every-``corners``-loaded-at-once session's own
     unscoped ``report_worst_slack_metric -setup``/``-hold`` calls.
-    ``(None, None, [], None, None, None, None)`` when ``corners`` is empty --
+    ``(None, None, [], None, None, None, None, None)`` when ``corners`` is empty --
     either the "should not happen in practice" case the original #949
     docstring named (a resolved ``liberty_path`` implies at least one
     shipped ``.lib``), or issue #1092's own explicit
@@ -916,8 +918,9 @@ def _run_corner_sweep(
     """
     from .place_and_route import _engine_error_message, _read_metrics
 
+    reports = prepare_reports(output_dir, hdl_toplevel)
     if not corners:
-        return None, None, [], None, None, None, None
+        return None, None, [], None, None, None, None, None
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -984,15 +987,8 @@ def _run_corner_sweep(
     # Issue #2357: the library-only pass -- same stdout, distinct markers
     # (`_corner_sweep_script_lines` runs this pass *before* any caller-stated
     # constraint is applied to the session).
-    max_transition_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-    )
-    max_capacitance_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    library_limits = library_limit_fields(
+        completed.stdout, reports, corners[0]["name"] if len(corners) == 1 else None
     )
 
     if len(corners) == 1:
@@ -1012,12 +1008,7 @@ def _run_corner_sweep(
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
                 # Issue #2357: this corner's own library-only counterpart.
-                "max_transition_violation_count_vs_library": (
-                    max_transition_violations_vs_library
-                ),
-                "max_capacitance_violation_count_vs_library": (
-                    max_capacitance_violations_vs_library
-                ),
+                **library_limits,
             }
         ]
         return (
@@ -1026,8 +1017,9 @@ def _run_corner_sweep(
             corner_breakdown,
             max_transition_violations,
             max_capacitance_violations,
-            max_transition_violations_vs_library,
-            max_capacitance_violations_vs_library,
+            library_limits["max_transition_violation_count_vs_library"],
+            library_limits["max_capacitance_violation_count_vs_library"],
+            library_limits["library_limit_report_path"],
         )
 
     corner_breakdown = []
@@ -1110,16 +1102,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #2357: this corner's own library-only counterpart,
                 # from the same single-corner invocation's stdout.
-                "max_transition_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-                ),
-                "max_capacitance_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-                ),
+                **library_limit_fields(corner_completed.stdout, reports, corner_name),
             }
         )
 
@@ -1129,6 +1112,7 @@ def _run_corner_sweep(
         corner_breakdown,
         max_transition_violations,
         max_capacitance_violations,
-        max_transition_violations_vs_library,
-        max_capacitance_violations_vs_library,
+        library_limits["max_transition_violation_count_vs_library"],
+        library_limits["max_capacitance_violation_count_vs_library"],
+        library_limits["library_limit_report_path"],
     )

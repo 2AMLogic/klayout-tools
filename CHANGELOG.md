@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` rejects a malformed `batch.poll_interval_s` /
+  `batch.poll_timeout_s` through the error envelope** (issue #7543,
+  2026-11-23): the last two `request.batch` seconds knobs still parsed with
+  a bare `float()` in `_resolve_batch_config` now go through validating
+  resolvers (`sim_batch_job_timeout.resolve_poll_interval_s` /
+  `resolve_poll_timeout_s`, beside the sibling `resolve_job_timeout_s`), the
+  same early-refusal discipline as every other `batch.*` knob. A
+  non-numeric, `bool`, non-finite or negative value — previously a raw
+  `ValueError`/`TypeError` traceback past the JSON envelope, or silently
+  accepted (`true` read as `1.0`, `nan`, negatives) — is now a documented
+  `{"error": {...}}` envelope with exit 1 on both the dry-run and submit
+  paths, before any S3 write, carrying the new `error.code:
+  "batch_poll_knob_invalid"`; the dry-run runner check re-raises that code
+  so a dry run refuses exactly what the submit refuses. `0` stays accepted
+  for both and absent keys keep the same defaults. **Additive —
+  `schema_version` unchanged:** no success payload field changes, but a
+  request that previously "worked" with `true`/`nan`/negative poll knobs
+  now refuses.
 - **`klt place-and-route` warns on two deck-known gf180mcu power configurations**
   (issue #7311, 2026-11-23): a `request.power` on `gf180mcu_fd_sc_mcu9t5v0`/
   `gf180mcu_fd_sc_mcu7t5v0` that applies `power.connects[].split_cuts`

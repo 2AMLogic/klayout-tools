@@ -40,6 +40,7 @@ from .place_and_route_cell_libraries import (
     _ROW_RAIL_STRAP,
     _TAPCELL_CELLS,
 )
+from .place_and_route_fences import placement_fence_lines
 from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_layers import _ROUTING_LAYER_RANGE
@@ -1010,10 +1011,7 @@ def _stage_script_lines(
         # and after `link_design` (the instance must already exist in the
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision, not something to optimize away. The instance is
-        # brace-quoted so a bracketed name is passed literally here; the
-        # `-instances` site re-escapes it for glob + list parsing (issues
-        # #4701, #4715).
+        # caller decision. Brace quoting preserves a bracketed instance name.
         lines += [
             f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
@@ -1030,6 +1028,7 @@ def _stage_script_lines(
         # Insert tap cells and build the PDN after rows, macros and tracks exist.
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
+        lines += placement_fence_lines(instance_groups)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines

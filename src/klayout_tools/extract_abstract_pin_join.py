@@ -10,21 +10,42 @@ if TYPE_CHECKING:
 
 
 class AbstractPinJoins:
-    """Remember extracted cluster IDs so no probe refers to an absorbed net."""
+    """Remember extracted cluster IDs so no probe refers to an absorbed net.
+
+    Issue #7561: a group also records which of its candidates **landed** on
+    the access point's own declared conductor (the point's role-layer probe
+    hit, versus the cross-layer fallback that takes whatever overlapping
+    conductor is nearby). A join that would absorb an anonymous routed net
+    into a differently named one -- silently shorting a driven signal into
+    a rail -- is only allowed when both sides of the pair carry that
+    landing evidence; otherwise the pair is kept separate and reported.
+    """
 
     def __init__(self) -> None:
-        self.groups: list[tuple[str, str, list[int]]] = []
+        self.groups: list[tuple[str, str, list[int], frozenset[int]]] = []
         self.nets: dict[int, kdb.Net] = {}
         self.parents: dict[int, int] = {}
         self.def_names: dict[int, set[str]] = {}
 
     def record(
-        self, instance: str, pin: str, winner: kdb.Net, candidates: dict[int, kdb.Net]
+        self,
+        instance: str,
+        pin: str,
+        winner: kdb.Net,
+        candidates: dict[int, kdb.Net],
+        landed: frozenset[int] | set[int] = frozenset(),
     ) -> None:
+        """Remember one pin's candidate nets and which of their probes
+        resolved on the access point's own declared conductor (``landed``,
+        a subset of ``candidates``' keys). An empty ``landed`` keeps the
+        pre-#7561 record shape: joins still happen for equally named or
+        mutually anonymous pairs, and mixed pairs are kept separate."""
         if len(candidates) > 1:
             self.nets.update(candidates)
             others = [key for key in candidates if key != winner.cluster_id]
-            self.groups.append((instance, pin, [winner.cluster_id, *others]))
+            self.groups.append(
+                (instance, pin, [winner.cluster_id, *others], frozenset(landed))
+            )
 
     def read_def_names(
         self,
@@ -59,7 +80,7 @@ class AbstractPinJoins:
         # A single bare pad with no other pin, device or name has no route
         # tree in the emitted netlist. A common candidate of two different
         # pin groups can connect the groups even when neither chose it first.
-        uses = Counter(key for _, _, keys in self.groups for key in keys)
+        uses = Counter(key for _, _, keys, _landed in self.groups for key in keys)
         routed = {
             key
             for key, net in self.nets.items()
@@ -70,7 +91,8 @@ class AbstractPinJoins:
         }
         joined: list[str] = []
         conflicts: list[str] = []
-        for instance, pin, keys in self.groups:
+        unsupported: list[str] = []
+        for instance, pin, keys, landed in self.groups:
             root = self._root(keys[0])
             for key in keys[1:]:
                 other = self._root(key)
@@ -81,9 +103,23 @@ class AbstractPinJoins:
                     f"{instance}.{pin}: {winner.expanded_name()} and "
                     f"{loser.expanded_name()}"
                 )
-                names = self._names(root) | self._names(other)
+                root_names = self._names(root)
+                other_names = self._names(other)
+                names = root_names | other_names
                 if len(names) > 1:
                     conflicts.append(f"{instance}.{pin}: {', '.join(sorted(names))}")
+                    continue
+                # One named and one anonymous side (#7561): without a
+                # declared-conductor landing on both sides the anonymous net
+                # is only known to overlap the pin's footprint, which cannot
+                # justify absorbing it into the named net. Decided per pair
+                # before any join mutates the circuit or the parent map, so
+                # a skipped pair leaves no join entry and no indirect path
+                # for a later group to merge through.
+                if bool(root_names) != bool(other_names) and not (
+                    keys[0] in landed and key in landed
+                ):
+                    unsupported.append(pair)
                     continue
                 circuit.join_nets(winner, loser)
                 self.parents[other] = root
@@ -99,6 +135,11 @@ class AbstractPinJoins:
             warnings.append(
                 "--abstract-cells pin pads have conflicting net names, kept separate: "
                 + "; ".join(conflicts)
+            )
+        if unsupported:
+            warnings.append(
+                "--abstract-cells pin pads without connection evidence, "
+                "kept separate: " + "; ".join(unsupported)
             )
         return warnings
 

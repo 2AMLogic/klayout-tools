@@ -22,6 +22,7 @@ from ._common_params import (
     declare_metal_label_present,
     declare_tap_and_well_layers,
 )
+from ._ring_shapes import _draw_ring_shapes
 
 
 def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -41,8 +42,6 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _ring_layout,
         _well_box_um,
         _well_island_label_point,
@@ -255,45 +254,17 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
             )
-            gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
-            _insert_ring(
-                self.cell,
+            _draw_ring_shapes(
+                self,
                 li_tap,
-                dbu,
-                info["outer_box_um"],
-                info["inner_box_um"],
-                gap_box,
-                self.mfg_grid_um,
-            )
-            _insert_ring(
-                self.cell,
                 li_metal,
+                li_contact,
                 dbu,
-                info["outer_box_um"],
-                info["inner_box_um"],
-                gap_box,
-                self.mfg_grid_um,
+                info,
+                implant_layer=self.well_tap_implant_layer
+                if self.well_tap_implant_present
+                else None,
             )
-            _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
-            if self.well_tap_implant_present:
-                # Tracks the tap ring, extended `ring_implant_margin_um` past
-                # every one of its edges (issue #2369's NP.5b/PP.5b
-                # extension-beyond-COMP fix to the originally coincident
-                # implant) -- still a ring, never a blanket over the enclosed
-                # area, which would re-dope whatever a caller later places
-                # inside the island (see the `well_tap_implant` role's own
-                # comment in `_PDK_ROLE_LAYERS`).
-                _insert_implant_ring(
-                    self.cell,
-                    self.layout.layer(self.well_tap_implant_layer),
-                    dbu,
-                    info["outer_box_um"],
-                    info["inner_box_um"],
-                    gap_box,
-                    info["gap"]["side"] if info["gap"] is not None else None,
-                    self.ring_implant_margin_um,
-                    self.mfg_grid_um,
-                )
             if self.well_present:
                 _insert_boxes(
                     self.cell,
