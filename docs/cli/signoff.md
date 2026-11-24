@@ -5249,10 +5249,11 @@ partition-qualified `"5.analog"` key works too):
   named member graded `met` and its envelope's `corners[]` contains every
   required grid point with every corner at that point `pass` (a point swept
   twice — a `params` axis — must pass at *every* corner), **and** it carries
-  at least one condition probe: a passing, `limits`-bearing `measurements[]`
-  entry tagged `spec_row: "<row id>"` (the #3778 tag; `klt sim`'s rolled-up
+  at least one condition probe. A probe is a passing `measurements[]` entry
+  tagged `spec_row: "<row id>"` (the #3778 tag) with a recognised, non-null
+  `min` or `max` bound in `limits`. Zero counts as a bound. The rolled-up
   `status` is `pass` only when the measurement passed at every corner that
-  reported it).
+  reported it.
 - Otherwise the row is uncovered — `unmet` / `partial_coverage`, listed in
   `detail.uncovered_rows` like any uncovered row — and `detail.joint_rows`
   names, per member with a shortfall, its `missing_points` (labels in the
