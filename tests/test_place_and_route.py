@@ -70,6 +70,10 @@ from pathlib import Path
 
 import pytest
 
+from helpers.place_and_route_merge import (
+    _skipped_power_stack_repair,
+    _skipped_via_pad_trim,
+)
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
@@ -82,6 +86,7 @@ from klayout_tools.place_and_route import (
     load_request,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_deck_warnings import tap_distance_warning
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -6145,6 +6150,7 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "max_capacitance_violation_count": 2,
             "max_transition_violation_count_vs_library": 3,
             "max_capacitance_violation_count_vs_library": 2,
+            "library_limit_report_path": report["library_limit_report_path"],
         }
     ]
 
@@ -7892,7 +7898,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
@@ -7965,11 +7971,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
-            # Issue #2357: the library-only counterpart -- also 0/0 here,
-            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
-            # was given for this request.
             "max_transition_violation_count_vs_library": 0,
             "max_capacitance_violation_count_vs_library": 0,
+            "library_limit_report_path": None,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -8058,9 +8062,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
-        # Issue #2357: the library-only counterpart, also 0/0 here.
         "max_transition_violation_count_vs_library": 0,
         "max_capacitance_violation_count_vs_library": 0,
+        "library_limit_report_path": None,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
@@ -8695,25 +8699,13 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
             "layers": [],
         },
     }
-
-
-def _skipped_via_pad_trim(variant: str) -> dict:
-    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
-    s = {
-        "status": "skipped",
-        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
-    }
-    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
-    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
-    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8829,6 +8821,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
         # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
         "pin_conductor": {"status": "unchanged", "layers": []},
     }
@@ -10627,11 +10620,10 @@ def _run_preset_pdn_integration(
     at all -- only `{"preset": ...}` -- and return the report.
 
     This is the automated form of this issue's "a preset-driven run reaches
-    `power.placed.status == "complete"` and `warnings == []` under
-    #2086/#2122's audit on a real toolchain run (not a stub), for each
-    supported library" acceptance criterion. The two assertions that
-    criterion names are made by each caller below, so a failure names the
-    library it happened on.
+    `power.placed.status == "complete"` with no #2086/#2122 audit warning on
+    a real toolchain run (not a stub), for each supported library"
+    acceptance criterion. Each caller below makes both assertions (a
+    gf180mcu caller expects the #7311 tap-distance entry and nothing else).
     """
     root, variant = variant_gate
     monkeypatch.setenv("PDK_ROOT", root)
@@ -10742,7 +10734,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -10784,7 +10776,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(

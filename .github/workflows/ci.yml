@@ -222,6 +222,16 @@ jobs:
           git ls-files 'examples/**/*.json' \
             | xargs -r uv run --frozen --extra dev klt env-provenance lint-envelope
 
+      - name: Check prepared release notes
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.base_ref == github.event.repository.default_branch &&
+          startsWith(github.head_ref, 'release/v')
+        env:
+          RELEASE_BRANCH: ${{ github.head_ref }}
+        run: python3 -I scripts/release_prep.py refresh --version "${RELEASE_BRANCH#release/v}" --check
+
   native:
     name: ${{ matrix.job_name }}
     # `native/mom/` (issue #718), `native/congestion/` (issue #785, Epic
@@ -1440,28 +1450,21 @@ jobs:
           PDK: sky130A
           COV_ARGS: ${{ matrix.python-version == '3.12' && '--cov --cov-report=json:coverage.json --cov-report=term' || '' }}
 
-      - name: Assert the sv2v reproducibility tests ran (no silent skip)
-        # Issue #5956: before the pinned sv2v steps above,
-        # tests/test_synthesize_netlist_normalize.py's two `_needs_sv2v`
-        # tests skipped on every CI leg, so issue #5594's AC2/AC4 were
-        # host-only. Same no-silent-skip posture as the `test-numerical`
-        # job's cross-check assert (issue #2276): this job provisions
-        # sv2v, Yosys and the sky130 liberty, so a skip in that file is a
-        # red, never a green lie. Runs the file explicitly with -rs on
-        # one leg (3.12, the leg that already carries the coverage extra)
-        # so any skip is named in this step's own log block -- that log
-        # line is also the AC1 "tests ran, 0 skipped" evidence.
+      - name: Assert the real sv2v synthesis tests ran (no silent skip)
+        # The real frontend must run on the provisioned sv2v/Yosys/sky130
+        # worker. Include the CLI evidence for the unpacked-array case
+        # (#4277) alongside the netlist reproducibility cases (#5956).
         if: matrix.python-version == '3.12'
         run: |
           set -o pipefail
           sv2v --version
           uv run --frozen --extra dev --extra functional-verification pytest \
-            tests/test_synthesize_netlist_normalize.py -rs \
+            tests/test_synthesize_netlist_normalize.py tests/test_synthesize_sv2v_ports.py -rPs \
             | tee /tmp/sv2v-normalize-pytest.log
           summary="$(tail -n 1 /tmp/sv2v-normalize-pytest.log)"
           echo "pytest summary: $summary"
           if echo "$summary" | grep -q 'skipped'; then
-            echo "::error::test_synthesize_netlist_normalize.py reported skips -- sv2v/Yosys/sky130 liberty are all provisioned in this job, so a skip here is a bug (issue #5956: this file's real-sv2v tests must RUN, never skip)"
+            echo "::error::Real sv2v synthesis tests skipped despite provisioned sv2v, Yosys and sky130 liberty"
             exit 1
           fi
         env:

@@ -14,9 +14,24 @@ from typing import Any
 
 from . import env_provenance
 from ._provenance import build_provenance
-from .decks import deck_source_path
-from .extract_base import SCHEMA_VERSION, _build_metrics
+from .decks import FinFETExtractionDeck, deck_source_path
+from .extract_base import SCHEMA_VERSION, _build_metrics, instantiated_device_counts
 from .extract_progress import _staged
+from .extract_report_canonicalize import _normalized_netlist_sha256
+
+
+def finfet_device_census(deck: object, circuit: Any) -> dict[str, Any]:
+    """Disclose both count scopes when a FinFET layout retains subcircuits."""
+    if not isinstance(deck, FinFETExtractionDeck) or circuit is None:
+        return {}
+    if next(iter(circuit.each_subcircuit()), None) is None:
+        return {}
+    counts = instantiated_device_counts(circuit)
+    return {
+        "device_count_scope": "selected_circuit",
+        "instantiated_device_counts": counts,
+        "instantiated_device_count": sum(counts.values()),
+    }
 
 
 def assemble_extract_report(
@@ -68,8 +83,6 @@ def assemble_extract_report(
     warnings: Any,
 ) -> dict[str, Any]:
     """Build the ``run_extract`` result dict (byte-identical to the inline code)."""
-    from .extract import _normalized_netlist_sha256
-
     # Issue #2659: `file` -- the input layout `provenance.input.content_hash`
     # below covers -- is normalised against the repo root resolved from the
     # layout's own location, the same "walk up from the input" anchor

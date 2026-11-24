@@ -226,7 +226,7 @@ multiplier warnings".
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
 and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
-"Asynchronous submit and status".
+"Asynchronous submit, status and cancel".
 
 `klt sim` on a **sharded** `batch` run (issue #5522) adds two top-level
 roll-ups to `environment.remote` beside the existing `fleet[]` array:
@@ -792,6 +792,14 @@ additively as `environment.remote.worker_environment` (and in each
 observations are `null` (never the client's values) and `capture` is `ok`,
 `absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
 environment" for the field names and limits.
+
+For sharded batch simulation, `environment.remote.run` records whole-run
+completion, the original host count, observed rounds, distinct jobs with launch
+evidence and the observed launch-to-terminal span. `environment.remote.fleet`
+covers jobs harvested or dispatched during the reporting invocation. The
+`history_coverage` field identifies partial history from older artifacts.
+See the [simulation report contract](cli/sim.md#whole-run-batch-summary) for
+the fields and their null semantics.
 
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
@@ -1931,7 +1939,9 @@ and the two coexist deliberately rather than by oversight:
   is committable evidence; a machine-specific absolute path is not).
   `scope` is not decoration: the resolution rule differs per value — a
   `"repo"` path must be joined to *the invoking repo's* root (the cwd `klt`
-  was run from), `"external"`/`"absent"` carry no usable path at all.
+  was run from), except for the request-anchored fields whose table rows
+  below name their own resolution root (#6762, #6764) — those join to that
+  root instead; `"external"`/`"absent"` carry no usable path at all.
 - **Plain string** — a bare absolute filesystem path (or `null` before the
   artifact exists), with no `scope` alongside it. The historical shape every
   path field used before the envelope existed.
@@ -1976,7 +1986,8 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
-| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
+| `em` | `artifacts.{mesh,spec,report,log}` (retained layout runs also `layout`, `mesh_report`, `mesh_log`), each with additive `sha256` — the hashed envelope #4931 defines. All of them use the repo containing the request file (#6764): same request, same report from any invoking directory; present paths outside that repo (or no repo at all) have scope `external` | 1 | #5616 |
+| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path`. Since #6764 every field resolves against the repo containing the request file (never the invoking cwd); an `outputs.dir` outside that repo makes the P&R fields `external` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
@@ -1993,7 +2004,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
-| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `library_limit_report_path` (also in the route stage and per-corner entries, null when no report is available, additive in #7588) (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
@@ -2729,6 +2740,8 @@ the warnings print as they happen, ahead of the plain-text error line.
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_cancel_nothing_to_cancel` | `klt sim --cancel JOB_ID`: the fleet's cancel verb found no pending or running instance for that job (already finished or cancelled, or unknown to the fleet tag) and wrote nothing (issue #4351). Not an infrastructure failure. See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
+  | `sim` | `batch_job_cancelled` | `--backend batch`: polling (a blocking run or `--attach`) observed `status.json` state `cancelled` — the job was cancelled through the fleet; nothing is re-launched and no results are coming (issue #4351). See [docs/cli/sim.md](cli/sim.md) "Asynchronous submit, status and cancel". |
   | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner (refused with exit `87`) keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code` and, additively, one top-level `diagnostics[]` entry with this code (severity `error`, `accepted_client_release`, remedy in `message`; issue #5061). See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity or shared vCPU/Spot-quota budget. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. Those diagnostics also carry additive `missing_features[]` (the request-feature keys the runner predates; issue #4863). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |

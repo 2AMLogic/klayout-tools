@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from ._common_params import (
     declare_cut_and_metal_params,
+    declare_device_well_enclosure,
     declare_mos_array_extra_params,
     declare_mos_stack_params,
     declare_ring_implant_params,
@@ -128,6 +129,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
         # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
         mfg_grid_um: float
+        device_well_enclosure_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -276,6 +278,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
+            declare_device_well_enclosure(self, WELL_ENCLOSURE_MARGIN_UM)
 
         def display_text_impl(self) -> str:
             return f"diff_pair(w={self.w_um},l={self.l_um},splits={self.splits})"
@@ -323,7 +326,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # `flavor="pfet"` well shape below -- computed once, independent
             # of `voltage_flavor`, so a caller can request either, both, or
             # neither.
-            margin = WELL_ENCLOSURE_MARGIN_UM
+            margin = self.device_well_enclosure_um
             device_well_box = (
                 -margin,
                 -margin,

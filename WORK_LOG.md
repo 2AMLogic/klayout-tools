@@ -8,6 +8,52 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-23
 
+- **PR #7503**: fix: match byte-identical short hex pins in --expect-version
+- **PR #7487**: Recognize PEX-side worker observations in envelope path lint
+- **PR #7468**: Canonicalize extract reports without loading the layout engine
+- **PR #7455**: Share simulator version pin comparison across manifest and report checks
+- **PR #7448**: feat(sta): per-entry clock reference for input/output delay maps
+- **PR #7445**: Stamp the variant directory selected by PDK discovery
+- **PR #7420**: Explain missing expression measurements on versioned simulation runners
+- **PR #7385**: fix(signoff): require checked ERC coverage for every declared tie in item 11
+- **PR #7302**: Share model resolution and sweep validation between klt size solvers
+- **PR #7157**: fix(gen-compose): clear the drawn pad for label-derived access
+- **PR #7150**: feat: control OpenROAD threads for place-and-route
+- **PR #7131**: Describe descriptor-backed names in post-route corner sweeps
+- **PR #7038**: feat: accept local operating-condition renames in Liberty list merge
+- **Issue #7484** (closed): klt pex: env-provenance lint-envelope flags the envelope's own remote worker observations because the #5133 skip is anchored at the envelope root
+- **Issue #7399** (closed): klt sta: I/O delays are primary-clock-only, so an input-delay-vs-secondary-clock check (e.g. data vs an edge-aligned strobe) cannot be expressed
+- **Issue #7125** (closed): place-and-route docs: two leftover `list_lib_corners` references describe sweep_corners validation that is now descriptor-driven
+- **Issue #7113** (closed): klt sim batch: measurements[].expr passes preflight but every dependent measurement errors on a runner that predates expr (runner_compatibility reads match)
+- **Issue #7090** (closed): Share model resolution and sweep validation between klt size solvers
+- **Issue #7060** (closed): Use the discovered variant directory for unpinned batch PDK stamps
+- **Issue #7049** (closed): Move extract report canonicalization out of the layout engine
+- **Issue #6987** (closed): Require checked ERC coverage for every declared tie before signoff item 11 grades met
+- **Issue #6940** (closed): Merge Liberty cell groups whose default operating condition differs only by name
+- **Issue #6815** (closed): gen-compose: ports_from_labels access search ignores routing.landing_pad_size_um, so it clears a smaller pad than compose draws
+- **Issue #6534** (closed): sim_batch_capacity_retry._run_pass: the interrupt branch's partial-outcome collection is dead code
+- **Issue #6378** (closed): sim: the engine_version pin's accept test is duplicated between the pre-submit and post-run checks
+- **Issue #6334** (closed): Reuse pdk.variant_dir_of() in bundle_expectation instead of re-deriving the variant dir
+- **Issue #6298** (closed): pdk_compat._sha_equal: byte-identical all-hex values shorter than 7 chars report mismatch
+- **Issue #6297** (closed): klt pdk check: bundle_expectation re-derives the variant dir instead of reading the one find_pdk resolved
+- **Issue #5632** (closed): abstract-cells + --abstract-cell-lef: merged substrate pin lands on the isolated 'vsubs' global, so a PG-pin gate-level reference cannot match (topology, not power_connectivity)
+- **Issue #5520** (closed): klt characterize: async set/reset arcs (preset/clear propagation, recovery/removal) for sequential cells
+- **Issue #5517** (closed): klt characterize: no sequential-cell arcs (setup/hold/recovery/removal), so a standard-cell library cannot be re-characterized end to end
+- **PR #7489**: Preserve OSDI model paths in relocated PEX testbenches
+- **PR #7477**: refactor(sim): isolate checkpoint persistence and fingerprinting
+- **PR #7473**: docs(lvs): show the sg13cmos5l plain-element reference migration
+- **PR #7452**: Preserve escaped scalar port names in gate-level LVS references
+- **PR #7437**: Exclude physically empty internal nets from SPEF design coverage
+- **PR #7432**: feat(place-and-route): disclose dont_use check result as cell_exclusions.validated
+- **PR #7425**: Decouple shared extraction interfaces from the extraction orchestrator
+- **PR #7393**: Grade measurement limits against each simulation corner’s supply
+- **PR #7382**: Qualify worker init evidence in ngspice batch reports
+- **PR #7364**: feat(layout-plan): derive MOS flavor from device_class, climb ring/self-net legs; LVS-clean mixed sky130 block
+- **PR #7166**: Avoid inferred SDC drift for unchecked command forms
+- **PR #7162**: Build only the SPICE decks submitted by split-grid characterization
+- **PR #7141**: Document saving an ngspice subcircuit resistor current
+- **PR #6141**: feat: read .pdk-store.json identity in pdk pins and add check --expect-bundle-sha256
+- **PR #6078**: Reject a diff_pair group whose declared devices share a gate or drain net
 - **PR #7444**: refactor: consolidate off-host echo checks into sim_echo_checks
 - **PR #7441**: test: gate plusargs tests on shared tool_probes cocotb/Icarus marks
 - **PR #7438**: refactor: drop unreachable expected_dupes branch in corner-matrix
@@ -74,6 +120,21 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #6246**: feat(extract): emit nets[].structural_id, a stable handle for anonymous nets
 - **PR #6215**: refactor(sta): share the OpenROAD mount-namespace hint with place-and-route
 - **PR #6187**: fix(array-check): check abutment per lane and derive the expected seam gap from --pitch
+- **Issue #7485** (closed): klt pex: the swapped testbench request resolves request-relative options.osdi_preload against the pex artifact root, so the extracted leg cannot find the OSDI module
+- **Issue #7474** (closed): Move simulation checkpoint persistence and fingerprinting out of sim.py
+- **Issue #7388** (closed): place-and-route cell_exclusions omits synthesize's `validated` disclosure
+- **Issue #7386** (closed): Break the extract.py import cycle across sibling, LVS, and netlist modules via extract_base
+- **Issue #7370** (closed): klt sim: measurements[].limits cannot be supply-relative, so a VDD-scaled bound cannot be tool-graded across a supply-sweeping corner set
+- **Issue #7368** (closed): klt sim batch: options.ngspice_init is accepted but the report retains no init identity or marker evidence
+- **Issue #7367** (closed): klt sta: design-side spef_annotation coverage still counts nets with no pins, so annotation_complete cannot reach true on a netlist with connection-less nets (#6970 residual)
+- **Issue #7067** (closed): Document how to save a device branch current for .meas FIND in klt sim
+- **Issue #7017** (closed): klt sta sdc_check: an unparseable-but-present SDC command is reported as a mismatch with sdc_value null, not as unchecked
+- **Issue #6912** (closed): layout-plan execute: 6-device mixed sky130 block (xhigh res_array + MIM cap_array + four hvi FETs) routes no net by default; make it a routed, LVS-clean regression fixture
+- **Issue #6858** (closed): Skip the unused full SPICE deck when characterize splits a grid
+- **Issue #5765** (closed): layout-plan execute cannot fully wire a diff_pair group (one port per declared device; subckt-call digest splits instances into per-finger devices)
+- **Issue #5693** (closed): klt lvs: gate-level-verilog reader rejects escaped/bracketed names in the module port list and direction declarations (follow-up to #1371, #4810)
+- **Issue #5624** (closed): klt pdk check: an install whose content does not match its recorded identity passes both legs (store stamp unread; materialized cross-variant symlinks undetected)
+- **Issue #4424** (closed): klt lvs: custom-class cap_cmomi/resistor LVS regresses from match to mismatch between daf06a51afaf and 0.8.0 (sg13cmos5l)
 - **Issue #7478** (closed): Live sky130A verification: klt sta clock_sinks > latency-report pins on a >2-flop post-CTS DEF
 - **Issue #7416** (closed): klt lvs (0.9.2): the FinFET gate-level route defaults flatten_reference on but flatten_layout off, so the default request fails at circuit matching with no advisory
 - **Issue #7415** (closed): klt erc --check: a gzipped report tracebacks with UnicodeDecodeError instead of verifying (same class as #5717/#5452)
