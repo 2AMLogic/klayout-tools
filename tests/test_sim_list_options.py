@@ -110,14 +110,15 @@ def test_planners_reject_non_object_options(tmp_path, options):
         )
 
 
-def _assert_one_json_error(capsys, rc):
+def _assert_one_json_error(capsys, rc, message=None):
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.out == ""
     envelope = json.loads(captured.err)  # exactly one JSON document
     assert envelope["schema_version"] == 1
     assert envelope["error"]["command"] == "sim"
-    assert envelope["error"]["message"] == "request.options must be an object (got str)"
+    expected = message or "request.options must be an object (got str)"
+    assert envelope["error"]["message"] == expected
 
 
 def test_cli_json_deck_dry_run_envelope(tmp_path, capsys, no_execution):
@@ -133,6 +134,18 @@ def test_cli_json_command_list_envelope(tmp_path, capsys, no_execution):
     argv = ["sim", path, "--backend", "local", "--format", "json"]
     _assert_one_json_error(capsys, main([*argv, "--command-approvals", approvals]))
     assert no_execution == []
+
+
+@pytest.mark.parametrize(
+    "payload", [["commands"], "commands here", ["decks"]], ids=["cmd", "str", "deck"]
+)
+def test_cli_json_non_object_request_envelope(tmp_path, capsys, payload):
+    """A non-dict request is refused before the list-membership test (#7720)."""
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(payload))
+    argv = ["sim", str(path), "--backend", "local", "--dry-run", "--format", "json"]
+    message = "request file must contain a JSON object"
+    _assert_one_json_error(capsys, main(argv), message)
 
 
 # --------------------------------------------------------------------------- #
