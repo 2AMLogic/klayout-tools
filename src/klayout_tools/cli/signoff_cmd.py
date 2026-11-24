@@ -158,7 +158,7 @@ from ..signoff_output import write_output_or_message
 from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
-from .signoff_attest_cmd import maybe_run_attest
+from .signoff_attest_cmd import maybe_run_attest, tool_pin_usage_error
 from .signoff_diff_cmd import run_diff_reports
 from .signoff_flags import (
     describe_grader_problem,
@@ -198,9 +198,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 
 
 def run(args: argparse.Namespace) -> int:
+    if (pin_error := tool_pin_usage_error(args)) is not None:
+        return pin_error
     if getattr(args, "diff_reports", None) is not None:
-        # Before every grading mode (issue #6850): the mode reads reports,
-        # not manifests, and refuses their flags itself.
         return run_diff_reports(args)
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
