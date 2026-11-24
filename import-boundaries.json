@@ -972,6 +972,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_corner_box",
         "klayout_tools.signoff_report_diff",
         "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_require_build",
