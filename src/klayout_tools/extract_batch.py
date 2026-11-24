@@ -35,6 +35,7 @@ extract-specific:
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import math
@@ -48,6 +49,8 @@ from typing import Any
 
 from . import _batch_collect, _batch_common, _warn, remote_transport, sim_batch
 from . import netlist_batch as _nb
+from .extract_base import REQUEST_SCHEMA
+from .extract_netlist_target import _default_output_path
 from .extract_spef import ExtractError
 from .netlist import NetlistError
 
@@ -99,7 +102,6 @@ def _translate(exc: NetlistError) -> ExtractError:
 def argv_request(args_values: dict[str, Any]) -> dict[str, Any]:
     """The runner request for an argv-form invocation (``file`` plus the
     :data:`ARGV_FORWARDED` flags and ``--deck-option`` pairs)."""
-    from .extract import REQUEST_SCHEMA
 
     request: dict[str, Any] = {"schema": REQUEST_SCHEMA}
     for key in ARGV_FORWARDED:
@@ -351,27 +353,6 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> ExtractError:
     return _batch_common.transport_error(job_id, exc, ExtractError, _NO_FALLBACK)
 
 
-def _job_failure(
-    *,
-    job_id: str,
-    status: dict[str, Any],
-    runner_error: dict[str, Any] | None,
-    note: str,
-    stderr_tail: str,
-    harness_log: str,
-) -> ExtractError:
-    return _batch_common.job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=harness_log,
-        err_cls=ExtractError,
-        no_fallback=_NO_FALLBACK,
-    )
-
-
 def _collect(
     config: sim_batch.BatchConfig,
     job_id: str,
@@ -391,7 +372,11 @@ def _collect(
         runner=runner,
         err_cls=ExtractError,
         no_fallback=_NO_FALLBACK,
-        job_failure=_job_failure,
+        job_failure=functools.partial(
+            _batch_common.job_failure,
+            err_cls=ExtractError,
+            no_fallback=_NO_FALLBACK,
+        ),
     )
 
 
@@ -475,8 +460,6 @@ def run_extract_batch(
     )
     no_netlist = bool(request.get("no_netlist"))
     if output is None and not no_netlist:
-        from .extract import _default_output_path
-
         output = _default_output_path(_abs(request["file"], base_dir))
     config = _resolve_config(pdk, timeout_s)
     ceiling = _check_ceiling(config, timeout_s)

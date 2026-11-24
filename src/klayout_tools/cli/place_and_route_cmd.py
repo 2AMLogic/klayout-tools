@@ -40,6 +40,7 @@ from ..place_and_route import (
     run_place_and_route,
 )
 from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from .sta_cmd import FMAX_CAVEAT
 
 #: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
 #: split `klt drc --check` uses. Fresh runs use 0 and 1, so 3
@@ -64,6 +65,22 @@ RERUN_HELP_EXTRA = (
 )
 
 
+def add_threads_argument(parser: argparse.ArgumentParser) -> None:
+    def argument(value: str) -> int | str:
+        # Preserve invalid tokens so all modes emit the same JSON request error.
+        try:
+            return int(value) if value.isascii() and value.isdecimal() else value
+        except ValueError:
+            return value
+
+    parser.add_argument(
+        "--threads",
+        type=argument,
+        metavar="N|max",
+        help="OpenROAD threads per process (overrides request.threads, default 1)",
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
         if args.resume:
@@ -82,6 +99,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = run_place_and_route(
             args.request,
+            threads=getattr(args, "threads", None),
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             backend=args.backend,
@@ -138,6 +156,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = rerun_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
                 backend=args.backend,
@@ -146,6 +165,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = check_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
             )
@@ -195,7 +215,13 @@ def _print_text(report: dict) -> None:
     print(f"wirelength_um: {report['wirelength_um']}")
     print(f"worst_slack_ns: {report['worst_slack_ns']}")
     print(f"total_negative_slack_ns: {report['total_negative_slack_ns']}")
-    print(f"fmax_mhz: {report['fmax_mhz']}")
+    # Issue #7522: qualify a numeric `fmax_mhz` the same way `klt sta`'s
+    # `_print_slack_fields` does (#7005) -- both commands derive the figure
+    # from OpenROAD's `timing__fmax`, which excludes opposite-edge paths.
+    # `None` (no measurement) and the JSON field stay unqualified.
+    fmax = report["fmax_mhz"]
+    caveat = "" if fmax is None else FMAX_CAVEAT
+    print(f"fmax_mhz: {fmax}{caveat}")
     print(f"setup_violation_count: {report['setup_violation_count']}")
     print(f"hold_violation_count: {report['hold_violation_count']}")
     print(f"estimated_power_mw: {report['estimated_power_mw']}")

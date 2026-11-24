@@ -18,6 +18,8 @@ from . import place_and_route_clock as _vclk
 from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_fences import placement_fence_lines
+from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
@@ -969,6 +971,7 @@ def _stage_script_lines(
     route_allow_congestion: bool = False,
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
+    instance_groups: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
     from .place_and_route import (
@@ -1023,10 +1026,7 @@ def _stage_script_lines(
         # and after `link_design` (the instance must already exist in the
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision, not something to optimize away. The instance is
-        # brace-quoted so a bracketed name is passed literally here; the
-        # `-instances` site re-escapes it for glob + list parsing (issues
-        # #4701, #4715).
+        # caller decision. Brace quoting preserves a bracketed instance name.
         lines += [
             f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
@@ -1040,30 +1040,23 @@ def _stage_script_lines(
         # placement step sees it.
         lines += _macro_blockage_lines(macros)
         lines += _make_tracks_lines(floorplan)
-        # `request.power` (issue #1091): tapcell + PDN Tcl, right after
-        # `place_macro`/`make_tracks` and before this stage's own
-        # `write_db` -- the same insertion point OpenROAD-flow-scripts
-        # itself uses (see this module's own docstring "Power delivery"
-        # section for the live-verified citation).
+        # Insert tap cells and build the PDN after rows, macros and tracks exist.
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
+        lines += placement_fence_lines(instance_groups)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
 
     assert checkpoint_in is not None  # every non-floorplan stage has a checkpoint
-    # `read_db` already restores a linked network (built by the floorplan
-    # stage's own `link_design`), so `create_clock` may safely follow
-    # `read_liberty` directly here -- unlike the floorplan stage above.
+    # read_db restores the linked network before the clock constraints.
     lines = [
         f"read_db {_tcl_literal(checkpoint_in)}",  # issue #5708
         f"read_liberty {_tcl_literal(liberty_path)}",
     ]
     lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
-    # the first resizer-driven step (`global_placement -timing_driven`,
-    # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
-    # process rather than relying on any checkpoint to carry it.
+    # the first resizer-driven step, and is re-emitted in each OpenROAD process.
     lines += _dont_use_lines(cell_library, library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
@@ -1072,8 +1065,11 @@ def _stage_script_lines(
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
 
+    declarations, place_fixed, check_fixed = fixed_group_commands(instance_groups or [])
+    lines += declarations
     if stage == "place":
         assert io_spec is not None
+        lines += place_fixed
         lines += pin_constraint_lines(io_spec.get("pin_constraints", []))
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
@@ -1224,8 +1220,9 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
-    # Issue #4914: global switching activity for `report_power_metric`
-    # (empty, so byte-identical, when `constraints.power_activity` is omitted).
+    lines += check_fixed
+
+    # Apply any requested switching activity before reporting power (#4914).
     lines += power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,

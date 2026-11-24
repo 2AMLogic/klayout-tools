@@ -10,12 +10,18 @@ Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
-(units, operating conditions, ``default_*``, ...) is an error naming every
-conflicting field and both values (issue #7011). Top-level ``lu_table_template`` and
-``power_lut_template`` groups are the exception: they are unioned by name
-(same name with different content is an error) and the ones the first file
-lacks are appended after its header. Each file's cell groups are appended in
-listed order; a duplicate cell name is an error. The
+(units, operating conditions, ``default_*``, ...) reports every
+conflicting field and both values (issue #7011). One exception (issue #6940): when
+each file declares a single ``operating_conditions`` group that its own
+``default_operating_conditions`` selects and the group bodies agree, the
+group's *name* alone may differ -- the merged header keeps the first
+file's spelling, and a renamed file whose retained text still references
+its local name refuses instead of dangling. Top-level ``lu_table_template``
+and ``power_lut_template`` groups are a second exception: they are unioned
+by name. Differing direct index values are safe only when every referencing
+table supplies all its own axes. The first definition is kept, and the ones the
+first file lacks are appended after its header. Each file's cell groups are
+appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
 """
@@ -24,25 +30,28 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 
 from .liberty_header_diff import header_mismatch
 from .liberty_merge_syntax import (
     _CELL_NAME_RE,
+    _TEMPLATE_KINDS,
     _find_matching,
     _find_terminator,
     _next_significant,
     _normalize_header,
     _scan_cells,
     _skip_ws,
+    _template_shape,
     _tokens,
+    inherited_table_axis,
 )
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
 
-_TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
 #: Header attributes ignored when comparing files for a merge: free text with
 #: no electrical content (a per-file timestamp, a version string, a vendor
@@ -94,7 +103,8 @@ def merge_liberty(paths: list[str]) -> str:
         return paths[0]
 
     texts = [_read(path) for path in paths]
-    digest = hashlib.sha256()
+    # Earlier cache entries may have missed differences between repeated groups.
+    digest = hashlib.sha256(b"liberty-merge-v2\0")
     for text in texts:
         digest.update(hashlib.sha256(text.encode("utf-8")).digest())
     out_path = os.path.join(cache_dir(), f"merged-{digest.hexdigest()[:24]}.lib")
@@ -117,34 +127,37 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     header = ""
     header_fields: dict[str, str] = {}
     first_path = paths[0]
+    first_condition_count = 0
     seen: dict[str, str] = {}
     templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
+    ambiguous_axes: dict[str, set[str]] = {}
     extra: list[str] = []
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
-        file_header, body, cells = _split(path, text)
+        file_header, body, cells, condition_count = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
         fields = _header_fields(path, stripped)
         if path is first_path:
             header, header_fields = file_header, fields
+            first_condition_count = condition_count
         else:
+            retained = "".join(raw for _, raw in file_templates) + body
+            first_fields, other_fields, context = _reconcile_conditions(
+                first_path,
+                header_fields,
+                path,
+                fields,
+                retained,
+                single_condition=first_condition_count == condition_count == 1,
+            )
             mismatch = header_mismatch(
-                first_path, header_fields, texts[0], path, fields, text
+                first_path, first_fields, texts[0], path, other_fields, text
             )
             if mismatch:
-                raise LibertyMergeError(mismatch)
-        for name, raw in file_templates:
-            tnorm = _normalize_header(raw)
-            known = templates.get(name)
-            if known is None:
-                templates[name] = (tnorm, raw, path)
-                if path is not first_path:
-                    extra.append(raw)
-            elif known[0] != tnorm:
-                raise LibertyMergeError(
-                    f"Liberty template '{name}' differs between '{known[2]}' "
-                    f"and '{path}' (cannot merge cell groups)"
-                )
+                raise LibertyMergeError(mismatch + context)
+        _union_templates(
+            file_templates, path, first_path, templates, extra, ambiguous_axes
+        )
         for cell in cells:
             if cell in seen:
                 raise LibertyMergeError(
@@ -153,7 +166,41 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 )
             seen[cell] = path
         bodies.append(body)
+    if ambiguous_axes:
+        for path, text in zip(paths, texts, strict=True):
+            if inherited := inherited_table_axis(text, ambiguous_axes):
+                name, axis = inherited
+                raise LibertyMergeError(
+                    f"Liberty template '{name}' differs across members and a table "
+                    f"in '{path}' inherits {axis} (cannot merge cell groups)"
+                )
     return header, extra, bodies
+
+
+def _union_templates(
+    file_templates: list[tuple[str, str]],
+    path: str,
+    first_path: str,
+    templates: dict[str, tuple[str, str, str]],
+    extra: list[str],
+    ambiguous_axes: dict[str, set[str]],
+) -> None:
+    """Keep first definitions and record axes requiring local values in every member."""
+    for name, raw in file_templates:
+        tnorm = _normalize_header(raw)
+        known = templates.get(name)
+        if known is None:
+            templates[name] = (tnorm, raw, path)
+            if path is not first_path:
+                extra.append(raw)
+        elif known[0] != tnorm:
+            shape, axes = _template_shape(raw)
+            if not axes or (shape, axes) != _template_shape(known[1]):
+                raise LibertyMergeError(
+                    f"Liberty template '{name}' differs between '{known[2]}' "
+                    f"and '{path}' (cannot merge cell groups)"
+                )
+            ambiguous_axes[name] = axes
 
 
 def _header_fields(path: str, header: str) -> dict[str, str]:
@@ -173,6 +220,7 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
     the comparator has understood nothing and must refuse instead.
     """
     fields: dict[str, str] = {}
+    groups: dict[str, list[str]] = {}
     statements = 0
     cursor = depth = 0
     for kind, pos, end in _tokens(header):
@@ -190,10 +238,11 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
             continue
         if cursor < pos:
             _add_residue(header[cursor:pos], fields)
-        taken = _take_field(header, pos, end, cursor, fields)
+        taken = _take_field(header, pos, end, cursor, fields, groups)
         statements += taken != cursor
         cursor = taken
     _add_residue(header[cursor:], fields)
+    fields.update(_group_fields(groups))
     if statements and not fields:
         ignored = ", ".join(sorted(_IGNORED_HEADER_ATTRS))
         raise LibertyMergeError(
@@ -204,8 +253,24 @@ def _header_fields(path: str, header: str) -> dict[str, str]:
     return fields
 
 
+def _group_fields(groups: dict[str, list[str]]) -> dict[str, str]:
+    """Compare all normalized bodies for a group without imposing declaration order."""
+    fields = {}
+    for key, bodies in groups.items():
+        first, *additional = sorted(bodies)
+        fields[key] = first
+        for occurrence, body in enumerate(additional, start=2):
+            fields[f"{key} [occurrence {occurrence}]"] = body
+    return fields
+
+
 def _take_field(
-    header: str, pos: int, end: int, cursor: int, fields: dict[str, str]
+    header: str,
+    pos: int,
+    end: int,
+    cursor: int,
+    fields: dict[str, str],
+    groups: dict[str, list[str]],
 ) -> int:
     """Consume the depth-1 statement starting at the identifier ``pos`` and
     return the new cursor (the old one when unrecognised, so the text rides
@@ -223,16 +288,16 @@ def _take_field(
     if ch == "(":
         close = _find_matching(header, nxt, "(", ")")
         args = _normalize_header(header[nxt + 1 : close])
-        p2, ch2 = _next_significant(header, close + 1)
-        if ch2 == "{":
-            bend = _find_matching(header, p2, "{", "}")
-            fields[f"{name}({args})"] = _normalize_header(header[p2 + 1 : min(bend, n)])
-            return min(bend + 1, n)
-        fields[f"{name}({args})"] = args  # complex attribute 'name (v1, v2) ;'
-        return min(p2 + 1, n)
+        name = f"{name}({args})"
+        nxt, ch = _next_significant(header, close + 1)
+        if ch != "{":
+            fields[name] = args  # complex attribute 'name (v1, v2) ;'
+            return min(nxt + 1, n)
     if ch == "{":
         bend = _find_matching(header, nxt, "{", "}")
-        fields[name] = _normalize_header(header[nxt + 1 : min(bend, n)])
+        body = _normalize_header(header[nxt + 1 : min(bend, n)])
+        fields[name] = body  # retain the field's source position in diagnostics
+        groups.setdefault(name, []).append(body)
         return min(bend + 1, n)
     return cursor
 
@@ -244,6 +309,98 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
         return
     prior = fields.get(_RESIDUE_KEY)
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
+
+
+def _unquote(value: str) -> str:
+    """``value`` without one pair of surrounding double quotes."""
+    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
+
+
+def _local_condition(fields: dict[str, str]) -> tuple[str, str, str] | None:
+    """``(group key, name, body)`` when the header declares exactly one
+    ``operating_conditions`` group whose name the
+    ``default_operating_conditions`` attribute selects; ``None`` otherwise
+    (no group, several groups, or a default pointing elsewhere -- none of
+    those is an unambiguous local rename, so the normal field comparison
+    decides)."""
+    groups = {k: v for k, v in fields.items() if k.startswith("operating_conditions(")}
+    if len(groups) != 1:
+        return None
+    key, body = next(iter(groups.items()))
+    name = _unquote(key[len("operating_conditions(") : -1])
+    if not name or name != _unquote(fields.get("default_operating_conditions", "")):
+        return None
+    return key, name, body
+
+
+def _references_condition(text: str, name: str) -> bool:
+    """Look for the discarded condition in retained Liberty references."""
+    value_attrs = {
+        "related_condition",
+        "default_operating_conditions",
+        "operating_conditions",
+    }
+    for kind, start, end in _tokens(text):
+        keyword = text[start:end]
+        if kind != "ident" or keyword not in value_attrs and keyword != "scaled_cell":
+            continue
+        pos, char = _next_significant(text, end)
+        if keyword in value_attrs and char == ":":
+            stop = _find_terminator(text, pos + 1)
+            value = _normalize_header(text[pos + 1 : stop])
+        elif keyword == "scaled_cell" and char == "(":
+            stop = _find_matching(text, pos, "(", ")")
+            args = _normalize_header(text[pos + 1 : stop])
+            # scaled_cell(existing_cell, operating_conditions_group)
+            match = re.fullmatch(r'(?:"(?:[^"\\]|\\.)*"|[^",]+)\s*,\s*(.+)', args)
+            value = match[1] if match else ""
+        else:
+            continue
+        if _unquote(value) == name:
+            return True
+    return False
+
+
+def _reconcile_conditions(
+    first_path: str,
+    first: dict[str, str],
+    path: str,
+    other: dict[str, str],
+    retained: str,
+    *,
+    single_condition: bool,
+) -> tuple[dict[str, str], dict[str, str], str]:
+    """The header field maps with the operating-condition pair removed when
+    the two headers differ only by its local name (issue #6940).
+
+    Each header must declare exactly one ``operating_conditions`` group its
+    own default selects and the group bodies must agree; the merged header
+    then keeps the first file's spelling, so the second file must not
+    reference its local name in ``retained`` (its body and template text --
+    a reference would dangle in the output). Anything else about the pair
+    (content, count, a foreign or missing default) is left in place for the
+    normal field-by-field comparison to refuse. The last return value adds
+    context when the retained text refers to a discarded name."""
+    if not single_condition:
+        return first, other, ""
+    a = _local_condition(first)
+    b = _local_condition(other)
+    if a is None or b is None or a[1] == b[1] or a[2] != b[2]:
+        return first, other, ""
+    if _references_condition(retained, b[1]):
+        return (
+            first,
+            other,
+            f"\n'{path}' references operating condition '{b[1]}' "
+            f"outside its header, but the merged header keeps only "
+            f"'{first_path}' spelling '{a[1]}'",
+        )
+    drop = {a[0], b[0], "default_operating_conditions"}
+    return (
+        {k: v for k, v in first.items() if k not in drop},
+        {k: v for k, v in other.items() if k not in drop},
+        "",
+    )
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
@@ -295,16 +452,16 @@ def _read(path: str) -> str:
         raise LibertyMergeError(f"cannot read Liberty file '{path}': {exc}") from exc
 
 
-def _split(path: str, text: str) -> tuple[str, str, list[str]]:
-    """``(header, body, cell names)`` for one ``library(){}`` file.
+def _split(path: str, text: str) -> tuple[str, str, list[str], int]:
+    """Split a library and report its cell names and condition count.
 
     ``body`` runs from the first top-level ``cell (`` to just before the
     library's closing brace.
     """
     first_ident = next((text[p:e] for k, p, e in _tokens(text) if k == "ident"), None)
-    first_cell, cells, close = _scan_cells(text)
+    first_cell, cells, close, conditions = _scan_cells(text)
     if close is None or first_ident != "library":
         raise LibertyMergeError(f"'{path}' is not a complete Liberty library group")
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
-    return text[:first_cell], text[first_cell:close], cells
+    return text[:first_cell], text[first_cell:close], cells, conditions

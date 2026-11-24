@@ -28,23 +28,25 @@ size-ratchet ceiling; the names are re-imported at module scope below so
 every pre-existing ``gen_compose_landing_pads.<name>`` import path (the
 test suite's included) keeps resolving unchanged.
 
-Same conventions as the modules it was split from:
-``gen_compose.py``/``gen_compose_routing.py`` names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_drop_array_extra_um``) are imported *inside*
-the functions that use them, so this module never has a load-time
-dependency back on them.
+Landing-pad calculations share dimensions and array geometry with the drawing code.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .gen_compose_base import (
+    _VIA_LANDING_SIZE_UM,
+    GenComposeError,
+    _drop_array_extra_um,
+)
 from .gen_compose_pad_conflicts import (  # noqa: F401 -- re-export (see above)
     _drawn_pad_side_um,
     _landing_pad_conflict_reason,
     _leg_conflict_message,
     _pad_conflict_escape_note,
     _pad_is_intermediate,
+    _pad_other_block_contact_reason,
     _terminal_pitch_um,
 )
 
@@ -73,8 +75,6 @@ def _parse_landing_pad_override(raw: Any, where: str) -> float | None:
     which raises once the router has resolved which pairs this request
     really draws.
     """
-    from .gen_compose import GenComposeError
-
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
@@ -147,7 +147,6 @@ class _LandingPadSideResolver:
         via_layer: tuple[int, int],
         drop: dict[str, Any] | None = None,
     ) -> float:
-        from .gen_compose import _VIA_LANDING_SIZE_UM
 
         if self._override_um is None and not (
             self.minimal_ladder and _pad_is_intermediate(drop, pad_layer)
@@ -298,8 +297,6 @@ def _landing_pad_box(
     """One landing on the output grid, including via-array growth and cut rounding."""
     import klayout.db as kdb
 
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_routing import _drop_array_extra_um
     from .gen_compose_via_cuts import drawn_landing_box
 
     side = (

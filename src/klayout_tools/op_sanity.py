@@ -109,7 +109,7 @@ from ._paths import (
 )
 from ._provenance import build_provenance, sha256_file
 from ._spice_text import logical_lines as _logical_lines
-from .pdk import PdkNotFoundError, find_pdk
+from .op_sanity_pdk import resolve_lint_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
     DEFAULT_TIMEOUT_S,
@@ -128,6 +128,7 @@ from .sim import (
     _supply_alter_lines,
 )
 from .sim_case_names import validate_request_measurements
+from .sim_request_overrides import _with_pdk_root_override
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1417,10 +1418,12 @@ def run_op_sanity(
     request_path: str,
     *,
     corner: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Lint the operating point of the netlist declared by the request at
     ``request_path``.
 
+    ``pdk_root`` is the ``--pdk-root`` pin, folded in as on the graded path.
     ``corner`` selects which expanded corner point of the request's own
     ``corners`` matrix to bias at, by ``corner_id``; the first expanded
     point is used when omitted. Exactly one corner is run -- this is a
@@ -1437,6 +1440,10 @@ def run_op_sanity(
     reported as ``status: "error"`` with diagnostics, never raised.
     """
     request = load_request(request_path)
+    try:
+        request = _with_pdk_root_override(request, pdk_root)
+    except SimError as exc:
+        raise OpSanityError(str(exc)) from exc
     request_dir = os.path.dirname(os.path.abspath(request_path))
     repo_root = env_provenance.find_repo_root(request_dir)
 
@@ -1487,22 +1494,12 @@ def run_op_sanity(
         raise OpSanityError(str(exc)) from exc
     point_models_lib = models_lib if _needs_models_lib(point) else None
 
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
+    provenance_pdk = resolve_lint_pdk(models)  # issue #5751
     options = request.get("options") or {}
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
     # Issue #2513: the sweep's OSDI preload must reach this deck too.
     try:
-        osdi_preload = sim_osdi_pin.resolve_osdi_preload(
-            options, request_dir, pdk_root=sim_osdi_pin.osdi_pdk_root_pin(request)
-        )
+        osdi_preload = sim_osdi_pin.resolve_request_osdi(request, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
 
