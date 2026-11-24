@@ -73,8 +73,10 @@ klt erc --pnr-response <run.json> [--format json]
 - `--format` — `text` (default, a human-readable summary) or `json`.
 - `-o PATH` / `--output PATH` also saves the full JSON report on a fresh layout
   run, including a completed `violations` or `not_checked` verdict. A `.gz`
-  suffix selects deterministic gzip compression. The tool replaces the
-  report file after the complete write succeeds. Stdout follows `--format`.
+  suffix selects deterministic gzip compression. The report is staged as a
+  sibling temporary file and renamed into place once the write completes, so
+  `PATH`'s **parent directory must be writable**; a failed write preserves
+  the previous report. Stdout follows `--format`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
@@ -3454,9 +3456,10 @@ verdict, and emits no label-layer warning. A defect is the same exit-1
 field-path error a normal run gives.
 
 `--validate-spec` is mutually exclusive with the positional `<file>` and with
-`--check` (argparse usage error, exit 2). The layout-only flags `--top`,
-`--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`, `--compact`
-and `--rerun` are rejected with a clean exit-1 error rather than ignored.
+`--check` (argparse usage error, exit 2). The layout-only flags `--output`,
+`--top`, `--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`,
+`--compact` and `--rerun` are rejected with a clean exit-1 error rather than
+ignored.
 
 ```json
 {

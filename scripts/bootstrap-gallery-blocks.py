@@ -13,9 +13,8 @@ Usage::
     python scripts/bootstrap-gallery-blocks.py --skip-signals
 
 Writes one ``blocks/<slug>/output/layout.json`` per
-``tests/corpus/<pdk>/*.gds`` file, using ``klt layers`` / ``klt cells``
-(invoked via subprocess, so this script has no dependency beyond an
-installed ``klt``). One block (``gf180mcu_fd_sc_mcu9t5v0__clkinv_1``) is
+``tests/corpus/<pdk>/*.gds`` file, collecting layer and cell metrics in process.
+One block (``gf180mcu_fd_sc_mcu9t5v0__clkinv_1``) is
 deliberately left without a ``layout.json`` so the checked-in ``blocks/``
 tree demonstrates the gallery loader's ``no_artifacts`` handling on a real
 (non-synthetic) directory — see ``blocks/README.md``.
@@ -70,7 +69,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +84,9 @@ if str(SRC_DIR) not in sys.path:
 # be on sys.path (above) before this import.
 from _gallery_common import attach_overview_render  # noqa: E402
 
+from klayout_tools.cells import cells_report  # noqa: E402
 from klayout_tools.decks import get_layer_names  # noqa: E402
+from klayout_tools.layers import layers_report  # noqa: E402
 
 # RenderError is not used directly in this module anymore (the shared
 # _gallery_common.attach_overview_render helper catches it) -- kept as
@@ -104,18 +104,6 @@ SCHEMA_VERSION = 1
 # -- still gets a real signals.json artifact (see bootstrap_block below),
 # just never wired into a layout.json.
 NO_ARTIFACTS_SLUGS = {"gf180mcu_fd_sc_mcu9t5v0__clkinv_1"}
-
-
-def run_klt(*args: str) -> dict:
-    """Invoke the `klt` CLI and parse its JSON output."""
-    result = subprocess.run(
-        ["klt", *args, "--format", "json"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
 
 
 def _attach_signals(slug: str, block_dir: Path, layout: dict | None) -> None:
@@ -201,7 +189,6 @@ def _attach_overview_render(
 
 def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
     slug = gds_path.stem
-    rel = gds_path.relative_to(REPO_ROOT)
 
     block_dir = BLOCKS_ROOT / slug
     output_dir = block_dir / "output"
@@ -215,8 +202,8 @@ def bootstrap_block(gds_path: Path, pdk: str, *, skip_signals: bool) -> None:
             _attach_signals(slug, block_dir, layout=None)
         return
 
-    layers = run_klt("layers", str(rel))
-    cells = run_klt("cells", str(rel))
+    layers = layers_report(str(gds_path))
+    cells = cells_report(str(gds_path))
     instance_count = sum(c.get("instances", 0) for c in cells.get("cells", []))
 
     output_dir.mkdir(parents=True, exist_ok=True)
