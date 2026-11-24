@@ -41,8 +41,8 @@ def warn_unverified_features(
         return None
     message = (
         f"the client could not verify support for {', '.join(features)} before "
-        "launch because the AMI manifest has no candidate images. The worker "
-        "will check these mandatory features when it starts."
+        "launch because the published batch runner image identity is unknown. "
+        "The worker will check these mandatory features when it starts."
     )
     _warn.warn(f"klt sim: warning: {message}")
     return {
