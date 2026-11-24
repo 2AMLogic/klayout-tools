@@ -127,3 +127,43 @@ def test_routed_notch_opposite_exposed_part_of_via(rotation, obstruction):
     assert (_region(layout, top, 21) ^ cuts).is_empty()
     assert _repair(layout, top)["m1_landing_pad_wire_pairs_extended"] == 0
     assert (_region(layout, top, 19) ^ after).is_empty()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_interacting_side_and_notch_reach_the_final_geometry_in_one_trim(reverse):
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top, via = layout.create_cell("top"), layout.create_cell("VIA_VIA12")
+    m1, v1 = layout.layer(19, 0), layout.layer(21, 0)
+    via.shapes(m1).insert(kdb.Box(0, 0, 18, 22))
+    via.shapes(v1).insert(kdb.Box(0, 2, 18, 20))
+    # The S.2 neighbour initially blocks the S.5 notch. Once the landing
+    # grows, the changed facing edges permit the notch and its enclosure.
+    groups = [
+        (kdb.Trans(), [(9, 81)], [(0, 36, 18, 166), (0, 36, 45, 54), (27, 0, 45, 54)]),
+        (
+            kdb.Trans(0, True, 100, -10),
+            [(-9, -11), (27, -83)],
+            [(-18, -135, 0, 45), (27, -135, 45, 81)],
+        ),
+    ]
+    for turn, placements, wires in reversed(groups) if reverse else groups:
+        for x, y in placements:
+            top.insert(kdb.CellInstArray(via.cell_index(), turn * kdb.Trans(x, y)))
+        for wire in wires:
+            top.shapes(m1).insert(kdb.Box(*wire).transformed(turn))
+    cuts = _region(layout, top, 21)
+    first = _repair(layout, top)
+    after = _region(layout, top, 19)
+    second = _repair(layout, top)
+    assert first["m1_landing_pad_wire_pairs_extended"] == 2
+    assert first["m1_v1_enclosures_repaired"] == 1
+    assert first["m1_v1_enclosures_remaining"] == 0
+    assert first["tip_check"] == second["tip_check"]
+    assert (
+        second["m1_landing_pad_wire_pairs_extended"]
+        == second["m1_v1_enclosures_repaired"]
+        == 0
+    )
+    assert (_region(layout, top, 19) ^ after).is_empty()
+    assert (_region(layout, top, 21) ^ cuts).is_empty()
