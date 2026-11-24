@@ -50,6 +50,7 @@ from .place_and_route import (
     _TECH_LEF_CORNERS,
     SCHEMA_VERSION,
     _stage_root,
+    _validate_outputs,
 )
 from .place_and_route_base import PlaceAndRouteError
 from .place_and_route_gds_merge import _merge_def_to_gds
@@ -89,6 +90,7 @@ def _load_merge_request(request_path: str) -> dict[str, Any]:
     _reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", PlaceAndRouteError
     )
+    _validate_outputs(request, request_path)
     return request
 
 

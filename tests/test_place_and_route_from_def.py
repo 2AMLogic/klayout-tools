@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import _openroad_engine, place_and_route
+from klayout_tools import _openroad_engine, place_and_route, place_and_route_merge_only
 from klayout_tools import pdk as pdk_module
 from klayout_tools.cli import main
 from test_place_and_route import _isolate_pdk
@@ -362,6 +362,50 @@ def test_cli_refuses_flow_flag_combinations(tmp_path, monkeypatch, capsys):
         code = main(argv)
         assert code == 1
         assert "--from-def cannot be combined with" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expected_message"),
+    [
+        ({"dire": "comparison"}, "unknown field 'outputs.dire'"),
+        ("artifacts", "request.outputs must be an object"),
+        (None, "request.outputs must be an object"),
+        ({"dir": 42}, "request.outputs.dir must be a non-empty string"),
+        ({"dir": "   "}, "request.outputs.dir must be a non-empty string"),
+    ],
+)
+def test_cli_rejects_malformed_outputs_before_views_or_output_creation(
+    tmp_path, monkeypatch, capsys, outputs, expected_message
+):
+    request_path, def_path = _build_env(tmp_path, monkeypatch)
+    _fail_if_openroad_invoked(monkeypatch)
+
+    def _refuse_view_lookup(*args, **kwargs):  # pragma: no cover - fails if reached
+        raise AssertionError(
+            "PDK/view resolution ran before request.outputs validation"
+        )
+
+    monkeypatch.setattr(place_and_route_merge_only, "find_pdk", _refuse_view_lookup)
+
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["outputs"] = outputs
+    Path(request_path).write_text(json.dumps(request), encoding="utf-8")
+
+    code = main(
+        ["place-and-route", request_path, "--from-def", def_path, "--format", "json"]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert captured.out == ""
+    err_payload = json.loads(captured.err)
+    assert err_payload["schema_version"] == 1
+    assert err_payload["error"]["command"] == "place-and-route"
+    assert expected_message in err_payload["error"]["message"]
+
+    assert not (tmp_path / ".klt").exists()
+    assert not (tmp_path / "comparison").exists()
+    assert sorted(os.listdir(tmp_path / "artifacts")) == ["top.gds"]
 
 
 def test_cli_text_format_prints_merge_summary(tmp_path, monkeypatch, capsys):
