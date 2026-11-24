@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 
 import klayout.db as kdb
 
+from .asap7_via_enclosures import V1_FAIL, V1_PASS, cap
+
 #: GDS layer numbers (asap7.lyp "<name> drawing - L/0").
 LAYERS = {
     "WELL": 1,
@@ -1679,17 +1681,6 @@ def _via_cases() -> list[Case]:
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
-    # "At least two opposite sides": the enclosing metal is a 26 nm bar
-    # (4 nm past the via on both sides across it, short of every threshold)
-    # that extends `e0` / `e1` past the via's ends. The bar stays above
-    # the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
-    # The other metal keeps its long default bar.
-    def capped(
-        via: str, which: str, e0: float, e1: float, vertical: bool
-    ) -> list[Shape]:
-        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
-        return _stack(via, **{which: bar})
-
     for via, rule, limits in (
         ("V1", "V1.M1.EN.1", ((5, 2), (2, 5))),
         ("V2", "V2.M2.EN.1", ((5, 5),)),
@@ -1697,9 +1688,16 @@ def _via_cases() -> list[Case]:
     ):
         for vertical in (True, False):
             for e0, e1 in limits:
-                c.append(_pass(rule, capped(via, "lower", e0, e1, vertical)))
+                c.append(_pass(rule, _stack(via, lower=cap(e0, e1, vertical))))
                 for x, y in ((e0 - D, e1), (e0, e1 - D), (e0 - D, e1 - D)):
-                    c.append(_fail(rule, capped(via, "lower", x, y, vertical)))
+                    c.append(_fail(rule, _stack(via, lower=cap(x, y, vertical))))
+
+    for make_case, layouts in ((_pass, V1_PASS), (_fail, V1_FAIL)):
+        for boxes, also in layouts:
+            shapes = _stack("V1", lower=None)
+            shapes.extend(box("M1", *bounds) for bounds in boxes)
+            case = make_case("V1.M1.EN.1", shapes, also=also)
+            c.extend((case, _flip(case)))
 
     # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
     # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
