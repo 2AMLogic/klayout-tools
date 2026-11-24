@@ -904,6 +904,7 @@
         "klayout_tools.evidence_canonicalize",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
+        "klayout_tools.macro_blackbox",
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
