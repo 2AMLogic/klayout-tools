@@ -3561,20 +3561,17 @@ def extract_netlist_from_layout(
     :func:`~klayout_tools.decks.get_extraction_deck` -- selects a
     caller-visible sheet-rho flavour for any resistor family whose
     ``flavour_option`` it names. ``None``/empty resolves the deck unchanged.
-    See :func:`run_extract`'s docstring for the full contract.
 
     ``label_layers`` (issue #2656): forwarded to the same
     :func:`~klayout_tools.decks.get_extraction_deck` call -- replaces, per
     label role, the GDS purpose this deck reads net/pin name text from, for
-    this call only. ``None``/empty resolves the deck unchanged. See
-    :func:`run_extract`'s docstring for the full contract.
+    this call only. ``None``/empty resolves the deck unchanged.
 
     ``def_net_names`` (issue #951): forwarded to ``_extract_netlist`` --
     ``True`` names routed nets from the DEF net name KLayout's LEF/DEF reader
     left on their geometry as GDS shape property
     :data:`_DEF_NET_NAME_PROPERTY_ID`, rather than from text labels. Off by
-    default (unchanged behavior). See :func:`run_extract` for the full
-    rationale.
+    default (unchanged behavior).
 
     ``parasitics_top_cell_only`` (issue #1704): forwarded to
     ``_extract_netlist``/:func:`_compute_parasitics` -- ``True`` additionally
@@ -3582,8 +3579,7 @@ def extract_netlist_from_layout(
     cell versus the portion drawn inside an instantiated sub-block, reported
     as the additive ``resistance_ohm_top_cell``/``capacitance_ff_top_cell``
     ground-entry fields. Off by default -- byte-identical to this flag's
-    pre-#1704 behavior. See :func:`_compute_parasitics`'s docstring for the
-    algorithm and :func:`run_extract` for the full CLI contract.
+    pre-#1704 behavior. See :func:`_compute_parasitics` for the algorithm.
 
     ``apply_resistor_fixed_offset`` (issue #559): forwarded to
     ``_extract_netlist`` -- ``True`` (the default) applies each opted-in
@@ -3605,29 +3601,25 @@ def extract_netlist_from_layout(
     directly in the top cell are promoted to top-level pins -- a net named
     solely by a label found below an instance boundary keeps its name but
     stays internal. Independent of the flag, ``warnings`` gains an entry
-    whenever a below-top label named a promoted pin. See :func:`run_extract`
-    for the full rationale.
+    whenever a below-top label named a promoted pin.
 
     ``declared_pins`` (issue #514): when given, every promoted pin *not*
     named in this set is demoted back to an internal net (it keeps its
-    name). ``None`` skips this reconciliation. See :func:`run_extract` for
-    the full rationale.
+    name). ``None`` skips this reconciliation.
 
     ``def_pins`` (issue #1390): the automatic, DEF-merge-aware counterpart
     to ``declared_pins`` -- forwarded to :func:`_extract_netlist`, which
     keeps a promoted net whenever *any* of its comma-joined component
     labels is in this set (not only an exact whole-name match, since a
     DEF-merged layout's net names routinely collide two or more labels onto
-    one net). ``None`` skips this reconciliation. See :func:`run_extract`
-    for the full rationale.
+    one net). ``None`` skips this reconciliation.
 
     ``pin_source_cells`` (issue #1513): a *positional* counterpart to
     ``declared_pins``/``def_pins`` for a `klt gen-compose`d assembly with
     no governing top-level DEF -- forwarded to :func:`_extract_netlist`,
     which keeps a promoted net whenever it resolves, by probing a label's
     own composed-frame position (not by matching its string), from a text
-    shape drawn inside one of these named cells. ``None`` skips this
-    reconciliation. See :func:`run_extract` for the full rationale.
+    shape drawn inside one of these named cells. ``None`` skips this reconciliation.
 
     ``rename_declared_pins`` (issue #2854): forwarded to
     :func:`_extract_netlist`, which renames each surviving promoted pin net
@@ -3661,12 +3653,20 @@ def extract_netlist_from_layout(
     #976): forwarded to :func:`_extract_netlist`/:func:`_compute_parasitics`
     -- a same-layer net pair only gets lateral coupling computed when at
     least one side's name is in this set. ``None``/empty (the default)
-    skips the lateral pass entirely, byte-identical to before this feature
-    existed.
+    skips the lateral pass entirely, byte-identical to pre-#976 behavior.
 
-    The optional MOM cross-check runs while the extractor still owns its geometry.
-    LVS can request implicit joins between identically labelled top-level nets.
-    This shared entry point raises the same errors as `run_extract`.
+    ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net``, issue
+    #798) forward to :func:`_extract_netlist`, which runs the cross-check while
+    ``l2n`` is alive; ``None`` skips it and ``mom_crosscheck`` is then ``None``.
+
+    Shared by :func:`run_extract` and ``klt lvs``'s inline-extraction path (per
+    ``docs/design/lvs-extraction-spike.md`` section 2b), which compares with
+    ``NetlistComparer`` rather than writing SPICE. ``join_same_named_nets`` lets
+    that path request implicit joins between identically labelled top-level nets.
+
+    Raises :class:`ExtractError` for a bad file, unknown deck, invalid
+    ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell, with
+    the same semantics as :func:`run_extract`.
     """
     # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
