@@ -52,13 +52,10 @@ def _fire_sim_worker_cap_notice(tmp_path, monkeypatch) -> None:
 
 
 def _fire_sim_unseeded_noise(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        sim_transient_noise,
-        "_unseeded_noise_report",
-        lambda *a, **k: {"unseeded_sources": []},
-    )
+    netlist = tmp_path / "noise.cir"
+    netlist.write_text("Vnoise out 0 trnoise(1 1n 0 0 0 0)\n", encoding="utf-8")
     sim_transient_noise.with_unseeded_noise(
-        {}, "netlist.cir", request={}, repo_root=None
+        {}, str(netlist), request={}, repo_root=None
     )
 
 
