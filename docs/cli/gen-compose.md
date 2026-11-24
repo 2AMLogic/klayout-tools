@@ -1876,8 +1876,8 @@ the waypoints are that placement's composed-frame coordinates, `p` sitting
 on sky130A and extracts as the two distinct nodes. Each part is load-bearing:
 
 - **`B`'s crossing legs name a plane above the one `A` draws on.** `metal2`
-  is the plane directly above `metal` (li1 → met1 on sky130A); anything at or
-  above the other net's plane serves. An explicit plane is never retried, and
+  is the plane directly above `metal` (li1 → met1 on sky130A). Use a higher
+  plane that the via ladder can reach. An explicit plane is never retried, and
   each leg drops to its own pins through the ordinary via ladder, which lands
   only at the pins. `B`'s inter-block link needs no entry: rejected on li1
   against `A`'s gate link, it takes the usual #1680 cross-block retry onto
