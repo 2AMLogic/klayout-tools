@@ -1,60 +1,81 @@
 {
   "schema_version": 1,
+  "generator": "gen-compose",
   "cell_name": "ota_5t_layout_0",
   "gds_path": "06-layout.gds",
   "pdk": {
     "name": "sky130A",
     "variant": "sky130A",
-    "version": "open_pdks bdc9412b3e468c102d01b7cf6337be06ec6e9c9a"
+    "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
   },
+  "dbu_um": 0.001,
   "bbox_um": {
     "x0": 0.0,
-    "y0": 0.0,
+    "y0": -0.15,
     "x1": 7.02,
-    "y1": 16.4
+    "y1": 17.39
   },
+  "ports": [],
   "blocks": [
     {
       "id": "tail",
+      "source": "generator_report",
       "generator": "mos_array",
+      "cell_name": "mos_array_0",
+      "source_path": "06-gen-tail.gds",
+      "source_digest": "sha256:538745e1c3ac570b7e4603e73248c9c96e5d1de54f725b7d5fa6f71b6dcbc4de",
       "offset_um": {
         "x": 0.0,
         "y": 0.0
       },
       "bbox_um": {
         "x0": 0.0,
-        "y0": 0.0,
+        "y0": -0.15,
         "x1": 1.84,
-        "y1": 10.0
-      }
+        "y1": 10.42
+      },
+      "orientation": "none",
+      "abuts": []
     },
     {
       "id": "diffpair",
+      "source": "generator_report",
       "generator": "diff_pair",
+      "cell_name": "diff_pair_0",
+      "source_path": "06-gen-diffpair.gds",
+      "source_digest": "sha256:032d2775b9936f46728653a0dfe159b969293a0c33c503de299d3060c8096554",
       "offset_um": {
         "x": 2.84,
         "y": 0.0
       },
       "bbox_um": {
         "x0": 2.84,
-        "y0": 0.0,
+        "y0": -0.15,
         "x1": 4.18,
-        "y1": 16.4
-      }
+        "y1": 17.39
+      },
+      "orientation": "none",
+      "abuts": []
     },
     {
       "id": "mirror",
+      "source": "generator_report",
       "generator": "diff_pair",
+      "cell_name": "diff_pair_0",
+      "source_path": "06-gen-mirror.gds",
+      "source_digest": "sha256:c8332ab9032cdea1be2f51a613a4fb643d853f071fcb55fe1b367d3c312a2bc9",
       "offset_um": {
         "x": 5.18,
         "y": 0.0
       },
       "bbox_um": {
         "x0": 5.18,
-        "y0": 0.0,
+        "y0": -0.15,
         "x1": 7.02,
-        "y1": 12.4
-      }
+        "y1": 13.39
+      },
+      "orientation": "none",
+      "abuts": []
     }
   ],
   "nets": [
@@ -71,7 +92,28 @@
         }
       ],
       "routed": true,
-      "route_length_um": 2.42
+      "route_length_um": 2.42,
+      "status": "routed",
+      "landed_on_block": true,
+      "legs": [
+        {
+          "pins": [
+            {
+              "block": "tail",
+              "port": "U0_D"
+            },
+            {
+              "block": "diffpair",
+              "port": "Q1_1_S"
+            }
+          ],
+          "routed": true,
+          "route_length_um": 2.42,
+          "reason": null,
+          "channel_track": 0,
+          "landed_on_block": true
+        }
+      ]
     },
     {
       "net": "TAIL_B",
@@ -86,7 +128,28 @@
         }
       ],
       "routed": true,
-      "route_length_um": 8.82
+      "route_length_um": 9.39,
+      "status": "routed",
+      "landed_on_block": true,
+      "legs": [
+        {
+          "pins": [
+            {
+              "block": "tail",
+              "port": "U0_D"
+            },
+            {
+              "block": "diffpair",
+              "port": "Q2_1_S"
+            }
+          ],
+          "routed": true,
+          "route_length_um": 9.39,
+          "reason": null,
+          "channel_track": 0,
+          "landed_on_block": true
+        }
+      ]
     },
     {
       "net": "N1",
@@ -101,7 +164,28 @@
         }
       ],
       "routed": true,
-      "route_length_um": 2.42
+      "route_length_um": 2.42,
+      "status": "routed",
+      "landed_on_block": true,
+      "legs": [
+        {
+          "pins": [
+            {
+              "block": "diffpair",
+              "port": "Q1_1_D"
+            },
+            {
+              "block": "mirror",
+              "port": "M1_1_S"
+            }
+          ],
+          "routed": true,
+          "route_length_um": 2.42,
+          "reason": null,
+          "channel_track": 0,
+          "landed_on_block": true
+        }
+      ]
     },
     {
       "net": "VOUT",
@@ -116,9 +200,31 @@
         }
       ],
       "routed": true,
-      "route_length_um": 4.42
+      "route_length_um": 4.42,
+      "status": "routed",
+      "landed_on_block": true,
+      "legs": [
+        {
+          "pins": [
+            {
+              "block": "diffpair",
+              "port": "Q2_1_D"
+            },
+            {
+              "block": "mirror",
+              "port": "M2_1_S"
+            }
+          ],
+          "routed": true,
+          "route_length_um": 4.42,
+          "reason": null,
+          "channel_track": 0,
+          "landed_on_block": true
+        }
+      ]
     }
   ],
+  "pins": [],
   "unrouted_nets": [],
   "drc_hints": {
     "min_spacing_um": 1.0,
@@ -147,5 +253,16 @@
     ],
     "notes": []
   },
-  "warnings": []
+  "warnings": [],
+  "provenance": {
+    "klt_version": "0.7.1.dev517+gebd6e9c71ae3.dirty",
+    "klayout_version": "0.30.12",
+    "pdk": {
+      "name": "sky130A",
+      "source": "search root: ~/.volare",
+      "version": "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+    },
+    "deck": null,
+    "input": null
+  }
 }

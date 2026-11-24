@@ -217,35 +217,35 @@ def _errors(report: dict) -> list[dict]:
     return [entry for entry in report["mismatches"] if entry["severity"] == "error"]
 
 
-#: Which *objects* a report implicates is read from every entry, not only
-#: the `severity: "error"` ones. `klt lvs` downgrades an unmatched
-#: device/net to a warning when a richer `device.property` finding already
-#: explains it (`lvs_mismatch.py`'s degraded-pair handling), and whether
-#: that downgrade fires differs between the two request shapes these tests
-#: compare -- the inline-extraction shape reports the widened NMOS as a
-#: plain `device.unmatched`, the pre-extracted shape recognises the pair and
-#: reports the parameter difference, downgrading the unmatched entries
-#: behind it. The *verdict* is compared through `status` and `_errors`; the
-#: identity of what failed is compared across all entries, so this reporting
-#: asymmetry cannot make two agreeing pipelines look like disagreeing ones.
+#: Devices are read from the `severity: "error"` entries only, nets from every
+#: entry. Device warnings are no part of the verdict and are asymmetric:
+#: `klt`'s inline extraction adds a zero-instance `topology` warning (`pnp`,
+#: which neither pipeline instantiated) and `device.body_unverified`, so an
+#: all-entries read made agreeing pipelines look different ({nfet, pfet, pnp}
+#: vs {nfet, pfet}). The degraded-pair asymmetry the all-entries read once
+#: absorbed stays covered: `klt lvs` downgrades `device.unmatched` to a
+#: warning when a `device.property` error explains it, that error names the
+#: class and reference device, both shapes now report the widened NMOS that
+#: way, and an un-downgraded `device.unmatched` is still an error. Nets keep
+#: the all-entries read: every `net.unmatched` in the width defect is a
+#: downgraded warning, so an errors-only read would see none.
 
 
 def _implicated_device_classes(report: dict) -> set[str]:
+    """Device classes responsible for a mismatch; advisories can also name devices."""
     return {
         entry["device"]["class"].lower()
-        for entry in report["mismatches"]
+        for entry in _errors(report)
         if entry.get("device") and entry["device"].get("class")
     }
 
 
 def _reference_device_ids(report: dict) -> set[str]:
-    """Reference-side device identifiers the report names. The reference
-    netlist is byte-identical across both pipelines, so these are directly
-    comparable (layout-side identifiers are each extractor's own instance
-    names and are not)."""
+    """Reference devices named by mismatch errors. Both pipelines read the same
+    reference netlist, while each extractor assigns its own layout-side names."""
     return {
         entry["device"]["reference"]
-        for entry in report["mismatches"]
+        for entry in _errors(report)
         if entry.get("device") and entry["device"].get("reference")
     }
 

@@ -40,10 +40,22 @@ def _leaves(value: Any, path: tuple[str, ...] = ()):
         yield path, value
 
 
-def _drc_report(root: Path) -> dict:
-    root.mkdir()
-    path = _write_gds_without_timestamps(_make_violation_layout(), root / "v.gds")
-    return run_drc(path, "sky130")
+def _drc_report(root: Path, rel: str = "v.gds") -> dict:
+    """A `klt drc` report for one layout inside a `.git`-marked `root`.
+
+    Since issue #2659 the echoed `file` is the portable `{path, scope}`
+    envelope: inside a repo it records the input's *repo-relative* path, so
+    two checkouts with identical relative layouts now produce identical
+    envelopes (that portability is the point of the retype). Callers that
+    need the two reports to differ at the registered key give the checkouts
+    different relative layouts via `rel`.
+    """
+    root.mkdir(parents=True)
+    (root / ".git").mkdir()
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gds = _write_gds_without_timestamps(_make_violation_layout(), path)
+    return run_drc(gds, "sky130")
 
 
 def _extract_report(root: Path) -> dict:
@@ -80,7 +92,10 @@ def _check(report_a: dict, report_b: dict, root_a: Path, root_b: Path, verb: str
 def test_drc_path_only_keys_registry_is_complete(tmp_path):
     a, b = tmp_path / "checkout_a", tmp_path / "nested" / "checkout_b"
     b.parent.mkdir()
-    _check(_drc_report(a), _drc_report(b), a, b, "drc")
+    # Different relative layouts: since #2659 identical layouts inside two
+    # repos emit identical `{path, scope}` envelopes, and the registry is
+    # only provably live when the registered key actually differs.
+    _check(_drc_report(a), _drc_report(b, rel="inputs/v.gds"), a, b, "drc")
 
 
 def test_extract_path_only_keys_registry_is_complete(tmp_path):

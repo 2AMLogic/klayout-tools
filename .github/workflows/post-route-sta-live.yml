@@ -1,0 +1,116 @@
+name: Live klt sta engine checks (every live_openroad-marked test)
+
+# Issue #3776 (follow-up to #3755): the `live_openroad`-marked tests (a
+# real `openroad` + the sky130A PDK, so they skip in the ordinary `ci.yml`
+# `test` job) need manual provisioning, and no other lane runs them. Issue
+# #7541: this lane used to select four hand-listed node IDs, so 17 of the
+# 21 marked tests ran in no lane at all; it now derives its node IDs from
+# `--collect-only -m live_openroad` and runs exactly those (the marker is
+# applied by the shared `_LIVE_ONLY` decorator in
+# `tests/test_post_route_sta.py`, guarded by
+# `tests/test_live_sta_lane_registration.py`), so a new live test joins
+# this lane by construction. This manually-triggered job provisions both,
+# exactly as `equiv-canary.yml` does (minus Yosys, which these tests do not
+# use), and fails if any test fails or is skipped. Trigger from the Actions
+# tab, or `gh workflow run post-route-sta-live.yml`, when `post_route_sta`'s
+# Tcl or SPEF handling changes. See `equiv-canary.yml` for the provisioning
+# rationale.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-route-sta-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  post-route-sta-live:
+    name: Live OpenROAD klt sta checks (every live_openroad-marked test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Verify KLayout imports headlessly
+        run: |
+          uv run --frozen --extra dev python -c "
+          import klayout.db as kdb
+          print('klayout', kdb.Layout().dbu)
+          "
+
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device + std-cell libs)
+        # Shared composite action (issue #5658): the library list is an input
+        # folded into the cache key, so this std-cell consumer can no longer
+        # restore the device-models-only entry the nightly sim canaries
+        # populate under their own key.
+        id: pdk-cache
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-sky130a-pdk
+        with:
+          libs: sky130_fd_pr sky130_fd_sc_hd
+
+      - name: Install the openroad Docker wrapper
+        # scripts/install-openroad-docker.sh (issue #1328) -- pulls the
+        # pinned `openroad/orfs` image digest (issue #2465, not the moving
+        # `:latest` tag) and writes a wrapper script that shells out
+        # to it per invocation, mirroring docs/cli/place-and-route.md's
+        # documented recipe. GitHub-hosted `ubuntu-latest` runners ship
+        # Docker preinstalled, so no separate Docker setup step is needed.
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$HOME/.cache/openroad-docker/bin"
+          scripts/install-openroad-docker.sh "$HOME/.cache/openroad-docker/bin"
+          echo "$HOME/.cache/openroad-docker/bin" >>"$GITHUB_PATH"
+
+      - name: Run the live klt sta engine tests
+        # Select by marker, but run the *derived* node IDs rather than a bare
+        # `-m live_openroad` over `testpaths` (PR #7550 review): `-m` still
+        # imports every test module, and module-level skips in unrelated
+        # files (native-extension, numpy, Xyce suites) fire at collection,
+        # are reported as `skipped` -- not `deselected` -- and would trip
+        # the SKIPPED gate below on a fully successful run. Running only the
+        # collected IDs keeps this log to the live tests, so the gate stays
+        # a strict "did a live test skip" check. `-o addopts=` because
+        # pyproject.toml's `addopts = "-q"` would turn `-q` into `-qq`,
+        # which prints per-file counts instead of node IDs.
+        env:
+          PDK: sky130A
+          PDK_ROOT: /home/runner/.ciel
+        run: |
+          set -o pipefail
+          uv run --frozen --extra dev pytest --collect-only -q -o addopts= -m live_openroad \
+            | grep -E '^tests/[^ ]+[.]py::' > live-nodes.txt
+          # An empty selection must fail the step, never run nothing.
+          test -s live-nodes.txt
+          echo "Selected $(wc -l < live-nodes.txt) live_openroad-marked tests:"
+          cat live-nodes.txt
+          mapfile -t nodes < live-nodes.txt
+          uv run --frozen --extra dev pytest "${nodes[@]}" -v -rs \
+            | tee pytest-post-route-sta-live.log
+
+      - name: Confirm the live tests ran to completion, not skipped
+        # A skip exits 0, so grep the `-rs` summary and fail explicitly if
+        # provisioning did not satisfy `_live_sky130_env()`. The run above
+        # executes exactly the `live_openroad`-marked tests (issue #7541)
+        # and nothing else is collected, so a skip means one of them did not
+        # run.
+        run: |
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-post-route-sta-live.log; then
+            echo "::error::Live klt sta test was SKIPPED, not run -- provisioning did not satisfy _live_sky130_env()." >&2
+            exit 1
+          fi
+          echo "Live klt sta tests ran to completion (not skipped)."

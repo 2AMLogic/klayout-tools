@@ -11,10 +11,11 @@ This script is the "generated automatically ... not hand-maintained" half of
 that feature (issue #623's recommended Option A): it walks every ``v*`` git
 tag reachable from the current branch and, for every deck module under
 ``src/klayout_tools/decks/`` present at that tag, records its content hash
-(computed exactly the way ``klayout_tools._provenance.sha256_file`` hashes a
-deck file at runtime -- a straight streamed SHA-256 of the raw file bytes),
-the tag, its commit, and the package version from that tag's
-``pyproject.toml``. One entry is recorded **per deck per release** (not only
+(using the rule-source declaration at that tag, or raw file bytes for releases
+that predate it), the tag, its commit, and the package version from that tag's
+``pyproject.toml``. A standalone ``<name>.drc`` KLayout deck file (ASAP7) is
+a separate artifact and gets its own entry tagged ``"artifact": "drc_deck"``
+(issue #3826). One entry is recorded **per deck per release** (not only
 when the hash changes) so that:
 
 - ``klt deck resolve --deck X --version Y`` is a direct, always-present
@@ -39,17 +40,20 @@ reproduces byte-identical output.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import runpy
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DECKS_DIR = REPO_ROOT / "src" / "klayout_tools" / "decks"
 HISTORY_PATH = DECKS_DIR / "_history.json"
+# This release script also runs with plain Python, outside an installed package.
+_source_hash = runpy.run_path(str(DECKS_DIR.parent / "_deck_hash.py"))["source_hash"]
 
 #: Deck modules are plain per-PDK sibling files under decks/ -- anything
 #: that isn't the package init, a non-deck support module colocated in the
@@ -74,15 +78,26 @@ def _run(*args: str) -> str:
     ).stdout
 
 
+#: Pseudo-tags (``--as-release``): tag name -> the git ref that stands in for
+#: it. The automated release PR (issue #4920) regenerates the table *before*
+#: the tag exists, treating its own HEAD as the release.
+_PSEUDO_TAGS: dict[str, str] = {}
+
+
+def _ref(tag: str) -> str:
+    return _PSEUDO_TAGS.get(tag, tag)
+
+
 def _tags() -> list[str]:
     """Every ``v*`` tag, oldest first (matches ``docs/cli/deck.md``'s
-    documented ordering)."""
+    documented ordering), plus any ``--as-release`` pseudo-tag last."""
     out = _run("git", "tag", "--sort=v:refname", "--list", "v*")
-    return [line for line in out.splitlines() if line.strip()]
+    tags = [line for line in out.splitlines() if line.strip()]
+    return tags + [t for t in _PSEUDO_TAGS if t not in tags]
 
 
 def _deck_module_names_at(tag: str) -> list[str]:
-    out = _run("git", "ls-tree", "--name-only", f"{tag}:src/klayout_tools/decks")
+    out = _run("git", "ls-tree", "--name-only", f"{_ref(tag)}:src/klayout_tools/decks")
     names = []
     for line in out.splitlines():
         line = line.strip()
@@ -92,18 +107,29 @@ def _deck_module_names_at(tag: str) -> list[str]:
     return sorted(names)
 
 
-def _blob_sha256(tag: str, deck_name: str) -> str:
+def _drc_deck_names_at(tag: str) -> list[str]:
+    """Names with a standalone ``<name>.drc`` KLayout DRC deck file at
+    ``tag`` (issue #3826) -- a separate hashed artifact from the deck module."""
+    out = _run("git", "ls-tree", "--name-only", f"{_ref(tag)}:src/klayout_tools/decks")
+    return sorted(
+        line.strip()[: -len(".drc")]
+        for line in out.splitlines()
+        if line.strip().endswith(".drc")
+    )
+
+
+def _blob(tag: str, filename: str) -> bytes:
     result = subprocess.run(
-        ["git", "show", f"{tag}:src/klayout_tools/decks/{deck_name}.py"],
+        ["git", "show", f"{_ref(tag)}:src/klayout_tools/decks/{filename}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
     )
-    return hashlib.sha256(result.stdout).hexdigest()
+    return result.stdout
 
 
 def _package_version_at(tag: str) -> str:
-    text = _run("git", "show", f"{tag}:pyproject.toml")
+    text = _run("git", "show", f"{_ref(tag)}:pyproject.toml")
     match = _VERSION_RE.search(text)
     if not match:
         raise SystemExit(
@@ -113,8 +139,12 @@ def _package_version_at(tag: str) -> str:
     return match.group(1)
 
 
-def _commit_sha(tag: str) -> str:
-    return _run("git", "rev-list", "-n", "1", tag).strip()
+def _commit_sha(tag: str) -> str | None:
+    # A pseudo-tag's commit is unknowable pre-merge (amend/squash change the
+    # sha), so record null rather than a sha that never lands on any branch.
+    if tag in _PSEUDO_TAGS:
+        return None
+    return _run("git", "rev-list", "-n", "1", _ref(tag)).strip()
 
 
 def build_entries() -> list[dict[str, Any]]:
@@ -122,12 +152,27 @@ def build_entries() -> list[dict[str, Any]]:
     for tag in _tags():
         package_version = _package_version_at(tag)
         commit = _commit_sha(tag)
+
+        read_blob = partial(_blob, tag)
+
         for deck_name in _deck_module_names_at(tag):
-            digest = _blob_sha256(tag, deck_name)
+            digest = _source_hash(f"{deck_name}.py", read_blob)
             entries.append(
                 {
                     "deck": deck_name,
-                    "content_hash": f"sha256:{digest}",
+                    "content_hash": digest,
+                    "git_tag": tag,
+                    "git_commit": commit,
+                    "package_version": package_version,
+                }
+            )
+        for deck_name in _drc_deck_names_at(tag):
+            digest = _source_hash(f"{deck_name}.drc", read_blob)
+            entries.append(
+                {
+                    "deck": deck_name,
+                    "artifact": "drc_deck",
+                    "content_hash": digest,
                     "git_tag": tag,
                     "git_commit": commit,
                     "package_version": package_version,
@@ -136,7 +181,21 @@ def build_entries() -> list[dict[str, Any]]:
     return entries
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Regenerate decks/_history.json")
+    parser.add_argument(
+        "--as-release",
+        metavar="vX.Y.Z",
+        help="record HEAD as release vX.Y.Z before that tag exists (the release "
+        "PR; the next regeneration after tagging rewrites it from the real tag)",
+    )
+    args = parser.parse_args(argv)
+    if args.as_release:
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", args.as_release):
+            parser.error("--as-release must look like vX.Y.Z")
+        _PSEUDO_TAGS[args.as_release] = "HEAD"
     tags = _tags()
     if not tags:
         print("no v* git tags found -- nothing to record", file=sys.stderr)

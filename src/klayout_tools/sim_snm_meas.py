@@ -1,0 +1,258 @@
+"""``measurements[].snm`` for ``klt sim`` (issue #3895).
+
+A ``measurements[]`` entry declared with ``snm`` grades the butterfly static
+noise margin of a bistable pair as one scalar::
+
+    {"name": "snm_hold",
+     "snm": {"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"},
+     "limits": {"min": 0.1}}
+
+The numerics (rotation, per-eye extreme, error reasons) live in
+:mod:`klayout_tools.sim_snm`; this module only validates the request, asks
+ngspice to dump each unique ``x``/``y1``/``y2`` triple of the finished ``dc``
+analysis to a small ASCII rawfile, reads it back and hands the arrays to
+``analyze_snm``::
+
+    let __klt_snm_<k>_x = v(in)
+    let __klt_snm_<k>_y1 = v(out_a)
+    let __klt_snm_<k>_y2 = v(out_b)
+    write <corner_dir>/snm_<k>.raw __klt_snm_<k>_x __klt_snm_<k>_y1 __klt_snm_<k>_y2
+
+The rawfile is independent of ``options.waveforms``. ``value`` is the SNM in
+volts (graded like any scalar); an additive ``snm`` sibling carries the request
+echo and the two per-eye sides. Every failure is ``status: "error"``,
+``value: null`` with a ``code: "measurement"`` diagnostic whose message starts
+with a ``[<reason>]`` token from :data:`ERROR_CODES`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from . import sim_measurement_kind, sim_snm
+from .sim_errors import SimError
+from .sim_forms import normalize_selector as normalize_selector
+from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
+
+#: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
+ERROR_CODES = (
+    "snm_vector_missing",
+    "snm_raw_invalid",
+    sim_snm.REASON_INVALID,
+    sim_snm.REASON_NON_MONOTONIC,
+    sim_snm.REASON_NO_SECOND_EYE,
+)
+
+_KEYS = ("x", "y1", "y2")
+_ALLOWED_KEYS = frozenset(_KEYS)
+
+_VECTOR_PREFIX = "__klt_snm_"
+
+
+def is_snm(spec: dict[str, Any]) -> bool:
+    return sim_measurement_kind.declares(spec, "snm")
+
+
+def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [spec for spec in measurements_spec if is_snm(spec)]
+
+
+def _triple(spec: dict[str, Any]) -> tuple[str, str, str]:
+    body = spec["snm"]
+    return tuple(normalize_selector(body[key]) or "" for key in _KEYS)  # type: ignore[return-value]
+
+
+def unique_triples(
+    measurements_spec: list[dict[str, Any]],
+) -> list[tuple[str, str, str]]:
+    """Distinct normalized ``(x, y1, y2)`` triples, in first-declared order --
+    also the order their deck lines and rawfiles are numbered in."""
+    triples: list[tuple[str, str, str]] = []
+    for spec in snm_measurements(measurements_spec):
+        triple = _triple(spec)
+        if triple not in triples:
+            triples.append(triple)
+    return triples
+
+
+# --------------------------------------------------------------------------- #
+# Request validation
+# --------------------------------------------------------------------------- #
+
+
+def validate_form_exclusive(spec: dict[str, Any]) -> bool:
+    """For an entry declaring ``snm``: refuse any other form beside it and
+    validate the body. Returns ``True`` when the entry is an snm entry (so the
+    caller has nothing more to validate)."""
+    return validate_exclusive_form(
+        spec,
+        "snm",
+        other_forms("snm"),
+        lambda name, spec: validate_snm_spec(name, spec["snm"]),
+    )
+
+
+def validate_snm_spec(name: Any, body: Any) -> None:
+    if not isinstance(body, dict):
+        raise SimError(
+            f"measurement '{name}': 'snm' must be an object, e.g. "
+            '{"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"}'
+        )
+    unknown = sorted(set(body) - _ALLOWED_KEYS)
+    if unknown:
+        raise SimError(
+            f"measurement '{name}': unknown snm key(s) {unknown}; "
+            f"allowed: {sorted(_ALLOWED_KEYS)}"
+        )
+    for key in _KEYS:
+        if normalize_selector(body.get(key)) is None:
+            raise SimError(
+                f"measurement '{name}': snm.{key} must be a single-ended "
+                f'"v(node)" selector with one node token (no whitespace, '
+                f"comma or parenthesis); got {body.get(key)!r}"
+            )
+
+
+def validate_snm_context(
+    measurements_spec: list[dict[str, Any]], analysis: dict[str, Any]
+) -> None:
+    """An SNM is a DC-sweep quantity (the sweep axis is ``x``), and
+    measurement names must be unique so each response entry is unambiguous."""
+    declared = snm_measurements(measurements_spec)
+    if not declared:
+        return
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="snm",
+        required="dc",
+        explanation="needs a DC sweep",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="an snm entry"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Deck emission
+# --------------------------------------------------------------------------- #
+
+
+#: Prefix of the rawfile each snm measurement writes per corner.
+_RAWFILE_PREFIX = "snm"
+
+
+def rawfile_path(corner_dir: str, index: int) -> str:
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
+
+
+def control_lines(
+    measurements_spec: list[dict[str, Any]], corner_dir: str
+) -> list[str]:
+    """Per unique triple: three ``let`` lines and one ``write`` of the three
+    vectors. Empty without an snm entry (deck byte-identical to before)."""
+    lines: list[str] = []
+    for index, triple in enumerate(unique_triples(measurements_spec)):
+        vectors = [f"{_VECTOR_PREFIX}{index}_{key}" for key in _KEYS]
+        lines.extend(
+            f"let {vec} = {sel}" for vec, sel in zip(vectors, triple, strict=True)
+        )
+        lines.append(f"write {rawfile_path(corner_dir, index)} {' '.join(vectors)}")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
+# Extraction
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SnmOutcome:
+    """One snm measurement's result, or why there is none."""
+
+    value: float | None = None
+    error: str | None = None
+    code: str | None = None
+    result: sim_snm.SnmResult | None = None
+
+    def report(self, spec: dict[str, Any]) -> dict[str, Any]:
+        body = spec["snm"]
+        out: dict[str, Any] = {key: body[key] for key in _KEYS}
+        if self.result is not None:
+            out.update(self.result.to_dict())
+        return out
+
+
+def _analyze_triple(raw_path: str) -> sim_snm.SnmResult | SnmOutcome:
+    """The SNM for one triple's rawfile, or a triple-level failure outcome
+    (the caller prefixes the measurement name)."""
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="snm",
+        columns=4,
+        vector_desc="x, y1 or y2",
+        analysis_label="DC",
+        expected_columns="a sweep axis, x, y1 and y2",
+    )
+    if error is not None:
+        return SnmOutcome(code=error[0], error=error[1])
+    assert raw is not None
+    columns = [[z.real for z in raw.column(i)] for i in (1, 2, 3)]
+    try:
+        return sim_snm.analyze_snm(*columns)
+    except sim_snm.SnmInputError as exc:
+        return SnmOutcome(code=exc.reason, error=f"bad sweep: {exc}")
+
+
+def _outcome_for(
+    spec: dict[str, Any], analysed: sim_snm.SnmResult | SnmOutcome
+) -> SnmOutcome:
+    if isinstance(analysed, SnmOutcome):
+        return SnmOutcome(
+            code=analysed.code,
+            error=f"measurement '{spec['name']}': {analysed.error}",
+        )
+    return SnmOutcome(value=float(analysed.snm), result=analysed)
+
+
+def extract_corner_snms(
+    measurements_spec: list[dict[str, Any]], corner_dir: str
+) -> dict[int, SnmOutcome]:
+    """``{position in measurements_spec: outcome}`` for every snm entry of one
+    finished corner. One computation per unique triple. Never raises: any
+    rawfile problem becomes that measurement's own ``error``."""
+    triples = unique_triples(measurements_spec)
+    analysed = [
+        _analyze_triple(rawfile_path(corner_dir, i)) for i in range(len(triples))
+    ]
+    return {
+        position: _outcome_for(spec, analysed[triples.index(_triple(spec))])
+        for position, spec in enumerate(measurements_spec)
+        if is_snm(spec)
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Response entry
+# --------------------------------------------------------------------------- #
+
+
+def snm_measurement_result(
+    spec: dict[str, Any],
+    outcome: SnmOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``snm`` measurement's response entry (issue #3895).
+
+    ``value`` is the butterfly SNM in volts, graded through
+    :func:`_grade_measurement_value` like any scalar; the request echo and the
+    two per-eye sides ride the additive ``snm`` sibling. A failure is
+    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
+    ``code: "measurement"`` diagnostic whose message starts with a
+    ``[<reason>]`` token from :data:`ERROR_CODES`."""
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="snm", report_with_spec=True
+    )

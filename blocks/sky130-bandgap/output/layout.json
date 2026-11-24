@@ -1,21 +1,17 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-12T08:29:04.061525+00:00",
+  "generated_at": "2026-10-30T19:11:48.194976+00:00",
   "slug": "sky130-bandgap",
   "name": "Sky130 Bandgap",
   "description": "Bandgap voltage reference on sky130 \u2014 2AM Logic canary block",
   "pdk": "sky130",
   "layer_count": 16,
-  "cell_count": 27,
-  "instance_count": 26,
+  "cell_count": 37,
+  "instance_count": 36,
   "layout_file": "bandgap_core_routed.gds",
-  "schematic": {
-    "path": "schematic.svg",
-    "provenance": "Source: 2AMLogic/sky130-bandgap @ 31d8167 (design/bandgap_core.sch)."
-  },
   "renders": {
     "overview": "renders/overview.png",
-    "layer_64_20": "renders/64_20.png",
+    "nwell.drawing": "renders/64_20.png",
     "diff.drawing": "renders/65_20.png",
     "tap.drawing": "renders/65_44.png",
     "layer_66_13": "renders/66_13.png",
@@ -29,8 +25,8 @@
     "met2.drawing": "renders/69_20.png",
     "pnp.drawing": "renders/82_44.png",
     "layer_83_20": "renders/83_20.png",
-    "layer_86_20": "renders/86_20.png",
-    "layer_94_20": "renders/94_20.png",
+    "rpm.drawing": "renders/86_20.png",
+    "psdm.drawing": "renders/94_20.png",
     "center_crop": "renders/center_crop/overview.png"
   },
   "spec_summary": {
@@ -80,10 +76,10 @@
     "engine": "ngspice",
     "engine_version": "46",
     "status": "fail",
-    "corner_count": 27,
+    "corner_count": 31,
     "default_corner_id": "bandgap-smoke/tt_27c_3.30v",
-    "passed": 17,
-    "failed": 10,
+    "passed": 18,
+    "failed": 13,
     "errored": 0,
     "measurements": [
       {
@@ -95,7 +91,7 @@
       {
         "name": "Error Amp Loop",
         "limits": null,
-        "status": "pass",
+        "status": "fail",
         "worst_case": null
       },
       {
@@ -114,12 +110,6 @@
         "name": "Line Regulation Post Layout",
         "limits": null,
         "status": "pass",
-        "worst_case": null
-      },
-      {
-        "name": "Monte Carlo Untrimmed",
-        "limits": null,
-        "status": "fail",
         "worst_case": null
       },
       {
@@ -173,7 +163,25 @@
       {
         "name": "Psrr Dc Post Layout",
         "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Psrr Dc With Injector",
+        "limits": null,
         "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Psrr Injector Attribution",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Psrr Injector Candidates",
+        "limits": null,
+        "status": "fail",
         "worst_case": null
       },
       {
@@ -219,7 +227,19 @@
         "worst_case": null
       },
       {
+        "name": "Startup Ramp Post Layout",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
         "name": "Startup Stability",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Startup Stability Post Layout",
         "limits": null,
         "status": "pass",
         "worst_case": null
@@ -233,13 +253,13 @@
       {
         "name": "Startup Time Post Layout",
         "limits": null,
-        "status": "fail",
+        "status": "pass",
         "worst_case": null
       },
       {
         "name": "Trim Lsb Chained",
         "limits": null,
-        "status": "fail",
+        "status": "pass",
         "worst_case": null
       },
       {
@@ -304,70 +324,13 @@
         "diagnostics": []
       },
       {
-        "corner_id": "error-amp-loop/tt_27c_2.97v",
+        "corner_id": "error-amp-loop/overall",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
-        "status": "pass",
+        "status": "fail",
         "runtime_s": 0,
-        "measurements": [
-          {
-            "name": "vref_delta",
-            "value": 3.3296e-11,
-            "unit": "V",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "iq_delta",
-            "value": 5.79892e-16,
-            "unit": "A",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "iq_total",
-            "value": 3.11438e-05,
-            "unit": "A",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "iq_amp",
-            "value": 2.05075e-05,
-            "unit": "A",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "iq_core",
-            "value": 1.06363e-05,
-            "unit": "A",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "loop_gain_dc",
-            "value": 50.49,
-            "unit": "dB",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "ugf",
-            "value": 220183.0,
-            "unit": "Hz",
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "phase_margin",
-            "value": 62.9777,
-            "unit": "deg",
-            "status": "pass",
-            "margin": null
-          }
-        ],
+        "measurements": [],
         "diagnostics": []
       },
       {
@@ -381,7 +344,7 @@
         "diagnostics": []
       },
       {
-        "corner_id": "line-regulation/tt_27c_3.30v",
+        "corner_id": "line-regulation/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -390,28 +353,28 @@
         "measurements": [
           {
             "name": "line_shift_mv",
-            "value": 0.0103261,
+            "value": 0.0250614,
             "unit": "mV",
             "status": "pass",
             "margin": null
           },
           {
             "name": "line_reg_pct_per_v",
-            "value": 0.00134276,
+            "value": 0.0031373,
             "unit": "%/V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "line_psrr_db",
-            "value": 96.1121,
+            "value": 88.4107,
             "unit": "dB",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_nom",
-            "value": 1.16519,
+            "value": 1.21033,
             "unit": "V",
             "status": "pass",
             "margin": null
@@ -450,28 +413,28 @@
         "measurements": [
           {
             "name": "line_shift_mv",
-            "value": 0.0185456,
+            "value": 0.321543,
             "unit": "mV",
             "status": "pass",
             "margin": null
           },
           {
             "name": "line_reg_pct_per_v",
-            "value": 0.00235467,
+            "value": 0.0408115,
             "unit": "%/V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "line_psrr_db",
-            "value": 91.026,
+            "value": 66.2461,
             "unit": "dB",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_nom",
-            "value": 1.19335,
+            "value": 1.19375,
             "unit": "V",
             "status": "pass",
             "margin": null
@@ -498,16 +461,6 @@
             "margin": null
           }
         ],
-        "diagnostics": []
-      },
-      {
-        "corner_id": "monte-carlo-untrimmed/overall",
-        "process": null,
-        "supply_v": {},
-        "temperature_c": 27,
-        "status": "fail",
-        "runtime_s": 0,
-        "measurements": [],
         "diagnostics": []
       },
       {
@@ -665,7 +618,7 @@
         "diagnostics": []
       },
       {
-        "corner_id": "pdk-smoke/tt_27c_2.97v",
+        "corner_id": "pdk-smoke/tt_27c_3.30v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -674,14 +627,14 @@
         "measurements": [
           {
             "name": "vgs",
-            "value": 0.918849,
+            "value": 0.930528,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "isup",
-            "value": 2.05115e-06,
+            "value": 2.36947e-06,
             "unit": "A",
             "status": "pass",
             "margin": null
@@ -776,7 +729,7 @@
         "measurements": [
           {
             "name": "psrr_dc",
-            "value": 91.5601,
+            "value": 116.012,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -790,7 +743,7 @@
           },
           {
             "name": "psrr_1k",
-            "value": 62.9882,
+            "value": 67.8311,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -804,14 +757,14 @@
           },
           {
             "name": "psrr_band_min",
-            "value": 62.9882,
+            "value": 67.8311,
             "unit": "dB",
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_1m",
-            "value": 10.7734,
+            "value": 15.9849,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -834,7 +787,17 @@
         "diagnostics": []
       },
       {
-        "corner_id": "psrr-dc-post-layout/tt_125c_3.63v",
+        "corner_id": "psrr-dc-post-layout/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "psrr-dc-with-injector/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -843,7 +806,7 @@
         "measurements": [
           {
             "name": "psrr_dc",
-            "value": 82.7158,
+            "value": 70.4703,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -857,7 +820,7 @@
           },
           {
             "name": "psrr_1k",
-            "value": 60.3503,
+            "value": 60.5928,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -871,14 +834,14 @@
           },
           {
             "name": "psrr_band_min",
-            "value": 60.3503,
+            "value": 60.5928,
             "unit": "dB",
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_1m",
-            "value": 9.11324,
+            "value": 15.7919,
             "unit": "dB",
             "status": "pass",
             "margin": null
@@ -898,6 +861,26 @@
             "margin": null
           }
         ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "psrr-injector-attribution/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "psrr-injector-candidates/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
         "diagnostics": []
       },
       {
@@ -910,21 +893,21 @@
         "measurements": [
           {
             "name": "iq",
-            "value": 3.11438e-05,
+            "value": 2.59539e-05,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref",
-            "value": 1.19973,
+            "value": 1.21033,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vgdrv",
-            "value": 1.70504,
+            "value": 1.72918,
             "unit": "V",
             "status": "pass",
             "margin": null
@@ -933,7 +916,7 @@
         "diagnostics": []
       },
       {
-        "corner_id": "quiescent-current-post-layout/tt_27c_2.97v",
+        "corner_id": "quiescent-current-post-layout/tt_27c_3.30v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -942,21 +925,21 @@
         "measurements": [
           {
             "name": "iq",
-            "value": 1.99928e-05,
+            "value": 1.96368e-05,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref",
-            "value": 1.19335,
+            "value": 1.19375,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vgdrv",
-            "value": 1.75578,
+            "value": 2.08982,
             "unit": "V",
             "status": "pass",
             "margin": null
@@ -1084,7 +1067,7 @@
         "diagnostics": []
       },
       {
-        "corner_id": "startup-ramp/tt_-40c_2.97v",
+        "corner_id": "startup-ramp/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -1093,56 +1076,56 @@
         "measurements": [
           {
             "name": "t_start_s",
-            "value": -0.000372723,
+            "value": -0.000405679,
             "unit": "s",
             "status": "pass",
             "margin": null
           },
           {
             "name": "t_start_f",
-            "value": -1.13243e-07,
+            "value": -1.00891e-07,
             "unit": "s",
             "status": "pass",
             "margin": null
           },
           {
             "name": "t_start_g",
-            "value": 1.1127e-09,
+            "value": 2.2302e-09,
             "unit": "s",
             "status": "pass",
             "margin": null
           },
           {
             "name": "t_abs_s",
-            "value": 0.000603708,
+            "value": 0.000570752,
             "unit": "s",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_s",
-            "value": 1.20741,
+            "value": 1.21075,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_f",
-            "value": 1.20716,
+            "value": 1.21054,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_g",
-            "value": 1.20718,
+            "value": 1.21034,
             "unit": "V",
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_spread",
-            "value": 0.000479,
+            "value": 0.000625,
             "unit": "V",
             "status": "pass",
             "margin": null
@@ -1151,7 +1134,74 @@
         "diagnostics": []
       },
       {
-        "corner_id": "startup-stability/tt_-40c_2.97v",
+        "corner_id": "startup-ramp-post-layout/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "t_start_s",
+            "value": -0.000162953,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_start_f",
+            "value": 1.55309e-06,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_start_g",
+            "value": 1.13729e-08,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_abs_s",
+            "value": 0.000813478,
+            "unit": "s",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_s",
+            "value": 1.1938,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_f",
+            "value": 1.19364,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_g",
+            "value": 1.19365,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_spread",
+            "value": 0.000309,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "startup-stability/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
@@ -1167,50 +1217,117 @@
           },
           {
             "name": "alpha_eq",
-            "value": 0.553785,
+            "value": 0.581673,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "itrav_min",
-            "value": 0.000306143,
+            "value": 7.66857e-08,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "imin_off_su",
-            "value": 0.000679711,
+            "value": 0.000447324,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "imin_off_bare",
-            "value": 1.15911e-11,
+            "value": 5.46285e-12,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "i_off_su",
-            "value": 0.000693171,
+            "value": 0.000459479,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "i_off_bare",
-            "value": 7.58328e-11,
+            "value": 4.77415e-11,
             "unit": "A",
             "status": "pass",
             "margin": null
           },
           {
             "name": "i_on_su",
-            "value": -0.000825103,
+            "value": -0.000681324,
             "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "startup-stability-post-layout/ff_-40c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ncross_su",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "alpha_eq",
+            "value": 0.581673,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "itrav_min",
+            "value": 0.000177788,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "imin_off_su",
+            "value": 0.000549778,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "i_off_su",
+            "value": 0.000576901,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "i_on_su",
+            "value": -0.000529289,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_dut",
+            "value": 1.20297,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vgdrv_dut",
+            "value": 1.72857,
+            "unit": "V",
             "status": "pass",
             "margin": null
           }
@@ -1228,13 +1345,49 @@
         "diagnostics": []
       },
       {
-        "corner_id": "startup-time-post-layout/overall",
+        "corner_id": "startup-time-post-layout/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
-        "status": "fail",
+        "status": "pass",
         "runtime_s": 0,
-        "measurements": [],
+        "measurements": [
+          {
+            "name": "t_start_ms",
+            "value": 0.09512,
+            "unit": "ms",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_final",
+            "value": 1.19376,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "gdrv_final",
+            "value": 1.75826,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_final",
+            "value": 2.97,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_tran_points",
+            "value": 416.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
         "diagnostics": []
       },
       {
@@ -1242,7 +1395,7 @@
         "process": null,
         "supply_v": {},
         "temperature_c": 27,
-        "status": "fail",
+        "status": "pass",
         "runtime_s": 0,
         "measurements": [],
         "diagnostics": []
@@ -1261,8 +1414,8 @@
   },
   "source": {
     "repo": "2AMLogic/sky130-bandgap",
-    "ref": "7d1ce05168777f6615e1e26adf5eedd6213df318",
-    "path": "layout/bandgap-core/reports/20260811-221633-a0ee5e7/bandgap_core_routed.gds"
+    "ref": "4759dddd613ca18535a45d005ac5ae47110684d4",
+    "path": "layout/bandgap-core/reports/20260923-070209-dbd57a9/bandgap_core_routed.gds"
   },
   "downloadable": true,
   "status": "ok"

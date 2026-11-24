@@ -29,6 +29,8 @@ import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from .lvs_base import LvsError
+
 if TYPE_CHECKING:
     import klayout.db as kdb
 
@@ -60,12 +62,6 @@ _REFUSED_OPTIONS = (
 )
 
 
-def _error(message: str) -> Exception:
-    from .lvs import LvsError
-
-    return LvsError(message)
-
-
 def is_finfet_layout(layout_spec: Mapping[str, Any]) -> bool:
     from .extract_finfet import is_finfet_deck_name
 
@@ -84,7 +80,7 @@ def parse_finfet_bulk(options: Mapping[str, Any]) -> dict[str, str] | None:
         or any(key not in BULK_POLARITIES for key in value)
         or any(not isinstance(name, str) or not name.strip() for name in value.values())
     ):
-        raise _error(
+        raise LvsError(
             "options.finfet_bulk must be a non-empty JSON object mapping "
             f"{' and/or '.join(repr(p) for p in BULK_POLARITIES)} to the "
             "layout net name the device bulk is asserted to sit on, e.g. "
@@ -103,34 +99,35 @@ def validate_finfet_request(
     exact ``NFIN`` compare. Called only for a FinFET ``layout.deck``."""
     deck = layout_spec.get("deck")
     if engine != "klayout":
-        raise _error(
+        raise LvsError(
             f"layout.deck '{deck}' is a FinFET extraction deck; only "
             "engine 'klayout' compares NFIN exactly (the netgen engine would "
             "compare planar W/L)"
         )
     if "netlist" in layout_spec:
-        raise _error(
+        raise LvsError(
             f"layout.deck '{deck}' is a FinFET extraction deck; klt lvs "
             "supports it only with inline extraction (layout.file) -- a "
             "pre-extracted layout.netlist is read by the planar reader, which "
             "would drop NFIN"
         )
     form = reference_spec.get("form", "plain-element")
-    if form != "plain-element":
-        raise _error(
+    if form not in ("plain-element", "gate-level-verilog"):
+        raise LvsError(
             f"layout.deck '{deck}' is a FinFET extraction deck; "
             f"reference.form {form!r} is not supported (use 'plain-element' "
-            "CDL/SPICE M cards carrying nfin=)"
+            "CDL/SPICE M cards carrying nfin=, or 'gate-level-verilog' with "
+            "reference.library to expand library cells from the PDK CDL)"
         )
     for key in ("device_map", "device_bulk"):
         if reference_spec.get(key):
-            raise _error(
+            raise LvsError(
                 f"layout.deck '{deck}' is a FinFET extraction deck; "
                 f"reference.{key} is not supported"
             )
     for name, why in _REFUSED_OPTIONS:
         if options.get(name):
-            raise _error(
+            raise LvsError(
                 f"layout.deck '{deck}' is a FinFET extraction deck; "
                 f"options.{name} is not supported because it {why}"
             )
@@ -138,15 +135,15 @@ def validate_finfet_request(
 
 def _checked_nfin(value: Any, card: str) -> float:
     if value is None:
-        raise _error(f"FinFET device card {card} has no nfin= parameter")
+        raise LvsError(f"FinFET device card {card} has no nfin= parameter")
     try:
         nfin = float(value)
     except (TypeError, ValueError):
-        raise _error(
+        raise LvsError(
             f"FinFET device card {card}: nfin={value!r} is not a number"
         ) from None
     if not math.isfinite(nfin) or nfin <= 0 or nfin != int(nfin):
-        raise _error(
+        raise LvsError(
             f"FinFET device card {card}: nfin={value!r} must be a positive "
             "integer fin count"
         )
@@ -158,11 +155,11 @@ def _checked_positive(params: Mapping[str, Any], key: str, card: str) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise _error(
+        raise LvsError(
             f"FinFET device card {card} has no valid {key.lower()}= parameter"
         ) from None
     if not math.isfinite(number) or number <= 0:
-        raise _error(
+        raise LvsError(
             f"FinFET device card {card}: {key.lower()}={value!r} must be positive"
         )
     return number
@@ -192,9 +189,9 @@ def make_finfet_reference_reader() -> kdb.NetlistSpiceReader:
                 )
             card = f"M{name} (model {model!r}) in circuit {circuit.name!r}"
             if not model:
-                raise _error(f"FinFET device card {card} names no model")
+                raise LvsError(f"FinFET device card {card} names no model")
             if len(nets) != 4:
-                raise _error(
+                raise LvsError(
                     f"FinFET device card {card} has {len(nets)} nets; "
                     "a 4-terminal d g s b MOSFET is required"
                 )
@@ -238,7 +235,7 @@ def configure_finfet_comparison(*netlists: kdb.Netlist) -> list[str]:
             if not isinstance(device_class, kdb.DeviceClassMOS4Transistor):
                 continue
             if not device_class.has_parameter("NFIN"):
-                raise _error(
+                raise LvsError(
                     f"device class '{device_class.name}' carries no NFIN "
                     "parameter; refusing a planar W/L compare of a FinFET layout"
                 )
@@ -283,6 +280,7 @@ def apply_finfet_bulk(
             and device.device_class().has_terminal("B")
         ]
         record: dict[str, Any] = {
+            "circuit": circuit.name,
             "polarity": polarity,
             "net": target_name,
             "device_count": len(devices),
@@ -295,7 +293,7 @@ def apply_finfet_bulk(
             for device in devices:
                 net = device.net_for_terminal(device.device_class().terminal_id("B"))
                 if net is None:
-                    raise _error(
+                    raise LvsError(
                         f"options.finfet_bulk['{polarity}']: a {polarity} "
                         f"device ({device.expanded_name()}) has an unconnected "
                         "bulk terminal; refusing to tie it by policy"
@@ -303,7 +301,7 @@ def apply_finfet_bulk(
                 bulk_nets[net.cluster_id if net.cluster_id else id(net)] = net
             if len(bulk_nets) > 1:
                 names = sorted(n.expanded_name() for n in bulk_nets.values())
-                raise _error(
+                raise LvsError(
                     f"options.finfet_bulk['{polarity}']: the {polarity} bulk "
                     f"terminals land on {len(bulk_nets)} different nets "
                     f"({', '.join(names)}); the bulk policy only ties a single "
@@ -321,13 +319,13 @@ def apply_finfet_bulk(
             ]
             if not named:
                 shown = ", ".join(available) or "(none)"
-                raise _error(
+                raise LvsError(
                     f"options.finfet_bulk['{polarity}']: layout net "
                     f"'{target_name}' not found in circuit '{circuit.name}' "
                     f"(named nets: {shown})"
                 )
             if len(others) > 1:
-                raise _error(
+                raise LvsError(
                     f"options.finfet_bulk['{polarity}']: layout net name "
                     f"'{target_name}' is ambiguous ({len(others)} distinct "
                     "nets besides the bulk net carry it); fix the supply "
@@ -342,6 +340,42 @@ def apply_finfet_bulk(
                 record["status"] = "joined"
         records.append(record)
     return records
+
+
+def apply_finfet_bulk_hierarchy(
+    top: kdb.Circuit, spec: Mapping[str, str] | None
+) -> list[dict[str, Any]]:
+    """Apply ``options.finfet_bulk`` to ``top`` and every circuit beneath it.
+
+    Each circuit resolves the named net inside itself, so rail labels drawn in
+    a sub-cell are enough. A circuit without devices of a polarity is skipped;
+    a polarity with no devices anywhere is disclosed once as ``no_devices``
+    on ``top``. Must run before ``flatten_layout`` (flattening merges sub-cell
+    nets by connectivity, so the tie made here survives it).
+    """
+    if not spec:
+        return []
+    circuits: list[kdb.Circuit] = []
+    seen: set[str] = set()
+    pending = [top]
+    while pending:
+        circuit = pending.pop(0)
+        if circuit.name in seen:
+            continue
+        seen.add(circuit.name)
+        circuits.append(circuit)
+        pending.extend(sub.circuit_ref() for sub in circuit.each_subcircuit())
+    records: list[dict[str, Any]] = []
+    empty: dict[str, dict[str, Any]] = {}
+    for circuit in circuits:
+        for record in apply_finfet_bulk(circuit, spec):
+            if record["status"] == "no_devices":
+                empty.setdefault(record["polarity"], record)
+            else:
+                records.append(record)
+    tied = {record["polarity"] for record in records}
+    top_records = [r for p, r in empty.items() if p not in tied]
+    return top_records + records
 
 
 def bulk_disclosures(
@@ -446,27 +480,23 @@ def prepare_finfet_request(
         validate_finfet_request(layout_spec, reference_spec, options, engine)
     bulk = parse_finfet_bulk(options)
     if bulk is not None and not finfet:
-        raise _error("options.finfet_bulk requires a FinFET layout.deck (e.g. asap7)")
+        raise LvsError("options.finfet_bulk requires a FinFET layout.deck (e.g. asap7)")
     return finfet, bulk
 
 
 def prepare_finfet_comparison(
     finfet: bool,
     layout_netlist: kdb.Netlist,
-    layout_circuit: kdb.Circuit,
     reference_netlist: kdb.Netlist,
-    bulk: Mapping[str, str] | None,
-) -> list[dict[str, Any]]:
-    """Comparison-time FinFET setup (a no-op returning ``[]`` for a planar
-    deck): merge reference fingers with the extractor's combiner, apply the
-    opt-in bulk policy to the layout circuit, and configure exact ``NFIN``
-    on both sides. Returns the bulk-policy disclosure records."""
+) -> None:
+    """Comparison-time FinFET setup (a no-op for a planar deck): merge
+    reference fingers with the extractor's combiner and configure exact
+    ``NFIN`` on both sides. The opt-in bulk policy is applied earlier, before
+    ``flatten_layout`` (see :func:`apply_finfet_bulk_hierarchy`)."""
     if not finfet:
-        return []
+        return
     combine_reference_fingers(reference_netlist)
-    records = apply_finfet_bulk(layout_circuit, bulk)
     configure_finfet_comparison(layout_netlist, reference_netlist)
-    return records
 
 
 def sliced_reference_file(

@@ -50,6 +50,60 @@ def test_evidence_script_mirrors_production_prefix_and_stops_before_fine():
     ]
 
 
+def test_evidence_script_declares_macros_after_rtl_before_hierarchy():
+    """Issue #4368: the production script reads each macro's blackbox
+    declaration before `hierarchy -check`; the side script must too, or
+    `memory_mapping` is `indeterminate` on every macro-bearing design."""
+    lines = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        macro_inputs=(
+            {"cell": "sram", "source": "liberty", "path": "/m/sram.lib"},
+            {"cell": "rom", "source": "verilog_blackbox", "path": "/m/rom.v"},
+            {"cell": "pll", "source": "lef", "path": "/o/pll_blackbox.v"},
+        ),
+    ).splitlines()
+    assert lines[:5] == [
+        "read_verilog /a/x.v",
+        "read_liberty -lib /m/sram.lib",
+        "read_verilog -lib /m/rom.v",
+        "read_verilog -lib /o/pll_blackbox.v",
+        "hierarchy -check -top top",
+    ]
+
+
+def test_evidence_script_without_macros_is_unchanged():
+    text = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        macro_inputs=(),
+    )
+    assert "-lib" not in text
+
+
+def test_evidence_script_loads_liberty_first_and_lists_library_cells():
+    lines = sm.memory_evidence_script_text(
+        sources=["/a/x.v"],
+        hdl_toplevel="top",
+        blackbox_list_path="/o/bb.txt",
+        elaborated_stats_path="/o/e.json",
+        pre_lowering_stats_path="/o/p.json",
+        liberty_path="/l/x.lib",
+        library_cells_path="/o/lib.txt",
+    ).splitlines()
+    assert lines[:3] == [
+        "read_liberty -lib /l/x.lib",
+        "tee -q -o /o/lib.txt select -list =A:blackbox",
+        "read_verilog /a/x.v",
+    ]
+
+
 def test_evidence_script_carries_arithmetic_techmap_before_synth():
     lines = sm.memory_evidence_script_text(
         sources=["/a/x.v"],
@@ -63,6 +117,30 @@ def test_evidence_script_carries_arithmetic_techmap_before_synth():
     techmap = lines.index("techmap -map /o/map.v")
     assert lines.index("read_verilog /o/add8.v") < techmap
     assert techmap < lines.index("synth -top top -run :fine")
+
+
+def test_evidence_script_repo_relative_paths_with_repo_root(tmp_path):
+    root = str(tmp_path)
+    out = f"{root}/.klt/run"
+    text = sm.memory_evidence_script_text(
+        sources=[f"{root}/rtl/x.v", "/ext/y.v"],
+        hdl_toplevel="top",
+        blackbox_list_path=f"{out}/bb.txt",
+        elaborated_stats_path=f"{out}/e.json",
+        pre_lowering_stats_path=f"{out}/p.json",
+        adder_sources=(f"{out}/add8.v",),
+        adder_techmap_path=f"{out}/map.v",
+        repo_root=root,
+    )
+    lines = text.splitlines()
+    assert "read_verilog rtl/x.v" in lines
+    assert "read_verilog /ext/y.v" in lines  # outside the repo stays absolute
+    assert "read_verilog .klt/run/add8.v" in lines
+    assert "techmap -map .klt/run/map.v" in lines
+    assert "tee -q -o .klt/run/bb.txt select -list =A:blackbox =A:whitebox" in lines
+    assert "tee -q -o .klt/run/e.json stat -json" in lines
+    assert "tee -q -o .klt/run/p.json stat -json" in lines
+    assert root not in text
 
 
 @pytest.mark.parametrize(

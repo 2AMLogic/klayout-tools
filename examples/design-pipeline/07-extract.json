@@ -1,11 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "file": "06-layout.gds",
   "deck": "sky130",
   "top": "ota_5t_layout_0",
   "dbu_um": 0.001,
   "netlist_path": "07-extract.spice",
-  "netlist_sha256": "6520e5f3791831ac53006c652cba66b5e3e90822bd1d30deb151ccc603fa2e05",
+  "netlist_sha256": "b15fa9b5278043e7e5d13eca06c5aba35eb1980f20cc35a3b29860954a64358f",
   "status": "extracted",
   "device_count": 5,
   "net_count": 12,
@@ -13,140 +13,377 @@
   "device_counts": {
     "nfet": 5
   },
+  "dummy_devices_dropped": 0,
+  "ignored_layers": [],
+  "device_recognition_only_layers": [],
+  "device_classes": [
+    "nfet",
+    "pfet",
+    "pnp",
+    "sky130_fd_pr__model__cap_mim",
+    "sky130_fd_pr__model__cap_mim_m4",
+    "resistor"
+  ],
   "devices": [
     {
       "name": "$1",
       "class": "nfet",
       "nets": {
         "s": "N1",
-        "g": "$7",
-        "d": "$2",
+        "g": "\\$7",
+        "d": "\\$2",
         "b": "vsubs"
       },
       "params": {
         "l_um": 1.0,
-        "w_um": 6.0
-      }
+        "w_um": 6.0,
+        "as_um2": 2.52,
+        "ad_um2": 2.52,
+        "ps_um": 12.84,
+        "pd_um": 12.84
+      },
+      "instance_path": [
+        {
+          "cell": "mirror__diff_pair_0",
+          "array_index": null
+        },
+        {
+          "cell": "diff_pair$1",
+          "array_index": null
+        }
+      ]
     },
     {
       "name": "$2",
       "class": "nfet",
       "nets": {
-        "s": "TAIL_A,TAIL_B",
-        "g": "$8",
+        "s": "TAIL_A|TAIL_B",
+        "g": "\\$8",
         "d": "N1",
         "b": "vsubs"
       },
       "params": {
         "l_um": 0.5,
-        "w_um": 8.0
-      }
+        "w_um": 8.0,
+        "as_um2": 3.36,
+        "ad_um2": 3.36,
+        "ps_um": 16.84,
+        "pd_um": 16.84
+      },
+      "instance_path": [
+        {
+          "cell": "diffpair__diff_pair_0",
+          "array_index": null
+        },
+        {
+          "cell": "diff_pair",
+          "array_index": null
+        }
+      ]
     },
     {
       "name": "$3",
       "class": "nfet",
       "nets": {
-        "s": "$3",
-        "g": "$9",
-        "d": "TAIL_A,TAIL_B",
+        "s": "\\$3",
+        "g": "\\$9",
+        "d": "TAIL_A|TAIL_B",
         "b": "vsubs"
       },
       "params": {
         "l_um": 1.0,
-        "w_um": 10.0
-      }
+        "w_um": 10.0,
+        "as_um2": 4.2,
+        "ad_um2": 4.2,
+        "ps_um": 20.84,
+        "pd_um": 20.84
+      },
+      "instance_path": [
+        {
+          "cell": "tail__mos_array_0",
+          "array_index": null
+        },
+        {
+          "cell": "mos_array",
+          "array_index": null
+        }
+      ]
     },
     {
       "name": "$4",
       "class": "nfet",
       "nets": {
         "s": "VOUT",
-        "g": "$10",
-        "d": "$6",
+        "g": "\\$10",
+        "d": "\\$6",
         "b": "vsubs"
       },
       "params": {
         "l_um": 1.0,
-        "w_um": 6.0
-      }
+        "w_um": 6.0,
+        "as_um2": 2.52,
+        "ad_um2": 2.52,
+        "ps_um": 12.84,
+        "pd_um": 12.84
+      },
+      "instance_path": [
+        {
+          "cell": "mirror__diff_pair_0",
+          "array_index": null
+        },
+        {
+          "cell": "diff_pair$1",
+          "array_index": null
+        }
+      ]
     },
     {
       "name": "$5",
       "class": "nfet",
       "nets": {
-        "s": "TAIL_A,TAIL_B",
-        "g": "$11",
+        "s": "TAIL_A|TAIL_B",
+        "g": "\\$11",
         "d": "VOUT",
         "b": "vsubs"
       },
       "params": {
         "l_um": 0.5,
-        "w_um": 8.0
-      }
+        "w_um": 8.0,
+        "as_um2": 3.36,
+        "ad_um2": 3.36,
+        "ps_um": 16.84,
+        "pd_um": 16.84
+      },
+      "instance_path": [
+        {
+          "cell": "diffpair__diff_pair_0",
+          "array_index": null
+        },
+        {
+          "cell": "diff_pair",
+          "array_index": null
+        }
+      ]
     }
   ],
   "nets": [
     {
-      "name": "$10",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$11",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$2",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$3",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$6",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$7",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$8",
-      "pin": false,
-      "device_count": 1
-    },
-    {
-      "name": "$9",
-      "pin": false,
-      "device_count": 1
-    },
-    {
       "name": "N1",
       "pin": true,
-      "device_count": 2
+      "device_count": 2,
+      "net_id": 1,
+      "pin_index": 0,
+      "label_positions_um": [
+        {
+          "text": "N1",
+          "x_um": 4.68,
+          "y_um": 3.5
+        }
+      ]
     },
     {
-      "name": "TAIL_A,TAIL_B",
+      "name": "TAIL_A|TAIL_B",
       "pin": true,
-      "device_count": 3
+      "device_count": 3,
+      "net_id": 4,
+      "pin_index": 1,
+      "label_positions_um": [
+        {
+          "text": "TAIL_A",
+          "x_um": 2.34,
+          "y_um": 4.5
+        },
+        {
+          "text": "TAIL_B",
+          "x_um": 2.34,
+          "y_um": 8.985
+        }
+      ]
     },
     {
       "name": "VOUT",
       "pin": true,
-      "device_count": 2
+      "device_count": 2,
+      "net_id": 5,
+      "pin_index": 2,
+      "label_positions_um": [
+        {
+          "text": "VOUT",
+          "x_um": 4.68,
+          "y_um": 11.47
+        }
+      ]
+    },
+    {
+      "name": "\\$10",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 10,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$11",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 11,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$2",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 2,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$3",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 3,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$6",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 6,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$7",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 7,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$8",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 8,
+      "pin_index": null,
+      "label_positions_um": []
+    },
+    {
+      "name": "\\$9",
+      "pin": false,
+      "device_count": 1,
+      "net_id": 9,
+      "pin_index": null,
+      "label_positions_um": []
     },
     {
       "name": "vsubs",
       "pin": true,
-      "device_count": 5
+      "device_count": 5,
+      "net_id": 12,
+      "pin_index": 3,
+      "label_positions_um": []
     }
   ],
-  "warnings": [],
-  "pdk": null
+  "warnings": [
+    "net 'TAIL_A|TAIL_B' merges 2 distinct labels (TAIL_A, TAIL_B) onto one net -- KLayout joins multiple labels found on the same electrical net (as '|' here and in the written netlist, matching NetlistSpiceWriter's own node-name escaping); this usually means two differently-named nets were shorted together in the layout -- see docs/cli/extract.md's 'Merged net labels' section.",
+    "5 nets connect to exactly one device terminal -- a MOS gate -- and are not a declared pin: these gates have no DC path from anywhere else in the netlist, so they are almost certainly unconnected inputs rather than legitimate floating nodes; resimulating this netlist directly will hit a singular matrix on these nets -- see single_terminal_nets[] for the full list.",
+    "3 nets connect to exactly one device terminal -- source/drain/body/resistor-equivalent, not a gate -- and are not a declared pin; this can be a legitimate single-terminal tie (e.g. an intentionally unterminated dummy's diffusion tie), but confirm these nets have no other intended connectivity -- see single_terminal_nets[] for the full list."
+  ],
+  "black_box_regions": [],
+  "abstracted_cells": [],
+  "unmodelled_poly": [],
+  "merged_net_labels": [
+    {
+      "net": "TAIL_A|TAIL_B",
+      "labels": [
+        "TAIL_A",
+        "TAIL_B"
+      ]
+    }
+  ],
+  "voltage_domain_warnings": [],
+  "missing_flavour_markers": [],
+  "unbiased_pmos_body_nets": [],
+  "single_terminal_nets": [
+    {
+      "net": "\\$10",
+      "device": "$4",
+      "terminal": "g",
+      "terminal_kind": "gate"
+    },
+    {
+      "net": "\\$11",
+      "device": "$5",
+      "terminal": "g",
+      "terminal_kind": "gate"
+    },
+    {
+      "net": "\\$2",
+      "device": "$1",
+      "terminal": "d",
+      "terminal_kind": "drain"
+    },
+    {
+      "net": "\\$3",
+      "device": "$3",
+      "terminal": "s",
+      "terminal_kind": "source"
+    },
+    {
+      "net": "\\$6",
+      "device": "$4",
+      "terminal": "d",
+      "terminal_kind": "drain"
+    },
+    {
+      "net": "\\$7",
+      "device": "$1",
+      "terminal": "g",
+      "terminal_kind": "gate"
+    },
+    {
+      "net": "\\$8",
+      "device": "$2",
+      "terminal": "g",
+      "terminal_kind": "gate"
+    },
+    {
+      "net": "\\$9",
+      "device": "$3",
+      "terminal": "g",
+      "terminal_kind": "gate"
+    }
+  ],
+  "dead_metal": [],
+  "matched_device_groups": [],
+  "def_pin_promotion": null,
+  "pin_renames": null,
+  "rename_declared_pins": false,
+  "label_layers": null,
+  "pdk": null,
+  "provenance": {
+    "klt_version": "0.7.1.dev517+gebd6e9c71ae3.dirty",
+    "klayout_version": "0.30.12",
+    "pdk": null,
+    "deck": {
+      "name": "sky130",
+      "content_hash": "sha256:411d30797095f35557025e80916139f2741e16097d06b15a86c077a23763c180",
+      "released": false
+    },
+    "input": {
+      "content_hash": "sha256:29db5dcb6d312194f661bc9ce38b080127801ad7453f188e70c5be3a5c11541d",
+      "role": "layout"
+    }
+  },
+  "parasitics": null,
+  "spef_path": null,
+  "subcircuit": null,
+  "metrics": {
+    "extract__device__count": 5,
+    "extract__net__count": 12,
+    "extract__pin__count": 4
+  }
 }

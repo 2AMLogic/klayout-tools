@@ -12,168 +12,25 @@ from pathlib import Path
 
 import pytest
 
+from helpers.pdk_install_fixtures import (
+    isolate_pdk_search_space,
+)
+from helpers.pdk_install_fixtures import (
+    make_cell_library as _make_cell_library,
+)
+from helpers.pdk_install_fixtures import (
+    make_ihp_stdcell_library as _make_ihp_stdcell_library,
+)
+from helpers.pdk_install_fixtures import (
+    make_install as _make_install,
+)
 from klayout_tools import pdk, pdk_cells
 from klayout_tools.cli import main
 
 
-def _make_install(root, variant, *, sources=None, assets=("ngspice",)):
-    """Fabricate an open_pdks-layout variant under ``root``.
-
-    Creates ``root/<variant>/libs.tech`` (the layout probe) plus a ``libs.tech``
-    subdir per requested asset (or ``libs.ref`` for ``libs_ref``), and an
-    optional ``SOURCES`` version stamp. Returns the variant directory.
-    """
-    variant_dir = root / variant
-    (variant_dir / "libs.tech").mkdir(parents=True)
-    for asset in assets:
-        if asset == "libs_ref":
-            (variant_dir / "libs.ref").mkdir(parents=True, exist_ok=True)
-        else:
-            (variant_dir / "libs.tech" / asset).mkdir(parents=True, exist_ok=True)
-    if sources is not None:
-        (variant_dir / "SOURCES").write_text(sources, encoding="utf-8")
-    return variant_dir
-
-
-def _make_cell_library(
-    variant_dir,
-    name,
-    *,
-    devices=("nfet_01v8", "pfet_01v8_hvt"),
-    family="sky130",
-    corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
-    with_spice=True,
-    with_lib=True,
-    bare_device_names=False,
-    prefixed_operating_conditions=False,
-):
-    """Fabricate a `libs.ref/<name>` entry with `spice/`/`lib/` views.
-
-    ``devices`` are nfet/pfet flavor suffixes embedded in one synthetic SPICE
-    instance line each, matching real ``X<n> ... <model> w=... l=...``
-    instance lines. By default (``bare_device_names=False``) the model is
-    prefixed ``<family>_fd_pr__`` -- sky130's shape (`sky130_fd_pr__nfet_01v8`).
-    ``bare_device_names=True`` omits the prefix entirely -- gf180mcu's shape
-    (`nfet_06v0`), see issue #537. ``corners`` is an iterable of
-    ``(corner_name, nom_process, nom_temperature, nom_voltage)`` tuples, one
-    `.lib` file per entry. ``with_spice``/``with_lib`` let a test omit either
-    view to exercise the missing-view fallback.
-
-    ``prefixed_operating_conditions=True`` writes the `.lib` file's
-    `default_operating_conditions` attribute as `f"{name}__{corner_name}"`
-    instead of the bare ``corner_name`` -- gf180mcu_fd_sc_mcu9t5v0's real
-    shape (issue #820), where the vendor's own Liberty attribute already
-    carries the `<cell_library>__` prefix that sky130's files omit. The
-    on-disk filename is unaffected (still `<name>__<corner_name>.lib`).
-    """
-    lib_dir = variant_dir / "libs.ref" / name
-    if with_spice:
-        spice_dir = lib_dir / "spice"
-        spice_dir.mkdir(parents=True)
-        if bare_device_names:
-            lines = [
-                f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)
-            ]
-        else:
-            lines = [
-                f"X{i} a b c d {family}_fd_pr__{device} w=1u l=1u"
-                for i, device in enumerate(devices)
-            ]
-        (spice_dir / f"{name}.spice").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-    if with_lib:
-        lib_views_dir = lib_dir / "lib"
-        lib_views_dir.mkdir(parents=True)
-        for corner_name, process, temperature, voltage in corners:
-            operating_conditions = (
-                f"{name}__{corner_name}"
-                if prefixed_operating_conditions
-                else corner_name
-            )
-            content = (
-                f'    default_operating_conditions : "{operating_conditions}";\n'
-                f"    nom_process : {process};\n"
-                f"    nom_temperature : {temperature};\n"
-                f"    nom_voltage : {voltage};\n"
-            )
-            (lib_views_dir / f"{name}__{corner_name}.lib").write_text(
-                content, encoding="utf-8"
-            )
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    return lib_dir
-
-
-def _make_ihp_stdcell_library(
-    variant_dir,
-    name="sg13g2_stdcell",
-    *,
-    devices=("nfet",),
-    corners=(("typ_1p20V_25C", 1.0, 25.0, 1.2),),
-    with_spice=True,
-    with_lib=True,
-    with_lef=True,
-    tech_lef_filename="sg13g2_tech.lef",
-):
-    """Fabricate a `libs.ref/<name>` entry mirroring IHP-Open-PDK's real
-    `sg13g2_stdcell` shape (issue #1790, verified live against a real
-    fetched v0.3.0 install):
-
-    - Single-underscore `lib/` naming (`f"{name}_{corner}.lib"`), with
-      `default_operating_conditions` written as the full stem too -- IHP's
-      own `.lib` files embed the library name in that attribute, unlike
-      sky130's bare form.
-    - A `lef/` directory with **no** `techlef/` subdirectory at all -- just
-      the merged cell LEF (`f"{name}.lef"`) alongside a single,
-      corner-invariant tech LEF named after the *process*, not the library
-      (``tech_lef_filename``, default `sg13g2_tech.lef`, matching IHP's real
-      mismatch between the tech LEF's filename and `cell_library`'s name).
-    """
-    lib_dir = variant_dir / "libs.ref" / name
-    if with_spice:
-        spice_dir = lib_dir / "spice"
-        spice_dir.mkdir(parents=True)
-        lines = [f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)]
-        (spice_dir / f"{name}.spice").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-    if with_lib:
-        lib_views_dir = lib_dir / "lib"
-        lib_views_dir.mkdir(parents=True, exist_ok=True)
-        for corner_name, process, temperature, voltage in corners:
-            operating_conditions = f"{name}_{corner_name}"
-            content = (
-                f'    default_operating_conditions : "{operating_conditions}";\n'
-                f"    nom_process : {process};\n"
-                f"    nom_temperature : {temperature};\n"
-                f"    nom_voltage : {voltage};\n"
-            )
-            (lib_views_dir / f"{name}_{corner_name}.lib").write_text(
-                content, encoding="utf-8"
-            )
-    if with_lef:
-        lef_dir = lib_dir / "lef"
-        lef_dir.mkdir(parents=True, exist_ok=True)
-        (lef_dir / f"{name}.lef").write_text("# merged cell lef\n")
-        (lef_dir / tech_lef_filename).write_text("# tech lef\n")
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    return lib_dir
-
-
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
-    """Scrub PDK env vars, redirect HOME, and empty the host search space.
-
-    Individual tests opt back into stores/prefixes by setting the module
-    constants (or ``$PDK_ROOT``) to controlled ``tmp_path`` locations.
-    """
-    monkeypatch.delenv("PDK_ROOT", raising=False)
-    monkeypatch.delenv("PDK", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    monkeypatch.setattr(pdk, "STORE_DIRS", [])
-    monkeypatch.setattr(pdk, "SHARED_ROOTS", [])
-    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+    isolate_pdk_search_space(monkeypatch, tmp_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -378,6 +235,67 @@ def test_ambiguity_warning_is_none_when_unambiguous(tmp_path, monkeypatch):
     _make_install(tmp_path / "home" / ".ciel", "sky130A")
 
     assert pdk.ambiguity_warning(pdk.find_pdk(variant="sky130A")) is None
+
+
+def _make_gf180_root(tmp_path):
+    root = tmp_path / "gf"
+    for name in ("gf180mcuA", "gf180mcuB", "gf180mcuC", "gf180mcuD"):
+        _make_install(root, name)
+    return root
+
+
+def test_find_lists_alternative_variants_when_unselected(tmp_path):
+    root = _make_gf180_root(tmp_path)
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["variant"] == "gf180mcuA"
+    assert report["alternative_variants"] == ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+    warning = pdk.alternative_variants_warning(report)
+    assert warning is not None
+    assert "gf180mcuA" in warning and "gf180mcuB" in warning
+    assert "$PDK" in warning and "--pdk" in warning
+
+
+def test_find_alternative_variants_empty_when_pinned(tmp_path, monkeypatch):
+    root = _make_gf180_root(tmp_path)
+
+    explicit = pdk.find_pdk(root=str(root), variant="gf180mcuB")
+    assert explicit["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(explicit) is None
+
+    monkeypatch.setenv("PDK", "gf180mcuC")
+    via_env = pdk.find_pdk(root=str(root))
+    assert via_env["variant"] == "gf180mcuC"
+    assert via_env["alternative_variants"] == []
+
+
+def test_find_alternative_variants_empty_for_single_variant(tmp_path):
+    root = tmp_path / "one"
+    _make_install(root, "sky130A")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(report) is None
+
+
+def test_cli_find_warns_on_stderr_for_alternative_variants(tmp_path, capsys):
+    root = _make_gf180_root(tmp_path)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "klt: warning: no PDK variant selected" in captured.err
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["alternative_variants"] == [
+        "gf180mcuB",
+        "gf180mcuC",
+        "gf180mcuD",
+    ]
 
 
 def test_pdk_root_nonexistent_falls_through(tmp_path, monkeypatch):
@@ -657,6 +575,42 @@ def test_cli_find_text_surfaces_broken_symlink_count(tmp_path, capsys):
     assert "broken_symlinks: 1" in out
 
 
+def test_cli_find_text_names_shadowed_same_variant_roots(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    exit_code = main(["pdk", "find", "--pdk", "sky130A", "--format", "text"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    warnings = [line for line in out.splitlines() if line.startswith("warning:")]
+    assert warnings == [
+        f"warning: shadowed same-variant install: {home / '.volare'} "
+        "(search root: ~/.volare)"
+    ]
+
+
+def test_cli_find_text_unchanged_for_single_install_or_pinned_root(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    main(["pdk", "find", "--pdk-root", str(home / ".ciel"), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+    single = tmp_path / "single"
+    _make_install(single, "sky130A")
+    main(["pdk", "find", "--pdk-root", str(single), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- #
 # Flat single-PDK layout (issue #522 -- IHP-Open-PDK's SG13G2)
 #
@@ -767,7 +721,12 @@ def test_flat_layout_list_reports_single_variant(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13g2", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13g2",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
@@ -845,7 +804,12 @@ def test_flat_layout_list_reports_ihp_sg13cmos5l(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13cmos5l", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13cmos5l",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
@@ -1746,6 +1710,55 @@ def test_macros_excludes_std_cell_and_other_libraries(tmp_path):
     assert [macro["name"] for macro in report["macros"]] == ["sky130_fd_ip_sram_1k"]
 
 
+def test_macros_reports_structural_lef_lib_library_without_fd_ip(tmp_path):
+    """IHP's `sg13g2_sram` has no `_fd_ip_` in its name but ships lef+lib."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sg13g2_sram", views=("cdl", "gds", "lef", "lib"))
+    _make_macro_library(variant_dir, "sg13g2_stdcell")
+    _make_macro_library(variant_dir, "sg13g2_io")
+    (variant_dir / "libs.ref" / "sg13g2_pr").mkdir(parents=True)
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sg13g2_sram"]
+
+
+def test_macros_fd_ip_library_without_lib_view_still_reported(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k", views=("gds",))
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_variant_family_alias_resolves_ihp_install(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+
+    info = pdk.find_pdk(variant="sg13g2", root=str(root))
+
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_variant_family_alias_exact_name_wins(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+    _make_install(root, "sg13g2")
+
+    assert pdk.find_pdk(variant="sg13g2", root=str(root))["variant"] == "sg13g2"
+
+
+def test_variant_family_alias_does_not_guess_sky130(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A")
+
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130", root=str(root))
+
+
 def test_macros_only_hard_macro_ip_present_no_std_cell(tmp_path):
     """A variant shipping only hard-macro IP (no `_fd_sc_` standard-cell
     library at all) is not an error for either command -- `klt pdk macros`
@@ -2062,7 +2075,7 @@ def test_corners_gf180mcu_boilerplate_param_not_misclassified_as_skew(tmp_path):
     """A `.param` line present but with an unchanged value from the family's
     typical section must classify as ``"typical"``, not ``"param"`` -- a
     naive "any `.param` line present" check would misclassify this (see
-    :func:`klayout_tools.pdk._param_lines`'s docstring)."""
+    :func:`klayout_tools.pdk_corner_skew._param_lines`'s docstring)."""
     deck = """\
 .LIB typical
 .param rsh_nplus_u_m=60
@@ -3087,3 +3100,61 @@ def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK ASAP7" in proc.stdout
+
+
+_GF180MCU_FLAVOUR_DECK = """\
+.LIB typical
+ .lib 'sm141064.ngspice' nfet_03v3_t
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB ss
+ .lib 'sm141064.ngspice' nfet_03v3_s
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB fs
+ .lib 'sm141064.ngspice' nfet_03v3_fs
+.ENDL
+"""
+
+
+def test_corners_gf180mcu_reports_per_flavour_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sm141064.ngspice", _GF180MCU_FLAVOUR_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuD")
+    by_corner = {c["corner"]: c for c in report["corners"]}
+
+    def devices(corner):
+        mos = next(s for s in by_corner[corner]["sections"] if s["family"] == "mos")
+        return {d["flavour"]: d["skew"] for d in mos["devices"]}
+
+    assert devices("typical") == {
+        "03v3": "typical",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    assert devices("ss") == {
+        "03v3": "skewed",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    # Flavours the deck omits at a corner are unlisted, not guessed.
+    assert devices("fs") == {"03v3": "skewed", "06v0": None, "06v0_nvt": None}
+    # Family-level skew keeps its meaning; non-mos sections carry no devices.
+    ss_sections = {s["family"]: s for s in by_corner["ss"]["sections"]}
+    assert ss_sections["mos"]["skew"] == "skewed"
+    assert all("devices" not in s for f, s in ss_sections.items() if f != "mos")
+
+
+def test_corners_sky130_has_no_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sky130.lib.spice", _SKY130_FIXTURE_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="sky130A")
+    assert all("devices" not in s for c in report["corners"] for s in c["sections"])

@@ -10,6 +10,22 @@ import pytest
 from klayout_tools import lvs
 
 
+@pytest.fixture
+def tmp_path(tmp_path):
+    """Shadows pytest's own `tmp_path` for this module (issue #2659): seeds a
+    `.git` marker so `tmp_path` resolves as this run's own repo root.
+
+    Since #2659 `run_lvs`'s `layout` field is the committable `{path, scope}`
+    envelope, and `klt lvs --check`/`--rerun` resolve a `scope: "repo"` entry
+    against the repo root of the committed report's own directory. The replay
+    assertions below (`rerun_lvs_report`) therefore need their layout to sit
+    inside a repo -- the position a report committed as evidence is always
+    in. Same override, and the same reason, as `tests/test_lvs.py`'s.
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
 def _rail_request(tmp_path, rows, *, connected=False, deck="sky130", options=None):
     """Each row contains disconnected metal islands, each with its own labels."""
     layout = kdb.Layout()

@@ -108,6 +108,9 @@ import os
 import re
 from typing import Any
 
+from ._jsonnum import is_int
+from ._paths import _load_request_json
+
 SCHEMA_VERSION = 1
 
 #: The named prefix-adder architectures :func:`cell_map_for_architecture`
@@ -166,7 +169,7 @@ def normalize_architecture(architecture: str) -> str:
 
 
 def _validate_width(width: Any) -> int:
-    if isinstance(width, bool) or not isinstance(width, int):
+    if not is_int(width):
         raise ArithGenError("width must be an integer")
     if width < 1:
         raise ArithGenError(f"width must be >= 1 (got {width})")
@@ -538,10 +541,7 @@ def _node_wire(node_key: tuple[int, int], signal: str) -> str:
 
 
 def emit_adder_verilog(
-    graph: PrefixGraph,
-    module_name: str,
-    *,
-    architecture: str | None = None,
+    graph: PrefixGraph, module_name: str, *, architecture: str | None = None
 ) -> str:
     """Emit the structural prefix adder for ``graph`` as Verilog-2001 text.
 
@@ -984,15 +984,7 @@ def run_arith_gen(
 
 
 def _load_cell_map(path: str) -> list[list[int]]:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except FileNotFoundError as exc:
-        raise ArithGenError(f"cell map file not found: {path}") from exc
-    except OSError as exc:
-        raise ArithGenError(f"could not read cell map file '{path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise ArithGenError(f"cell map file '{path}' is not valid JSON: {exc}") from exc
+    document = _load_request_json(path, ArithGenError)
 
     if isinstance(document, dict):
         document = document.get("cell_map")

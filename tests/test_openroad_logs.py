@@ -245,6 +245,49 @@ def test_interrupt_retains_available_data_and_remains_an_interrupt(
     assert json.loads(record_path.read_text())["outcome"] == "interrupted"
 
 
+def test_transcripts_exist_and_grow_while_process_runs(tmp_path, monkeypatch):
+    seen = {}
+
+    def live_process(argv, **kwargs):
+        out, err = kwargs["stdout"], kwargs["stderr"]
+        directory = Path(out.name).parent
+        out.write(b"progress line\n")
+        seen["stdout"] = (directory / "stdout.log").read_bytes()
+        seen["stderr_exists"] = (directory / "stderr.log").exists()
+        seen["metadata_exists"] = (directory / "invocation.json").exists()
+        err.write(b"warn\n")
+        return subprocess.CompletedProcess(argv, 0, None, None)
+
+    monkeypatch.setattr(engine.subprocess, "run", live_process)
+    result = engine._run_openroad(
+        str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError
+    )
+    assert seen == {
+        "stdout": b"progress line\n",
+        "stderr_exists": True,
+        "metadata_exists": False,
+    }
+    assert result.stdout == "progress line\n"
+    assert result.stderr == "warn\n"
+
+
+def test_interrupt_keeps_transcript_written_before_it(tmp_path, monkeypatch):
+    def interrupted(argv, **kwargs):
+        kwargs["stdout"].write(b"flushed before ctrl-c\n")
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(engine.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        engine._run_openroad(
+            str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError
+        )
+    record_path = next(tmp_path.glob("openroad-logs/*/invocation.json"))
+    assert (
+        record_path.with_name("stdout.log").read_bytes() == b"flushed before ctrl-c\n"
+    )
+    assert json.loads(record_path.read_text())["outcome"] == "interrupted"
+
+
 def _caller_request(tmp_path, monkeypatch, command):
     import test_place_and_route as pnr_tests
     import test_post_route_sta as sta_tests

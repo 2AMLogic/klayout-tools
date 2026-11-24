@@ -5,7 +5,8 @@ Four modes, all emitting through the shared envelope helpers in
 
 - ``--list`` — enumerate klt's own built-in generators.
 - ``--list-pdk-pcells`` — enumerate the PCell libraries the **resolved PDK
-  itself** ships under ``libs.tech/klayout/python/`` (issue #1535).
+  itself** ships under ``libs.tech/klayout/python/`` or
+  ``tech/pymacros/`` (issue #1535).
 - ``--pdk-pcell <library>/<cell>`` — instantiate one of those vendor PCells.
 - ``<generator>`` — run one of klt's own built-in generators.
 
@@ -143,7 +144,14 @@ def _print_pdk_pcell_list_text(report: dict) -> None:
 
     libraries = report["libraries"]
     if not libraries:
-        print("no PDK PCell libraries loaded")
+        if report["pcell_lib_dir"] is None:
+            searched = report.get("searched_dirs") or []
+            print(
+                "no PDK PCell libraries loaded; searched: "
+                + (", ".join(searched) if searched else "(no klayout asset dir)")
+            )
+        else:
+            print("no PDK PCell libraries loaded")
     for library in libraries:
         print()
         print(f"{library['library']}  (package: {library['package']})")

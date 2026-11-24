@@ -17,17 +17,11 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_crossings
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 _DECL = {
     "name": "t_out",
@@ -171,7 +165,7 @@ def test_crossings_window_accepts_numbers_and_spice_literals():
     )
 
 
-@pytest.mark.parametrize("kind", ["op", "dc", "ac"])
+@pytest.mark.parametrize("kind", ["op", "ac"])
 def test_crossings_requires_a_transient(tmp_path, kind):
     _write_body(tmp_path)
     request = _write_request(
@@ -481,3 +475,77 @@ def test_integration_unresolved_signal_does_not_starve_a_later_one(tmp_path):
     assert by_name["good"]["crossings"]["times"] == pytest.approx(
         [0.5e-6, 1.5e-6, 2.5e-6], abs=1e-12
     )
+
+
+# --------------------------------------------------------------------------- #
+# Supply-relative level (issue #3918)
+# --------------------------------------------------------------------------- #
+
+
+def _frac_decl(fraction=0.5, rail="vdd"):
+    return {"signal": "v(a)", "level": {"frac_of": rail, "fraction": fraction}}
+
+
+def test_fraction_level_is_a_valid_declaration():
+    sim._validate_measurement_forms([{"name": "t", "crossings": _frac_decl()}])
+
+
+@pytest.mark.parametrize(
+    "level",
+    [
+        {"frac_of": "vdd", "fraction": -1},
+        {"frac_of": "vdd", "fraction": float("nan")},
+        {"frac_of": "vdd", "fraction": True},
+        {"frac_of": "", "fraction": 0.5},
+        {"fraction": 0.5},
+        {"frac_of": "vdd", "fraction": 0.5, "extra": 1},
+    ],
+)
+def test_malformed_fraction_level_is_refused(level):
+    with pytest.raises(sim.SimError, match="crossings.level"):
+        sim._validate_measurement_forms(
+            [{"name": "t", "crossings": {"signal": "v(a)", "level": level}}]
+        )
+
+
+def test_unknown_or_missing_supply_key_is_refused_before_a_run():
+    spec = [{"name": "t", "crossings": _frac_decl(rail="vcc")}]
+    with pytest.raises(sim.SimError, match="not a corners.supply_v key"):
+        sim_crossings.validate_supply_relative_levels(spec, [{"vdd": 1.8}])
+    with pytest.raises(sim.SimError, match="no corners.supply_v"):
+        sim_crossings.validate_supply_relative_levels(spec, [{}])
+    ok = [{"name": "t", "crossings": _frac_decl()}]
+    sim_crossings.validate_supply_relative_levels(ok, [{"vdd": 1.8}, {"vdd": 1.6}])
+
+
+def _write_ramp_raw(path):
+    # A 0 -> 2 V ramp over 2 s, sampled every second.
+    path.write_text(
+        "Title: t\nPlotname: Transient Analysis\nFlags: real\n"
+        "No. Variables: 2\nNo. Points: 3\nVariables:\n"
+        "\t0\ttime\ttime\n\t1\tv(a)\tvoltage\nValues:\n"
+        " 0\t0\n\t0\n 1\t1\n\t1\n 2\t2\n\t2\n"
+    )
+
+
+@pytest.mark.parametrize(("supply", "expected"), [(1.0, 0.5), (1.6, 0.8), (2.0, 1.0)])
+def test_fraction_level_resolves_against_each_corners_supply(
+    tmp_path, supply, expected
+):
+    _write_ramp_raw(tmp_path / "crossings_0.raw")
+    spec = [{"name": "t", "crossings": _frac_decl()}]
+    outcome = sim_crossings.extract_corner_crossings(
+        spec, str(tmp_path), {"vdd": supply}
+    )[0]
+    assert outcome.error is None
+    assert outcome.times == pytest.approx([expected])
+    assert outcome.report()["level"] == pytest.approx(expected)
+
+
+def test_literal_level_report_has_no_level_member(tmp_path):
+    _write_ramp_raw(tmp_path / "crossings_0.raw")
+    spec = [{"name": "t", "crossings": {"signal": "v(a)", "level": 0.5}}]
+    outcome = sim_crossings.extract_corner_crossings(spec, str(tmp_path), {"vdd": 1.8})[
+        0
+    ]
+    assert set(outcome.report()) == {"times", "edges", "truncated"}

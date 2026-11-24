@@ -7,7 +7,8 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     0 - place-and-route reached (at least) the requested target_stage
         (for a `pdk.rebuild_corners` request: in every corner)
-    1 - failed to run (bad request, unresolvable netlist/PDK/LEF, a
+    1 - confirmed open routing (emits full report), or failed to run
+        (bad request, unresolvable netlist/PDK/LEF, a
         floorplan spec with more than one method set, or an OpenROAD engine
         error that stops the run before reaching the requested
         target_stage) -- returned by ``emit_error`` as
@@ -17,9 +18,7 @@ Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
     3 - ``--check`` only: the committed report no longer reproduces
         (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. A *fresh* run never exits 3 -- place-and-route has no pass/fail
-concept of its own; timing slack/violation counts are data, not a built-in
-gate. See ``docs/design/digital-flow-contracts-spike.md`` section 5.)
+subcommand. Timing slack and violation counts are reported measurements.)
 
 ``--check <report>`` (issue #2224) switches this verb from running a fresh
 flow to *verifying a previously committed one* still reproduces from the
@@ -40,19 +39,86 @@ from ..place_and_route import (
     rerun_place_and_route_report,
     run_place_and_route,
 )
-from .output import emit_error, emit_success, render_rerun_drift
+from ..place_and_route_merge_only import run_merge_from_def
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+from .sta_cmd import FMAX_CAVEAT
 
 #: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
-#: split `klt drc --check` uses. This verb has no exit 3 of its own (see this
-#: module's docstring: place-and-route has no built-in pass/fail gate), so 3
+#: split `klt drc --check` uses. Fresh runs use 0 and 1, so 3
 #: is unambiguous here: it means, and only means, "the committed report no
 #: longer reproduces".
 EXIT_MATCH = 0
 EXIT_DRIFTED = 3
 
+#: Appended to the shared flow-verb `--rerun` help (parser.py passes it as
+#: `_add_flow_verify_args`'s `rerun_extra`): the two exclusions only this
+#: verb applies to the diff (issue #5863). A lint-clean committed report has
+#: its output paths scrubbed (repo-relative / `~/` / `$PDK_ROOT/...`, what
+#: `env-provenance lint-envelope` requires), so the raw fresh envelope's
+#: absolute paths must not read as drift.
+RERUN_HELP_EXTRA = (
+    "Output-path fields (def_path/gds_path/verilog_path/unrouted_def_path, "
+    "layer_map.path, netlist and provenance.deck.path envelopes, "
+    "corner_runs[].output_dir, macros[].lef/.lib, spef_sta.spef_path/"
+    ".sdf_path) compare by file name only, so a path-scrubbed committed "
+    "report still matches; provenance.pdk.source is excluded as resolution "
+    "provenance (issue #5863)"
+)
+
+
+def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ``klt place-and-route``'s non-positional run flags.
+
+    ``--threads`` (engine threads) and ``--from-def`` (issue #7721: run only
+    the DEF->GDS merge on a committed routed DEF) -- the flags this verb's
+    own module owns, registered in one place so ``parser.py``'s verb wiring
+    stays a single call.
+    """
+
+    def argument(value: str) -> int | str:
+        # Preserve invalid tokens so all modes emit the same JSON request error.
+        try:
+            return int(value) if value.isascii() and value.isdecimal() else value
+        except ValueError:
+            return value
+
+    parser.add_argument(
+        "--threads",
+        type=argument,
+        metavar="N|max",
+        help="OpenROAD threads per process (overrides request.threads, default 1)",
+    )
+    parser.add_argument(
+        "--from-def",
+        dest="from_def",
+        metavar="DEF",
+        default=None,
+        help=(
+            "run only the DEF->GDS merge on an existing routed DEF "
+            "(issue #7721): resolve the LEF/GDS views from the request, "
+            "run the merge-time repair passes (min-area, via-pad trim with "
+            "tip_check/router_fill_scan, power-stack) on that routing, and "
+            "write <top>_from_def.gds under the stage root -- no OpenROAD "
+            "stage, stage ODB or commit record needed, so a committed "
+            "routed stream can be re-graded on a later pin. Not combinable "
+            "with --check/--rerun/--resume/--backend. See "
+            "docs/cli/place-and-route.md, 'Merging a committed routed DEF "
+            "(--from-def)'"
+        ),
+    )
+
 
 def run(args: argparse.Namespace) -> int:
+    if args.from_def is not None:
+        return _run_from_def(args)
+
     if args.check is not None:
+        if args.resume:
+            return emit_error(
+                "place-and-route",
+                "--resume cannot be combined with --check",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -62,18 +128,34 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         report = run_place_and_route(
-            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            args.request,
+            threads=getattr(args, "threads", None),
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+            backend=args.backend,
+            resume=args.resume,
         )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_text)
+    return _emit_fresh_run_report(report, args.format)
+
+
+def _emit_fresh_run_report(report: dict, fmt: str) -> int:
+    """Emit a fresh run's report and derive its exit code: the response's own
+    `warnings` list goes to stderr in *both* formats (issue #2086 -- a run
+    that placed no tapcells, no PDN and no fillers completes, exits 0, and
+    its output looks exactly like data, so the complaint has to be visible
+    to an operator who never opens the JSON; stderr, not stdout, keeps
+    `--format json`'s stdout a single parseable document), and a
+    `pdk.rebuild_corners` report fails the command when any corner unit
+    failed while still emitting the aggregated report (issue #3507, each
+    unit's warnings corner-prefixed).
+    """
+    emit_success(report, fmt, _print_text)
     if "corner_runs" in report:
-        # Issue #3507: a `pdk.rebuild_corners` request emits its aggregated
-        # report either way; a unit that failed still fails the command.
-        # Each unit's own #2086 warnings go to stderr too, corner-prefixed.
         for run in report["corner_runs"]:
             for warning in run.get("warnings", ()):
                 print(
@@ -81,16 +163,57 @@ def run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         return 0 if report["status"] == "ok" else 1
-    # Issue #2086: the response's own `warnings` list also goes to stderr,
-    # in *both* formats. A run that placed no tapcells, no PDN and no
-    # fillers is the failure mode this exists for -- it completes, exits 0,
-    # and its output looks exactly like data -- so the complaint has to be
-    # visible to an operator who never opens the JSON. stderr, not stdout:
-    # `--format json`'s stdout stays a single parseable document (see
-    # `output.py`'s own envelope note), and the exit code is unchanged.
     for warning in report.get("warnings", ()):
         print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
+    return 0 if report["status"] == "ok" else 1
+
+
+def _emit_flow_error(exc: PlaceAndRouteError, fmt: str) -> int:
+    """``emit_error`` carrying the batch backend's ``code``/``details``
+    (issue #3518); both are ``None`` for every local failure."""
+    return emit_error(
+        "place-and-route", str(exc), fmt, code=exc.code, details=exc.details
+    )
+
+
+def _run_from_def(args: argparse.Namespace) -> int:
+    """``--from-def <routed.def>`` (issue #7721): run only the DEF→GDS merge
+    on a committed routed DEF -- no OpenROAD stage, no ODB/commit record.
+
+    Mutually exclusive with the flow-verification (``--check``/``--rerun``),
+    resume (``--resume``) and dispatch (``--backend``) flags: each names work
+    only a stage-running invocation can do.
+    """
+    conflicts = [
+        flag
+        for flag, active in (
+            ("check", args.check is not None),
+            ("rerun", bool(args.rerun)),
+            ("resume", bool(args.resume)),
+            ("backend", args.backend is not None),
+        )
+        if active
+    ]
+    if conflicts:
+        return emit_error(
+            "place-and-route",
+            f"--from-def cannot be combined with --{conflicts[0]}",
+            args.format,
+        )
+    try:
+        report = run_merge_from_def(
+            args.request,
+            args.from_def,
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+        )
+    except PlaceAndRouteError as exc:
+        return _emit_flow_error(exc, args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
+
+    emit_success(report, args.format, _print_from_def_text)
     return 0
 
 
@@ -107,38 +230,28 @@ def _run_check(args: argparse.Namespace) -> int:
             result = rerun_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                backend=args.backend,
             )
         else:
             result = check_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
             )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_corner_runs_text(report: dict) -> None:
@@ -166,6 +279,9 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"stage_reached: {report['stage_reached']}")
     print(f"seed: {report['seed']}")
+    if "resume" in report:
+        resumed = report["resume"]["resumed_stages"]
+        print(f"resumed_stages: {', '.join(resumed) if resumed else '(none)'}")
     print()
     print(f"die_area_um2: {report['die_area_um2']}")
     print(f"core_area_um2: {report['core_area_um2']}")
@@ -173,7 +289,13 @@ def _print_text(report: dict) -> None:
     print(f"wirelength_um: {report['wirelength_um']}")
     print(f"worst_slack_ns: {report['worst_slack_ns']}")
     print(f"total_negative_slack_ns: {report['total_negative_slack_ns']}")
-    print(f"fmax_mhz: {report['fmax_mhz']}")
+    # Issue #7522: qualify a numeric `fmax_mhz` the same way `klt sta`'s
+    # `_print_slack_fields` does (#7005) -- both commands derive the figure
+    # from OpenROAD's `timing__fmax`, which excludes opposite-edge paths.
+    # `None` (no measurement) and the JSON field stay unqualified.
+    fmax = report["fmax_mhz"]
+    caveat = "" if fmax is None else FMAX_CAVEAT
+    print(f"fmax_mhz: {fmax}{caveat}")
     print(f"setup_violation_count: {report['setup_violation_count']}")
     print(f"hold_violation_count: {report['hold_violation_count']}")
     print(f"estimated_power_mw: {report['estimated_power_mw']}")
@@ -219,3 +341,52 @@ def _print_text(report: dict) -> None:
     print(f"def_path: {report['def_path']}")
     print(f"gds_path: {report['gds_path']}")
     print(f"verilog_path: {report['verilog_path']}")
+
+
+def _print_from_def_text(report: dict) -> None:
+    """`--format text` rendering of a `--from-def` merge-only report
+    (issue #7721): the merge's own inputs and repair results, nothing a
+    placement run produced (no stages, no timing, no ODB metrics)."""
+    print(f"hdl_toplevel: {report['hdl_toplevel']}")
+    print(f"status: {report['status']}")
+    print()
+    inputs = report["from_def"]
+    print(f"def_path: {inputs['def_path']}")
+    print(f"def_content_hash: {inputs['def_content_hash']}")
+    print(f"tech_lef: {inputs['tech_lef']}")
+    print(f"cell_lef: {inputs['cell_lef']}")
+    print(f"cell_gds: {inputs['cell_gds']}")
+    print()
+    print(f"gds_path: {report['gds_path']}")
+    print(f"gds_dbu_um: {report['gds_dbu_um']}")
+    layer_map = report["layer_map"]
+    print(f"layer_map: {layer_map['path']} ({layer_map['resolution']})")
+
+    def _pass(name: str, info: dict | None) -> None:
+        if info is None:
+            print(f"{name}: (not measured)")
+            return
+        line = f"{name}: {info.get('status')}"
+        if info.get("status") == "skipped":
+            line += f" ({info.get('reason')})"
+        print(line)
+
+    print()
+    _pass("min_area_repair", report["min_area_repair"])
+    _pass("power_stack_repair", report["power_stack_repair"])
+    _pass("m4_grid_repair", report["m4_grid_repair"])
+    trim = report["via_pad_trim"]
+    _pass("via_pad_trim", trim)
+    if trim is not None:
+        tip = trim.get("tip_check")
+        if tip is not None:
+            line = f"via_pad_trim.tip_check: {tip.get('status')}"
+            if tip.get("status") == "skipped":
+                line += f" ({tip.get('reason')})"
+            else:
+                line += (
+                    f", violations={tip.get('violations')}"
+                    f", via_pad_violations={tip.get('via_pad_violations')}"
+                    f", router_fill_violations={tip.get('router_fill_violations')}"
+                )
+            print(line)

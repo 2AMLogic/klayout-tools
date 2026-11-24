@@ -10,31 +10,19 @@ ngspice (and no SPICE grid, local or fleet) is needed.
 from __future__ import annotations
 
 import json
-import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_batch
 
-pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+pytestmark = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
+)
 
 _CARD = {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
-
-
-@pytest.fixture(autouse=True)
-def _bare_name_ngspice_resolution(monkeypatch):
-    real_which = shutil.which
-
-    def fake_which(cmd, *args, **kwargs):
-        if cmd == "ngspice":
-            return cmd
-        return real_which(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
 
 
 def _write_body(tmp_path: Path) -> None:
@@ -99,6 +87,32 @@ def test_validate_accepts_scalars():
     assert sim._validate_ngspice_options(value) == value
 
 
+def test_validate_accepts_transient_charge_tolerances():
+    # Issue #7007: the reltol/abstol/vntol/chgtol quartet plus trtol.
+    value = {
+        "reltol": 1e-3,
+        "abstol": 1e-10,
+        "vntol": 1e-5,
+        "chgtol": 1e-13,
+        "trtol": 5,
+    }
+    assert sim._validate_ngspice_options(value) == value
+
+
+def test_allowlist_is_reexported_from_sim():
+    from klayout_tools import sim_corner_axes
+
+    assert sim.NGSPICE_SOLVER_OPTIONS is sim_corner_axes.NGSPICE_SOLVER_OPTIONS
+    assert {"chgtol", "trtol"} <= set(sim.NGSPICE_SOLVER_OPTIONS)
+
+
+def test_typo_rejection_lists_new_names():
+    with pytest.raises(sim.SimError, match='"chgtl" is not a supported') as excinfo:
+        sim._validate_ngspice_options({"chgtl": 1e-13})
+    assert "chgtol" in str(excinfo.value)
+    assert "trtol" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("value", "match"),
     [
@@ -154,6 +168,15 @@ def test_deck_value_types(tmp_path):
         {"reltol": 0.0001, "method": "gear", "noopiter": True, "srcsteps": False},
     )
     assert ".options reltol=0.0001 method=gear noopiter" in lines
+
+
+def test_deck_renders_charge_tolerance_quartet(tmp_path):
+    lines = _deck_lines(
+        tmp_path, {"reltol": 1e-3, "abstol": 1e-10, "vntol": 1e-5, "chgtol": 1e-13}
+    )
+    card = ".options reltol=0.001 abstol=1e-10 vntol=1e-05 chgtol=1e-13"
+    assert card in lines
+    assert lines.index(card) == lines.index(".temp 27") + 1
 
 
 def test_deck_unset_is_byte_identical(tmp_path):
@@ -260,13 +283,15 @@ def test_batch_job_with_stale_runner_echo_fails_loudly(tmp_path, monkeypatch):
         "read_collected_report",
         lambda _d: {"corners": [], "environment": {"engine_version": "ngspice-46"}},
     )
-    monkeypatch.setattr(sim_batch, "_build_batch_job_spec", lambda *a, **k: {})
+    (tmp_path / "body.spice").write_text("R1 out 0 1k\n")
     monkeypatch.setattr(sim_batch, "_batch_environment", lambda *a, **k: {})
     monkeypatch.setattr(sim_batch, "_read_job_identity", lambda *a, **k: {})
 
     with pytest.raises(sim.SimError, match="options.ngspice_options.gminsteps"):
         sim_batch._run_batch_job(
-            config=types.SimpleNamespace(runner_version_check="off"),
+            config=types.SimpleNamespace(
+                runner_version_check="off", job_timeout_s=None
+            ),
             job_id="job-1",
             corner_points=[sim.CornerPoint(None, {}, 27)],
             netlist_path=str(tmp_path / "body.spice"),

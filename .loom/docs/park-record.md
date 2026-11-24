@@ -153,6 +153,30 @@ open blocker (`park-record apply --blocked-by --by champion`, #11860; or
 automatically when the blockers close: the daemon's release pass was retired
 (#11301), so a role or a human clears it.
 
+**A hold is a human evidence gate, not a dependency wait (#10937).** When the
+hold's concern names an open issue/PR ("pending real-PDK verification in
+#N"), Champion writes one more record beside the reason-only one so
+`check-stale-blocked` and the pipeline view show what the PR waits on:
+
+```bash
+loom-daemon park-record apply --pr "$PR_NUMBER" --blocked-by "$N" --by champion \
+  --reason "champion merge-risk hold: human evidence gate"
+```
+
+The reason-only record stays (`body_declares_hold` reads it); `apply` refuses a
+closed blocker (#9102), so a hold that names none, or only closed ones, is
+unchanged. The extra record is inert: `check_and_unblock_prs` skips a PR whose
+`loom-daemon champion-hold classify` says `state=champion-hold` before it reads
+a `Blocked by`, so closing #N never lifts the hold. Worked example, PR 8314
+holds with `Blocked by: #8301` recorded, #8301 closes:
+
+```
+check_and_unblock_prs → PR 8314: state=champion-hold → skipped (no unblock, no comment)
+```
+
+Release stays Champion's (a release signal, `champion-pr-merge.md` "Sticky
+holds") or a human's; nothing auto-releases.
+
 ## Who reads one
 
 - `loom-daemon check-stale-blocked` (`defaults/scripts/check-stale-blocked.sh`,
@@ -233,6 +257,13 @@ check_and_unblock_prs() {
     local title=$(printf '%s\n' "$pr_row" | jq -r '.title')
 
     [ "$(has_permanent_block "$number")" = "true" ] && continue  # #8742, guide.md
+
+    # A standing Champion hold is a human evidence gate, not a dependency wait
+    # (#10937): closing a `Blocked by` number it records never releases it.
+    # Unreadable (exit 3) fails safe; foreign-park/clear/exit 2 go on.
+    local hc hrc
+    hc=$(loom-daemon champion-hold classify --pr "$number" 2>/dev/null); hrc=$?
+    case "$hrc $hc" in "0 "*" state=champion-hold "*|"3 "*) continue ;; esac
 
     local deps=$(parse_dependencies "$body")
 
@@ -367,7 +398,52 @@ actually be unparked is `guide.md`'s `check_and_unblock`/`check_and_unblock_prs`
 job (issues) and `check-stale-blocked`'s advisory report (both issues and
 PRs) — this document defines the wire format both sit on top of, nothing more.
 
+One mechanical carve-out (#13331): when a merge clears the blockers of an
+**issue** whose park records are all `by=curator`, each naming a blocker, and no
+other blocker, unticked dependency, or hold label remains,
+`loom-daemon notify-cleared-blockers` removes `loom:blocked`, adds
+`loom:curated` (never `loom:issue`), and says so in its cleared-blocker comment.
+`by=` is self-declared, which is accepted because the action approves nothing.
+
 See also: [`label-state-machine.md`](label-state-machine.md) for where
 `loom:blocked` sits relative to `loom:operator`/`loom:frozen`, and
 [`lease-record.md`](lease-record.md) for the sibling HTML-comment-marker
 convention this format's shape was co-designed with.
+
+## `park-record released` (#12665)
+
+`loom-daemon park-record released --pr N [--entered-at TS] [--failed]` writes
+nothing to the forge. Champion calls it after removing a merge-risk hold's
+`loom:blocked`, to journal the release as a `hold.transition` `remove`
+([`telemetry-schema.md`](telemetry-schema.md#holdtransition--a-hold-label-applied-to-or-removed-from-a-pr)).
+A Champion `park-record apply` journals the matching `add` itself, only when
+the label was not already on the PR.
+
+## Transient parks — `park-record apply --transient <cause>` (#13606)
+
+A park whose cause clears by itself (for example `batch_no_capacity` from the
+Spot batch fleet) carries a retry time instead of waiting for a person:
+
+```text
+<!-- loom:park Blocked by: (unstated) by=builder at=2026-11-05T12:00:00Z transient=capacity:batch attempt=1 until=2026-11-05T12:30:00Z -->
+```
+
+- `--transient` is mutually exclusive with `--blocked-by`; it counts as the
+  written choice, so no `--reason` is needed.
+- `attempt` is the previous record for the same cause plus one (else 1).
+- Delay: 30 min, 1 h, 2 h, 4 h, … capped at 24 h, with up to ±10% jitter
+  (`TRANSIENT_*` constants in `park_record.rs`).
+- Re-running while `until` is in the future is a no-op; after it passes, a
+  re-park appends the next attempt.
+- A record without these attributes parses exactly as before. A transient
+  record with a missing or unparseable `until` is treated as already due.
+
+Release: Guide's unblock sweep (`release_due_transient_parks`) reads
+`park-record parse --json` (`records[].transient` = `cause`, `attempt`, `until`,
+`due`, `escalate`; `null` for a legacy park) and removes `loom:blocked` once
+`due`. Only the last record counts, so a later blocker or reason park wins. At
+`attempt >= 6` or park age >= 7 days it posts one escalation comment
+(`<!-- loom:transient-escalated cause=… -->`) and keeps retrying at the 24 h cap;
+it never adds a hold. The record stays in the body so the next re-park
+increments `attempt`. Release has no `hold.transition` span: `park-record
+released` is PR-only, so cause and attempt are in the release comment.

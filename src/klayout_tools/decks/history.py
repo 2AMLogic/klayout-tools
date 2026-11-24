@@ -90,6 +90,13 @@ def _recorded_deck_hashes() -> dict[str, str] | None:
     return {str(k): v for k, v in recorded.items() if isinstance(v, str)}
 
 
+def _drc_deck_path(name: str) -> str | None:
+    """Path of ``<name>.drc`` beside the deck modules (issue #3826), or
+    ``None`` for a deck that ships no standalone KLayout DRC deck file."""
+    candidate = Path(__file__).resolve().parent / f"{name}.drc"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str, Any]]:
     """History-shaped entries for *this running build's own* release, when the
     generated table does not (yet) cover it (issue #2451).
@@ -114,8 +121,8 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
     """
     try:
         from .. import __version__, build_identity
-        from .._provenance import sha256_file
-        from . import deck_names, deck_source_path
+        from .._digest import content_hash as file_content_hash
+        from . import deck_content_hash, deck_names
 
         ident = build_identity.identity()
         if ident.get("is_release") is not True:
@@ -125,12 +132,14 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
         for name in deck_names():
             if deck is not None and name != deck:
                 continue
+            # The deck module and, where one ships, the standalone ``.drc``
+            # file are separate hashed artifacts (issue #3826).
+            drc_path = _drc_deck_path(name)
             if recorded is not None:
-                own_hash = recorded.get(name)
+                own_hashes = [recorded.get(name), recorded.get(f"{name}.drc")]
             else:
-                digest = sha256_file(deck_source_path(name))
-                own_hash = f"sha256:{digest}" if digest is not None else None
-            if own_hash is None or own_hash != content_hash:
+                own_hashes = [deck_content_hash(name), file_content_hash(drc_path)]
+            if content_hash not in own_hashes:
                 continue
             matches.append(
                 {
@@ -143,7 +152,7 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
                 }
             )
         return matches
-    except Exception:  # noqa: BLE001 - an identity probe must never break a lookup
+    except Exception:  # - an identity probe must never break a lookup
         return []
 
 
@@ -200,7 +209,10 @@ def resolve_deck(
         candidates = [
             e
             for e in entries
-            if e.get("deck") == deck and e.get("package_version") == version
+            if e.get("deck") == deck
+            and e.get("package_version") == version
+            # The deck module, not its standalone ``.drc`` artifact (#3826).
+            and "artifact" not in e
         ]
         if not candidates:
             raise DeckHistoryError(_not_found_message(deck=deck, version=version))
@@ -215,6 +227,10 @@ def resolve_deck(
         "git_commit": match["git_commit"],
         "package_version": match["package_version"],
     }
+    if match.get("artifact"):
+        # Additive (issue #3826): the hash identified the standalone DRC deck
+        # file rather than the deck module.
+        report["artifact"] = match["artifact"]
     if match.get("self_identified"):
         # Additive (issue #2451): the table did not cover this build's own
         # release; the build vouched for itself.
@@ -267,6 +283,26 @@ def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | 
     return bool(_self_release_entries(content_hash, deck))
 
 
+def _release_status(
+    deck_name: str, content_hash: str | None
+) -> tuple[bool | None, dict[str, Any] | None]:
+    """``(released, release)`` for one hashed deck artifact -- the tri-state
+    of :func:`is_deck_hash_released` plus the newest matching release's
+    ``{git_tag, git_commit, package_version}`` (``None`` unless released)."""
+    released = is_deck_hash_released(deck_name, content_hash)
+    if not released:
+        return released, None
+    try:
+        match = resolve_deck(content_hash=content_hash, deck=deck_name)
+    except DeckHistoryError:
+        return released, None
+    return released, {
+        "git_tag": match["git_tag"],
+        "git_commit": match["git_commit"],
+        "package_version": match["package_version"],
+    }
+
+
 def deck_info(name: str | None = None) -> dict[str, Any]:
     """The *currently installed* build's own deck content hash, structural
     device-class coverage, and release status -- without running a live
@@ -294,14 +330,18 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     is:
 
     - ``deck`` -- the deck name.
-    - ``content_hash`` -- this install's ``sha256:``-prefixed deck module
+    - ``content_hash`` -- this install's ``sha256:``-prefixed deck source
       hash (the same computation and shape as
       ``provenance.deck.content_hash``), or ``None`` if the deck's source
       file can't be hashed.
     - ``device_classes`` -- the device-class roles this deck is structurally
-      capable of recognising (``ExtractionDeck.device_classes``), e.g.
-      whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
+      capable of recognising (``ExtractionDeck.device_classes``) --
       independent of whether any given layout actually contains one.
+    - ``provides`` -- which capabilities this deck supplies (issue #3783):
+      ``curated_drc`` (``klt drc --deck``/``klt deck rules``),
+      ``klayout_drc`` (a shipped KLayout DRC script) and ``extraction``.
+    - ``enforced_rule_count`` -- rules the deck's curated DRC rule table
+      enforces (issue #5843); ``None`` for a deck with no table (``asap7``).
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -312,18 +352,29 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``{git_tag, git_commit, package_version}`` of the (newest) matching
       release, the same information :func:`resolve_deck` would return for
       this hash; ``None`` otherwise.
+    - ``unmodeled_rules`` -- the official foundry rule ids the deck
+      knowingly does not transcribe (issue #3796; the same static list as
+      ``klt drc``'s ``coverage.unmodeled_rules``). Empty for a deck that
+      declares none.
+    - ``drc_deck`` -- present only for a deck that ships a standalone KLayout
+      DRC deck file (``asap7.drc``; omitted otherwise, never ``null``)
+      (issue #3826). That file is a different artifact from the deck module
+      above, so it carries its own ``{path_kind, content_hash, released,
+      release}`` with the same semantics as the fields of the same name;
+      ``path_kind`` is ``"packaged"`` (the file inside this install).
     """
-    # Imported lazily, not at module scope: `_provenance` itself imports
-    # `is_deck_hash_released` from this module, so a module-level import here
-    # would be a circular import (this module would be mid-initialization the
-    # first time anything imports `_provenance` first).
+    # Lazy imports: `_provenance` imports `is_deck_hash_released` from this
+    # module, so a module-level import here would be circular.
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
-        deck_source_path,
+        deck_content_hash,
+        deck_provides,
         get_extraction_deck,
+        get_unmodeled_rules,
         known_extraction_deck_names,
     )
+    from .enforced_rules import enforced_rule_count
 
     names = [name] if name is not None else list(known_extraction_deck_names())
 
@@ -334,32 +385,31 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         except UnknownExtractionDeckError as exc:
             raise DeckHistoryError(str(exc)) from exc
 
-        digest = sha256_file(deck_source_path(deck_name))
-        content_hash = f"sha256:{digest}" if digest is not None else None
-        released = is_deck_hash_released(deck_name, content_hash)
+        content_hash = deck_content_hash(deck_name)
+        released, release = _release_status(deck_name, content_hash)
 
-        release: dict[str, Any] | None = None
-        if released:
-            try:
-                match = resolve_deck(content_hash=content_hash, deck=deck_name)
-            except DeckHistoryError:
-                release = None
-            else:
-                release = {
-                    "git_tag": match["git_tag"],
-                    "git_commit": match["git_commit"],
-                    "package_version": match["package_version"],
-                }
-
-        decks.append(
-            {
-                "deck": deck_name,
-                "content_hash": content_hash,
-                "device_classes": list(deck.device_classes),
-                "released": released,
-                "release": release,
+        entry: dict[str, Any] = {
+            "deck": deck_name,
+            "content_hash": content_hash,
+            "device_classes": list(deck.device_classes),
+            "provides": deck_provides(deck_name),
+            "enforced_rule_count": enforced_rule_count(deck_name),
+            "released": released,
+            "release": release,
+            "unmodeled_rules": get_unmodeled_rules(deck_name),
+        }
+        drc_path = _drc_deck_path(deck_name)
+        if drc_path is not None:
+            drc_digest = sha256_file(drc_path)
+            drc_hash = f"sha256:{drc_digest}" if drc_digest is not None else None
+            drc_released, drc_release = _release_status(deck_name, drc_hash)
+            entry["drc_deck"] = {
+                "path_kind": "packaged",
+                "content_hash": drc_hash,
+                "released": drc_released,
+                "release": drc_release,
             }
-        )
+        decks.append(entry)
 
     return {"schema_version": 1, "decks": decks}
 
@@ -372,7 +422,9 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: ``"ongrid"``/``"angle"`` (issue #2642) are the vertex check kinds: a grid
 #: in micrometres and a minimum interior corner angle in degrees, neither of
 #: them a ``threshold_dbu`` distance either.
-_NON_DISTANCE_CHECKS = frozenset({"area", "density", "antenna", "ongrid", "angle"})
+_NON_DISTANCE_CHECKS = frozenset(
+    {"area", "density", "antenna", "ongrid", "angle", "comp_coverage", "tap_distance"}
+)
 
 
 def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
@@ -399,7 +451,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
     Returns a flat envelope:
 
     - ``deck`` -- the deck name, as given.
-    - ``content_hash`` -- this install's ``sha256:``-prefixed deck module
+    - ``content_hash`` -- this install's ``sha256:``-prefixed deck source
       hash, the same value :func:`deck_info`/``provenance.deck.content_hash``
       report, so a consumer can pin the exact deck revision a constant was
       read from and detect drift on the next PDK bump. ``None`` when the
@@ -443,6 +495,14 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
 
     Top-level, pinned by ``content_hash`` like the rules:
 
+    - ``unmodeled_rules`` -- official foundry rule ids the deck knowingly
+      does not transcribe (issue #3796), kept apart from ``rules``; the same
+      static list as ``klt drc``'s ``coverage.unmodeled_rules``. Not narrowed
+      by ``rule_id``.
+    - ``marker_blind_layers`` -- ``["<layer>/<datatype>", ...]`` area-marker
+      layers (sky130: ``81/2`` ``areaid.ce``) the deck accepts but does not
+      model rule-switching for (issue #3815); ``[]`` for a deck declaring
+      none. Deck-static, so it is not narrowed by ``rule_id``.
     - ``layer_table`` -- every ``{"name", "layer", "datatype"}`` the deck
       names, sorted by ``(layer, datatype)``.
     - ``ambiguous_names`` -- ``[{"name", "pairs": [{"layer", "datatype"}]}]``
@@ -451,15 +511,14 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
     - ``unresolved`` -- ``[{"layer", "datatype", "rules": [id]}]`` for each
       pair the (selected) rules read that has no deck name; sorted.
     """
-    # Imported lazily for the same circular-import reason `deck_info` is --
-    # see its own note.
-    from .._provenance import sha256_file
     from . import (
         UnknownDeckError,
-        deck_source_path,
+        deck_content_hash,
         get_deck,
         get_layer_names,
+        get_marker_blind_layers,
         get_nominal_dbu,
+        get_unmodeled_rules,
     )
 
     try:
@@ -479,14 +538,17 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         rules = selected
 
     layer_names = get_layer_names(name)
-    digest = sha256_file(deck_source_path(name))
 
     return {
         "schema_version": 1,
         "deck": name,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
+        "content_hash": deck_content_hash(name),
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
+        "unmodeled_rules": get_unmodeled_rules(name),
+        "marker_blind_layers": [
+            f"{layer}/{datatype}" for layer, datatype in get_marker_blind_layers(name)
+        ],
         **_layer_table_fields(rules, layer_names),
     }
 
@@ -522,21 +584,22 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     Returns a flat envelope:
 
     - ``deck`` / ``content_hash`` -- the deck name as given, and this
-      install's ``sha256:``-prefixed deck module hash (the same value
+      install's ``sha256:``-prefixed deck source hash (the same value
       :func:`deck_info`/``provenance.deck.content_hash`` report), so a
       transcribed layer number stays re-checkable against the installed deck
       on the next PDK bump.
     - ``device_classes`` -- one entry per declared device class, in the
       deck's own declaration order: the two MOS classes first (they are
       declared by every deck), then bipolars, MiM capacitors, MoM
-      capacitors, drawn resistors and junction diodes -- the same order
+      capacitors, MOS capacitors, drawn resistors and junction diodes -- the same order
       :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` lists.
 
     Each entry carries:
 
     - ``name`` -- the ``devices[].class`` label this class extracts as.
     - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
-      ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
+      ``"capacitor"``, ``"mom_capacitor"``, ``"mos_capacitor"``, ``"resistor"``,
+      ``"diode"``).
     - ``marker`` -- the class's device-recognition marker layer, or ``None``
       for a markerless (geometry-driven) class or one whose marker is a
       derived expression.
@@ -574,12 +637,9 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     plus the deck's published name for the pair when it publishes one
     (``null`` rather than a fabricated name when it does not).
     """
-    # Imported lazily for the same circular-import reason `deck_info` is --
-    # see its own note.
-    from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
-        deck_source_path,
+        deck_content_hash,
         get_extraction_deck,
         get_layer_names,
     )
@@ -603,12 +663,10 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
             )
         entries = selected
 
-    digest = sha256_file(deck_source_path(name))
-
     return {
         "schema_version": 1,
         "deck": name,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
+        "content_hash": deck_content_hash(name),
         "device_classes": entries,
     }
 
@@ -641,12 +699,10 @@ def _terminal_entry(
 ) -> dict[str, Any]:
     """One terminal of a device class, in :func:`deck_devices`' shape.
 
-    ``relation`` is the terminal's
-    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
-    as ``{"source", "op", "extents"}`` so two entries differing only in a
-    relation project differently -- or ``None`` (``null``) for a terminal
-    defined by its static layer/``requires``/``excludes`` alone, which is
-    every terminal of every non-bipolar class.
+    ``relation`` (issue #2863) is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation`, reported as ``{"source",
+    "op", "extents"}``, or ``None`` for a terminal defined by its static
+    layer/``requires``/``excludes`` alone (every non-bipolar terminal).
     """
     return {
         "name": name,
@@ -759,6 +815,21 @@ def _provenance_entry(provenance: Any) -> dict[str, Any] | None:
     }
 
 
+def _resistor_terminals(
+    resistor: Any, names: dict[tuple[int, int], str]
+) -> list[dict[str, Any]]:
+    """Resistor terminals; ``anode_marker`` (#4312) adds a third, ``anode``."""
+    body = (resistor.body, resistor.requires, resistor.excludes)
+    terminals = [
+        _terminal_entry("body", *body, names),
+        _terminal_entry("terminal", resistor.terminal, (), (), names),
+    ]
+    if resistor.anode_marker is not None:
+        marker = resistor.anode_marker
+        terminals.append(_terminal_entry("anode", marker, (), (), names))
+    return terminals
+
+
 def _project_device_classes(
     deck: Any, layer_names: dict[tuple[int, int], str]
 ) -> list[dict[str, Any]]:
@@ -766,19 +837,17 @@ def _project_device_classes(
     :func:`deck_devices`' ``device_classes[]`` shape.
 
     Ordered exactly as :attr:`ExtractionDeck.device_classes` orders its own
-    role tokens (MOS, bipolars, capacitors, MoM capacitors, resistors,
-    diodes) so the two lists read against each other without re-sorting.
+    role tokens (MOS, bipolars, capacitors, MoM capacitors, MOS capacitors,
+    resistors, diodes) so the two lists read against each other without re-sorting.
     """
     entries: list[dict[str, Any]] = []
 
     # MOS. Markerless by construction: recognition is the deck's own
     # active/poly/nwell stack, split by which side of the well the active
     # island sits on (see `ExtractionDeck`'s docstring). Reported anyway --
-    # "this class needs no marker" is exactly the fact a caller comparing
-    # against a marker-gated class needs to see, and the `nwell`
-    # require/exclude asymmetry is what tells NMOS from PMOS (so `pfet`
-    # reports `predicate_gated: true` on `nwell`, which is the literal
-    # truth: a PMOS is not recognised outside the well).
+    # "this class needs no marker" is a fact a caller comparing against a
+    # marker-gated class needs to see, and the `nwell` require/exclude
+    # asymmetry tells NMOS from PMOS (`pfet` is `predicate_gated` on `nwell`).
     for class_name, in_well in ((deck.nfet_class, False), (deck.pfet_class, True)):
         entries.append(
             _device_class_entry(
@@ -904,24 +973,43 @@ def _project_device_classes(
             )
         )
 
+    # MOS capacitors (issue #2919): marker-gated, recognised on the active
+    # island (implant/well/voltage predicates) and its poly gate.
+    for mos_cap in deck.mos_capacitors:
+        well_requires = (deck.nwell,) if mos_cap.in_well else ()
+        well_excludes = () if mos_cap.in_well else (deck.nwell,)
+        entries.append(
+            _device_class_entry(
+                name=mos_cap.name,
+                kind="mos_capacitor",
+                marker=mos_cap.marker,
+                terminals=[
+                    _terminal_entry(
+                        "source_drain",
+                        deck.active,
+                        (mos_cap.implant, *well_requires, *mos_cap.requires),
+                        (*well_excludes, *mos_cap.excludes),
+                        layer_names,
+                    ),
+                    _terminal_entry("gate", deck.poly, (), (), layer_names),
+                ],
+                layer_names=layer_names,
+                provenance=mos_cap.provenance,
+            )
+        )
+
     for resistor in deck.resistors:
         entries.append(
             _device_class_entry(
                 name=resistor.name,
                 kind="resistor",
                 marker=resistor.marker,
-                terminals=[
-                    _terminal_entry(
-                        "body",
-                        resistor.body,
-                        resistor.requires,
-                        resistor.excludes,
-                        layer_names,
-                    ),
-                    _terminal_entry("terminal", resistor.terminal, (), (), layer_names),
-                ],
+                terminals=_resistor_terminals(resistor, layer_names),
                 layer_names=layer_names,
                 provenance=resistor.provenance,
+                # Issue #2679: how `body` relates to `marker` ("abutting_heads":
+                # the marker is the body; `body` is only the two heads).
+                extra={"topology": resistor.topology},
             )
         )
 
@@ -1009,6 +1097,10 @@ def _rule_pairs(rule: DrcRule) -> list[tuple[int, int]]:
     pairs = [rule.layer]
     if rule.other_layer is not None:
         pairs.append(rule.other_layer)
+    if rule.region_spec is not None:
+        pairs.extend(rule.region_spec.layers())
+    if rule.net_spec is not None:
+        pairs.extend(rule.net_spec.layers())
     return pairs
 
 
@@ -1077,6 +1169,15 @@ def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:
         return {"grid_um": rule.grid_um}
     if rule.check == "angle":
         return {"angle_limit_deg": rule.angle_limit_deg}
+    if rule.check == "tap_distance" and rule.region_spec is not None:
+        spec: Any = rule.region_spec
+        # Physical micrometres already, like `grid_um` -- no dbu conversion.
+        return {
+            "well_domain": spec.well_domain,
+            "voltage": spec.voltage,
+            "max_distance_um": spec.max_distance_um,
+            "step_um": spec.step_um,
+        }
     return {}
 
 

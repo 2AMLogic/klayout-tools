@@ -99,9 +99,10 @@ simple `assign <net> = <net>;` alias, and a plain concatenation `assign
 a vector alias or tie-off padding), expanded MSB-first into one per-bit
 alias using the module's own `wire`/`input`/`output`/`inout` declared
 widths; the two sides' total widths must agree exactly. A concatenation
-operand must be a plain net or single-index bit-select -- replication
-(`{N{x}}`), literals (`1'b0`) and part-selects (`a[7:4]`) inside a
-concatenation stay rejected. A Verilog escaped identifier
+operand must be a plain net, single-index bit-select, nested concatenation
+or replication with a literal positive count (`{N{x}}`, issue #4117);
+literals (`1'b0`) and part-selects (`a[7:4]`) inside a concatenation stay
+rejected. A Verilog escaped identifier
 (`\\name`) is accepted wherever a name is, as the single atomic token
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
@@ -152,6 +153,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import cast
+
+from .verilog_module_names import apply_module_names
+from .verilog_pin_bind import _bind_connections
 
 #: Verilog block (`/* ... */`) and line (`// ...`) comments, stripped before
 #: any other parsing. `re.S` so a block comment can span newlines.
@@ -164,14 +169,8 @@ _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 #: (trailing, must be blank) is one `module ... ... endmodule` body.
 _ENDMODULE_RE = re.compile(r"\bendmodule\b")
 
-#: An identifier: a plain Verilog identifier, or an escaped identifier
-#: (`\name`, terminated by whitespace -- Verilog's own escape convention for
-#: identifiers containing characters that would otherwise be delimiters).
-#: The post-backslash character class here is deliberately the *plain*
-#: identifier one: this pattern validates module/port/direction-statement
-#: names, where the escape only ever guards against a keyword collision.
-#: Connection expressions do **not** use it for an escaped name -- see
-#: :data:`_ESCAPED_IDENT_RE`.
+#: Plain identifier spelling, optionally escaped to guard a keyword.
+#: Port declarations also accept full escaped names via _ESCAPED_IDENT_RE.
 _IDENT_RE = re.compile(r"\\?[A-Za-z_$][A-Za-z0-9_$]*")
 
 #: A Verilog escaped identifier in its full generality: a leading backslash
@@ -312,7 +311,13 @@ def _split_top_level(text: str, seps: str = ",") -> list[str]:
     parts: list[str] = []
     depth = 0
     current: list[str] = []
+    escaped = False
     for char in text:
+        if char == "\\" or (escaped and not char.isspace()):
+            escaped = True
+            current.append(char)
+            continue
+        escaped = False
         if char in "([{":
             depth += 1
         elif char in ")]}":
@@ -342,7 +347,7 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"'module' declaration has no port list: {statement.strip()[:80]!r}"
         )
     name = rest[:open_paren].strip()
-    if not _IDENT_RE.fullmatch(name):
+    if not (_IDENT_RE.fullmatch(name) or _ESCAPED_IDENT_RE.fullmatch(name)):
         raise VerilogNetlistError(f"'module' declaration has no valid name: {rest!r}")
     close_paren = rest.rfind(")")
     if close_paren == -1 or close_paren < open_paren:
@@ -358,15 +363,25 @@ def _parse_header(statement: str) -> tuple[str, list[str]]:
             f"{trailer!r} -- only a plain, non-ANSI port list "
             "('module name(a, b, c);') is supported"
         )
-    for port in port_names:
-        if not _IDENT_RE.fullmatch(port):
-            raise VerilogNetlistError(
-                f"'module {name}' port list entry {port!r} is not a plain "
-                "port name -- ANSI-style inline port declarations "
-                "('module name(input a, output b);') are not supported, "
-                "only 'module name(a, b); input a; output b;'"
-            )
-    return _unescape(name), [_unescape(p) for p in port_names]
+    context = f"'module {name}' port list entry"
+    return _unescape(name), [_port_name(port, context) for port in port_names]
+
+
+def _port_name(raw: str, context: str, *, escape_terminated: bool = True) -> str:
+    if _IDENT_RE.fullmatch(raw) or (
+        escape_terminated and _ESCAPED_IDENT_RE.fullmatch(raw)
+    ):
+        return _unescape(raw)
+    if _DIRECTION_STMT_RE.match(raw):
+        raise VerilogNetlistError(
+            f"{context} {raw!r} uses an ANSI-style inline declaration. "
+            "Declare the direction after the module header."
+        )
+    raise VerilogNetlistError(
+        f"{context} {raw!r} is not a port identifier. Declare a bus with "
+        "a range before its name, or escape a literal port name with a "
+        "leading backslash and terminate it with whitespace."
+    )
 
 
 def _unescape(identifier: str) -> str:
@@ -391,21 +406,13 @@ def _parse_direction_statement(
         raise VerilogNetlistError(
             f"could not parse port direction declaration: {statement.strip()[:80]!r}"
         )
-    names_text = match.group("names")
-    names = [_unescape(n) for n in _split_top_level(names_text)]
+    names = _split_top_level(match.group("names"))
     if not names:
         raise VerilogNetlistError(
             f"port direction declaration names no signal: {statement.strip()[:80]!r}"
         )
-    for name in names:
-        if not _IDENT_RE.fullmatch(name):
-            # Re-validate the already-unescaped name so a stray range/
-            # expression in the name list fails loudly instead of silently
-            # becoming a malformed net name.
-            raise VerilogNetlistError(
-                f"port direction declaration has a non-identifier entry "
-                f"{name!r}: {statement.strip()[:80]!r}"
-            )
+    for raw in names:
+        name = _port_name(raw, "port direction declaration entry")
         if match.group("msb") is not None:
             msb = int(match.group("msb"))
             lsb = int(match.group("lsb"))
@@ -454,7 +461,7 @@ def _parse_escaped_connection_expr(expr: str) -> str:
         raise VerilogNetlistError(
             f"connection {expr!r} is a multi-bit range slice -- only a plain "
             "net name or a single-index bit-select ('bus[3]') is supported "
-            "for an instance port connection"
+            "for this operand"
         )
     index_match = _INDEX_SUFFIX_RE.match(rest)
     if index_match:
@@ -466,7 +473,7 @@ def _parse_escaped_connection_expr(expr: str) -> str:
     )
 
 
-def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
+def _parse_connection_expr(expr: str) -> str:
     """Resolve one single-net expression to a net name, or raise
     :class:`VerilogNetlistError` for anything this narrow grammar does not
     model (a range slice, concatenation, a non-constant expression).
@@ -485,7 +492,7 @@ def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> 
         raise VerilogNetlistError(
             f"connection {expr!r} is a multi-bit range slice -- only a plain "
             "net name or a single-index bit-select ('bus[3]') is supported "
-            "for an instance port connection"
+            "for this operand"
         )
     if _IDENT_RE.fullmatch(expr) or _BIT_SELECT_RE.match(expr):
         return _unescape(expr)
@@ -539,19 +546,16 @@ def _parse_instance_statement(statement: str) -> _Instance:
                     f"instance '{inst_name}' ('{cell}') connection {item!r} "
                     "is not a well-formed '.PORT(NET)' entry"
                 )
-            port_name = item[1:port_open].strip()
-            if not _IDENT_RE.fullmatch(port_name):
-                raise VerilogNetlistError(
-                    f"instance '{inst_name}' ('{cell}') connection {item!r} "
-                    "names an invalid port"
-                )
+            port_name = _port_name(
+                item[1:port_open].strip(),
+                f"instance '{inst_name}' ('{cell}') pin",
+                escape_terminated=item[port_open - 1].isspace(),
+            )
             expr = item[port_open + 1 : port_close].strip()
             if not expr:
-                # `.PORT()` -- an explicit no-connect. Leave it unrecorded;
-                # `_convert_module` synthesizes a fresh disconnected net for
-                # any declared pin with no recorded connection.
+                # _convert_module supplies a fresh disconnected net for `.PORT()`.
                 continue
-            expressions[_unescape(port_name)] = expr
+            expressions[port_name] = expr
     return _Instance(cell=cell, name=inst_name, expressions=expressions)
 
 
@@ -822,7 +826,7 @@ def _parse_module_chunk(chunk: str) -> _Module:
     return _Module(name=name, ports=ports, instances=instances, aliases=aliases)
 
 
-_ASSIGN_RE = re.compile(r"^assign\s+(?P<lhs>\S+)\s*=\s*(?P<rhs>\S+)$")
+_ASSIGN_RE = re.compile(r"^assign\s+(?P<lhs>.+?)\s*=\s*(?P<rhs>[^=]+)$", re.S)
 
 #: An ``assign`` whose right-hand side is a brace-delimited expression --
 #: routed to :func:`_expand_concat_assign` (issue #2372) instead of the
@@ -919,6 +923,59 @@ def _concat_operand_bits(
     )
 
 
+_REPLICATION_RE = re.compile(r"^(?P<count>\d+)\s*(?P<body>\{.*\})$", re.S)
+
+
+def _closes_at_end(expr: str) -> bool:
+    """True when the ``{`` opening ``expr`` is matched by its final ``}``."""
+    depth = 0
+    for index, char in enumerate(expr):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index == len(expr) - 1
+    return False
+
+
+def _flatten_concat(
+    statement: str, expr: str, net_widths: dict[str, list[str]]
+) -> list[str]:
+    """Flatten a brace-delimited concatenation ``{ ... }`` to its MSB-first
+    single-bit list (issue #4117). An element is a nested concatenation
+    (``{a, b}``), a replication with a literal positive integer count
+    (``2{a}`` / ``2{a, b}``), or a plain operand resolved by
+    :func:`_concat_operand_bits`, whose brace rejection backstops malformed
+    input."""
+    if not (expr.startswith("{") and _closes_at_end(expr)):
+        raise _unsupported_assign(statement, f"unbalanced braces in {expr!r}")
+    elements = _split_top_level(expr[1:-1])
+    if not elements:
+        raise _unsupported_assign(statement, "the concatenation is empty")
+    bits: list[str] = []
+    for element in elements:
+        replication = _REPLICATION_RE.match(element)
+        if replication is not None:
+            count = int(replication.group("count"))
+            if count < 1:
+                raise _unsupported_assign(
+                    statement,
+                    f"replication count in {element!r} must be a positive integer",
+                )
+            body = replication.group("body")
+            if not _closes_at_end(body):
+                raise _unsupported_assign(
+                    statement, f"unbalanced braces in {element!r}"
+                )
+            bits.extend(_flatten_concat(statement, body, net_widths) * count)
+        elif element.startswith("{"):
+            bits.extend(_flatten_concat(statement, element, net_widths))
+        else:
+            bits.extend(_concat_operand_bits(statement, element, net_widths))
+    return bits
+
+
 def _expand_concat_assign(
     statement: str,
     lhs: str,
@@ -932,9 +989,10 @@ def _expand_concat_assign(
 
     Verilog concatenation is MSB-first: the first operand supplies the
     most-significant bits. Both sides are expanded to MSB-first bit lists
-    from the module's own declarations and zipped. Operands are restricted
-    to plain nets and single-index bit-selects; replication (``{N{x}}``),
-    literals (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
+    from the module's own declarations and zipped. Operands may be plain
+    nets, single-index bit-selects, nested concatenations and replications
+    with a literal positive count (``{N{x}}``, issue #4117); literals
+    (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
     same "only a plain ... is supported" error as any other unsupported
     ``assign``, as is a width mismatch between the two sides (Verilog would
     silently zero-extend or truncate; a sign-off converter must not).
@@ -944,14 +1002,8 @@ def _expand_concat_assign(
             statement,
             "a concatenation on the left-hand side is not supported",
         )
-    inner = rhs.strip()[1:-1]
-    operands = _split_top_level(inner)
-    if not operands:
-        raise _unsupported_assign(statement, "the concatenation is empty")
     lhs_bits = _concat_operand_bits(statement, lhs, net_widths)
-    rhs_bits: list[str] = []
-    for operand in operands:
-        rhs_bits.extend(_concat_operand_bits(statement, operand, net_widths))
+    rhs_bits = _flatten_concat(statement, rhs.strip(), net_widths)
     if len(lhs_bits) != len(rhs_bits):
         raise _unsupported_assign(
             statement,
@@ -980,17 +1032,13 @@ def _parse_assign_statement(
     match = _ASSIGN_RE.match(statement.strip())
     if match is None:
         raise _unsupported_assign(statement)
-    lhs = _parse_connection_expr(match.group("lhs"))
-    rhs = _parse_connection_expr(match.group("rhs"))
-    lhs_bits = (net_widths or {}).get(lhs, [lhs])
-    rhs_bits = (net_widths or {}).get(rhs, [rhs])
-    if lhs_bits == [lhs] and rhs_bits == [rhs]:
-        aliases[lhs] = rhs
-        return
+    widths = net_widths or {}
+    lhs_bits = _assign_side_bits(statement, match.group("lhs"), widths, rhs=False)
+    rhs_bits = _assign_side_bits(statement, match.group("rhs"), widths, rhs=True)
     # A whole-bus alias (`assign dout = _05_;`, Yosys's routine rendering of
-    # a bus output): alias bit for bit, so a per-bit consumer -- a
-    # bit-expanded port, or a whole-bus macro connection (issue #2657) --
-    # resolves through it.
+    # a bus output), a part-select alias, or a sized-constant tie-off: alias
+    # bit for bit, so a per-bit consumer -- a bit-expanded port, or a
+    # whole-bus macro connection (issue #2657) -- resolves through it.
     if len(lhs_bits) != len(rhs_bits):
         raise _unsupported_assign(
             statement,
@@ -999,6 +1047,48 @@ def _parse_assign_statement(
         )
     for lhs_bit, rhs_bit in zip(lhs_bits, rhs_bits, strict=True):
         aliases[lhs_bit] = rhs_bit
+
+
+def _assign_side_bits(
+    statement: str,
+    expr: str,
+    net_widths: dict[str, list[str]],
+    *,
+    rhs: bool,
+) -> list[str]:
+    """Resolve one side of a non-concatenation-RHS ``assign`` to its
+    MSB-first per-bit net list (issue #2941): a plain net or declared bus, a
+    single-index bit-select, a multi-bit part-select (`bus[15:8]`), and --
+    on the right-hand side only -- a sized constant of any base (`8'h00`,
+    `1'h0`). A left-hand-side concatenation of plain nets/bit-selects
+    (`{ w[7], w[4] }`) is expanded operand by operand."""
+    expr = expr.strip()
+    operands = _split_concatenation(expr)
+    if operands is not None:
+        if rhs:
+            raise _unsupported_assign(statement, "unsupported concatenation")
+        if not operands:
+            raise _unsupported_assign(statement, "the concatenation is empty")
+        bits: list[str] = []
+        for operand in operands:
+            bits.extend(_concat_operand_bits(statement, operand, net_widths))
+        return bits
+    try:
+        if rhs:
+            constant = _sized_constant_bits(expr)
+            if constant is not None:
+                return constant
+        sliced = _range_slice_bits(expr, net_widths)
+        if sliced is not None:
+            return sliced
+        net = _parse_connection_expr(expr)
+    except VerilogNetlistError as exc:
+        raise _unsupported_assign(statement, str(exc)) from exc
+    if not rhs and net in _CONST_NET_NAMES.values():
+        raise _unsupported_assign(
+            statement, f"{expr!r} is a constant and cannot be assigned to"
+        )
+    return list(net_widths.get(net, [net]))
 
 
 def _resolve_alias(net: str, aliases: dict[str, str]) -> str:
@@ -1010,6 +1100,11 @@ def _resolve_alias(net: str, aliases: dict[str, str]) -> str:
 
 
 def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
+    """The module list of :func:`_parse_with_names` (issue #4810)."""
+    return _parse_with_names(text)[0]
+
+
+def _parse_with_names(text: str) -> tuple[list[dict[str, object]], dict[str, str]]:
     """Parse gate-level Verilog ``text`` into a list of module descriptions,
     one per ``module``/``endmodule`` block, in file order.
 
@@ -1073,7 +1168,7 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
                 "port_aliases": _port_aliases(module.ports, module.aliases),
             }
         )
-    return modules
+    return modules, apply_module_names(modules)
 
 
 def collect_gate_level_port_aliases(text: str) -> dict[str, dict[str, str]]:
@@ -1105,7 +1200,7 @@ def collect_gate_level_port_aliases(text: str) -> dict[str, dict[str, str]]:
     """
     modules = parse_gate_level_verilog(text)
     return {
-        module["name"]: dict(module["port_aliases"])  # type: ignore[arg-type]
+        module["name"]: dict(module["port_aliases"])
         for module in modules
         if module["port_aliases"]
     }
@@ -1134,10 +1229,10 @@ def parse_subckt_pin_orders(text: str) -> dict[str, list[str]]:
     join-continuations convention :mod:`klayout_tools.netlist_normalize`
     already uses.
     """
-    from .netlist_normalize import _merge_continuations
+    from ._spice_text import fold_spice_continuations
 
     pin_orders: dict[str, list[str]] = {}
-    for line in _merge_continuations(text.splitlines()):
+    for line in fold_spice_continuations(text.splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
             continue
@@ -1154,6 +1249,7 @@ def convert_gate_level_verilog(
     text: str,
     *,
     pin_order_lookup,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> str:
     """Convert gate-level Verilog ``text`` to plain-element-shaped SPICE
     ``klt lvs`` can read directly via ``NetlistSpiceReader`` (issue #1336).
@@ -1179,10 +1275,17 @@ def convert_gate_level_verilog(
     names are first known, by :func:`_bind_connections`: a library cell's
     `<PORT>[<index>]` pins in descending numeric index order, a parsed
     sub-module's bit-expanded ports in their declared order.
+
+    ``port_case_folds`` (issue #4815), when given, is extended with one
+    ``{"cell", "instance", "from", "to"}`` record per library-cell scalar
+    port bound to a pin that differs from it only by letter case (see
+    :func:`_bind_connections`).
     """
     modules = parse_gate_level_verilog(text)
     real_orders = _library_pin_orders(modules, pin_order_lookup)
-    bound, stub_pin_order = _bind_all_instances(modules, real_orders)
+    bound, stub_pin_order = _bind_all_instances(
+        modules, real_orders, port_case_folds=port_case_folds
+    )
 
     out: list[str] = []
     for module, module_bound in zip(modules, bound, strict=True):
@@ -1206,6 +1309,106 @@ def convert_gate_level_verilog(
         out.append(f".SUBCKT {cell} {' '.join(pins)}")
         out.append(f".ENDS {cell}")
 
+    return "\n".join(out) + "\n"
+
+
+#: Pin names a transistor-level library cell declares for its supply rails
+#: (ASAP7 CDL: ``VDD``/``VSS``). A cell pin of this name that the Verilog
+#: instance does not connect is tied to the module-level rail of the same
+#: name by :func:`convert_gate_level_verilog_expanded`; every other
+#: unconnected pin gets its own unconnected net.
+_RAIL_PIN_NAMES = frozenset({"VDD", "VSS", "VNW", "VPW", "GND"})
+
+
+def parse_subckt_blocks(text: str) -> dict[str, str]:
+    """``{<name>: <full .SUBCKT .. .ENDS text>}`` for every subcircuit block
+    in a library ``.spice``/``.cdl`` ``text``, keyed by the name as written.
+    Continuation lines are kept verbatim inside the block text."""
+    blocks: dict[str, str] = {}
+    current: list[str] = []
+    name = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if not current:
+            if upper.startswith(".SUBCKT"):
+                parts = stripped.split()
+                if len(parts) < 2:
+                    continue
+                name = parts[1]
+                current = [line]
+        else:
+            current.append(line)
+            if upper.startswith(".ENDS"):
+                blocks[name] = "\n".join(current) + "\n"
+                current = []
+    return blocks
+
+
+def convert_gate_level_verilog_expanded(
+    text: str,
+    *,
+    pin_order_lookup,
+    cell_body_lookup,
+    port_case_folds: list[dict[str, str]] | None = None,
+) -> str:
+    """Like :func:`convert_gate_level_verilog`, but every library cell is
+    written as its real transistor-level ``.SUBCKT`` block (``cell_body_lookup
+    (cell) -> str | None``, e.g. :func:`parse_subckt_blocks` over the PDK CDL)
+    instead of a pin-only stub, so a FinFET extraction (which compares ``nfin``
+    exactly on devices) has a device-level reference to match.
+
+    Each instance calls the cell with its *full* declared pin list: pins the
+    Verilog connects are bound as in the stub conversion; an unconnected rail
+    pin (:data:`_RAIL_PIN_NAMES`) is tied to the module-level net of the same
+    name; any other unconnected pin gets its own ``__NC_`` net. A cell with no
+    body is :class:`VerilogNetlistError` naming the cell -- never a silent
+    skip."""
+    modules = parse_gate_level_verilog(text)
+    real_orders = _library_pin_orders(modules, pin_order_lookup)
+    bound, _ = _bind_all_instances(
+        modules, real_orders, port_case_folds=port_case_folds
+    )
+
+    bodies: dict[str, str] = {}
+    for cell in real_orders:
+        body = cell_body_lookup(cell)
+        if body is None:
+            raise VerilogNetlistError(
+                f"library cell '{cell}' has a pin order but no transistor-level "
+                "'.subckt' body in the resolved PDK library, so it cannot be "
+                "expanded for a FinFET compare"
+            )
+        bodies[cell] = body
+
+    out: list[str] = []
+    for module, module_bound in zip(modules, bound, strict=True):
+        ports = cast("list[str]", module["ports"])
+        instances = cast("list[dict[str, str]]", module["instances"])
+        out.append(f".SUBCKT {module['name']} {' '.join(ports)}".rstrip())
+        for instance, connections in zip(instances, module_bound, strict=True):
+            cell = instance["cell"]
+            if cell in real_orders:
+                pins = real_orders[cell]
+                nets = [
+                    connections.get(
+                        pin,
+                        pin
+                        if pin.upper() in _RAIL_PIN_NAMES
+                        else f"__NC_{instance['name']}_{pin}__",
+                    )
+                    for pin in pins
+                ]
+            else:
+                pins = cast("list[str]", _sub_module_by_name(modules, cell)["ports"])
+                nets = [
+                    connections.get(pin, f"__NC_{instance['name']}_{pin}__")
+                    for pin in pins
+                ]
+            out.append(f"X{_sanitize(instance['name'])} {' '.join(nets)} {cell}")
+        out.append(f".ENDS {module['name']}")
+
+    out.extend(body.rstrip("\n") for body in bodies.values())
     return "\n".join(out) + "\n"
 
 
@@ -1237,7 +1440,10 @@ def _library_pin_orders(
 
 
 def _bind_all_instances(
-    modules: list[dict[str, object]], real_orders: dict[str, list[str]]
+    modules: list[dict[str, object]],
+    real_orders: dict[str, list[str]],
+    *,
+    port_case_folds: list[dict[str, str]] | None = None,
 ) -> tuple[list[list[dict[str, str]]], dict[str, list[str]]]:
     """``(bound, stub_pin_order)``: every instance's ``{<pin>: <net>}``
     binding (:func:`_bind_connections`), per module, in instance order; and
@@ -1253,12 +1459,17 @@ def _bind_all_instances(
         for instance in module["instances"]:  # type: ignore[attr-defined]
             cell = instance["cell"]
             library = cell in real_orders
-            pins = (
+            pins: list[str] = (
                 real_orders[cell]
                 if library
-                else _sub_module_by_name(modules, cell)["ports"]
+                else _sub_module_by_name(modules, cell)["ports"]  # type: ignore[assignment]
             )
-            pin_nets, unknown = _bind_connections(instance, pins, library=library)  # type: ignore[arg-type]
+            pin_nets, unknown = _bind_connections(
+                instance,
+                pins,
+                library=library,
+                port_case_folds=port_case_folds,
+            )
             if library:
                 used_pins[cell].update(pin_nets)
                 unknown_pins[cell].update(unknown)
@@ -1275,74 +1486,6 @@ def _bind_all_instances(
             )
         stub_pin_order[cell] = [pin for pin in real_order if pin in used_pins[cell]]
     return bound, stub_pin_order
-
-
-def _port_bit_pins(port: str, pins: list[str], *, library: bool) -> list[str]:
-    """``port``'s per-bit pins among ``pins`` (every `<port>[<index>]`
-    entry), MSB-first (issue #2657).
-
-    A parsed sub-module's ports were bit-expanded by :func:`_expand_range`
-    from its own `[msb:lsb]` declaration, so their declared order already is
-    MSB-first, ascending range included. A library cell's pins come from a
-    `.subckt`/`.cdl` header, whose bit names carry the Verilog index but
-    whose header position carries nothing Verilog defines, so they are
-    sorted by that index, highest first: the `[N-1:0]` convention every real
-    vector-ported macro checked uses (see the module docstring)."""
-    pattern = re.compile(rf"^{re.escape(port)}\[(-?\d+)\]$")
-    hits = [
-        (int(match.group(1)), pin)
-        for pin in pins
-        if (match := pattern.match(pin)) is not None
-    ]
-    if library:
-        hits.sort(key=lambda hit: hit[0], reverse=True)
-    return [pin for _, pin in hits]
-
-
-def _bind_connections(
-    instance: dict[str, object], pins: list[str], *, library: bool
-) -> tuple[dict[str, str], set[str]]:
-    """``({<real pin>: <net>}, {<unknown port>, ...})`` for one instance
-    calling a cell/module with declared ``pins``.
-
-    A scalar connection binds to its pin by name, as it always has. A
-    multi-bit one (issue #2657) is zipped MSB-first onto the port's per-bit
-    pins (:func:`_port_bit_pins`) -- or onto a scalar pin of that name, when
-    one bit wide. A bit-count mismatch either way is an error naming the
-    instance, port and both widths, never a silent truncate or pad. A port
-    with no pin at all is returned as unknown for the caller to report (a
-    library cell's error aggregates every such port across every instance
-    of the cell type).
-    """
-    pin_set = set(pins)
-    pin_nets: dict[str, str] = {}
-    unknown: set[str] = set()
-    connections: dict[str, str | list[str]] = instance["connections"]  # type: ignore[assignment]
-    for port, net in connections.items():
-        if isinstance(net, str) and port in pin_set:
-            bit_pins = [port]
-        else:
-            bit_pins = _port_bit_pins(port, pins, library=library)
-            if not bit_pins and port in pin_set:
-                bit_pins = [port]
-        if not bit_pins:
-            unknown.add(port)
-            continue
-        bits = net if isinstance(net, list) else [net]
-        if len(bits) != len(bit_pins):
-            raise VerilogNetlistError(
-                f"instance '{instance['name']}' ('{instance['cell']}') port "
-                f"'{port}' is {len(bit_pins)} bit(s) wide ({bit_pins[0]} .. "
-                f"{bit_pins[-1]}) but its connection is {len(bits)} bit(s) wide"
-            )
-        for pin, bit in zip(bit_pins, bits, strict=True):
-            if pin in pin_nets:
-                raise VerilogNetlistError(
-                    f"instance '{instance['name']}' ('{instance['cell']}') "
-                    f"connects pin '{pin}' twice"
-                )
-            pin_nets[pin] = bit
-    return pin_nets, unknown
 
 
 def _sub_module_by_name(

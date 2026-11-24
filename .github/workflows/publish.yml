@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Dispatched by release.yml (issue #4920): a tag pushed with the default
+  # GITHUB_TOKEN does not fire the `push: tags` trigger above, but a
+  # `workflow_dispatch` made with that token does. Dispatch on the tag ref, so
+  # the run is still this workflow at top level (PyPI trusted publishing is
+  # registered against `publish.yml` + environment `pypi`).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +20,15 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-24.04
     steps:
+      # A dispatch from a branch would build a `.dev` version (issue #4920);
+      # only a tag ref may build, and so publish, a release.
+      - name: Require a release tag ref
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::publish.yml must run on a v* tag ref, got $GITHUB_REF"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history + tags: `hatch_build.py` records the built commit's
@@ -23,7 +38,7 @@ jobs:
           # a release wheel labelled as a non-release build.
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
           python-version: "3.10"
@@ -36,9 +51,30 @@ jobs:
           name: dist
           path: dist/
 
+  check-native-extras:
+    name: Check klt-*-native extra pins
+    runs-on: ubuntu-24.04
+    # Repo code runs here, so keep it out of the privileged `publish` job:
+    # read-only token, no `pypi` environment, no OIDC, no persisted credentials.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
+
+      # Issue #2900: v0.6.0/v0.7.0 shipped a `[yield]` extra pinning
+      # klt-yield-native before it was on PyPI. Fail the release instead.
+      - name: Check klt-*-native extra pins are published
+        run: uv run --python 3.12 --no-project python scripts/check_native_extras.py
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, check-native-extras]
     runs-on: ubuntu-24.04
     environment: pypi
     steps:
@@ -47,9 +83,46 @@ jobs:
           name: dist
           path: dist/
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
 
       - name: Publish to PyPI
         run: uv publish
+
+  # Issue #5861: the pipeline stopped at PyPI, so the Releases page lagged
+  # behind. This job runs only after the upload succeeds and creates the
+  # GitHub Release from this tag's CHANGELOG.md section; `contents: write`
+  # is scoped to this job only (workflow default stays read-only).
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Build release notes from CHANGELOG.md
+        run: |
+          python3 -I scripts/release_notes.py "${GITHUB_REF_NAME#v}" \
+            >"$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      # Idempotent: a re-run of publish.yml on the same tag edits the
+      # existing release instead of failing on it.
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          fi

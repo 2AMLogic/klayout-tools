@@ -64,11 +64,17 @@ Regenerate all four with:
 uv run python3 examples/dogbone-terminal/generate.py
 ```
 
-The generated GDS is byte-reproducible (GDS2 wall-clock write timestamps
-suppressed), and
+Within one pinned `klt` the generated GDS is byte-reproducible (GDS2
+wall-clock write timestamps suppressed), and
 `tests/test_gen.py::test_dogbone_terminal_example_regenerates_byte_identical`
-holds the committed streams to it — so a change to `klt gen mos_array` that
-moves this example's composed unit device (or merely adds a PCell
-parameter, which lands in the stream's context-info properties) fails at the
-commit that causes it. When it does, rerun the command above and review the
-resulting fixture diff as a deliberate update.
+holds the committed streams to that within-version guarantee — so a change to
+`klt gen mos_array` that moves this example's composed unit device fails at
+the commit that causes it. Bytes are **not** stable across `klt` upgrades
+(record order within a cell can move — see `docs/json-contract.md` →
+"Stream-stability contract"), so a consumer copying this pattern should gate
+on `klt diff` or on `klt stats`'s `geometry_digest` rather than a byte
+compare when an upgrade is the suspect. One blind spot to know about: streams
+no longer carry PCell context info (`write_layout()` stopped writing it), so
+a change that merely adds a PCell parameter is invisible to this guard — the
+test's docstring records the same caveat. When the guard does fail, rerun the
+command above and review the resulting fixture diff as a deliberate update.

@@ -1,0 +1,188 @@
+"""Supply-relative voltage levels for ``klt sim`` (issue #3918).
+
+A bench written for one supply cannot follow ``corners.supply_v`` for its
+stimulus amplitude or its mid-rail measurement threshold if the level is a
+literal volt. Wherever a level is already resolved in Python per corner
+(``stimulus`` levels, ``measurements[].crossings.level``) it may instead be a
+fraction of a named ``corners.supply_v`` key::
+
+    {"frac_of": "vdd", "fraction": 0.5}
+
+A plain number keeps its meaning. The fraction is resolved against the
+corner's own supply value, so ``0.5`` of ``vdd`` is ``0.9 V`` at ``vdd=1.8``
+and ``0.45 V`` at ``vdd=0.9``.
+
+This module is pure: it validates the object and multiplies. It does not
+rewrite ``.meas`` cards (ngspice requires a literal there).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ._jsonnum import is_finite_number
+from .sim_errors import SimError
+
+#: Keys the object form may carry.
+FORM_KEYS = frozenset({"frac_of", "fraction"})
+
+
+class SupplyRelativeError(ValueError):
+    """A malformed or unresolvable ``{frac_of, fraction}`` level."""
+
+
+def is_supply_relative(value: Any) -> bool:
+    """Whether ``value`` is written in the ``{frac_of, fraction}`` form."""
+    return isinstance(value, dict)
+
+
+def validate(value: Any, field: str) -> None:
+    """Shape-check a ``{frac_of, fraction}`` object (no supply needed)."""
+    if not isinstance(value, dict):
+        raise SupplyRelativeError(f"{field} must be an object (got {value!r})")
+    unknown = sorted(set(value) - FORM_KEYS)
+    if unknown:
+        raise SupplyRelativeError(
+            f"{field} has unknown key(s) {unknown}; allowed: {sorted(FORM_KEYS)}"
+        )
+    rail = value.get("frac_of")
+    if not isinstance(rail, str) or not rail.strip():
+        raise SupplyRelativeError(
+            f"{field}.frac_of must name a corners.supply_v key (got {rail!r})"
+        )
+    fraction = value.get("fraction")
+    if not is_finite_number(fraction) or fraction < 0:
+        raise SupplyRelativeError(
+            f"{field}.fraction must be a finite number >= 0 (got {fraction!r})"
+        )
+
+
+def resolve(value: Any, field: str, supply_v: dict[str, Any] | None) -> float:
+    """``fraction * supply_v[frac_of]`` volts, validated against the corner's
+    supply map. Raises :class:`SupplyRelativeError` naming ``field``."""
+    validate(value, field)
+    rail = value["frac_of"].strip()
+    supply = supply_v or {}
+    if not supply:
+        raise SupplyRelativeError(
+            f"{field} is supply-relative (frac_of {rail!r}) but the request "
+            "declares no corners.supply_v for this corner"
+        )
+    match = next((key for key in supply if str(key).strip() == rail), None)
+    if match is None:
+        match = next(
+            (key for key in supply if str(key).strip().lower() == rail.lower()), None
+        )
+    if match is None:
+        raise SupplyRelativeError(
+            f"{field}.frac_of {rail!r} is not a corners.supply_v key "
+            f"(keys: {sorted(str(key) for key in supply)})"
+        )
+    return float(value["fraction"]) * float(supply[match])
+
+
+EXCLUSIVE_FLAGS = ("exclusive_min", "exclusive_max")
+
+
+def coverage_bounds(limits: Any) -> dict[str, Any]:
+    """Return the limits that can own a coverage row, including unknown keys."""
+    if not isinstance(limits, dict):
+        return {}
+    return {key: value for key, value in limits.items() if key not in EXCLUSIVE_FLAGS}
+
+
+def _has_exclusive_bounds(spec: dict[str, Any]) -> bool:
+    limits = spec.get("limits")
+    return isinstance(limits, dict) and any(
+        limits.get(key) is True for key in EXCLUSIVE_FLAGS
+    )
+
+
+def request_uses_exclusive_bounds(request: dict[str, Any]) -> bool:
+    scopes = [request, *(request.get("analysis_steps") or [])]
+    return any(
+        _has_exclusive_bounds(spec)
+        for scope in scopes
+        if isinstance(scope, dict)
+        for spec in scope.get("measurements") or []
+        if isinstance(spec, dict)
+    )
+
+
+def _validate_exclusive_bounds(spec: dict[str, Any]) -> None:
+    limits = spec.get("limits")
+    if not isinstance(limits, dict):
+        return
+    for flag in EXCLUSIVE_FLAGS:
+        if flag not in limits:
+            continue
+        field = f"measurement '{spec['name']}': limits.{flag}"
+        if not isinstance(limits[flag], bool):
+            raise SimError(f"{field} must be a boolean")
+        side = flag.removeprefix("exclusive_")
+        bound = limits.get(side)
+        if limits[flag] and not (is_finite_number(bound) or is_supply_relative(bound)):
+            raise SimError(
+                f"{field} requires a finite number or supply-relative limits.{side}"
+            )
+
+
+def _relative_bounds(spec: dict[str, Any]) -> dict[str, Any]:
+    limits = spec.get("limits")
+    if not isinstance(limits, dict):
+        return {}
+    return {k: limits[k] for k in ("min", "max") if is_supply_relative(limits.get(k))}
+
+
+def validate_limits(
+    specs: list[dict[str, Any]],
+    supply_maps: list[dict[str, Any]],
+    mc: dict[str, Any] | None,
+) -> None:
+    """Validate bounds across the full sweep before a worker can start."""
+    for spec in specs:
+        _validate_exclusive_bounds(spec)
+        for key, value in _relative_bounds(spec).items():
+            field = f"measurement '{spec['name']}': limits.{key}"
+            if spec.get("k_sigma") is not None or (mc or {}).get("k_sigma") is not None:
+                raise SimError(
+                    f"{field} cannot be supply-relative with a k_sigma window"
+                )
+            try:
+                validate(value, field)
+                for supply in supply_maps:
+                    resolve(value, field, supply)
+            except SupplyRelativeError as exc:
+                raise SimError(str(exc)) from exc
+
+
+def resolve_limits(
+    specs: list[dict[str, Any]], supply: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    """Copy only affected specs, leaving declarations intact for the aggregate."""
+    resolved = []
+    echoes = {}
+    for spec in specs:
+        bounds = _relative_bounds(spec)
+        if bounds:
+            name = spec["name"]
+            limits = spec["limits"].copy()
+            for key, value in bounds.items():
+                limits[key] = resolve(
+                    value, f"measurement '{name}': limits.{key}", supply
+                )
+            echoes[name] = {
+                k: limits[k] for k in ("min", "max") if limits.get(k) is not None
+            }
+            spec = {**spec, "limits": limits}
+        resolved.append(spec)
+    return resolved, echoes
+
+
+def attach_limits(
+    results: list[dict[str, Any]], echoes: dict[str, dict[str, float]]
+) -> None:
+    """Record the numeric bounds beside each affected measurement's grade."""
+    for result in results:
+        if result["name"] in echoes:
+            result["limits_resolved"] = echoes[result["name"]]

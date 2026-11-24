@@ -1,0 +1,40 @@
+{
+  "counts": {
+    "devices": {
+      "layout": 14,
+      "matched": 14,
+      "reference": 14
+    },
+    "nets": {
+      "layout": 13,
+      "matched": 13,
+      "reference": 13
+    },
+    "pins": {
+      "layout": 8,
+      "matched": 8,
+      "reference": 8
+    }
+  },
+  "engine": "klayout",
+  "mismatches": [
+    {
+      "category": "topology",
+      "circuit": null,
+      "description": "device class has no counterpart on the other side, but no devices of this class were extracted either -- not a real topology mismatch: 'bjt'",
+      "details": null,
+      "device": {
+        "class": "bjt",
+        "layout": null,
+        "reference": null
+      },
+      "instance": null,
+      "net": null,
+      "property": null,
+      "severity": "warning",
+      "side": "layout",
+      "subcircuit": null
+    }
+  ],
+  "status": "match"
+}

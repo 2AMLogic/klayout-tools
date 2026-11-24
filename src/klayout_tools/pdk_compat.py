@@ -24,6 +24,8 @@ import os
 import re
 from typing import Any
 
+from .pdk_store import PDK_STORE_MARKER, read_store_sha256, read_store_version
+
 #: Identity namespace: a lambdapdk *wrapper release* (the tag
 #: ``scripts/fetch-pdks.sh`` fetches). This is **not** an upstream ASAP7
 #: revision and must never be presented as one.
@@ -31,6 +33,12 @@ NS_LAMBDAPDK_RELEASE = "lambdapdk-release"
 
 #: Identity namespace: open_pdks ``SOURCES`` stamp (the ``version`` field).
 NS_OPEN_PDKS_SOURCES = "open_pdks-sources"
+
+#: Identity namespace: the bundle ``.pdk-store.json`` ``version`` (the
+#: upstream commit SHA an object-store provisioner installed from, issue
+#: #5624). A bare commit SHA compared against a store install resolves into
+#: this namespace; it is never conflated with an open_pdks ``SOURCES`` stamp.
+NS_PDK_STORE = "pdk-store-version"
 
 #: The open_pdks commit the fleet pins for sky130 and gf180mcu (issue #3427,
 #: epic #3420). The authoritative copy is ``pdks.families.*.open_pdks_commit``
@@ -43,7 +51,9 @@ _MANIFEST_PIN_SOURCE = (
 )
 
 #: File the lambdapdk fetch writes at the archive root, holding the release.
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 LAMBDAPDK_MARKER = ".fetched-version"
+FETCHED_COMMIT_MARKER = ".fetched-commit"
 
 #: How many directory levels above a variant directory to look for
 #: :data:`LAMBDAPDK_MARKER` (lambdapdk nests ``<root>/lambdapdk/<process>``).
@@ -95,12 +105,77 @@ def _open_pdks_hash(stamp: str) -> str | None:
 
 
 def _open_pdks_equal(expected: str, installed: str) -> bool:
-    """Same open_pdks commit; a short hash (>= 7 hex) matches by prefix."""
+    """Same open_pdks commit; a short hash (>= 7 hex) matches by prefix.
+    Identical values match at any length (issue #6298)."""
     want, have = _open_pdks_hash(expected), _open_pdks_hash(installed)
     if want is None or have is None:
         return expected == installed
+    if want == have:
+        return True
     short, long_ = sorted((want, have), key=len)
     return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
+
+
+_BARE_HEX = re.compile(r"[0-9a-fA-F]+")
+
+
+def _sha_equal(expected: str, installed: str) -> bool:
+    """Same commit SHA (both values fully hex, e.g. a store install's
+    ``.pdk-store.json`` ``version`` against a bare-hex pin); a short hash
+    (>= 7 hex, git's abbreviation floor) matches by prefix. Non-hex values
+    are compared exactly, and identical values match at any length
+    (issue #6298)."""
+    if not (_BARE_HEX.fullmatch(expected) and _BARE_HEX.fullmatch(installed)):
+        return expected == installed
+    if expected.lower() == installed.lower():
+        return True
+    return len(expected) >= _MIN_SHORT_HASH and installed.lower().startswith(
+        expected.lower()
+    )
+
+
+def read_fetched_marker(variant_dir: str) -> str | None:
+    """Return the stripped contents of the nearest :data:`LAMBDAPDK_MARKER`
+    at ``variant_dir`` or up to :data:`_MARKER_SEARCH_DEPTH` parents, or
+    ``None`` when absent/unreadable/empty. The nearest marker wins: an
+    unreadable or empty one is not skipped in favour of a farther one."""
+    current = os.path.abspath(variant_dir)
+    for _ in range(_MARKER_SEARCH_DEPTH + 1):
+        marker = os.path.join(current, LAMBDAPDK_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as handle:
+                    value = handle.read().strip()
+            except OSError:
+                return None
+            return value or None
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def read_fetched_commit(variant_dir: str) -> str | None:
+    """Return the upstream commit recorded by ``scripts/fetch-*.sh`` in the
+    nearest :data:`FETCHED_COMMIT_MARKER` (same search as
+    :func:`read_fetched_marker`), or ``None`` when absent, unreadable, or not
+    a 40-hex id (issue #3786). Never guessed."""
+    current = os.path.abspath(variant_dir)
+    for _ in range(_MARKER_SEARCH_DEPTH + 1):
+        marker = os.path.join(current, FETCHED_COMMIT_MARKER)
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as handle:
+                    value = handle.read().strip()
+            except (OSError, UnicodeDecodeError):
+                return None
+            return value if _FULL_COMMIT.fullmatch(value) else None
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
 
 
 def read_installed_identity(
@@ -114,30 +189,25 @@ def read_installed_identity(
     ``docs/json-contract.md``).
     """
     if namespace == NS_LAMBDAPDK_RELEASE:
-        current = os.path.abspath(variant_dir)
-        for _ in range(_MARKER_SEARCH_DEPTH + 1):
-            marker = os.path.join(current, LAMBDAPDK_MARKER)
-            if os.path.isfile(marker):
-                try:
-                    with open(marker, encoding="utf-8") as handle:
-                        value = handle.read().strip()
-                except OSError:
-                    return None, None
-                if not value:
-                    return None, None
-                return (
-                    {"namespace": namespace, "value": value},
-                    LAMBDAPDK_MARKER,
-                )
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            current = parent
-        return None, None
+        value = read_fetched_marker(variant_dir)
+        if value is None:
+            return None, None
+        return (
+            {"namespace": namespace, "value": value},
+            LAMBDAPDK_MARKER,
+        )
     if namespace == NS_OPEN_PDKS_SOURCES and sources_version:
         return (
             {"namespace": namespace, "value": sources_version},
             "SOURCES",
+        )
+    if namespace == NS_PDK_STORE:
+        value = read_store_version(variant_dir)
+        if value is None:
+            return None, None
+        return (
+            {"namespace": namespace, "value": value},
+            PDK_STORE_MARKER,
         )
     return None, None
 
@@ -157,6 +227,8 @@ def compare_identities(
         return "unknown"
     if expected["namespace"] == NS_OPEN_PDKS_SOURCES:
         same = _open_pdks_equal(expected["value"], installed["value"])
+    elif expected["namespace"] == NS_PDK_STORE:
+        same = _sha_equal(expected["value"], installed["value"])
     else:
         same = expected["value"] == installed["value"]
     return "match" if same else "mismatch"
@@ -228,3 +300,77 @@ def compatibility_warning(result: dict[str, Any]) -> str | None:
         f"determined (expected {expected.get('value')!r}, pinned in "
         f"{result['source']}); compatibility is unverified"
     )
+
+
+def check_expected_version(
+    expected: str, variant_dir: str, sources_version: str | None = None
+) -> dict[str, Any]:
+    """Compare a caller-supplied pin (``klt pdk find --expect-version``)
+    against the installed identity of ``variant_dir``.
+
+    Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
+    "installed": str | None}``. The installed identity is the open_pdks
+    ``SOURCES`` stamp if present, else the lambdapdk ``.fetched-version``
+    marker, else the bundle ``.pdk-store.json`` ``version`` (issue #5624,
+    compared last so an install carrying a real ``SOURCES`` stamp is
+    unchanged). A bare hex SHA (>= 7 chars) is a commit pin: against a store
+    install it resolves into the store namespace (both values are commit
+    SHAs, matched by prefix), otherwise into the ``open_pdks <sha>`` stamp
+    namespace; an ``open_pdks <sha>`` stamp is always an open_pdks identity;
+    any other string is compared exactly in the installed tree's own
+    namespace. Differing namespaces and an unreadable installed identity
+    are ``unknown`` -- callers gating on this must fail closed.
+    """
+    installed: dict[str, str] | None = None
+    for namespace in (NS_OPEN_PDKS_SOURCES, NS_LAMBDAPDK_RELEASE, NS_PDK_STORE):
+        installed, _ = read_installed_identity(variant_dir, namespace, sources_version)
+        if installed:
+            break
+    wanted = expected.strip()
+    if re.fullmatch(rf"[0-9a-fA-F]{{{_MIN_SHORT_HASH},}}", wanted):
+        if installed and installed["namespace"] == NS_PDK_STORE:
+            identity = {"namespace": NS_PDK_STORE, "value": wanted}
+        else:
+            identity = {
+                "namespace": NS_OPEN_PDKS_SOURCES,
+                "value": f"open_pdks {wanted}",
+            }
+    elif _OPEN_PDKS_STAMP.search(wanted):
+        identity = {"namespace": NS_OPEN_PDKS_SOURCES, "value": wanted}
+    else:
+        identity = {
+            "namespace": installed["namespace"] if installed else "",
+            "value": wanted,
+        }
+    return {
+        "status": compare_identities(identity, installed),
+        "expected": expected,
+        "installed": installed["value"] if installed else None,
+    }
+
+
+def check_expected_bundle(variant_dir: str | None, expected: str) -> dict[str, Any]:
+    """Compare a caller-supplied bundle sha256 pin (``klt pdk check
+    --expect-bundle-sha256``, issue #5624) against the ``sha256`` the nearest
+    ``.pdk-store.json`` records.
+
+    Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
+    "installed": str | None}`` -- the same shape as
+    :func:`check_expected_version`. The full 64-hex digest is compared
+    exactly. A stamp that is absent, unreadable, or records no valid
+    64-digit ASCII hexadecimal ``sha256`` is ``unknown``.
+
+    This compares the install's *recorded* bundle hash: it trusts the stamp
+    and never rehashes the unpacked tree (an unpacked tree cannot be hashed
+    back to its tar bytes reproducibly). It therefore detects an install
+    provisioned from a bundle other than the one the pin names -- not
+    in-place corruption of already-unpacked files.
+    """
+    installed = read_store_sha256(variant_dir) if variant_dir is not None else None
+    if installed is None:
+        status = "unknown"
+    elif installed == expected:
+        status = "match"
+    else:
+        status = "mismatch"
+    return {"status": status, "expected": expected, "installed": installed}

@@ -94,7 +94,17 @@ the normal verdict, and the tracker comment keeps attempt 1 on record.
    sentinel as `ci-refusals-reference.md` shows. On `LOOM-RERUN-DENIED …` or
    `ERROR`, go to step 5 and quote the refusal in the verdict.
 3. **On `LOOM-RERUN-OK`**: post a PR comment naming the test, the tracker and
-   the rerun. Add no end-state label and no `loom:ci-failure`. Release the claim
+   the rerun, with this body (the last line is required: `post-verdict.sh`'s
+   stale-read gate counts a marker-less same-user comment as a human comment
+   newer than the review start and refuses your own verdict):
+
+   ```
+   CI flake rerun: `<test>` failed on `<job>` (attempt 1, head `<sha>`).
+   Tracker: #<tracker>. Rerun requested via `loom-daemon forge rerun <run_id> --failed`.
+   <!-- loom:ci-flake-note -->
+   ```
+
+   Add no end-state label and no `loom:ci-failure`. Release the claim
    exactly as "When CI is Pending" does
    (`gh pr edit <number> --remove-label "loom:reviewing"`; `loom:review-requested` stays).
    In single-PR mode you may instead wait for the rerun with
@@ -117,9 +127,19 @@ Run <run_id> (attempt <N>) finished red:
 Not routed as a flake because: <the test is in code this PR changes / attempt <N> of this head is red again / rerun refused: LOOM-RERUN-DENIED …>.
 
 Please fix these issues before the PR can be approved. I'll evaluate again once CI passes.
+
+<!-- loom:ci-gate-only -->
 EOF
 )" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
 ```
 
 Every failing check gets a line, and every line names a test or a step.
+
+**Do not add `loom:blocked` for a CI-only gate** (#10178). The labels above are
+the whole gate; the daemon returns the PR to review when the exact head goes
+green, but only for a verdict carrying `<!-- loom:ci-gate-only -->` (put it in
+the body only when CI is the **sole** finding) and no `loom:blocked` other than
+a park record with no blocker and `reason="ci-gate"`. If you must park it:
+`loom-daemon park-record apply --issue <number> --reason ci-gate --by judge`.
+

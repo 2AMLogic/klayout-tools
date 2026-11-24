@@ -22,6 +22,7 @@ Exit codes (see ``docs/cli/synthesize.md`` for the full table):
         multiply-driven net (issue #1588). Follows `klt drc`'s own
         convention of a nonzero exit on findings from an otherwise
         successful run.
+    4 - generic ABC timed out with a retained pre-ABC checkpoint
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. A failed equivalence gate is folded into exit 1 rather than
 reusing `klt equiv`'s own 3/4 split -- `klt synthesize`'s own pass/fail
@@ -40,6 +41,11 @@ never a false pass.
 """
 
 import argparse
+import os
+import shutil
+import sys
+import tempfile
+from contextlib import ExitStack
 
 from ..env_provenance import render_path_field
 from ..synthesize import (
@@ -48,7 +54,13 @@ from ..synthesize import (
     rerun_synthesize_report,
     run_synthesize,
 )
-from .output import emit_error, emit_success, render_rerun_drift, render_table
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    render_table,
+)
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
@@ -64,13 +76,59 @@ EXIT_MATCH = 0
 EXIT_DRIFTED = 3
 
 
+def configure(parser: argparse.ArgumentParser) -> None:
+    """Add ``--yosys-timeout-s`` (issue #5773) and bind ``run`` as the handler.
+
+    Lives here, not in ``parser.py``, to keep that file under its size
+    ratchet -- the same split as :func:`.lvs_cmd.configure`.
+    """
+    parser.add_argument(
+        "--yosys-timeout-s",
+        dest="yosys_timeout_s",
+        default=None,
+        help=(
+            "per-invocation Yosys wall-clock budget in seconds for this run "
+            "(default: 300; cap 3600) -- overrides the request document's "
+            "`yosys_timeout_s` field. The KLT_YOSYS_TIMEOUT_S environment "
+            "variable also overrides the request field; the flag wins over "
+            "the env var. Must be re-passed with `--check --rerun`, like "
+            "`--equiv-timeout-s`. See docs/cli/synthesize.md's 'Yosys "
+            "budget overrides' section."
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
+    if args.request != "-":
+        return _run_request(args)
+    # The engine reopens its request for provenance and replay. Spool stdin
+    # beside its relative inputs so every reader sees the same request bytes.
+    with ExitStack() as cleanup:
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=".", delete=False
+            ) as doc:
+                cleanup.callback(os.unlink, doc.name)
+                shutil.copyfileobj(sys.stdin, doc)
+        except (OSError, UnicodeError) as exc:
+            return emit_error(
+                "synthesize", f"could not read stdin request: {exc}", args.format
+            )
+        return _run_request(argparse.Namespace(**{**vars(args), "request": doc.name}))
+
+
+def _run_request(args: argparse.Namespace) -> int:
     if args.check is not None:
         return _run_check(args)
 
     if args.rerun:
         return emit_error(
             "synthesize", "--rerun requires --check <report>", args.format
+        )
+    if args.skip_deck:
+        return emit_error(
+            "synthesize", "--skip-deck requires --check <report>", args.format
         )
 
     try:
@@ -80,12 +138,17 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
+            equiv_engine=args.equiv_engine,
+            yosys_timeout_s=args.yosys_timeout_s,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
+    if report["status"] == "inconclusive":
+        emit_success(report, args.format, _print_partial)
+        return 4
     emit_success(report, args.format, _print_text)
 
     if report["structural"]["has_critical"]:
@@ -102,6 +165,12 @@ def _run_check(args: argparse.Namespace) -> int:
     hashes but never the request that produced it, so there is nothing to
     reconstruct the inputs from. See `_report_verify.py`'s module docstring.
     """
+    if args.skip_deck and args.rerun:
+        return emit_error(
+            "synthesize",
+            "--skip-deck is cheap-mode only; --rerun runs Yosys and needs the liberty",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_synthesize_report(
@@ -111,6 +180,8 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
+                equiv_engine=args.equiv_engine,
+                yosys_timeout_s=args.yosys_timeout_s,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )
@@ -120,27 +191,16 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                netlist_override=args.netlist,
+                skip_deck=args.skip_deck,
             )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_sta(report: dict) -> None:
@@ -195,6 +255,20 @@ def _print_memory_mapping(report: dict) -> None:
     blackboxes = report.get("blackbox_modules")
     if blackboxes:
         print(f"blackbox_modules (area not included): {', '.join(blackboxes)}")
+
+
+def _print_partial(report: dict) -> None:
+    partial = report["partial"]
+    print(f"status: {report['status']} ({report['reason']})")
+    print(f"stage: {partial['stage']} (ABC budget {partial['abc_timeout_s']:g} s)")
+    print(f"netlist_path: {render_path_field(partial['netlist_path'])}")
+    print(f"stats_path: {render_path_field(partial['stats_path'])}")
+    print("cell_counts:")
+    for cell, count in sorted(partial["cell_counts"].items()):
+        print(f"  {cell}: {count}")
+    for capability in ("equivalence", "restructuring"):
+        if report.get(capability):
+            print(f"{capability}: {report[capability]['status']}")
 
 
 def _print_text(report: dict) -> None:

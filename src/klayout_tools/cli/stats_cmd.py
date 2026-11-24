@@ -6,6 +6,7 @@ every other ``klt`` subcommand — see ``docs/json-contract.md``.
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..stats import StatsError, stats_report
 from .output import emit_error, emit_success, render_table
 
@@ -13,7 +14,10 @@ from .output import emit_error, emit_success, render_table
 def run(args: argparse.Namespace) -> int:
     try:
         window_layers = (
-            [_parse_layer_spec(spec) for spec in args.window_layer]
+            [
+                parse_layer_spec(spec, "--window-layer", StatsError)
+                for spec in args.window_layer
+            ]
             if args.window_layer
             else None
         )
@@ -23,6 +27,7 @@ def run(args: argparse.Namespace) -> int:
             top=args.top,
             density_window=args.density_window,
             window_layers=window_layers,
+            geometry_digest=args.geometry_digest,
         )
     except StatsError as exc:
         return emit_error("stats", str(exc), args.format)
@@ -31,18 +36,12 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_layer_spec(spec: str) -> tuple[int, int]:
-    try:
-        layer, datatype = spec.split("/")
-        return int(layer), int(datatype)
-    except ValueError:
-        raise StatsError(f"--window-layer must look like L/D, got: {spec}") from None
-
-
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"top_cell: {report['top_cell'] if report['top_cell'] is not None else '-'}")
+    digest = report["geometry_digest"]
+    print(f"geometry_digest: {digest if digest is not None else '-'}")
 
     bbox = report["bbox_um"]
     print(

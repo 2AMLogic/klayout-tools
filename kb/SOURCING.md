@@ -200,8 +200,9 @@ Fatal error: detected during BSIM4v5.5.0 parameter checking for
 
 **Verified against this repo's pinned toolchain** — ngspice-46, sky130A at
 the exact commit `scripts/aws/build-remote-sim-ami.sh` pins
-(`c6d73a35f524070e85faff4a6a9eef49553ebc2b`), resolved via a normal
-`PDK_ROOT`/`volare` install (the same resolution `klt sim`/`klt pdk` use) —
+(`c6d73a35f524070e85faff4a6a9eef49553ebc2b` when measured; the pin is now
+`f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`), resolved via a normal
+`PDK_ROOT`/`ciel` install (the same resolution `klt sim`/`klt pdk` use) —
 2026-09-14, `ngspice -b` on a standalone `.op` deck:
 
 ```spice

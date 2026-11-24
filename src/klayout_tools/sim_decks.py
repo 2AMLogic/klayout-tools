@@ -62,11 +62,9 @@ or image selection) raises before any upload, SSH push, or fleet launch --
 the same "refuse before anything billable" discipline the corner backends
 apply.
 
-Dependency surface mirrors ``sim_remote.py``/``sim_batch.py``: ``sim.py``
-imports this module's entry point, while this module's need for
-``sim.SimError`` (and the couple of other ``sim`` helpers it reuses) is
-imported *inside* the functions that use them, so there is no load-time
-cycle. Tests patch ``RemoteLauncher`` and the ``remote_transport``/
+``sim.py`` imports this module's entry point. The shared ``SimError`` comes
+from ``sim_errors``. Functions import the remaining ``sim`` helpers when called.
+Tests patch ``RemoteLauncher`` and the ``remote_transport``/
 ``sim_batch`` call sites by this module's namespace, the same way
 ``tests/test_sim.py`` patches ``sim.RemoteLauncher``.
 """
@@ -76,7 +74,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -85,8 +82,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from . import _provenance, remote_transport, sim_batch, sim_remote, sim_staging
+from . import (
+    _provenance,
+    remote_transport,
+    sim_batch,
+    sim_batch_async,
+    sim_batch_plan,
+    sim_deck_expand,
+    sim_decks_staging,
+    sim_remote,
+    sim_staging,
+)
+from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
+from .sim_errors import SimError, request_options
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -101,11 +110,22 @@ DECK_MODE = "decks"
 DECK_STDOUT_FILENAME = "stdout.bin"
 DECK_STDERR_FILENAME = "stderr.bin"
 
+#: Unit-relative completion record (issue #3957): written atomically after a
+#: unit's streams and declared outputs are on disk, and consulted by
+#: ``--resume`` to decide whether a valid result already exists.
+UNIT_RECORD_FILENAME = "unit.json"
+
+#: Bumped only when the record's own shape changes incompatibly; a record
+#: carrying any other value is "not complete" (the unit re-runs).
+UNIT_RECORD_VERSION = 1
+
 #: Unit-relative names the runner itself writes (the captured engine
 #: streams). No staged file or declared output may claim them -- a stream
 #: write would silently overwrite the one, and the other would misreport a
 #: stream as a declared output.
-_RESERVED_UNIT_NAMES = frozenset({DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME})
+_RESERVED_UNIT_NAMES = frozenset(
+    {DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME, UNIT_RECORD_FILENAME}
+)
 
 #: Exit codes a remote deck job may return with a parseable report on
 #: stdout: 0 (every unit passed) and 4 (at least one unit errored/timed
@@ -185,16 +205,12 @@ def _resolve_local_path(ref: str, *, request_dir: str, where: str) -> str:
 
 
 def _validated_timeout(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise _deck_error(f"{where} must be a positive number of seconds")
-    if value <= 0:
+    if not is_number(value) or value <= 0:
         raise _deck_error(f"{where} must be a positive number of seconds")
     return float(value)
 
 
 def _deck_error(message: str):
-    from .sim import SimError
-
     return SimError(message)
 
 
@@ -227,7 +243,7 @@ def plan_deck_units(
     Raises ``sim.SimError`` naming the offending ``request.decks[i]`` field
     for every rejection.
     """
-    from .sim import DEFAULT_TIMEOUT_S
+    from .sim import DEFAULT_TIMEOUT_S, _validate_ngspice_init
 
     decks = request.get(DECKS_FIELD)
     if not isinstance(decks, list) or not decks:
@@ -247,14 +263,18 @@ def plan_deck_units(
             "-- one off-host job runs the whole deck list across its own "
             "worker pool (options.max_workers)"
         )
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _deck_error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = DEFAULT_TIMEOUT_S
     if options.get("timeout_s") is not None:
         default_timeout = _validated_timeout(
             options.get("timeout_s"), "request.options.timeout_s"
         )
+    # Issue #5738: the deck path honours options.ngspice_init exactly as the
+    # corner path does. Validate it here -- plan_deck_units is the check
+    # every backend (and the off-host worker's own run) funnels through, so
+    # a malformed value is a named error before any unit runs or anything
+    # is uploaded, never a silently dropped option.
+    ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
 
     roots = sim_staging.host_resolved_roots(request)
     seen_ids: set[str] = set()
@@ -281,7 +301,32 @@ def plan_deck_units(
                 allow_worker_form=allow_worker_form,
             )
         )
+    if ngspice_init_lines:
+        _refuse_staged_spiceinit(units)
     return units
+
+
+def _refuse_staged_spiceinit(units: list[dict[str, Any]]) -> None:
+    """Refuse a unit that stages its own ``.spiceinit`` while
+    ``options.ngspice_init`` is set (issue #5738): the runner materializes
+    the option at exactly ``<unit_dir>/.spiceinit``, and a staged deck,
+    input, or include landing on that same name would be silently
+    overwritten -- letting either side win silently is this issue's own
+    defect class, so the combination is rejected by name instead (the
+    ``_reject_corner_only_fields`` reasoning)."""
+    for unit in units:
+        staged = (
+            unit["deck"]["name"],
+            *(item["name"] for item in unit["inputs"]),
+            *(item["name"] for item in unit["includes"]),
+        )
+        if ".spiceinit" in staged:
+            raise _deck_error(
+                f"deck unit {unit['id']!r} stages a file named '.spiceinit' "
+                "while options.ngspice_init is set -- both write the same "
+                "file in the unit's directory; remove the staged file or "
+                "the option"
+            )
 
 
 def _reject_corner_only_fields(request: dict[str, Any]) -> None:
@@ -542,8 +587,6 @@ def _scan_deck_closure(
     ngspice will on the worker. Bounded by ``sim_staging``'s per-closure
     file/byte caps.
     """
-    from .sim import SimError
-
     includes: list[dict[str, Any]] = []
     host_resolved: list[str] = []
     seen: set[tuple[str, str]] = set()
@@ -564,7 +607,7 @@ def _scan_deck_closure(
             )
         text = raw.decode("utf-8", errors="replace")
         for index, line in enumerate(text.splitlines(), start=1):
-            directive_target = _closure_directive_target(
+            directive_target = sim_deck_expand.closure_directive_target(
                 line, where=f"{where} line {index}"
             )
             if directive_target is None:
@@ -599,51 +642,12 @@ def _scan_deck_closure(
                 occupied, rel_dest, resolved, where=f"{where} line {index}"
             )
             includes.append({"staged": resolved, "name": rel_dest})
-            queue.append((resolved, rel_dest))
+            if directive != "`pre_osdi`":  # a binary library holds no directives
+                queue.append((resolved, rel_dest))
     return includes, host_resolved
 
 
-def _closure_directive_target(line: str, *, where: str) -> tuple[str, str] | None:
-    """The file a deck line references, as ``(directive, target)``, or
-    ``None`` for a line that names no file.
-
-    ``.include``/``.inc`` always name one. ``.lib`` is two-faced (the same
-    split ``sim_staging._Stager._parse_lib`` makes, #2668): one token is a
-    section *definition* (``.lib tt`` ... ``.endl``) and names no file; two
-    tokens are a file-bearing ``.lib <file> <section>`` reference -- the
-    model-reference form PDK corner selection uses -- whose file must be
-    staged, left to the executing host, or rejected exactly like an include
-    target. Any other ``.lib`` shape is rejected by name rather than
-    guessed at, so it cannot slip past the pre-launch check."""
-    from .sim import SimError
-
-    match = sim_staging._INCLUDE_RE.match(line)
-    if match is not None:
-        return "`.include`", sim_staging._unquote(match.group("target"))
-    lib_match = sim_staging._LIB_RE.match(line)
-    if lib_match is None:
-        return None
-    try:
-        tokens = shlex.split(lib_match.group("rest"))
-    except ValueError as exc:
-        tokens = []
-        problem = str(exc)
-    else:
-        problem = f"{len(tokens)} argument(s)"
-    if len(tokens) == 1:
-        return None
-    if len(tokens) == 2:
-        return "`.lib`", tokens[0]
-    raise SimError(
-        f"{where}: unsupported `.lib` directive form ({problem}) -- deck-list "
-        "requests understand `.lib <section>` definitions and "
-        "`.lib <file> <section>` references only"
-    )
-
-
 def _read_closure_file(path: str, *, where: str) -> bytes:
-    from .sim import SimError
-
     try:
         with open(path, "rb") as handle:
             return handle.read()
@@ -667,8 +671,6 @@ def _classify_include_target(
     PDK-rooted). Anything that would need the deck rewritten -- an absolute
     local path, a ``..``-climbing relative, a file that resolves nowhere --
     raises ``SimError`` naming the directive site."""
-    from .sim import SimError
-
     if not target or "$" in target:
         return None, target
     expanded = os.path.expanduser(target)
@@ -679,8 +681,9 @@ def _classify_include_target(
         raise SimError(
             f"{where}: absolute {directive} target {target!r} cannot be "
             "staged without modifying the deck -- reference the file by a "
-            "path relative to the deck, or move it under the PDK root so "
-            "the executing host resolves it"
+            "path relative to the deck, or, for a file in the runner's PDK, "
+            "write it as `$PDK_ROOT/<relative path>` (the executing host "
+            "expands it; the deck bytes are shipped unchanged)"
         )
     resolved = os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(origin_path)), expanded)
@@ -713,23 +716,6 @@ def _classify_include_target(
 # --------------------------------------------------------------------------- #
 
 
-def _alloc_staged_name(used: set[str], tag: str, kind: str, base: str) -> str:
-    """A collision-free flat staged name: sanitized basename, prefixed with
-    the unit's index and role so two units can never collide (only unit
-    ``u<i>``'s own files share its prefix, and ``kind``+counter separates
-    those). The staged name is internal -- the deck runner copies each file
-    to its declared in-unit destination before the engine runs -- so only
-    transport safety matters here, never what the engine sees."""
-    base = sim_staging._UNSAFE_NAME_CHARS.sub("_", base) or "file"
-    candidate = f"{tag}-{kind}-{base}"
-    counter = 1
-    while candidate in used:
-        candidate = f"{tag}-{kind}-{counter}-{base}"
-        counter += 1
-    used.add(candidate)
-    return candidate
-
-
 def stage_deck_job(
     request: dict[str, Any], *, request_dir: str
 ) -> tuple[list[sim_staging.StagedFile], dict[str, Any]]:
@@ -746,55 +732,52 @@ def stage_deck_job(
     ``{"staged": <flat name>, "name": <unit-relative destination>}`` for
     every deck, input, and staged include, plus the ``host_resolved``
     targets left verbatim for provenance.
+
+    Naming and content dedup are
+    :class:`sim_decks_staging.DeckStager`'s: files whose bytes are
+    identical ship once, under one shared name every unit that needs them
+    references (issue #5539), which neither :func:`_copy_unit_files` (it
+    copies, never moves) nor :func:`_unit_input_key` (it hashes by
+    unit-relative ``name``) can notice.
     """
     units = plan_deck_units(request, request_dir=request_dir, allow_worker_form=False)
-    used: set[str] = {remote_transport.REMOTE_REQUEST_FILENAME}
-    files: list[sim_staging.StagedFile] = []
+    stager = sim_decks_staging.DeckStager(
+        reserved=[remote_transport.REMOTE_REQUEST_FILENAME]
+    )
+    stage = stager.stage
     worker_units: list[dict[str, Any]] = []
     for index, unit in enumerate(units):
         tag = f"u{index}"
-        deck_staged = _alloc_staged_name(
-            used, tag, "deck", os.path.basename(unit["deck"]["staged"])
+        deck_staged = stage(
+            unit["deck"]["staged"],
+            tag=tag,
+            kind="deck",
+            label=f"deck {unit['id']}",
         )
-        files.append(
-            sim_staging.StagedFile(
-                staged_name=deck_staged,
-                label=f"deck {unit['id']}",
-                local_path=unit["deck"]["staged"],
-            )
-        )
-        staged_inputs = []
-        for input_index, item in enumerate(unit["inputs"]):
-            staged = _alloc_staged_name(
-                used,
-                tag,
-                f"in{input_index}",
-                os.path.basename(item["staged"]),
-            )
-            files.append(
-                sim_staging.StagedFile(
-                    staged_name=staged,
+        staged_inputs = [
+            {
+                "staged": stage(
+                    item["staged"],
+                    tag=tag,
+                    kind=f"in{input_index}",
                     label=f"input {item['name']} of {unit['id']}",
-                    local_path=item["staged"],
-                )
-            )
-            staged_inputs.append({"staged": staged, "name": item["name"]})
-        staged_includes = []
-        for include_index, item in enumerate(unit["includes"]):
-            staged = _alloc_staged_name(
-                used,
-                tag,
-                f"inc{include_index}",
-                os.path.basename(item["staged"]),
-            )
-            files.append(
-                sim_staging.StagedFile(
-                    staged_name=staged,
+                ),
+                "name": item["name"],
+            }
+            for input_index, item in enumerate(unit["inputs"])
+        ]
+        staged_includes = [
+            {
+                "staged": stage(
+                    item["staged"],
+                    tag=tag,
+                    kind=f"inc{include_index}",
                     label=f"include {item['name']} of {unit['id']}",
-                    local_path=item["staged"],
-                )
-            )
-            staged_includes.append({"staged": staged, "name": item["name"]})
+                ),
+                "name": item["name"],
+            }
+            for include_index, item in enumerate(unit["includes"])
+        ]
         worker_units.append(
             {
                 "id": unit["id"],
@@ -807,9 +790,13 @@ def stage_deck_job(
             }
         )
     options = request.get("options") or {}
+    # Issue #5738: ngspice_init ships in the worker request so the worker's
+    # own local-parallel deck run materializes it -- and so the generic
+    # runner feature detector (`_uses_option("ngspice_init")`, min runner
+    # 0.7.0) sees it in the request document this job actually runs.
     worker_options = {
         key: options[key]
-        for key in ("timeout_s", "max_workers", "ngspice_binary")
+        for key in ("timeout_s", "max_workers", "ngspice_binary", "ngspice_init")
         if options.get(key) is not None
     }
     worker_request = {
@@ -819,7 +806,7 @@ def stage_deck_job(
         DECKS_FIELD: worker_units,
         "options": worker_options,
     }
-    return files, worker_request
+    return stager.files, worker_request
 
 
 # --------------------------------------------------------------------------- #
@@ -850,6 +837,7 @@ def run_deck_unit(
     unit_dir: str,
     staging_root: str,
     ngspice_binary: str,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one deck unit in isolation and return its evidence-first result.
 
@@ -858,13 +846,22 @@ def run_deck_unit(
     in, and ``ngspice -b <deck>`` runs with ``unit_dir`` as ``cwd`` --
     exactly the invocation a local ``ngspice -b`` in the caller's own
     harness would be, so its stdout/stderr bytes are comparable evidence.
+    ``ngspice_init`` (issue #5738, the already-validated
+    ``options.ngspice_init`` lines -- see
+    ``sim._validate_ngspice_init``) is materialized as
+    ``unit_dir/.spiceinit`` after the unit's files are copied in and
+    before the engine spawns, so ``cwd=unit_dir`` makes ngspice read it.
     Streams are captured as raw bytes and written unmodified; a timeout
     keeps whatever the engine emitted before it was killed; a spawn failure
     leaves empty stream files so the result shape is uniform. Never raises
     for anything the *engine* did -- only evidence, statuses, and
     diagnostics.
     """
-    from .sim import _extract_engine_version
+    from .sim import (
+        _extract_engine_version,
+        _probe_engine_version,
+        _write_spiceinit,
+    )
 
     shutil.rmtree(unit_dir, ignore_errors=True)
     os.makedirs(unit_dir, exist_ok=True)
@@ -873,12 +870,25 @@ def run_deck_unit(
         if parent:
             os.makedirs(parent, exist_ok=True)
     _copy_unit_files(unit, unit_dir=unit_dir, staging_root=staging_root)
+    # Issue #5738: materialize options.ngspice_init in the unit's own
+    # directory -- `_spawn_engine` runs with cwd=unit_dir, so ngspice reads
+    # exactly this file before touching the deck. Only called with lines
+    # set: the directory was just recreated (no stale file can exist), and
+    # a caller-staged '.spiceinit' input -- the documented pre-#5738
+    # workaround -- must survive untouched when the option is unset.
+    if ngspice_init:
+        _write_spiceinit(unit_dir, ngspice_init)
+    input_key = _unit_input_key(unit, staging_root=staging_root)
 
     deck_name = unit["deck"]["name"]
     diagnostics: list[dict[str, str]] = []
     started = time.monotonic()
     spawn = _spawn_engine(
-        [ngspice_binary, "-b", deck_name],
+        [
+            ngspice_binary,
+            "-b",
+            sim_deck_expand.prepare_run_deck(unit, unit_dir=unit_dir),
+        ],
         unit_dir=unit_dir,
         timeout_s=unit["timeout_s"],
         diagnostics=diagnostics,
@@ -893,12 +903,19 @@ def run_deck_unit(
         with open(os.path.join(unit_dir, name), "wb") as handle:
             handle.write(payload)
 
+    # `ngspice -b <deck>` prints no version banner, so the stdout extraction
+    # finds nothing; ask the binary itself (issue #4543). A unit whose engine
+    # never spawned has no engine to attribute and keeps `null`.
     engine_version = _extract_engine_version(
         spawn.stdout.decode("utf-8", errors="replace")
     )
+    if engine_version is None and spawn.exit_code is not None:
+        engine_version = _probe_engine_version("ngspice", ngspice_binary)
     status = _unit_status(spawn, diagnostics)
+    if status == "error" and spawn.exit_code is not None:
+        diagnostics.extend(_engine_failure_diagnostics(spawn))
     outputs, missing_outputs = _resolve_declared_outputs(unit, unit_dir=unit_dir)
-    return {
+    result = {
         "id": unit["id"],
         "status": status,
         "exit_code": spawn.exit_code,
@@ -914,6 +931,143 @@ def run_deck_unit(
         "host_resolved": list(unit.get("host_resolved", ())),
         "diagnostics": diagnostics,
     }
+    _write_unit_record(
+        unit_dir,
+        key={**input_key, "engine_version": engine_version},
+        result=result,
+        diagnostics=diagnostics,
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Completion records and --resume (issue #3957)
+# --------------------------------------------------------------------------- #
+
+
+def _staged_source(ref: dict[str, Any], staging_root: str) -> str:
+    source = ref["staged"]
+    return source if os.path.isabs(source) else os.path.join(staging_root, source)
+
+
+def _unit_input_key(unit: dict[str, Any], *, staging_root: str) -> dict[str, Any]:
+    """The engine-independent part of a unit's resume key: the content
+    hashes of its deck, declared inputs and staged include closure (by
+    unit-relative name), its declared outputs, and its timeout. A seed the
+    caller bakes into the deck is part of ``deck_sha256``, so "same deck
+    and seed set" needs no field of its own."""
+
+    def hashes(refs: list[dict[str, Any]]) -> dict[str, str | None]:
+        return {
+            ref["name"]: _provenance.sha256_file(_staged_source(ref, staging_root))
+            for ref in refs
+        }
+
+    return {
+        "engine": "ngspice",
+        "deck": unit["deck"]["name"],
+        "deck_sha256": hashes([unit["deck"]])[unit["deck"]["name"]],
+        "inputs": hashes(unit["inputs"]),
+        "includes": hashes(unit["includes"]),
+        "outputs": sorted(unit.get("outputs", ())),
+        "timeout_s": unit["timeout_s"],
+    }
+
+
+def _write_unit_record(
+    unit_dir: str,
+    *,
+    key: dict[str, Any],
+    result: dict[str, Any],
+    diagnostics: list[dict[str, str]],
+) -> None:
+    """Write ``<unit_dir>/unit.json`` atomically (temp file + ``os.replace``,
+    the discipline ``sim._Checkpoint._flush_locked`` uses), so an interrupted
+    run leaves either no record or a whole one. A write failure costs only
+    the unit's resumability: it is a warning diagnostic, never a failed
+    unit."""
+    record = {
+        "record_version": UNIT_RECORD_VERSION,
+        "key": key,
+        "output_sha256": {
+            relative: _provenance.sha256_file(os.path.join(unit_dir, relative))
+            for relative in result["outputs"]
+        },
+        "result": result,
+    }
+    final = os.path.join(unit_dir, UNIT_RECORD_FILENAME)
+    temp = f"{final}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, final)
+    except (OSError, TypeError, ValueError) as exc:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "unit_record_unwritten",
+                "message": f"could not write {UNIT_RECORD_FILENAME} ({exc}) -- "
+                "this unit cannot be skipped by --resume",
+            }
+        )
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+
+
+def _keys_match(recorded: Any, current: dict[str, Any]) -> bool:
+    """Equal on every field; ``engine_version`` only when the current side
+    knows it (the batch fleet's engine cannot be probed before submit)."""
+    if not isinstance(recorded, dict):
+        return False
+    for field, value in current.items():
+        if field == "engine_version" and value is None:
+            continue
+        if recorded.get(field) != value:
+            return False
+    return True
+
+
+def _load_complete_unit(
+    unit: dict[str, Any], *, unit_dir: str, key: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The recorded result of a unit that is verifiably complete for ``key``,
+    else ``None`` ("not complete -- run it"). Complete means the record
+    parses, is this version, matches the key, recorded ``pass``, and every
+    declared output and both streams still exist (outputs with their
+    recorded hash). Anything missing, partial, unparseable or mismatched is
+    simply "not complete": nothing is deleted here and nothing raises."""
+    try:
+        with open(
+            os.path.join(unit_dir, UNIT_RECORD_FILENAME), encoding="utf-8"
+        ) as handle:
+            record = json.load(handle)
+        result = record["result"]
+        if (
+            record["record_version"] != UNIT_RECORD_VERSION
+            or result["id"] != unit["id"]
+            or result["status"] != "pass"
+            or result["missing_outputs"]
+            or not _keys_match(record["key"], key)
+        ):
+            return None
+        recorded_hashes = record["output_sha256"]
+        if sorted(recorded_hashes) != sorted(result["outputs"]) or sorted(
+            result["outputs"]
+        ) != sorted(unit.get("outputs", ())):
+            return None
+        for relative, digest in recorded_hashes.items():
+            if _provenance.sha256_file(os.path.join(unit_dir, relative)) != digest:
+                return None
+        for stream in (DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME):
+            if not os.path.isfile(os.path.join(unit_dir, stream)):
+                return None
+        return {**result, "resumed": True}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 class _EngineSpawn:
@@ -1006,6 +1160,47 @@ def _unit_status(spawn: _EngineSpawn, diagnostics: list[dict[str, str]]) -> str:
             }
         )
     return "error"
+
+
+#: Bytes of each captured stream read for failure classification, and the
+#: size of the fallback tail when nothing classifies (issue #4603).
+_ENGINE_FAILURE_HEAD_BYTES = 256 * 1024
+_ENGINE_FAILURE_TAIL_LINES = 12
+_ENGINE_FAILURE_TAIL_CHARS = 1500
+
+
+def _engine_failure_diagnostics(spawn: _EngineSpawn) -> list[dict[str, str]]:
+    """Evidence for a non-zero engine exit (issue #4603): the ngspice
+    deck-abort diagnostics ``_classify_diagnostics`` finds in the captured
+    streams, else a bounded tail of stderr (then stdout) so the cause is
+    never only in ``stderr.bin``. Evidence only -- grading is unchanged."""
+    from .sim import _NGSPICE_FATAL_CODES, _classify_diagnostics
+
+    def decode(payload: bytes) -> str:
+        return payload[:_ENGINE_FAILURE_HEAD_BYTES].decode("utf-8", errors="replace")
+
+    stderr_text, stdout_text = decode(spawn.stderr), decode(spawn.stdout)
+    combined = f"{stderr_text}\n{stdout_text}"
+    fatal = [
+        d
+        for d in _classify_diagnostics(combined)
+        if d.get("code") in _NGSPICE_FATAL_CODES
+    ]
+    if fatal:
+        return fatal
+    for label, text in (("stderr", stderr_text), ("stdout", stdout_text)):
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if lines:
+            tail = "\n".join(lines[-_ENGINE_FAILURE_TAIL_LINES:])
+            tail = tail[-_ENGINE_FAILURE_TAIL_CHARS:]
+            return [
+                {
+                    "severity": "error",
+                    "code": "engine_output_tail",
+                    "message": f"ngspice {label} tail: {tail}",
+                }
+            ]
+    return []
 
 
 def _resolve_declared_outputs(
@@ -1109,12 +1304,14 @@ def _run_decks_local(
     ngspice_binary: str,
     max_workers: int,
     backend: str,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run every unit locally -- serially for ``backend="local"`` (one unit
     at a time, results strictly in request order) or across a bounded
     thread pool for ``local-parallel`` (still reported in request order;
     each unit's fresh directory is its isolation, so pool width changes
-    nothing about the evidence)."""
+    nothing about the evidence). ``ngspice_init`` (issue #5738) is
+    materialized per unit by :func:`run_deck_unit`."""
     os.makedirs(outdir, exist_ok=True)
     results: list[dict[str, Any] | None] = [None] * len(units)
     if max_workers <= 1 or len(units) <= 1:
@@ -1124,6 +1321,7 @@ def _run_decks_local(
                 unit_dir=os.path.join(outdir, unit["id"]),
                 staging_root=staging_root,
                 ngspice_binary=ngspice_binary,
+                ngspice_init=ngspice_init,
             )
     else:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(units))) as pool:
@@ -1134,6 +1332,7 @@ def _run_decks_local(
                     unit_dir=os.path.join(outdir, unit["id"]),
                     staging_root=staging_root,
                     ngspice_binary=ngspice_binary,
+                    ngspice_init=ngspice_init,
                 ): index
                 for index, unit in enumerate(units)
             }
@@ -1159,8 +1358,6 @@ def _require_remote_config(request: dict[str, Any]) -> tuple[Any, str]:
     (``models.pdk`` selects the baked AMI; ``remote.ssh_key_path`` pairs
     with ``remote.key_name``) -- same messages, so a deck request missing
     them fails exactly like a corner request would."""
-    from .sim import SimError
-
     remote_spec = request.get("remote") or {}
     pdk = (request.get("models") or {}).get("pdk")
     if not pdk:
@@ -1236,7 +1433,6 @@ def _run_decks_remote(
     ``RemoteLauncher``'s context-manager contract, exactly as for corners.
     """
     from .remote_launcher import RemoteLaunchError
-    from .sim import SimError
 
     remote_spec = request.get("remote") or {}
     pdk, ssh_key_path = _require_remote_config(request)
@@ -1419,28 +1615,28 @@ def _recover_failed_remote_deck_job(
 # --------------------------------------------------------------------------- #
 
 
-def _deck_batch_command(version_check: str) -> str:
+def _deck_batch_command(
+    version_check: str, worker_request: dict[str, Any], model_names: list[str]
+) -> str:
     """The batch job command for a deck-list request: the same preflight +
     ``klt sim --backend local-parallel`` invocation the corner job builds,
     with ``--outdir`` pointed into ``$EDA_OUTPUT_DIR`` **unconditionally**
     (unit streams are the result, not an opt-in artifact) and the report
     redirected to ``report.json`` (stdout is not a clean channel back --
-    see ``sim_batch._build_batch_job_spec``)."""
-    command = (
-        sim_batch._runner_preflight_script(
+    see ``sim_batch._build_batch_job_spec``). Includes the #5328 capture."""
+    return (
+        sim_batch._job_stderr_capture_prefix()
+        + sim_batch._runner_preflight_script(
             _provenance._klt_version(),
             enforce=version_check == "enforce",
+            capture=sim_batch._worker_capture_command(worker_request, model_names),
         )
         + sim_batch._deck_preflight_lines()
-    ) + (
-        f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
+        + f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
         f' --outdir "$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}"'
         f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-        "; rc=$?; wait $! 2>/dev/null; exit $rc"
     )
-    return command
 
 
 def _read_deck_report(local_dir: str) -> dict[str, Any]:
@@ -1540,7 +1736,8 @@ def _recover_failed_deck_job(
     cleared (no previous run's files may pose as this job's evidence).
     Never resubmits and never raises -- a collection problem is recorded on
     the units while the primary job failure stays authoritative. The caller
-    fills in the report's ``outdir`` and the ``environment.remote`` block."""
+    fills in the report's ``outdir``; ``environment.remote`` carries the
+    runner identity read from the collected outputs."""
     units = worker_request[DECKS_FIELD]
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
@@ -1552,19 +1749,26 @@ def _recover_failed_deck_job(
     note: str | None = None
     environment: dict[str, Any] = {
         **sim_batch._batch_environment(config, job_id, status),
-        **sim_batch._read_runner_identity(None),
+        **sim_batch._read_job_identity(None),
     }
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-            environment = {
-                **sim_batch._batch_environment(config, job_id, status),
-                **sim_batch._read_runner_identity(collected),
-            }
+            environment.update(sim_batch._read_job_identity(collected, worker_request))
             try:
                 report = _read_deck_report(collected)
             except sim_batch.BatchError:
-                pass
+                # Not a deck report: the preflight (or klt itself) writes
+                # its klt error envelope to report.json, so classify that
+                # before falling back to the stderr tee.
+                try:
+                    kind, runner_error = sim_batch._classify_collected_report(
+                        sim_batch.read_collected_report(collected)
+                    )
+                except sim_batch.BatchError:
+                    kind = "unusable"
+                if kind != "error":
+                    runner_error = None
             else:
                 _install_unit_trees(
                     units,
@@ -1573,8 +1777,10 @@ def _recover_failed_deck_job(
                         collected, sim_batch.BATCH_ARTIFACTS_DIRNAME
                     ),
                 )
+                report.setdefault("environment", {})["remote"] = environment
                 return report
-            runner_error, note = sim_batch._read_stderr_envelope(collected)
+            if runner_error is None:
+                runner_error, note = sim_batch._read_stderr_envelope(collected)
     except (sim_batch.BatchError, OSError) as exc:
         note = str(exc)
     _install_unit_trees(units, outdir=outdir, source_root=None)
@@ -1600,30 +1806,26 @@ def _recover_failed_deck_job(
     )
 
 
-def _run_decks_batch(
+def _prepare_decks_batch(
     request: dict[str, Any],
     files: list[sim_staging.StagedFile],
     worker_request: dict[str, Any],
-    *,
-    outdir: str,
-) -> dict[str, Any]:
-    """Submit the deck list to 2am's EDA batch fleet as one job and collect
-    its report -- the batch analog of :func:`_run_decks_remote`, reusing
-    the batch transport primitives (submit/launch/poll/collect and the
-    runner-identity preflight) exactly as the corner backend does. Job
-    timeout is the fully-serial worst case (every unit's own timeout, one
-    after another) plus slack; the fleet's own ``$EDA_JOB_CONCURRENCY``
-    sizing still makes a real run far faster."""
-    from .sim import SimError
-
-    units = worker_request[DECKS_FIELD]
-    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+) -> tuple[sim_batch.BatchConfig, sim_batch.BatchJobSpec]:
+    """Resolve the batch config and build the one job spec for a deck list,
+    before any S3 write. Job timeout is the fully-serial worst case (every
+    unit's own timeout, one after another) plus slack; the fleet's own
+    ``$EDA_JOB_CONCURRENCY`` sizing still makes a real run far faster."""
+    serial_worst_s = sim_batch_plan.deck_serial_worst_s(worker_request[DECKS_FIELD])
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
     sim_batch._assess_deck_support(request, config)
     spec = sim_batch.BatchJobSpec(
-        cmd=_deck_batch_command(config.runner_version_check),
+        cmd=_deck_batch_command(
+            config.runner_version_check,
+            worker_request,
+            [item.staged_name for item in files if item.label.startswith("model ")],
+        ),
         tool=sim_batch._batch_job_tool_label(worker_request),
         pdk_variant=(request.get("models") or {}).get("pdk"),
         pdk_root=(request.get("models") or {}).get("pdk_root"),
@@ -1645,59 +1847,115 @@ def _run_decks_batch(
             ),
         ),
     )
-    job_id = sim_batch.new_job_id()
+    return config, spec
+
+
+def _collect_decks_batch(
+    config: sim_batch.BatchConfig,
+    job_id: str,
+    worker_request: dict[str, Any],
+    *,
+    outdir: str,
+) -> dict[str, Any]:
+    """Poll ``job_id`` to a terminal state and collect its deck report --
+    the second half of a blocking batch run, and the whole of ``--attach``.
+    Raises :class:`~klayout_tools.sim_batch.BatchError` on a transport
+    failure; a failed or timed-out job returns a report instead."""
+    units = worker_request[DECKS_FIELD]
     try:
-        sim_batch.submit_job(config, job_id, spec)
-        sim_batch.launch_job(config, job_id)
-        try:
-            status = sim_batch.poll_status(config, job_id)
-        except sim_batch.BatchPollTimeout as exc:
-            _install_unit_trees(units, outdir=outdir, source_root=None)
-            return _synthesized_deck_report(
-                worker_request,
-                code="batch_poll_timeout",
-                message=str(exc),
-                outdir=outdir,
-                environment={
-                    "provider": "aws-batch-fleet",
-                    "job_id": job_id,
-                    "bucket": config.bucket,
-                    "region": config.region,
-                    "state": exc.last_state,
-                },
-            )
+        status = sim_batch.poll_status(config, job_id)
+    except sim_batch.BatchPollTimeout as exc:
+        _install_unit_trees(units, outdir=outdir, source_root=None)
+        return _synthesized_deck_report(
+            worker_request,
+            code=(
+                "batch_job_interrupted"
+                if isinstance(exc, sim_batch.BatchJobInterrupted)
+                else "batch_poll_timeout"
+            ),
+            message=str(exc),
+            outdir=outdir,
+            environment={
+                **sim_batch._batch_job_environment(config, job_id),
+                "region": config.region,
+                "state": exc.last_state,
+                **(
+                    {"interrupted_s": round(exc.interrupted_s, 1)}
+                    if isinstance(exc, sim_batch.BatchJobInterrupted)
+                    else {}
+                ),
+            },
+        )
+    if status.get("state") != "done" and (
+        sim_batch._status_exit_code(status)
+        not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
+    ):
+        recovered = _recover_failed_deck_job(
+            config, job_id, worker_request, status, outdir=outdir, runner=None
+        )
+        recovered["outdir"] = os.path.abspath(outdir)
+        return recovered
+    with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
+        sim_batch.collect_outputs(config, job_id, collected)
+        report = _read_deck_report(collected)
         environment = {
             **sim_batch._batch_environment(config, job_id, status),
-            **sim_batch._read_runner_identity(None),
+            **sim_batch._read_job_identity(collected, worker_request),
         }
-        if status.get("state") != "done" and (
-            sim_batch._status_exit_code(status)
-            not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
-        ):
-            recovered = _recover_failed_deck_job(
-                config, job_id, worker_request, status, outdir=outdir, runner=None
-            )
-            recovered["outdir"] = os.path.abspath(outdir)
-            recovered.setdefault("environment", {})["remote"] = environment
-            return recovered
-        with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
-            sim_batch.collect_outputs(config, job_id, collected)
-            report = _read_deck_report(collected)
-            environment = {
-                **sim_batch._batch_environment(config, job_id, status),
-                **sim_batch._read_runner_identity(collected),
-            }
-            _install_unit_trees(
-                units,
-                outdir=outdir,
-                source_root=os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME),
-            )
-    except sim_batch.BatchError as exc:
-        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+        _install_unit_trees(
+            units,
+            outdir=outdir,
+            source_root=os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME),
+        )
     report["outdir"] = os.path.abspath(outdir)
     report["backend"] = "batch"
     report.setdefault("environment", {})["remote"] = environment
     return report
+
+
+def _run_decks_batch(
+    request: dict[str, Any],
+    files: list[sim_staging.StagedFile],
+    worker_request: dict[str, Any],
+    *,
+    outdir: str,
+) -> dict[str, Any]:
+    """Submit the deck list to 2am's EDA batch fleet as one job and collect
+    its report -- the batch analog of :func:`_run_decks_remote`, reusing
+    the batch transport primitives (submit/launch/poll/collect and the
+    runner-identity preflight) exactly as the corner backend does."""
+    config, spec = _prepare_decks_batch(request, files, worker_request)
+    job_id = sim_batch.new_job_id()
+    try:
+        sim_batch.submit_job(config, job_id, spec)
+        sim_batch.launch_job(config, job_id)
+        return _collect_decks_batch(config, job_id, worker_request, outdir=outdir)
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+
+
+def _submit_decks_batch_only(
+    request: dict[str, Any],
+    files: list[sim_staging.StagedFile],
+    worker_request: dict[str, Any],
+    *,
+    artifacts_dir: str | None,
+) -> dict[str, Any]:
+    """``--submit-only`` for a deck list (issue #3958): upload and launch the
+    one deck job and return its identity without polling or collecting.
+    ``job_ceiling`` is ``None`` -- the deck path does not assess one."""
+    try:
+        config, spec = _prepare_decks_batch(request, files, worker_request)
+    except sim_batch.BatchError as exc:
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return sim_batch_async.launch_prepared_job(
+        request=request,
+        config=config,
+        spec=spec,
+        unit_count=len(worker_request[DECKS_FIELD]),
+        job_ceiling=None,
+        artifacts_dir=artifacts_dir,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1713,6 +1971,152 @@ def resolve_deck_outdir(artifacts_dir: str | None, request_dir: str) -> str:
     return artifacts_dir or os.path.join(request_dir, ".klt", "sim")
 
 
+def _deck_dry_run_report(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    *,
+    request_dir: str,
+    backend: str,
+) -> dict[str, Any]:
+    """``--dry-run`` for a deck list (issue #4543): the staging and batch
+    config checks a real off-host run makes before anything billable, then
+    a report of the planned units. Nothing is spawned, submitted or
+    written. ``plan_deck_units`` (already run by the caller) covers deck,
+    input and include existence on every backend."""
+    from .sim import SCHEMA_VERSION
+
+    staged: list[sim_staging.StagedFile] = []
+    if backend in ("remote", "batch"):
+        staged, worker_request = stage_deck_job(request, request_dir=request_dir)
+        if backend == "batch":
+            try:
+                _prepare_decks_batch(request, staged, worker_request)
+            except sim_batch.BatchError as exc:
+                raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": DECK_MODE,
+        "dry_run": True,
+        "status": "valid",
+        "engine": "ngspice",
+        "backend": backend,
+        "unit_count": len(units),
+        "units": [
+            {
+                "id": unit["id"],
+                "deck": unit["deck"]["name"],
+                "outputs": list(unit.get("outputs", ())),
+            }
+            for unit in units
+        ],
+        "staged_files": [
+            {"name": item.staged_name, "kind": item.label} for item in staged
+        ],
+        "warnings": [],
+    }
+
+
+def _run_decks_batch_pending(
+    request: dict[str, Any],
+    pending: list[dict[str, Any]],
+    *,
+    request_dir: str,
+    backend: str,
+    outdir: str,
+    ngspice_binary: str,
+) -> dict[str, Any]:
+    """Submit only the ``pending`` units as one batch job (an empty report
+    when a resume left nothing to run)."""
+    if not pending:
+        return _build_deck_report(
+            units=[],
+            results=[],
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+            max_workers=1,
+        )
+    pending_ids = {unit["id"] for unit in pending}
+    pending_request = {
+        **request,
+        DECKS_FIELD: [
+            entry for entry in request[DECKS_FIELD] if entry.get("id") in pending_ids
+        ],
+    }
+    from . import sim_decks_split
+
+    split = sim_decks_split.run_if_split(
+        request, pending_request, pending, request_dir=request_dir, outdir=outdir
+    )
+    if split is not None:
+        return split
+    files, worker_request = stage_deck_job(pending_request, request_dir=request_dir)
+    return _run_decks_batch(pending_request, files, worker_request, outdir=outdir)
+
+
+def _run_decks_offhost(
+    request: dict[str, Any],
+    units: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    resumed: dict[int, Any],
+    *,
+    request_dir: str,
+    backend: str,
+    outdir: str,
+    ngspice_binary: str,
+    artifacts_dir: str | None,
+    resume: bool,
+    submit_only: bool,
+    attach_job_id: str | None,
+    collect_partial: bool = False,
+) -> dict[str, Any]:
+    """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
+    from .sim import apply_engine_host
+
+    if backend == "remote":
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
+        report = _run_decks_remote(request, files, worker_request, outdir=outdir)
+    elif submit_only:
+        from . import sim_decks_split
+
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
+        sim_decks_split.refuse_submit_only(request, units)
+        return _submit_decks_batch_only(
+            request, files, worker_request, artifacts_dir=artifacts_dir
+        )
+    elif attach_job_id is not None:
+        from . import sim_decks_split
+
+        _, worker_request = stage_deck_job(request, request_dir=request_dir)
+        report = sim_decks_split.attach(
+            request,
+            worker_request,
+            attach_job_id,
+            request_dir=request_dir,
+            outdir=outdir,
+            collect_partial=collect_partial,
+        )
+    else:
+        report = _run_decks_batch_pending(
+            request,
+            pending,
+            request_dir=request_dir,
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+        )
+    if resume:
+        from . import sim_decks_resume
+
+        sim_decks_resume._apply_resume(report, units, resumed)
+    apply_engine_host(
+        report.setdefault("environment", {}),
+        backend=backend,
+        client_ngspice_binary=ngspice_binary,
+    )
+    return report
+
+
 def run_deck_request(
     request: dict[str, Any],
     *,
@@ -1720,12 +2124,17 @@ def run_deck_request(
     backend: str,
     max_workers: int | None = None,
     artifacts_dir: str | None = None,
+    resume: bool = False,
+    submit_only: bool = False,
+    attach_job_id: str | None = None,
+    dry_run: bool = False,
+    collect_partial: bool = False,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
     JSON envelope). Called by ``sim.run_sim`` when the request carries
     ``decks``; the caller-facing flags the corner machinery owns
-    (``--hosts``, ``--resume``, ``--budget-s``, ``--plot``,
+    (``--hosts``, ``--budget-s``, ``--plot``,
     ``--fail-fast-probe``, ``--fail-on-diagnostic``) are rejected by
     ``run_sim`` before reaching here.
 
@@ -1733,19 +2142,34 @@ def run_deck_request(
     outputs) is written -- there is no keep_artifacts switch, because the
     streams *are* the result. It defaults to a ``.klt/sim/`` directory next
     to the request file, the same convention as the corner backend.
+
+    ``resume`` (``local``/``local-parallel``/``batch``; issue #3957) skips
+    every unit whose ``<outdir>/<id>/unit.json`` completion record matches
+    the unit's current key and still verifies on disk, and reports it with
+    ``resumed: true``; the rest run as usual.
+
+    ``submit_only`` / ``attach_job_id`` (issue #3958; ``batch`` only -- the
+    caller refuses every other combination) split the one deck job at the
+    launch/poll seam: submit-only returns the ``status: "submitted"``
+    payload of :func:`sim_batch_async.launch_prepared_job`; attach collects
+    an already-submitted job's report.
     """
+    from . import sim_decks_resume
     from .sim import (
-        SimError,
         _resolve_max_workers,
         _resolve_ngspice_binary,
+        _validate_ngspice_init,
         apply_engine_host,
     )
+    from .sim_spiceinit import add_deck_init_hints
 
-    if max_workers is not None and (
-        not isinstance(max_workers, int)
-        or isinstance(max_workers, bool)
-        or max_workers < 1
-    ):
+    if resume and (submit_only or attach_job_id is not None):
+        raise SimError(
+            "--resume/options.resume cannot be combined with --submit-only or "
+            "--attach for a deck-list request -- the submitted job is one "
+            "unit of work that is collected whole"
+        )
+    if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
         request,
@@ -1754,37 +2178,62 @@ def run_deck_request(
     )
     options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
+    # Issue #5738: plan_deck_units already rejected a malformed value; this
+    # re-read of the (now known-good) option is what threads the lines into
+    # the local runner, so each unit's directory gets its .spiceinit.
+    ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
-    if backend == "remote" or backend == "batch":
-        # Validate the whole staged closure before anything billable: an
-        # unstageable include or missing file is a submit-time SimError,
-        # never a launched job that cannot run.
-        files, worker_request = stage_deck_job(request, request_dir=request_dir)
-        if backend == "remote":
-            report = _run_decks_remote(request, files, worker_request, outdir=outdir)
-        else:
-            report = _run_decks_batch(request, files, worker_request, outdir=outdir)
-        apply_engine_host(
-            report.setdefault("environment", {}),
-            backend=backend,
-            client_ngspice_binary=ngspice_binary,
+    if dry_run:
+        return _deck_dry_run_report(
+            request, units, request_dir=request_dir, backend=backend
         )
-        return report
 
-    if backend == "local":
-        workers = 1
-    else:
-        workers = _resolve_max_workers(max_workers)
+    resumed = (
+        sim_decks_resume._resolve_resumed(
+            units,
+            backend=backend,
+            request_dir=request_dir,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+        )
+        if resume
+        else {}
+    )
+    pending = [unit for index, unit in enumerate(units) if index not in resumed]
+
+    if backend == "remote" or backend == "batch":
+        report = _run_decks_offhost(
+            request,
+            units,
+            pending,
+            resumed,
+            request_dir=request_dir,
+            backend=backend,
+            outdir=outdir,
+            ngspice_binary=ngspice_binary,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            submit_only=submit_only,
+            attach_job_id=attach_job_id,
+            collect_partial=collect_partial,
+        )
+
+        return add_deck_init_hints(report, ngspice_init_lines)
+
+    workers = 1 if backend == "local" else _resolve_max_workers(max_workers)
     report = _run_decks_local(
-        units,
+        pending,
         staging_root=request_dir,
         outdir=outdir,
         ngspice_binary=ngspice_binary,
         max_workers=workers,
         backend=backend,
+        ngspice_init=ngspice_init_lines,
     )
+    if resume:
+        sim_decks_resume._apply_resume(report, units, resumed)
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )
-    return report
+    return add_deck_init_hints(report, ngspice_init_lines)

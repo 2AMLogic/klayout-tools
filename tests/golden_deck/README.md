@@ -7,8 +7,8 @@ Declarative, rule-id-keyed golden violate/clean fixture manifest for
 -- issue #1420's other addition -- uses the
 `"isolated"` check kind as of issue #1654, so it no longer falls within this
 manifest's width/space-only scope), `sg13g2.py`'s width/space
-`DrcRule` entries (32, issue #905/#911 initial 14, grown to 32 by issue
-#1247), and **all** of `gf180mcu.py`'s
+`DrcRule` entries (34, issue #905/#911 initial 14, grown to 32 by issue
+#1247, +2 for issue #3787's `psd.width.1`/`psd.space.1`), and **all** of `gf180mcu.py`'s
 `DrcRule` entries (46: 14 width, 15 space, 15 enclosing, 2 separation --
 recounted for issue #1110, which both added two rules and corrected a stale
 width/space/separation split in this line, then grown further by issue
@@ -65,14 +65,17 @@ tests/golden_deck/
                             # metal4.space.1 pair,
                             # +2 for issue #3484's nplus.space.pcomp.far.1/
                             # pplus.enclosing.comp.far.1 well-distance split)
-  sg13g2/manifest.json     # 32 entries (issue #905/#911, Epic #711 Phase 3b
+  sg13g2/manifest.json     # 36 entries (+2 for issue #3571's
+                            # nwell.width.1/nwell.space.1; issue #905/#911, Epic #711 Phase 3b
                             # -- see that deck's own module docstring; width/
                             # space only, same split as sky130 -- its 5
                             # enclosing/separation rules ship as hand-written
                             # pairs in tests/test_drc.py instead; grown from
                             # 14 to 32 by issue #1247's extended
-                            # metals/vias-to-TopMetal2 stack)
-  sg13cmos5l/manifest.json # 27 entries (issue #1400, width/space/enclosing
+                            # metals/vias-to-TopMetal2 stack; +2 for
+                            # issue #3787's psd.width.1/psd.space.1)
+  sg13cmos5l/manifest.json # 29 entries (+2 for issue #3012's
+                            # nwell.width.1/nwell.space.1; issue #1400, width/space/enclosing
                             # on Activ/GatPoly/Metal1; issue #1417 extends
                             # coverage to the Metal2-TopMetal1 stack's width/
                             # space rules plus every via level's width/space/
@@ -211,17 +214,20 @@ Three tiers:
    `expected_disagreement`. Gated `skipif` on both a real `klayout` binary
    on `$PATH` **and** a resolvable sky130A install (mirrors
    `tests/test_drc_klayout_engine.py`'s own `HAVE_KLAYOUT_BINARY` gate) --
-   skips cleanly, never fails, in an environment with neither. gf180mcu's own
-   `--engine klayout` **DRC** cross-check remains explicitly deferred as of
-   issue #904 -- re-verified unchanged: gf180mcu's native *DRC* deck still
-   has no single runnable file (see `docs/cli/drc.md`'s "Engine" ->
-   "klayout" limitation); tiers 1 and 2 cover all 46 of its rules in full.
-   **Unlike the DRC side, gf180mcu's native *LVS* deck is single-file and
-   directly runnable** -- issue #904 cross-checks gf180mcu's LVS
-   device-extraction rules against it separately; see
-   `tests/test_lvs_native_extraction_cross_check_gf180mcu.py` and
-   `docs/cli/extract.md`'s "gf180mcu native-deck LVS device-extraction
-   cross-check" section (not this DRC-side manifest).
+   skips cleanly, never fails, in an environment with neither.
+
+   For gf180mcu, tiers 1 and 2 cover all of its DRC rules. Tier 3 remains
+   deferred because the manifest tests do not yet run the golden-pair fixtures
+   through the native engine.
+   Since #4002, `klt drc --engine klayout|both --pdk <variant>` resolves the
+   family main script `tech/drc/gf180mcu.drc` as `native_deck.kind: pdk_main_script`.
+   Both engines completed a live `--engine both` run on `gf180mcuA`
+   (premise corrected 2026-11-18, issue #5720).
+
+   Issue #904 separately cross-checks LVS device extraction against gf180mcu's
+   single, directly runnable `gf180mcu.lvs` deck. See the
+   [LVS cross-check tests](../test_lvs_native_extraction_cross_check_gf180mcu.py)
+   and the [gf180mcu LVS results](../../docs/cli/extract.md#gf180mcu-native-deck-gf180mculvs-lvs-device-extraction-cross-check-issue-904).
 
 ## Cross-check results (sky130)
 
@@ -244,6 +250,12 @@ print("agree:  ", ", ".join(agree))
 print("approx: ", ", ".join(approx))
 PY
 ```
+
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420:
+> `tests/test_golden_deck.py` plus both native-extraction cross-check
+> modules re-run against the `~/.ciel` f6eeac7 install with KLayout 0.28.16 from the
+> system package: all passed, so the manifest's `expected_disagreement`
+> values are unchanged. The text below records the original runs.
 
 Tier 3 has been run against a real `volare`-fetched sky130A install
 (`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same commit
@@ -341,19 +353,23 @@ same `if FEOL ... end` block that suppresses
 `diff.width.1`/`poly.width.1`/`nwell.width.1`. It therefore now carries a
 non-null `expected_disagreement` and appears as a class-A row above.
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29
+> under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1),
+> issue #3420: the `tap.width.1` FEOL-gated disagreement above is unchanged
+> under `f6eeac7` — covered by the tier-3 re-qualification note above,
+> whose re-run found every manifest `expected_disagreement` value
+> unchanged.
+
 If you add a rule to `sky130/manifest.json`, add it to the class-A/class-B
 table above (or state the new class in prose) in the same change -- the
 tier-1 coverage test enforces that the manifest matches the deck, but
 nothing enforces that this section matches the manifest.
 
-gf180mcu's 56 rules have no native-*DRC*-deck cross-check verdict either
-way (deferred per the scope above -- no single runnable native DRC deck
-exists to cross-check against, re-verified unchanged as of issue #904); their
-`expected_disagreement` fields are all `null` because none has been
-cross-checked, which is **not** a claim of agreement. This is explicitly
-noted, not a silent skip: gf180mcu's DRC rules are still validated by tiers 1
-and 2 above (coverage + curated-engine self-consistency) on all 56 rules, and
-issue #904 additionally cross-checks gf180mcu's *LVS* device-extraction
-rules against a real, directly-runnable native deck (see the tier-3 note
-above) -- the DRC-side gap and the LVS-side result are two different
-questions with two different answers, not one deferred item.
+For gf180mcu, the `expected_disagreement` fields are all `null` because the
+golden-pair manifest tests do not yet run their fixtures through the native
+DRC engine. A native DRC verdict on those fixtures is pending for all of its
+rules. Since #4002, `klt drc --engine klayout|both --pdk <variant>` resolves
+`tech/drc/gf180mcu.drc` as `native_deck.kind: pdk_main_script`. Both engines completed a live
+`--engine both` run on one `gf180mcuA` layout (premise corrected 2026-11-18,
+issue #5720). Tiers 1 and 2 check manifest coverage and curated-engine results.
+The LVS device-extraction cross-check in #904 uses the separate native LVS deck.

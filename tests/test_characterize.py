@@ -10,7 +10,7 @@ Two tiers, mirroring `tests/test_sim.py`'s split (issue #2502):
   request validation, the generated testbench and `.meas` card set, the
   seconds -> nanoseconds table reshape, and the settle-window check. These
   always run, everywhere.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the worked example end to end through the real `ngspice -b`: grid sweep,
   `.meas` extraction, `.lib` emission, and the **round-trip acceptance bar**
   the issue names explicitly -- the emitted file parsing back through
@@ -32,21 +32,12 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import characterize, liberty_writer
 from klayout_tools.characterize_arcs import FunctionError, derive_arcs, parse_function
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_sim.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "characterize"
 
@@ -928,9 +919,7 @@ def test_settle_check_refuses_a_window_the_slowest_point_outgrew(tmp_path):
     with pytest.raises(
         characterize.CharacterizeError, match="transient window too short"
     ):
-        characterize._check_settle_margin(
-            plan, resolved["grid"], tables, resolved["options"]
-        )
+        characterize._check_settle_margin(resolved["grid"], tables, resolved["options"])
 
 
 def test_settle_check_accepts_a_comfortable_window(tmp_path):
@@ -941,9 +930,7 @@ def test_settle_check_accepts_a_comfortable_window(tmp_path):
         plan, resolved["grid"], values, liberty_writer.Thresholds()
     )
 
-    characterize._check_settle_margin(
-        plan, resolved["grid"], tables, resolved["options"]
-    )
+    characterize._check_settle_margin(resolved["grid"], tables, resolved["options"])
 
 
 def test_extract_measurements_refuses_a_failed_sim_corner(tmp_path):
@@ -1096,10 +1083,10 @@ def test_example_response_matches_the_documented_envelope(example_run):
         "liberty",
         "simulation",
         "comparison",
+        "failed_cells",
         "provenance",
     }
-    # Single-cell form: the top-level cell/arcs/leakage/simulation mirror the
-    # one `cells[]` entry, and no comparison was asked for.
+    # Single-cell form: top-level cell/arcs/leakage/simulation mirror `cells[0]`.
     assert len(report["cells"]) == 1
     entry = report["cells"][0]
     assert entry["cell"] == report["cell"]
@@ -1110,7 +1097,7 @@ def test_example_response_matches_the_documented_envelope(example_run):
     # `cell.netlist` is an *input* being pinned -> {path, scope} envelope.
     assert set(report["cell"]["netlist"]) == {"path", "scope"}
     # Generated artifacts are plain absolute strings (json-contract.md's
-    # "Output-artifact path fields").
+    # "Path fields: envelope vs. plain string").
     for path in (
         report["liberty"]["path"],
         report["simulation"]["testbench"],
@@ -1467,12 +1454,12 @@ def test_power_cards_integrate_each_rail_over_its_output_edge_window(tmp_path):
     cards = _cards_by_name(plan)
 
     fall_window = (
-        f"FROM={characterize._spice_number(window['fall_start_ns'])}n "
-        f"TO={characterize._spice_number(window['stop_ns'])}n"
+        f"FROM={characterize.spice_number(window['fall_start_ns'])}n "
+        f"TO={characterize.spice_number(window['stop_ns'])}n"
     )
     rise_window = (
-        f"FROM={characterize._spice_number(window['rise_start_ns'])}n "
-        f"TO={characterize._spice_number(window['fall_start_ns'])}n"
+        f"FROM={characterize.spice_number(window['rise_start_ns'])}n "
+        f"TO={characterize.spice_number(window['fall_start_ns'])}n"
     )
     assert cards["a0s0l0_qvr"].endswith(fall_window)
     assert cards["a0s0l0_qgr"].endswith(fall_window)
@@ -1486,7 +1473,7 @@ def test_power_cards_follow_a_positive_unate_polarity(tmp_path):
     request = _inverter_request(tmp_path)
     request["cell"]["pins"][1]["function"] = "A"  # buffer: output rises with A
     plan, _ = _plan_for(tmp_path, request)
-    rise_start = characterize._spice_number(plan["window"]["rise_start_ns"])
+    rise_start = characterize.spice_number(plan["window"]["rise_start_ns"])
 
     assert f"FROM={rise_start}n" in _cards_by_name(plan)["a0s0l0_qvr"]
 
@@ -1794,12 +1781,12 @@ def test_capacitance_cards_integrate_the_slew_threshold_region(tmp_path):
     cards = _cap_cards(plan)
     rise_from = window["rise_start_ns"] + 0.2 * ramp
     rise_to = window["rise_start_ns"] + 0.8 * ramp
-    assert f"FROM={characterize._spice_number(rise_from)}n" in cards["cp0_qcr"]
-    assert f"TO={characterize._spice_number(rise_to)}n" in cards["cp0_qcr"]
+    assert f"FROM={characterize.spice_number(rise_from)}n" in cards["cp0_qcr"]
+    assert f"TO={characterize.spice_number(rise_to)}n" in cards["cp0_qcr"]
     fall_from = window["fall_start_ns"] + 0.2 * ramp
     fall_to = window["fall_start_ns"] + 0.8 * ramp
-    assert f"FROM={characterize._spice_number(fall_from)}n" in cards["cp0_qcf"]
-    assert f"TO={characterize._spice_number(fall_to)}n" in cards["cp0_qcf"]
+    assert f"FROM={characterize.spice_number(fall_from)}n" in cards["cp0_qcf"]
+    assert f"TO={characterize.spice_number(fall_to)}n" in cards["cp0_qcf"]
 
 
 def test_capacitance_cards_follow_custom_slew_thresholds(tmp_path):
@@ -1820,7 +1807,7 @@ def test_capacitance_cards_follow_custom_slew_thresholds(tmp_path):
     assert point["fall_span"] == pytest.approx(0.4)
     rise_from = point["ramp_ns"] * 0.3 + plan["window"]["rise_start_ns"]
     assert (
-        f"FROM={characterize._spice_number(rise_from)}n" in _cap_cards(plan)["cp0_qcr"]
+        f"FROM={characterize.spice_number(rise_from)}n" in _cap_cards(plan)["cp0_qcr"]
     )
 
 

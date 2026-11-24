@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:02.240467+00:00",
+  "slug": "sky130-dsp-fft",
+  "name": "Sky130 Dsp Fft",
+  "description": "Streaming FFT and FIR DSP engine on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "FFT size",
+        "target": "256-point complex",
+        "fallback": "64-point",
+        "stretch": "1024-point, or runtime-selectable size"
+      },
+      {
+        "parameter": "Architecture",
+        "target": "streaming pipeline, 1 sample/clock"
+      },
+      {
+        "parameter": "Input / output",
+        "target": "16-bit I + 16-bit Q fixed point",
+        "fallback": "12-bit",
+        "stretch": "18-bit"
+      },
+      {
+        "parameter": "Accuracy",
+        "target": "SQNR \u2265 60 dB vs. double-precision reference",
+        "fallback": "\u2265 50 dB",
+        "stretch": "\u2265 70 dB"
+      },
+      {
+        "parameter": "FIR",
+        "target": "32-tap, 16-bit programmable coefficients",
+        "fallback": "16-tap",
+        "stretch": "64-tap or decimating"
+      },
+      {
+        "parameter": "Clock (all sky130_fd_sc_hd corners)",
+        "target": "50 MHz",
+        "fallback": "25 MHz",
+        "stretch": "100 MHz"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #1"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-dsp-fft",
+    "ref": "75400e342ca8a3953c45fc607fbe75f902aaa362",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

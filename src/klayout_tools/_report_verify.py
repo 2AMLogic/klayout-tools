@@ -16,20 +16,23 @@ the comparison idiom ``klt signoff``'s ``_grade_evidence()``
 already established: a mismatch always renders as a **failure to verify**,
 never a false pass.
 
-Both modes report the same two-value ``status``:
+The result carries a verification ``status``:
 
 - ``"match"`` -- every check passed (cheap mode: every hash matched; full
   mode: no verdict-bearing field drifted).
-- ``"drifted"`` -- at least one check failed (cheap mode: names which hash
-  moved; full mode: names which field(s) changed).
+- ``"drifted"`` -- a hash differs, a baseline is absent, or a full rerun
+  changed a verdict-bearing field.
+- ``"unverifiable"`` -- LVS/extract cheap checks could not hash a recorded input
+  and found no independent drift.
 
 ``drc.py``/``lvs.py``/``extract.py``/``synthesize.py``/``place_and_route.py``
 each supply the verb-specific pieces (which hashes to re-derive, how to re-run
 the analysis) via the small building blocks below; this module owns only the
-shape-agnostic mechanics (loading a committed report, comparing one hash,
-diffing two report dicts, dropping run-scoped bookkeeping keys -- by name
-(:func:`strip_keys`) or by path (:func:`strip_path_patterns`) -- before that
-diff).
+shape-agnostic mechanics (loading a committed report, resolving one echoed
+input path back to a file on *this* checkout (:func:`resolve_committed_path`,
+issue #2659), comparing one hash, diffing two report dicts, dropping
+run-scoped bookkeeping keys -- by name (:func:`strip_keys`) or by path
+(:func:`strip_path_patterns`) -- before that diff).
 
 **Flow verbs need the request back (issue #2224).** ``klt drc``/``klt lvs``/
 ``klt extract`` echo their own inputs into the report (``file``/``deck``/
@@ -50,24 +53,39 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from . import env_provenance
+from ._jsongz import READ_ERRORS, open_text
+from ._report_verify_diff import diff_verdict_fields
+from ._report_verify_exclude import LIST_ITEM
+
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
 #: build and the PDK release string, never the deck/input content hashes or
-#: any verdict-bearing field. Curator's own analysis (issue #1106): these are
-#: the fields inferred from the schema, not a pre-existing coded precedent
-#: (`klt signoff`'s consistency check goes the other way -- it *requires*
-#: these to agree *across* checks in one signoff bundle; here we deliberately
-#: allow them to disagree between one committed report and a fresh rerun of
-#: the same report, which is the whole reason `--rerun` needs an exclusion
-#: list at all).
+#: any verdict-bearing field. Inferred from the schema (issue #1106), not a
+#: coded precedent: `klt signoff`'s consistency check *requires* these to
+#: agree *across* checks in one bundle; here we deliberately allow them to
+#: differ between a committed report and a fresh rerun of it, which is the
+#: whole reason `--rerun` needs an exclusion list at all.
 VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("provenance", "klt_version"),
+        # Issue #4412: the commit/reinstall handle behind `klt_version`.
+        ("provenance", "klt_git_commit"),
+        ("provenance", "klt_reinstall_spec"),
         ("provenance", "klayout_version"),
         ("provenance", "pdk", "version"),
+        # Issue #3786: the upstream commit behind a fetched PDK -- a revision
+        # stamp like `version`, absent on installs that predate the record.
+        ("provenance", "pdk", "commit"),
         # `klt extract`'s additive wall-clock `timing` object (issue #3181):
         # a measurement of the run, never part of the evidence.
         ("timing",),
+        ("provenance", "pdk", "linked_trees"),
+        # Issue #5182: other PDK roots on the resolving host (#2564) -- machine-local.
+        ("provenance", "pdk", "ambiguous_sources"),
+        # Issue #5863: how the PDK was resolved (search roots vs $PDK_ROOT
+        # vs --pdk-root) -- resolution provenance, not evidence.
+        ("provenance", "pdk", "source"),
     }
 )
 
@@ -83,11 +101,6 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
 VOLATILE_FLOW_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
     ("engine_version",)
 }
-
-#: Sentinel distinguishing "key absent" from a legitimate JSON `null` when
-#: diffing two report dicts (see :func:`_diff_json`) -- `None != None` would
-#: otherwise be indistinguishable from `None != <missing>`.
-_MISSING = object()
 
 
 def get_path(data: Any, path: tuple[str, ...]) -> Any:
@@ -105,7 +118,8 @@ def get_path(data: Any, path: tuple[str, ...]) -> Any:
 
 def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read and minimally validate a previously committed ``klt drc``/``klt
-    lvs`` ``--format json`` report from ``path``.
+    lvs`` ``--format json`` report from ``path``. Gzip compression is
+    detected by content, regardless of the filename's suffix.
 
     Raises ``error_cls`` (the caller's own ``DrcError``/``LvsError``, so the
     CLI layer's existing single ``except`` clause keeps working unchanged)
@@ -115,18 +129,88 @@ def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, An
     for "an old report predating #331" / a malformed path (issue #1106's
     acceptance criteria).
     """
-    if not os.path.isfile(path):
-        raise error_cls(f"committed report not found: {path}")
+    if not os.path.exists(path):
+        raise error_cls(f"file not found: {path}")
+    if os.path.isdir(path):
+        raise error_cls(f"not a file: {path}")
+
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open_text(path) as handle:
             data = json.load(handle)
+    except READ_ERRORS as exc:
+        raise error_cls(f"could not read request '{path}': {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise error_cls(f"committed report is not valid JSON: {path} ({exc})") from exc
-    except OSError as exc:
-        raise error_cls(f"could not read committed report '{path}': {exc}") from exc
+        raise error_cls(f"request '{path}' is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise error_cls(f"committed report must be a JSON object: {path}")
     return data
+
+
+def resolve_committed_path(
+    value: Any, *, report_path: str | None, override: str | None = None
+) -> str | None:
+    """The filesystem path a committed report's own echoed input-path field
+    names, resolved **from this checkout** -- ``None`` when the recorded
+    value names no resolvable path here (issue #2659).
+
+    Accepts both shapes a committed report can carry for such a field, so a
+    ``--check``/``--rerun`` of evidence written before *or* after issue
+    #2659's normalization keeps working:
+
+    - a bare path **string** (every report predating #2659, and every
+      still-plain-string field): returned verbatim, so the historical
+      anchoring is byte-unchanged -- a relative value still resolves against
+      the current process's cwd, the convention ``klt drc --check``
+      established and :func:`klayout_tools._report_verify_hints.input_hash_check`
+      documents.
+    - the ``{path, scope}`` object :func:`~klayout_tools.env_provenance
+      .repo_relative_path` builds: ``scope: "repo"`` is joined to the repo
+      root discovered from **the committed report's own location**, which is
+      what ``scope: "repo"`` means by construction -- the identical
+      resolution ``klt signoff``'s ``input_verified`` gate applies to the
+      same shape (``signoff.py``'s ``_resolve_input_artifact_value``). This
+      is the portability the normalization buys: evidence committed beside
+      its inputs verifies from any clone, not only on the producing host.
+      ``scope: "external"``/``"absent"`` carry no path at all (``null``, on
+      purpose, so a host-specific absolute path never lands in committed
+      evidence) and are therefore unresolvable here -- correctly reported as
+      "cannot verify" rather than guessed at.
+
+    ``report_path`` may be ``None`` for a caller holding a decoded report but
+    not the file it came from; the repo root is then discovered from the
+    current working directory, the only other defensible anchor available.
+
+    ``override`` (issue #2699) is a caller-supplied explicit input path
+    (``klt drc``/``klt extract``'s positional ``file`` and ``klt lvs``'s
+    ``--layout``, alongside ``--check``). It **always wins** over the report's
+    own recorded value -- one precedence rule shared by all three verbs --
+    and is returned verbatim (a relative path anchors to the cwd, like any
+    other CLI path). This restores ``--check``/``--rerun`` for an input the
+    report cannot locate (``scope: "external"``) and gives an in-repo caller
+    an escape hatch when the grading clone is laid out differently; a file
+    that disagrees with the recorded hash is reported as ``drifted``, never
+    silently accepted.
+    """
+    if override:
+        return override
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, Mapping):
+        if value.get("scope") != "repo":
+            return None
+        relative = value.get("path")
+        if not isinstance(relative, str) or not relative:
+            return None
+        anchor = (
+            os.path.dirname(os.path.abspath(report_path))
+            if report_path
+            else os.getcwd()
+        )
+        root = env_provenance.find_repo_root(anchor)
+        if root is None:
+            return None
+        return os.path.join(root, relative)
+    return None
 
 
 def hash_check(field: str, expected: str | None, actual: str | None) -> dict[str, Any]:
@@ -146,18 +230,44 @@ def hash_check(field: str, expected: str | None, actual: str | None) -> dict[str
 
 
 def build_check_result(
-    *, report_path: str, checks: list[dict[str, Any]]
+    *,
+    report_path: str,
+    checks: list[dict[str, Any]],
+    skipped: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``--check`` (cheap mode) JSON payload from a list of
-    :func:`hash_check` entries -- shared shape for ``klt drc``/``klt lvs``."""
+    :func:`hash_check` entries -- shared shape for ``klt drc``/``klt lvs``.
+
+    ``skipped`` (issue #4315) names checks the caller deliberately did not
+    run, as ``{"field", "reason"}`` entries, so a ``match`` over a partial
+    check is never mistaken for a full one. ``None`` (the default) omits the
+    key entirely, leaving every other caller's payload byte-identical."""
     status = "match" if all(check["match"] for check in checks) else "drifted"
-    return {
+    result: dict[str, Any] = {
         "schema_version": 1,
         "mode": "check",
         "report": report_path,
         "status": status,
         "checks": checks,
     }
+    if skipped is not None:
+        result["skipped"] = skipped
+    return result
+
+
+def build_input_check_result(
+    *, report_path: str, checks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Distinguish an unavailable input from a changed digest for LVS and extract."""
+    result = build_check_result(report_path=report_path, checks=checks)
+    for check in checks:
+        if check["expected"] is not None and check["actual"] is None:
+            check["status"] = "unverifiable"
+    if result["status"] == "drifted" and all(
+        check["match"] or check.get("status") == "unverifiable" for check in checks
+    ):
+        result["status"] = "unverifiable"
+    return result
 
 
 def build_rerun_result(
@@ -194,20 +304,34 @@ def build_rerun_result(
     reports this same ``{status, drift, fresh}`` shape (and renders through
     the same :func:`klayout_tools.cli.output.render_rerun_drift`) rather
     than inventing a second drift-report shape.
+
+    Provenance fields the fresh report does not carry (issue #5866) are
+    surfaced as an **additive, optional** ``not_compared`` list --
+    ``[{"field": "provenance.gds_sha256", "committed": <value>}]``, field
+    names dotted exactly like ``drift[]``'s -- placed above ``fresh``. The
+    key is emitted only when non-empty, so every payload that has no such
+    field stays byte-identical, and ``status``/the exit code reflect only
+    fields both reports actually carry (see :func:`diff_verdict_fields`
+    for the narrowness of the rule).
     """
+    not_compared: list[dict[str, Any]] = []
     drift = diff_verdict_fields(
         committed if committed_for_diff is None else committed_for_diff,
         fresh if fresh_for_diff is None else fresh_for_diff,
         exclude=exclude,
+        not_compared=not_compared,
     )
-    return {
+    result: dict[str, Any] = {
         "schema_version": 1,
         "mode": mode,
         "report": report_path,
         "status": "drifted" if drift else "match",
         "drift": drift,
-        "fresh": fresh,
     }
+    if not_compared:
+        result["not_compared"] = not_compared
+    result["fresh"] = fresh
+    return result
 
 
 def strip_keys(value: Any, keys: frozenset[str]) -> Any:
@@ -243,15 +367,6 @@ def strip_keys(value: Any, keys: frozenset[str]) -> Any:
     if isinstance(value, list):
         return [strip_keys(item, keys) for item in value]
     return value
-
-
-#: The path component standing for "any list index" in a
-#: :func:`strip_path_patterns` pattern (issue #2526). Spelled as a literal
-#: ``"*"`` so a pattern reads the way the dotted field name it targets does
-#: (``("items", "*", "text")`` for ``items.2.text``); no report shape any
-#: caller passes has a mapping key literally named ``*``, so the wildcard can
-#: never collide with a real key.
-LIST_ITEM = "*"
 
 
 def strip_path_patterns(value: Any, patterns: frozenset[tuple[str, ...]]) -> Any:
@@ -346,69 +461,3 @@ def strip_path_only_keys(
     if include_volatile_provenance:
         patterns = patterns | VOLATILE_PROVENANCE_PATHS
     return strip_path_patterns(report, patterns)
-
-
-def diff_verdict_fields(
-    committed: Any,
-    fresh: Any,
-    *,
-    exclude: frozenset[tuple[str, ...]] = frozenset(),
-) -> list[dict[str, Any]]:
-    """Recursively diff two JSON-decoded report values, returning one entry
-    per leaf field whose value differs -- ``{"field": "a.b.c", "committed":
-    ..., "fresh": ...}``, dotted-path field names, sorted-key traversal for
-    determinism. A path exactly matching an entry in ``exclude`` (see
-    :data:`VOLATILE_PROVENANCE_PATHS`) is skipped entirely, subtree included.
-
-    Dicts are compared key-by-key (the union of both sides' keys, so a field
-    added/removed between the committed and fresh schema surfaces as a
-    diff -- see this module's docstring caveat on schema evolution). Lists of
-    equal length are compared index-by-index (both ``violations``/
-    ``mismatches`` are already documented as sorted for determinism, so two
-    runs against unchanged inputs produce identically-ordered lists); a
-    length mismatch is reported as one whole-list diff entry rather than a
-    misleading index-by-index one. Any other type mismatch (or genuinely
-    unequal leaf values) is one diff entry at that path.
-    """
-    diffs: list[dict[str, Any]] = []
-    _diff_json(committed, fresh, (), exclude, diffs)
-    return diffs
-
-
-def _diff_json(
-    committed: Any,
-    fresh: Any,
-    path: tuple[str, ...],
-    exclude: frozenset[tuple[str, ...]],
-    out: list[dict[str, Any]],
-) -> None:
-    if path in exclude:
-        return
-    if isinstance(committed, dict) and isinstance(fresh, dict):
-        for key in sorted(set(committed) | set(fresh)):
-            _diff_json(
-                committed.get(key, _MISSING),
-                fresh.get(key, _MISSING),
-                path + (key,),
-                exclude,
-                out,
-            )
-        return
-    if (
-        isinstance(committed, list)
-        and isinstance(fresh, list)
-        and len(committed) == len(fresh)
-    ):
-        for index, (committed_item, fresh_item) in enumerate(
-            zip(committed, fresh, strict=True)
-        ):
-            _diff_json(committed_item, fresh_item, path + (str(index),), exclude, out)
-        return
-    if committed != fresh:
-        out.append(
-            {
-                "field": ".".join(path),
-                "committed": None if committed is _MISSING else committed,
-                "fresh": None if fresh is _MISSING else fresh,
-            }
-        )

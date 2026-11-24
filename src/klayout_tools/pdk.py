@@ -89,11 +89,38 @@ from __future__ import annotations
 import math
 import os
 import re
+import subprocess
 from typing import Any
 
+from ._text import read_text as _read_text
 from .lef_header import parse_lef_header
-from .pdk_compat import check_compatibility
-from .pdk_families import family_subset, pdk_variant_family
+
+#: Re-exported (self-aliased so linters recognise the re-export as
+#: intentional) from the module they were split into for the file-size
+#: ratchet (issue #5449): `pdk.ambiguity_warning` / `pdk.AMBIGUITY_REMEDY`
+#: are the spellings `klt sim`, `klt netlist` and the docs use.
+from .pdk_ambiguity import AMBIGUITY_REMEDY as AMBIGUITY_REMEDY
+from .pdk_ambiguity import ambiguity_warning as ambiguity_warning
+from .pdk_compat import (
+    check_compatibility,
+    check_expected_version,
+    read_fetched_commit,
+    read_fetched_marker,
+)
+from .pdk_corner_skew import (
+    _flavour_devices,
+    _gf180mcu_flavour_tokens,
+    _local_sub_library_bodies,
+    _param_lines,
+)
+from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
+from .pdk_families import (
+    KNOWN_PDK_FAMILIES,
+    family_subset,
+    pdk_variant_family,
+    pdk_variant_install_names,
+)
+from .pdk_store import read_store_stamp
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -124,18 +151,22 @@ _ASSET_LAYOUT: dict[str, tuple[str, ...]] = {
     "libs_ref": ("libs.ref",),
 }
 
-#: Subdirectory of ``assets["klayout"]`` a PDK stages its own importable
-#: KLayout PyCell (Python PCell) library packages under -- see
-#: :func:`pdk_pcell_lib_dir`. Verified against three real installs for issue
-#: #1535: a ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells``
-#: -- the Mabrains-authored ``sky130`` PCell library the PDK's own
+#: Candidate subdirectories of ``assets["klayout"]`` a PDK stages its own
+#: importable KLayout PyCell (Python PCell) library packages under, probed in
+#: order -- see :func:`pdk_pcell_lib_dir`. Verified against real installs: a
+#: ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells`` -- the
+#: Mabrains-authored ``sky130`` PCell library the PDK's own
 #: ``pymacros/sky130_pcells.lym`` autoloads by putting exactly this directory
 #: on ``sys.path``), a fetched ``ihp-sg13g2``
 #: (``libs.tech/klayout/python/{sg13g2_native_pcell_lib,sg13g2_pycell_lib,...}``),
-#: and a ``volare``-fetched ``gf180mcuD`` (ships **no** ``python/`` at all).
-#: Unlike ``drc/``/``lvs/`` (see :func:`drc_deck_file`), no verified install
-#: nests this one under ``klayout/tech/``, so no nested fallback is probed.
-_PCELL_LIB_SUBDIR = "python"
+#: and an open_pdks ``gf180mcuC`` (no ``python/``; ships ``cells``,
+#: ``klayout_api_cells`` and ``sealring_cells`` under
+#: ``libs.tech/klayout/tech/pymacros/``, which its ``gf180mcu.lym`` puts on
+#: ``sys.path``). A ``volare``-fetched ``gf180mcuD`` ships neither.
+_PCELL_LIB_SUBDIRS: tuple[tuple[str, ...], ...] = (
+    ("python",),
+    ("tech", "pymacros"),
+)
 
 
 class PdkNotFoundError(Exception):
@@ -147,7 +178,11 @@ class PdkNotFoundError(Exception):
     """
 
 
-def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+def find_pdk(
+    variant: str | None = None,
+    root: str | None = None,
+    expect_version: str | None = None,
+) -> dict[str, Any]:
     """Resolve one PDK install/variant and return its discovery payload.
 
     ``variant`` (the ``--pdk`` flag) selects a variant explicitly and beats
@@ -162,6 +197,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "root": <absolute install root>,
             "variant": <variant name>,
             "version": <str | None>,
+            "commit": <str | None>,  # 40-hex upstream commit, fetched installs only
             "resolved_via": <how the install was found>,
             "assets": {
                 "ngspice": <abs dir | None>, "xschem": ..., "klayout": ...,
@@ -169,6 +205,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             },
             "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
             "has_pcell_library": <bool>,
+            "pcell_shim": <"present" | "missing" | "not_required">,
             "ambiguous_roots": [{"root": <abs root>, "resolved_via": <str>}, ...],
             "compatibility": {"status": <match|mismatch|unknown|not_declared>, ...},
         }
@@ -185,6 +222,14 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     routinely imports third-party modules klt does not depend on (verified:
     sky130A's ``cells`` needs ``gdsfactory``; ihp-sg13g2's needs ``cni``).
     Additive field; see ``docs/json-contract.md``.
+
+    ``pcell_shim`` (issue #4236) says whether the vendored compat shim a
+    shipped PyCell package imports (ihp-sg13g2's ``pycell4klayout-api``, a git
+    submodule the release tarball omits) is on disk: ``"present"``,
+    ``"missing"`` (absent or empty -- the package exists but cannot load), or
+    ``"not_required"`` (no shipped package needs one, e.g. sky130A). A cheap
+    filesystem check, so a repo can state PCell usability from ``pdk find``
+    alone. Additive field.
 
     ``broken_symlinks`` (issue #1406) reports every **dangling** symlink
     (:func:`_find_broken_symlinks`) found under any resolved ``assets``
@@ -213,10 +258,23 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     explicit ``root=`` disables the search entirely, so it is always ``[]``.
     Additive field; see ``docs/json-contract.md``.
 
+    ``alternative_variants`` (issue #3814) lists the sorted names of the
+    *other* variants in the chosen root when the variant was **not**
+    explicitly selected (no ``variant=`` and no ``$PDK``) -- the "silent
+    default" case, where ``variants[0]`` was picked and e.g.
+    ``gf180mcuB``-``D`` sat unmentioned beside ``gf180mcuA``. ``[]`` when the
+    variant was pinned or the root holds a single variant. Resolution is
+    unchanged; render :func:`alternative_variants_warning` to surface it.
+    Additive field; see ``docs/json-contract.md``.
+
     ``compatibility`` (issue #2759) compares the install's version identity
     with the one a klt technology package declares it was built for
     (:mod:`klayout_tools.pdk_compat`). Warning-only: ``mismatch``/``unknown``
     never change resolution or exit codes. Additive field.
+
+    ``expect_version`` (issue #3810) adds a ``version_expectation`` object --
+    ``{"status": match|mismatch|unknown, "expected", "installed"}`` -- only
+    when given; see :func:`klayout_tools.pdk_compat.check_expected_version`.
 
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
@@ -231,25 +289,49 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
         if effective_variant is not None:
             chosen = by_name.get(effective_variant)
             if chosen is None:
+                # An exact directory-name match always wins; otherwise accept
+                # the deck/family spelling (`sg13g2` -> `ihp-sg13g2`).
+                chosen = next(
+                    (
+                        by_name[alias]
+                        for alias in pdk_variant_install_names(effective_variant)
+                        if alias in by_name
+                    ),
+                    None,
+                )
+            if chosen is None:
                 continue
         else:
             chosen = variants[0]  # variants are sorted → deterministic default
         variant_dir = chosen["_dir"]
         assets = _asset_dirs(variant_dir)
-        return {
+        report: dict[str, Any] = {
             "schema_version": 1,
             "root": root_path,
             "variant": chosen["name"],
             "version": chosen["version"],
+            "layout": chosen["_layout"],
+            "commit": chosen["_commit"],
             "resolved_via": resolved_via,
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),
+            "pcell_shim": _pcell_shim_status_for_assets(assets),
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
             ),
+            "alternative_variants": (
+                []
+                if effective_variant is not None
+                else [v["name"] for v in variants if v["name"] != chosen["name"]]
+            ),
             "compatibility": _compatibility_for(chosen),
         }
+        if expect_version is not None:
+            report["version_expectation"] = check_expected_version(
+                expect_version, variant_dir, chosen["_sources"]
+            )
+        return report
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
 
@@ -280,34 +362,67 @@ def _ambiguous_roots(
     return matches
 
 
-def ambiguity_warning(report: dict[str, Any]) -> str | None:
+def alternative_variants_warning(report: dict[str, Any]) -> str | None:
     """Render a one-line warning for a :func:`find_pdk` report whose
-    ``ambiguous_roots`` is non-empty, or ``None`` when the resolution was
-    unambiguous (issue #2564).
+    ``alternative_variants`` is non-empty, or ``None`` otherwise (issue #3814).
 
-    Pure formatter: this module never prints (see the module docstring), so a
-    caller emits the returned string itself -- to stderr for a CLI verb, or
-    into its own diagnostics channel. The message names the **absolute** root
-    actually read and every root skipped, because that is the only form of
-    the information a caller can act on; the JSON reports carry the
-    path-free ``resolved_via`` labels instead (see ``docs/json-contract.md``'s
-    path-privacy rule for committed evidence).
+    Pure formatter, like :func:`ambiguity_warning`: the caller prints it.
     """
-    skipped = report.get("ambiguous_roots") or []
-    if not skipped:
+    others = report.get("alternative_variants") or []
+    if not others:
         return None
-    others = ", ".join(
-        f"{entry['root']} ({entry['resolved_via']})" for entry in skipped
-    )
     return (
-        f"klt: warning: {len(skipped) + 1} installs provide PDK variant "
-        f"{report['variant']!r}; read {report['root']} "
-        f"({report['resolved_via']}), skipped {others}. Resolution is "
-        "first-match-wins, so a pinned open_pdks build may not be the one "
-        "this run read -- pin the root explicitly (--pdk-root, or a "
-        "request's models.pdk_root) to disable the search and choose "
+        f"klt: warning: no PDK variant selected; defaulted to "
+        f"{report['variant']!r} but {report['root']} also holds "
+        f"{', '.join(others)}. Set $PDK or pass --pdk to choose "
         "deliberately."
     )
+
+
+def find_pdk_for_deck(
+    deck_name: str | None,
+    variant: str | None = None,
+    root: str | None = None,
+) -> dict[str, Any]:
+    """:func:`find_pdk`, constrained to the PDK family of ``deck_name``
+    (issue #4474), so ``provenance.pdk`` never contradicts ``deck.name``.
+
+    With no pinned variant (no ``variant`` and no ``$PDK``), the lowest
+    variant *of the deck's family* is chosen instead of the root's lowest
+    variant overall. A pinned variant of a different family, or a root with
+    no variant of the deck's family, raises :class:`PdkNotFoundError` naming
+    both families. A ``deck_name`` that is not a known PDK family (or
+    ``None``) imposes no constraint -- exactly :func:`find_pdk`.
+    """
+    if deck_name not in KNOWN_PDK_FAMILIES:
+        return find_pdk(variant=variant, root=root)
+    effective = variant if variant is not None else os.environ.get("PDK")
+    if effective is not None:
+        pdk_family = pdk_variant_family(effective)
+        if pdk_family != deck_name:
+            raise PdkNotFoundError(
+                f"PDK variant {effective!r} (family {pdk_family!r}) does not match "
+                f"the deck's family {deck_name!r}"
+            )
+        return find_pdk(variant=variant, root=root)
+    names = sorted(
+        {
+            entry["name"]
+            for install in list_pdks(root)["installs"]
+            for entry in install["variants"]
+            if pdk_variant_family(entry["name"]) == deck_name
+        }
+    )
+    if not names:
+        # No variant of any kind: find_pdk's own not-found message is the
+        # right one; otherwise the root holds only other families.
+        resolved = find_pdk(variant=variant, root=root)
+        raise PdkNotFoundError(
+            f"no PDK variant of the deck's family {deck_name!r} found "
+            f"(resolved {resolved['variant']!r}, family "
+            f"{pdk_variant_family(resolved['variant'])!r})"
+        )
+    return find_pdk(variant=names[0], root=root)
 
 
 def list_pdks(root: str | None = None) -> dict[str, Any]:
@@ -367,6 +482,9 @@ def list_pdks(root: str | None = None) -> dict[str, Any]:
                         "has_pcell_library": bool(
                             _pcell_packages_for_assets(_asset_dirs(entry["_dir"]))
                         ),
+                        "pcell_shim": _pcell_shim_status_for_assets(
+                            _asset_dirs(entry["_dir"])
+                        ),
                     }
                     for entry in variants
                 ],
@@ -404,6 +522,19 @@ def _abspath(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _descriptor_load(directory: str) -> dict[str, Any]:
+    """:func:`load_descriptor`, surfacing a bad descriptor as ``PdkNotFoundError``
+    (issue #3782) so it is never silently skipped in favour of another layout."""
+    try:
+        return load_descriptor(directory)
+    except DescriptorError as exc:
+        raise PdkNotFoundError(str(exc)) from exc
+
+
+def _descriptor_variant(directory: str) -> str | None:
+    return _descriptor_load(directory)["variant"]
+
+
 def _probe_root(root_path: str) -> list[dict[str, Any]]:
     """Return the variants under ``root_path``, trying the nested (open_pdks)
     layout first and falling back to the flat, single-PDK layout (issue
@@ -425,7 +556,9 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     for name in sorted(os.listdir(root_path)):
         variant_dir = os.path.join(root_path, name)
-        if os.path.isdir(os.path.join(variant_dir, "libs.tech")):
+        if has_descriptor(variant_dir):
+            layout = "descriptor"
+        elif os.path.isdir(os.path.join(variant_dir, "libs.tech")):
             layout = "open_pdks"
         elif _is_asap7_tree(variant_dir):
             layout = "asap7"
@@ -434,7 +567,9 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
         variants.append(
             {
                 "name": name,
-                "version": _read_version(variant_dir),
+                "version": read_version(variant_dir),
+                "_commit": read_fetched_commit(variant_dir),
+                "_sources": read_sources(variant_dir),
                 "_dir": variant_dir,
                 "_layout": layout,
             }
@@ -463,17 +598,25 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     read directly off its directory name) -- when ``root_path`` itself ships
     a ``libs.tech/`` directory, or ``[]`` otherwise.
     """
-    if os.path.isdir(os.path.join(root_path, "libs.tech")):
+    if has_descriptor(root_path):
+        layout = "descriptor"
+    elif os.path.isdir(os.path.join(root_path, "libs.tech")):
         layout = "open_pdks"
     elif _is_asap7_tree(root_path):
         layout = "asap7"
     else:
         return []
-    name = os.path.basename(root_path.rstrip(os.sep)) or root_path
+    name = (
+        (_descriptor_variant(root_path) if layout == "descriptor" else None)
+        or os.path.basename(root_path.rstrip(os.sep))
+        or root_path
+    )
     return [
         {
             "name": name,
-            "version": _read_version(root_path),
+            "version": read_version(root_path),
+            "_commit": read_fetched_commit(root_path),
+            "_sources": read_sources(root_path),
             "_dir": root_path,
             "_layout": layout,
         }
@@ -509,34 +652,146 @@ def _is_asap7_tree(directory: str) -> bool:
 
 def _compatibility_for(entry: dict[str, Any]) -> dict[str, Any]:
     """Compatibility result (:mod:`klayout_tools.pdk_compat`) for a probed
-    variant entry."""
+    variant entry.
+
+    Fed the real open_pdks ``SOURCES`` stamp only (``_sources``), never the
+    display ``version``: its ``git:``/``fetched:`` fallbacks are not SOURCES
+    stamps and would read as a spurious ``mismatch`` (issue #3070).
+    """
     return check_compatibility(
-        entry["name"], entry["_dir"], entry["_layout"], entry["version"]
+        entry["name"], entry["_dir"], entry["_layout"], entry["_sources"]
     )
 
 
-def _read_version(variant_dir: str) -> str | None:
-    """Read the version stamp from the variant's ``SOURCES`` file, or ``None``.
-
-    open_pdks writes a ``SOURCES`` file recording the upstream commits the
-    install was built from. Its non-empty lines are whitespace-normalised and
-    joined with ``"; "`` into a single stamp. Absent/unreadable/empty → ``None``
-    (never guessed).
-    """
+def read_sources(variant_dir: str) -> str | None:
+    """open_pdks' ``SOURCES`` file -- non-empty lines whitespace-normalised
+    and joined with ``"; "`` -- or ``None`` when absent/unreadable/empty."""
     sources = os.path.join(variant_dir, "SOURCES")
-    if not os.path.isfile(sources):
-        return None
+    if os.path.isfile(sources):
+        try:
+            with open(sources, encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+        except OSError:
+            lines = []
+        if lines:
+            return "; ".join(lines)
+    return None
+
+
+def read_version(variant_dir: str) -> str | None:
+    """Read the version stamp for a variant install, or ``None``.
+
+    In order: (1) open_pdks' ``SOURCES`` file -- non-empty lines
+    whitespace-normalised and joined with ``"; "`` (unchanged, byte-identical
+    to before the fallbacks existed); (2) a ``.fetched-version`` marker
+    (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
+    directory or its parent is itself a git work tree root, ``git:<40-hex
+    HEAD>`` with ``-dirty`` for index or tracked-file changes (#3070, #7771);
+    (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
+    Absent/unreadable/empty → ``None`` (never guessed).
+    """
+    if sources := read_sources(variant_dir):
+        return sources
+    if marker := read_fetched_marker(variant_dir):
+        return f"fetched:{marker}"
+    return _git_version(variant_dir) or read_store_stamp(variant_dir)
+
+
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _git_run(directory: str, *args: str) -> str | None:
+    """stdout of ``git -C directory <args>``, or ``None`` on any failure
+    (``git`` missing, not a work tree, non-zero exit, timeout)."""
     try:
-        with open(sources, encoding="utf-8") as handle:
-            lines = [line.strip() for line in handle if line.strip()]
-    except OSError:
+        proc = subprocess.run(
+            ["git", "-C", directory, *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    return "; ".join(lines) if lines else None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git_version(variant_dir: str) -> str | None:
+    """``git:<HEAD>[-dirty]`` when the git work tree root is ``variant_dir``
+    or its parent (the PDK-root layout), else ``None``.
+
+    A work tree rooted anywhere else -- e.g. a tarball install nested inside
+    an unrelated checkout such as klt's own -- is not the PDK's revision and
+    is deliberately ignored. Not cached: it runs once per probed variant, and
+    a cache would go stale across runs that edit the tree.
+    """
+    real = os.path.realpath(variant_dir)
+    # A work tree rooted at ``real`` or its parent has a ``.git`` entry there
+    # (dir, or file for linked worktrees/submodules); skip the subprocess otherwise.
+    if not any(
+        os.path.exists(os.path.join(d, ".git")) for d in (real, os.path.dirname(real))
+    ):
+        return None
+    top = _git_run(real, "rev-parse", "--show-toplevel")
+    if top is None:
+        return None
+    toplevel = os.path.realpath(top.strip())
+    if toplevel not in (real, os.path.dirname(real)):
+        return None
+    head = _git_run(real, "rev-parse", "HEAD")
+    if head is None or not _HEX40.match(head.strip()):
+        return None
+    status = _git_run(real, "status", "--porcelain", "--untracked-files=no")
+    dirty = "-dirty" if status and status.strip() else ""
+    return f"git:{head.strip()}{dirty}"
+
+
+def variant_dir_of(pdk: dict[str, Any]) -> str | None:
+    """Absolute directory of the variant a :func:`find_pdk` payload resolved.
+
+    The payload deliberately carries only ``root`` + ``variant``: a nested
+    layout's variant is ``root/<variant>``, a flat one is ``root`` itself.
+    """
+    root = pdk.get("root")
+    name = pdk.get("variant")
+    if not root:
+        return None
+    nested = os.path.join(root, name) if name else None
+    if (
+        nested
+        and os.path.isdir(nested)
+        and (
+            has_descriptor(nested)
+            or os.path.isdir(os.path.join(nested, "libs.tech"))
+            or _is_asap7_tree(nested)
+        )
+    ):
+        return nested
+    return root
+
+
+def tree_of(path: str, *, follow_symlinks: bool = True) -> str | None:
+    """Nearest PDK variant tree on the physical or logical path, if present."""
+    absolute = os.path.realpath(path) if follow_symlinks else os.path.abspath(path)
+    current = os.path.dirname(absolute)
+    while True:
+        if (
+            has_descriptor(current)
+            or os.path.isdir(os.path.join(current, "libs.tech"))
+            or _is_asap7_tree(current)
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     """Map each tool area to its absolute directory, or ``None`` if absent."""
     assets: dict[str, str | None] = {}
+    if has_descriptor(variant_dir):
+        return _descriptor_load(variant_dir)["assets"]
     layout = _ASSET_LAYOUT
     if _is_asap7_tree(variant_dir):
         layout = _ASAP7_ASSET_LAYOUT
@@ -672,20 +927,16 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     same "prefer the specific name" precedence :func:`netgen_setup_file`
     uses) and falls back to a bare ``<variant>.drc``.
 
-    Not every PDK's native deck fits that single-file shape: gf180mcu (also
-    verified against a real fetched install) ships its native deck instead as
-    ~60 topic fragments under ``drc/rule_decks/*.drc`` plus a Python
-    assembly/CLI wrapper (``drc/run_drc.py``) that concatenates the right
-    subset at run time -- a distinct, PDK-specific invocation contract (its
-    own ``--variant``/``--table``/``--run_dir`` flags) this function
-    deliberately does not attempt to drive generically, the same "avoid
-    hand-assembling rule-table fragments ourselves" boundary
-    ``docs/cli/drc.md``'s "Engine" section draws for the curated-deck engine.
-    For a variant shaped like that, this function returns ``None`` rather
-    than guessing or reimplementing that assembly -- a caller who has already
-    produced a merged single-file deck (e.g. by running the PDK's own
-    ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
-    drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
+    Not every PDK's native deck fits that single-file, variant-named shape:
+    gf180mcu ships a single main script named for the *family*
+    (``tech/drc/gf180mcu.drc``) that selects the metal stack from a ``variant``
+    ``-rd`` global, not a variant-named file. That shape is resolved by
+    :func:`.pdk_native_drc.native_drc_main_script` (issue #4002), not by this
+    function, which keeps its "``None`` means no variant-named deck" contract. An older
+    gf180mcu layout (topic fragments under ``drc/rule_decks/*.drc`` plus a
+    ``drc/run_drc.py`` wrapper) is not driven by either; reach it with `klt
+    drc`'s ``--deck-file`` override after running the PDK's own ``run_drc.py
+    --macro_gen``.
 
     A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
     PDK's SG13G2/SG13CMOS5L) nests its ``drc/`` one directory deeper, at
@@ -714,12 +965,9 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     if klayout_dir is None:
         return None
 
-    drc_dir = os.path.join(klayout_dir, "drc")
-    if not os.path.isdir(drc_dir):
-        nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
-        if not os.path.isdir(nested_drc_dir):
-            return None
-        drc_dir = nested_drc_dir
+    drc_dir = _klayout_drc_dir(klayout_dir)
+    if drc_dir is None:
+        return None
 
     for name in (f"{info['variant']}.lydrc", f"{info['variant']}.drc"):
         candidate = os.path.join(drc_dir, name)
@@ -727,6 +975,40 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
             return candidate
 
     return None
+
+
+def _klayout_drc_dir(klayout_dir: str) -> str | None:
+    """The ``drc/`` directory under a ``libs.tech/klayout`` asset dir, trying
+    the open_pdks-shaped ``drc/`` before the flat-install ``tech/drc/``."""
+    drc_dir = os.path.join(klayout_dir, "drc")
+    if os.path.isdir(drc_dir):
+        return drc_dir
+    nested_drc_dir = os.path.join(klayout_dir, "tech", "drc")
+    if os.path.isdir(nested_drc_dir):
+        return nested_drc_dir
+    return None
+
+
+def _klayout_lvs_dir(klayout_dir: str) -> str | None:
+    """The ``lvs/`` directory under a ``libs.tech/klayout`` asset dir, trying
+    the open_pdks-shaped ``lvs/`` before the flat-install ``tech/lvs/``
+    (the LVS twin of :func:`_klayout_drc_dir`; issue #5827)."""
+    lvs_dir = os.path.join(klayout_dir, "lvs")
+    if os.path.isdir(lvs_dir):
+        return lvs_dir
+    nested_lvs_dir = os.path.join(klayout_dir, "tech", "lvs")
+    if os.path.isdir(nested_lvs_dir):
+        return nested_lvs_dir
+    return None
+
+
+def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
+    """List the KLayout DRC decks and LVS runsets a variant ships, with the
+    ``-rd`` globals each consumes (issues #3816, #5827); see
+    :func:`klayout_tools.pdk_decks.drc_decks` for the return shape."""
+    from .pdk_decks import drc_decks as _drc_decks  # lazy: pdk_decks imports pdk
+
+    return _drc_decks(variant=variant, root=root)
 
 
 def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | None:
@@ -797,12 +1079,9 @@ def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     if klayout_dir is None:
         return None
 
-    lvs_dir = os.path.join(klayout_dir, "lvs")
-    if not os.path.isdir(lvs_dir):
-        nested_lvs_dir = os.path.join(klayout_dir, "tech", "lvs")
-        if not os.path.isdir(nested_lvs_dir):
-            return None
-        lvs_dir = nested_lvs_dir
+    lvs_dir = _klayout_lvs_dir(klayout_dir)
+    if lvs_dir is None:
+        return None
 
     resolved_variant = info["variant"]
     # open_pdks names the LVS deck after the bare family, not the lettered
@@ -850,11 +1129,19 @@ def _pcell_lib_dir_for_assets(assets: dict[str, str | None]) -> str | None:
     :func:`list_pdks` can compute their ``has_pcell_library`` field without
     recursing back into :func:`find_pdk`.
     """
+    for path in _pcell_search_dirs(assets):
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _pcell_search_dirs(assets: dict[str, str | None]) -> list[str]:
+    """The ordered candidate PyCell-library directories probed for an
+    already-resolved ``assets`` map (``[]`` when it has no ``klayout`` dir)."""
     klayout_dir = assets.get("klayout")
     if klayout_dir is None:
-        return None
-    path = os.path.join(klayout_dir, _PCELL_LIB_SUBDIR)
-    return path if os.path.isdir(path) else None
+        return []
+    return [os.path.join(klayout_dir, *sub) for sub in _PCELL_LIB_SUBDIRS]
 
 
 def _pcell_packages_in(lib_dir: str) -> list[str]:
@@ -884,6 +1171,46 @@ def _pcell_packages_for_assets(assets: dict[str, str | None]) -> list[str]:
     return [] if lib_dir is None else _pcell_packages_in(lib_dir)
 
 
+#: PyCell packages (by name) that import a PDK-bundled compat shim vendored as
+#: a git submodule next to them, mapped to the shim's directory (path segments
+#: relative to the PyCell ``lib_dir``). A release tarball omits submodules, so
+#: this directory is routinely empty (issue #4236). Pure path data so
+#: :func:`pcell_shim_status` stays a filesystem check; the import/``sys.path``
+#: details live in :mod:`klayout_tools.pdk_pcell`.
+_PCELL_SHIM_ROOTS: dict[str, tuple[str, ...]] = {
+    "sg13g2_pycell_lib": ("pycell4klayout-api",),
+}
+
+
+def _pcell_shim_status_for_assets(assets: dict[str, str | None]) -> str:
+    """``"present"`` | ``"missing"`` | ``"not_required"`` (issue #4236).
+
+    ``not_required`` when no PyCell package the variant ships needs a vendored
+    compat shim (sky130A, gf180mcuD, ...); otherwise ``missing`` when any such
+    shim directory is absent or empty -- the uninitialized-submodule shape --
+    and ``present`` when every required one has content. No imports, no pya.
+    """
+    lib_dir = _pcell_lib_dir_for_assets(assets)
+    if lib_dir is None:
+        return "not_required"
+    roots = [
+        _PCELL_SHIM_ROOTS[name]
+        for name in _pcell_packages_in(lib_dir)
+        if name in _PCELL_SHIM_ROOTS
+    ]
+    if not roots:
+        return "not_required"
+    for segments in roots:
+        shim_dir = os.path.join(lib_dir, *segments)
+        try:
+            populated = os.path.isdir(shim_dir) and bool(os.listdir(shim_dir))
+        except OSError:  # pragma: no cover - unreadable directory
+            populated = False
+        if not populated:
+            return "missing"
+    return "present"
+
+
 def pdk_pcell_lib_dir(
     variant: str | None = None, root: str | None = None
 ) -> str | None:
@@ -899,16 +1226,14 @@ def pdk_pcell_lib_dir(
     exactly as :func:`find_pdk` does (same precedence, same
     :class:`PdkNotFoundError` on no match).
 
-    Layout convention (verified against three real installs, see
-    :data:`_PCELL_LIB_SUBDIR`): both sky130A and ihp-sg13g2 stage their PyCell
-    packages directly at ``libs.tech/klayout/python/<package>/``, and
-    gf180mcuD ships no such directory at all. Unlike ``drc/``/``lvs/``, no
-    verified install nests it under ``klayout/tech/``, so -- keeping this
-    module's "enumerate what is present, never guess" convention -- no nested
-    fallback is probed.
+    Layout convention (see :data:`_PCELL_LIB_SUBDIRS`): sky130A and
+    ihp-sg13g2 stage their PyCell packages at
+    ``libs.tech/klayout/python/<package>/``; gf180mcuC at
+    ``libs.tech/klayout/tech/pymacros/<package>/``. Both are probed, in that
+    order, and the first existing directory wins. gf180mcuD ships neither.
 
     Returns the absolute directory, or ``None`` when the variant ships no
-    ``klayout`` asset directory at all or no ``python/`` subdirectory under it.
+    ``klayout`` asset directory at all or neither candidate exists under it.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
     """
@@ -1007,6 +1332,15 @@ def _resolve_tech_lef(lib_dir: str, cell_library: str, corner: str) -> str | Non
     return None
 
 
+def descriptor_views(info: dict[str, Any], cell_library: str) -> dict[str, Any]:
+    """Descriptor ``views`` entry for ``cell_library`` (issue #4087), or ``{}``
+    when the resolved install has no descriptor or does not map the library."""
+    variant_dir = variant_dir_of(info)
+    if variant_dir is None or not has_descriptor(variant_dir):
+        return {}
+    return _descriptor_load(variant_dir)["views"].get(cell_library, {})
+
+
 def lef_files(
     cell_library: str,
     variant: str | None = None,
@@ -1053,19 +1387,104 @@ def lef_files(
     (the same condition :func:`find_pdk` raises for).
     """
     info = find_pdk(variant=variant, root=root)
+    views = descriptor_views(info, cell_library)
+    mapped_tech = views.get("tech_lef")
+    if mapped_tech is not None and corner not in mapped_tech:
+        raise PdkNotFoundError(
+            f"tech LEF not found: no '{corner}' interconnect corner mapped for "
+            f"'{cell_library}' in the PDK descriptor "
+            f"(mapped: {', '.join(sorted(mapped_tech))})"
+        )
+
     libs_ref = info["assets"]["libs_ref"]
-    if libs_ref is None:
-        return {"tech_lef": None, "cell_lef": None}
+    tech_lef: str | None = None
+    cell_lef: str | None = None
+    if libs_ref is not None:
+        lib_dir = os.path.join(libs_ref, cell_library)
+        tech_lef = _resolve_tech_lef(lib_dir, cell_library, corner)
+        conventional = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
+        cell_lef = conventional if os.path.isfile(conventional) else None
 
-    lib_dir = os.path.join(libs_ref, cell_library)
+    if mapped_tech is not None:
+        tech_lef = mapped_tech[corner]
+    if "cell_lef" in views:
+        cell_lef = views["cell_lef"]
+    return {"tech_lef": tech_lef, "cell_lef": cell_lef}
 
-    tech_lef = _resolve_tech_lef(lib_dir, cell_library, corner)
-    cell_lef = os.path.join(lib_dir, "lef", f"{cell_library}.lef")
 
-    return {
-        "tech_lef": tech_lef,
-        "cell_lef": cell_lef if os.path.isfile(cell_lef) else None,
-    }
+def resolve_klayout_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
+    """The open_pdks KLayout LEF/DEF layer-map file for a resolved PDK
+    (``libs.tech/klayout/tech/<variant>.map``), as ``(path, resolution)``.
+
+    Prefers the variant-named file (``<variant>.map``, ``resolution=
+    "exact"``); falls back to a family-level file (``<family>.map``,
+    ``resolution="family"``) when the variant-named file is absent -- some
+    open_pdks families (gf180mcu, unlike sky130) ship a single map file
+    shared across every variant (issue #1029). Returns ``(None, "none")``
+    when neither exists, or when the variant ships no ``klayout`` asset at
+    all.
+
+    Shared by ``place_and_route``, ``lef_abstract`` and ``extract_abstract``
+    (issue #3731): PDK resolution is the one logic family ``docs/
+    ARCHITECTURE.md`` keeps out of per-module self-containment.
+    """
+    klayout_dir = pdk_info["assets"].get("klayout")
+    if klayout_dir is None:
+        return None, "none"
+    tech_dir = os.path.join(klayout_dir, "tech")
+    variant = pdk_info["variant"]
+    exact = os.path.join(tech_dir, f"{variant}.map")
+    if os.path.isfile(exact):
+        return exact, "exact"
+
+    family = variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
+    # the shipped map is named after the process, ``sg13g2.map`` -- without
+    # this the DEF->GDS merge silently fell back to KLayout's sequential
+    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
+    if family.startswith("ihp-"):
+        family = family[len("ihp-") :]
+    if family != variant:
+        family_candidate = os.path.join(tech_dir, f"{family}.map")
+        if os.path.isfile(family_candidate):
+            return family_candidate, "family"
+
+    return None, "none"
+
+
+def load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
+    """Parse an open_pdks KLayout ``.map`` file into ``{(gds_layer,
+    gds_datatype): <LEF layer name>}``.
+
+    File shape (whitespace-delimited, one entry per line): ``<lef_layer_name>
+    <comma-separated purposes> <gds_layer> <gds_datatype>``.
+    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
+    drawn layer) are skipped. Several purposes of the same LEF layer simply
+    contribute several entries mapping to the same name -- never a conflict,
+    since distinct purposes always use distinct datatypes in a real
+    open_pdks map file.
+    """
+    mapping: dict[tuple[int, int], str] = {}
+    with open(map_path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) < 4:
+                continue
+            lef_name = parts[0]
+            if lef_name in ("NAME", "DIEAREA"):
+                continue
+            try:
+                gds_layer = int(parts[-2])
+                gds_datatype = int(parts[-1])
+            except ValueError:
+                continue
+            mapping[(gds_layer, gds_datatype)] = lef_name
+    return mapping
 
 
 # --------------------------------------------------------------------------- #
@@ -1406,23 +1825,6 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
     )
 
 
-def _read_text(path: str) -> str | None:
-    """Read ``path`` as UTF-8 text, or ``None`` if missing/unreadable.
-
-    Stays defined here (rather than moving into :mod:`klayout_tools.pdk_cells`
-    with the rest of the `klt pdk cells` region, issue #1884) because
-    :func:`lef_files` below also calls it -- :mod:`klayout_tools.pdk_cells`
-    imports it back from here instead.
-    """
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
 # --------------------------------------------------------------------------- #
 # `klt pdk macros` -- hard-macro IP library discovery
 # --------------------------------------------------------------------------- #
@@ -1438,6 +1840,10 @@ def _read_text(path: str) -> str | None:
 #: "standard-cell digital library"); `klt pdk macros` exists specifically to
 #: surface them -- see docs/cli/pdk.md "klt pdk macros".
 _HARD_MACRO_LIB_MARKER = "_fd_ip_"
+
+#: Name suffixes of I/O-pad libraries (`sky130_fd_io`, `gf180mcu_fd_io`,
+#: `sg13g2_io`), which ship `lef`+`lib` views but are not hard macros.
+_IO_PAD_LIB_SUFFIXES = ("_fd_io", "_io")
 
 #: View subdirectories under a `libs_ref/<lib>` entry that
 #: :func:`list_hard_macro_libraries` reports presence of, keyed by the name
@@ -1467,7 +1873,9 @@ def list_hard_macro_libraries(
     Resolves one PDK install/variant exactly as :func:`find_pdk` does (same
     ``variant``/``root`` args, same :class:`PdkNotFoundError` on no match),
     then scans its ``libs_ref`` asset for hard-macro IP libraries -- entries
-    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`).
+    whose name contains ``_fd_ip_`` (see :data:`_HARD_MACRO_LIB_MARKER`) or
+    that structurally ship ``lef`` + ``lib`` views and are not standard-cell
+    or I/O-pad libraries (e.g. IHP's ``sg13g2_sram``).
     This is the sibling command to `klt pdk cells`, not an alternate mode of
     it (see docs/cli/pdk.md "klt pdk macros" for why): `klt pdk cells`
     deliberately excludes hard-macro IP libraries, and this command's own
@@ -1507,7 +1915,7 @@ def list_hard_macro_libraries(
         }
 
     An empty ``macros`` list is a successful result (the variant ships no
-    `_fd_ip_`-named library), not an error.
+    hard-macro library), not an error.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves.
     """
@@ -1524,13 +1932,29 @@ def list_hard_macro_libraries(
 
 
 def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
-    """Enumerate `_fd_ip_`-named entries under ``libs_ref``, name-sorted."""
+    """Enumerate hard-macro IP libraries under ``libs_ref``, name-sorted.
+
+    A library is a hard macro when its name contains ``_fd_ip_`` (open_pdks
+    convention) or, structurally, when it ships both ``lef/`` and ``lib/``
+    views and is neither a standard-cell library nor an I/O-pad library
+    (IHP's ``sg13g2_sram``).
+    """
+    from .pdk_cells import _STD_CELL_LIB_MARKERS
+
     if not os.path.isdir(libs_ref):
         return []
     macros: list[dict[str, Any]] = []
     for name in sorted(os.listdir(libs_ref)):
         lib_dir = os.path.join(libs_ref, name)
-        if not os.path.isdir(lib_dir) or _HARD_MACRO_LIB_MARKER not in name:
+        if not os.path.isdir(lib_dir):
+            continue
+        structural = (
+            os.path.isdir(os.path.join(lib_dir, "lef"))
+            and os.path.isdir(os.path.join(lib_dir, "lib"))
+            and not any(marker in name for marker in _STD_CELL_LIB_MARKERS)
+            and not name.endswith(_IO_PAD_LIB_SUFFIXES)
+        )
+        if _HARD_MACRO_LIB_MARKER not in name and not structural:
             continue
         macros.append(
             {
@@ -1610,6 +2034,10 @@ _GF180MCU_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("mos_cap", "moscap_"),
 )
 
+#: The one gf180mcu family whose section mixes device flavours (3.3V vs 5/6V)
+#: that the deck skews independently; it gets the additive ``devices`` list.
+_GF180MCU_FLAVOUR_FAMILY = "mos"
+
 #: sky130's per-corner device-family split, keyed by the leading path
 #: component of the `.include` lines a `.lib <corner> ... .endl` block
 #: carries (``"corners/tt.spice"`` -> family ``mos``, ``"r+c/..."`` ->
@@ -1639,40 +2067,6 @@ _LIB_INCLUDE_TOKEN_RE = re.compile(
 _INCLUDE_PATH_RE = re.compile(
     r'^\s*\.include\s+"([^"]+)"', re.IGNORECASE | re.MULTILINE
 )
-#: Matches both a `.param` statement line and its `+`-prefixed ngspice
-#: line-continuations -- gf180mcu's `bjt_*`/`diode_*`/`res_*`/`moscap_*`
-#: sections write their assignments as a bare `.param` line followed by
-#: several `+name=value ...` continuation lines (see :func:`_param_lines`),
-#: not `.param name=value` on one line the way `mimcap_*` does.
-_PARAM_LINE_RE = re.compile(r"^\s*(?:\.param\b|\+)", re.IGNORECASE)
-
-
-def _param_lines(body: str) -> frozenset[str]:
-    """The normalised set of `.param` statement lines (plus their `+`
-    line-continuations, concatenated as separate set members) in ``body``,
-    for comparing whether a section's parameter overrides genuinely differ
-    from its family's typical section.
-
-    A **set** comparison of the *whole* parameter area (not "does this
-    section contain any `.param`/`+` line at all") -- both PDKs' decks carry
-    `.param` lines that are unconditional boilerplate, unrelated to
-    process-corner skew, in *every* section (gf180mcu's per-corner
-    `rsh_*_u_m` sheet-resistance restatements that happen to equal the
-    typical value at some corners; sky130's `mc_mm_switch`/`mc_pr_switch`
-    Monte-Carlo toggle, which is `0` in every non-mismatch,
-    non-statistical corner including `tt` itself). Presence alone would
-    misclassify those as ``"param"``-skewed even when every value is
-    unchanged from typical; comparing the actual line set against the
-    family's typical section correctly resolves them to ``"typical"``.
-    Internal whitespace is collapsed (``" ".join(line.split())``) so
-    incidental spacing differences between corners don't register as a
-    content difference.
-    """
-    return frozenset(
-        " ".join(line.split())
-        for line in body.splitlines()
-        if _PARAM_LINE_RE.match(line)
-    )
 
 
 def list_corners(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
@@ -1733,14 +2127,27 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
     for sky130), not per individual device flavor within a family. A family
     reported ``"skewed"`` means *some* of its devices moved off the typical
     section for that corner -- it does not guarantee *every* device in the
-    family did. For example, gf180mcu's own model deck leaves its 06v0
-    MOSFET flavor at the typical-named section inside every corner while
-    its 03v3 flavor does skew, both inside the single curated "mos" family
-    (the issue's own worked example) -- this command correctly reports
-    "mos" as ``"skewed"`` for that corner (some devices moved), but does
-    not itself flag the 06v0 sub-flavor as unmoved. Resolving that finer,
-    per-flavor question is the spike's own proposed ``klt pdk corner --pdk
-    <variant> --corner <name>`` follow-up (section 2.2), not this command.
+    family did. For example, gf180mcu's own model deck includes the same
+    ``_t``-suffixed (typical-named) sub-library for its 06v0 MOSFET flavor
+    inside every corner's section while its 03v3 flavor switches to
+    ``_s``/``_f``-suffixed sub-libraries, both inside the single curated
+    "mos" family -- but identical include tokens alone do not decide what a
+    flavor's model receives: the corner sections also override ``.param``
+    values those ``_t`` sub-libraries consume, so the flavor is skewed, by
+    parameters rather than by a model swap (issue #5663). Which of the two
+    happened per flavor is answered by the additive ``devices`` list (issue
+    #3794) on gf180mcu's ``mos`` section entries: one ``{flavour, section,
+    skew}`` per device flavor (``03v3``, ``06v0``, ``06v0_nvt``, ...), each
+    classified against its own typical-corner include tokens *and* the
+    ``.param`` values its sub-libraries consume -- ``"skewed"`` (tokens
+    moved), ``"param"`` (tokens identical, a consumed ``.param`` value
+    differs), ``"typical"`` (provably unmoved), ``"unknown"`` (undecidable:
+    unresolvable sub-library with differing ``.param`` values attributable
+    to it by neither consumption nor name prefix), or ``None`` for a flavor
+    the typical corner has but this section does not. Tokens without a
+    separable flavor (gf180mcuD's ``fets_mm`` mismatch lib, its
+    ``noise_corner`` noise lib) are not device flavors and are not listed
+    (issue #5663). Family-level ``skew`` and ``complete`` are unchanged.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pdk.md``)::
@@ -1757,7 +2164,11 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
                     "corner": str,
                     "sections": [
                         {"family": str, "section": str | None,
-                         "skew": "typical" | "skewed" | "param" | None},
+                         "skew": "typical" | "skewed" | "param" | None,
+                         # gf180mcu "mos" only (issues #3794, #5663):
+                         "devices": [{"flavour": str, "section": str | None,
+                                      "skew": "typical" | "skewed" | "param"
+                                              | "unknown" | None}]},
                         ...
                     ],
                     "family_count": int,
@@ -1879,8 +2290,7 @@ def _parse_named_lib_blocks(text: str) -> dict[str, str]:
 def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
     """Scan gf180mcu's golden model deck for its per-family corner sections.
 
-    See :func:`list_corners` for the overall algorithm and its documented
-    granularity limits.
+    See :func:`list_corners` for the algorithm and its granularity limits.
     """
     text = _read_text(model_path)
     if text is None:
@@ -1889,6 +2299,7 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
 
     typical_tokens: dict[str, set[tuple[str, str]]] = {}
     typical_params: dict[str, frozenset[str]] = {}
+    typical_flavours: dict[str, set[tuple[str, str]]] = {}
     corners: list[dict[str, Any]] = []
     for corner in _GF180MCU_CORNER_NAMES:
         sections: list[dict[str, Any]] = []
@@ -1912,7 +2323,25 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
                     skew = "param"
                 else:
                     skew = "typical"
-            sections.append({"family": family, "section": section_name, "skew": skew})
+            entry: dict[str, Any] = {
+                "family": family,
+                "section": section_name,
+                "skew": skew,
+            }
+            if family == _GF180MCU_FLAVOUR_FAMILY:
+                flavours = _gf180mcu_flavour_tokens(tokens)
+                if corner == "typical":
+                    typical_flavours = flavours
+                entry["devices"] = _flavour_devices(
+                    section_name,
+                    flavours,
+                    typical_flavours,
+                    corner == "typical",
+                    blocks=_local_sub_library_bodies(model_path, blocks, tokens),
+                    params=params,
+                    typical_params=typical_params.get(family, frozenset()),
+                )
+            sections.append(entry)
         corners.append(_finish_corner(corner, sections, corner == "typical"))
     return corners
 

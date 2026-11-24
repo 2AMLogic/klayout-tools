@@ -375,11 +375,22 @@ def test_deck_hashes_records_each_deck_module(tmp_path):
     decks.mkdir(parents=True)
     (decks / "sky130.py").write_bytes(b"DECK = []\n")
     (decks / "notes.txt").write_text("ignored")
+    (decks / "sky130.drc").write_bytes(b"# drc\n")
 
     assert module.deck_hashes(str(tmp_path)) == {
-        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest()
+        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest(),
+        # A standalone DRC deck file is its own artifact (issue #3826).
+        "sky130.drc": "sha256:" + hashlib.sha256(b"# drc\n").hexdigest(),
     }
     assert module.deck_hashes(str(tmp_path / "missing")) is None
+
+
+def test_build_pins_match_installed_decks():
+    from klayout_tools.decks import deck_content_hash, deck_names
+
+    recorded = _load_hatch_build().deck_hashes(str(_ROOT))
+    for name in deck_names():
+        assert recorded[name] == deck_content_hash(name)
 
 
 def test_render_build_info_includes_deck_hashes(tmp_path):

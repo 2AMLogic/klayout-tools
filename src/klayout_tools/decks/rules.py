@@ -23,6 +23,7 @@ re-exports every public name below so existing
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,22 @@ class DerivedLayer:
     ``intersect_with`` alone, and vice versa. ``intersect_with`` is
     required for this mode.
 
+    **``"gate_endcap"`` mode (issue #2936).** A rule on how far one layer
+    must *extend past* another's edge where the two cross -- sky130's
+    ``poly.8`` ("min. poly extention gate (endcap)", 0.13 um), the poly
+    beyond a diffusion edge at a transistor. No enclosing/space primitive
+    expresses it: measuring the gate (``poly & diff``) against poly also
+    reports the gate's long sides, which are coincident with poly's own
+    edges. ``"gate_endcap"`` derives, instead, the *probe zones*: each
+    ``base`` (diffusion) edge segment lying under or flush with
+    ``intersect_with`` (poly) is a gate end edge, and the zone is that edge
+    pushed outward by ``sized_by_um`` (the required extension). Pair it
+    with ``check="enclosed"``, ``other_layer=<the poly layer>`` and
+    ``threshold_dbu=0``: the engine's outside-region term then reports
+    exactly the part of each zone poly fails to cover, including a flush
+    (zero-extension) end. Orientation-free (a rotated gate works the same),
+    and poly that merely abuts a diffusion from outside is not a gate.
+
     **Well-context partition (issue #3484).** Any mode above can be followed
     by a second, optional stage that keeps only the part of the derived
     region that is ``"near"`` or ``"far"`` from a *context* region:
@@ -191,6 +208,16 @@ class DerivedLayer:
     polygon is then ``"far"``) and never cause the rule to be skipped.
     Whole-polygon selection errs strict: a polygon that is only partly
     within reach of the context is entirely ``"near"``.
+
+    **Second context stage (issue #3682).** ``context2_layers`` /
+    ``context2_sized_by_um`` / ``context2`` repeat the same partition as a
+    *sequential* stage applied to the stage-1 result, so the two stages AND
+    together and every combination is expressible: ``near`` then ``far`` is
+    "inside ThickGateOx but outside DigiBnd", and ``near`` then ``near`` its
+    exact complement within ``near``. Stage 2 requires stage 1, and is
+    validated like it (``context2`` and ``context2_layers`` set together).
+    Absent layers contribute an empty region (``near`` yields nothing,
+    ``far`` keeps everything) and never cause the rule to be skipped.
     """
 
     base: tuple[int, int]
@@ -200,6 +227,9 @@ class DerivedLayer:
     context_layers: tuple[tuple[int, int], ...] = ()
     context_sized_by_um: float = 0.0
     context: str | None = None
+    context2_layers: tuple[tuple[int, int], ...] = ()
+    context2_sized_by_um: float = 0.0
+    context2: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,11 +319,133 @@ class RuleProvenance:
 
 
 @dataclass(frozen=True)
+class CompCoverageSpec:
+    """Descriptor for ``DrcRule(check="comp_coverage")`` (issue #3587): the
+    checked layer (``DrcRule.layer``) minus every ``covered_by_any`` layer,
+    with a *whole* checked polygon exempted when it interacts with any
+    ``exempt_markers`` polygon -- gf180mcu's ``DF.12``: ``comp.not_interacting
+    (schottky_diode).not(nplus).not(pplus)``.
+
+    Every named layer other than the checked one may be absent from a stream:
+    it is read as an empty region, never as a reason to skip the rule (an
+    unimplanted COMP is exactly the violation). Why this is a typed descriptor
+    rather than a :class:`DerivedLayer` mode: see
+    ``docs/design/gf180mcu-comp-checks-spike.md`` section 7.
+    """
+
+    covered_by_any: tuple[tuple[int, int], ...]
+    exempt_markers: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.covered_by_any:
+            raise ValueError("covered_by_any must name at least one layer")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (*self.covered_by_any, *self.exempt_markers)
+
+
+@dataclass(frozen=True)
+class TapDistanceSpec:
+    """Deck-owned layer and distance inputs for ``tap_distance`` (#3607).
+
+    ``inside`` (DF.13) uses ``step_um`` octagon steps clipped to Nwell.
+    ``outside`` (DF.14) uses a diamond filter and Euclidean separation.
+    The check selects whole active polygons outside tap reach. See the
+    voltage selectors and limitations in ``docs/cli/drc.md`` and the upstream
+    derivation in ``docs/design/gf180mcu-comp-checks-spike.md`` (§§3, 5, 7).
+
+    Missing non-COMP layers are empty regions. Active with no taps is a
+    violation. Invalid descriptors raise :class:`ValueError` at construction.
+    """
+
+    well_domain: str
+    voltage: str
+    max_distance_um: float
+    nwell: tuple[int, int]
+    dnwell: tuple[int, int]
+    lvpwell: tuple[int, int]
+    nplus: tuple[int, int]
+    pplus: tuple[int, int]
+    res_mk: tuple[int, int]
+    dualgate: tuple[int, int]
+    v5_xtor: tuple[int, int]
+    step_um: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.well_domain not in ("inside", "outside"):
+            raise ValueError("well_domain must be 'inside' or 'outside'")
+        if self.voltage not in ("lv", "mv"):
+            raise ValueError("voltage must be 'lv' or 'mv'")
+        if self.max_distance_um <= 0:
+            raise ValueError("max_distance_um must be positive")
+        if self.step_um <= 0:
+            raise ValueError("step_um must be positive")
+        steps = self.max_distance_um / self.step_um
+        if abs(steps - round(steps)) > 1e-9:
+            raise ValueError("max_distance_um must be a multiple of step_um")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (
+            self.nwell,
+            self.dnwell,
+            self.lvpwell,
+            self.nplus,
+            self.pplus,
+            self.res_mk,
+            self.dualgate,
+            self.v5_xtor,
+        )
+
+
+@dataclass(frozen=True)
+class NetSpaceSpec:
+    """Connectivity model for ``DrcRule(check="net_space")`` (issue #3572):
+    which shapes join two regions of the checked layer into one net.
+
+    The checked layer (``DrcRule.layer``) is the net-bearing layer whose
+    spacing is measured -- only between polygons on *different* nets. The
+    model is a straight conductor chain, mirroring KLayout's
+    ``connect(a, b)`` graph:
+
+    - ``tap_and``: layers intersected with the checked layer to form the
+      *tap* region (e.g. ``Activ`` and ``nSD`` for an NWell tie). The tap is
+      joined to the checked layer it sits in.
+    - ``chain``: conductor/cut layers joined in order -- the tap to
+      ``chain[0]``, ``chain[0]`` to ``chain[1]``, and so on (e.g. ``Cont``
+      then ``Metal1``). Same-layer touching shapes join as well.
+
+    Anything not in this chain is *not modelled* and never joins two nets:
+    a checked-layer polygon with no tap is its own net, and two polygons
+    tied only through a layer outside ``chain`` read as different nets (so
+    the rule errs toward flagging, never silently toward passing). Each
+    deck documents its own unmodelled list next to the rule.
+    """
+
+    tap_and: tuple[tuple[int, int], ...]
+    chain: tuple[tuple[int, int], ...]
+
+    def __post_init__(self) -> None:
+        if not self.tap_and:
+            raise ValueError("tap_and must name at least one layer")
+        if not self.chain:
+            raise ValueError("chain must name at least one layer")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (*self.tap_and, *self.chain)
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
     ``layer`` and ``other_layer`` are ``(layer, datatype)`` pairs. ``check``
-    selects which ``klayout.db.Region`` check primitive to run:
+    selects which ``klayout.db.Region`` check primitive to run (or, for
+    ``"comp_coverage"`` -- issue #3587 -- or ``"tap_distance"`` -- issue
+    #3607 -- a region rule described by ``region_spec``, see
+    :class:`CompCoverageSpec` / :class:`TapDistanceSpec`):
     ``"width"`` / ``"space"`` / ``"notch"`` / ``"isolated"`` are single-layer
     checks; ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"``
     are two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
@@ -313,11 +465,10 @@ class DrcRule:
     source rule whose real semantics is "isolated"/"distinct polygon"
     spacing (as opposed to "space", which also bounds intra-polygon
     notches) -- see ``sky130.py``'s ``nwell.space.1`` for a worked example.
-    ``threshold_dbu`` is the
-    rule's distance threshold expressed in database units of the deck's own
-    *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
-    sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
-    1 nm per unit).
+    ``threshold_dbu`` is the rule's distance threshold expressed in database
+    units of the deck's own *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM``
+    constant — e.g. sky130 and gf180mcu are both authored against ``dbu_um = 0.001``,
+    i.e. 1 nm per unit).
 
     For ``"enclosing"`` (``layer`` encloses ``other_layer``) and ``"enclosed"``
     (``layer`` is enclosed by ``other_layer``), ``run_drc()`` reports more than
@@ -550,6 +701,12 @@ class DrcRule:
     :class:`~klayout_tools.drc.DrcError` for an ``"angle"`` rule that leaves
     it unset or outside ``(0, 180]``.
 
+    ``"net_space"`` (issue #3572) is a net-aware spacing check: like
+    ``"space"`` it measures ``layer`` against itself at ``threshold_dbu``,
+    but reports only facing edges of polygons on *different* nets, as
+    decided by ``net_spec`` (:class:`NetSpaceSpec`, required). An isolated
+    polygon (no tap) is its own net.
+
     ``requires_any_layer`` (issue #2634) skips this rule entirely -- the
     same ``coverage.rules_skipped`` path a missing ``layer``/``other_layer``
     already uses -- unless at least one of the listed ``(layer, datatype)``
@@ -643,6 +800,22 @@ class DrcRule:
     rather than measured as one oversized contact. ``None`` (the default)
     checks the full drawn layer as before; it cannot be combined with
     ``derived_layer``.
+
+    ``report_escapes`` (issue #3001) controls the #318 zero-overlap escape
+    term of an ``"enclosing"``/``"enclosed"`` rule. ``True`` (the default,
+    every pre-existing rule) also reports whatever part of the enclosed
+    layer lies outside the enclosing layer. ``False`` reports only the
+    marginal facing-edge shortfall -- exactly the DRC-DSL ``a.enclosed(b, d)``
+    statement, which has no escape term. Use it where the source rule
+    measures an *extension* and the enclosed layer is legitimately wider than
+    the enclosing one in other directions (gf180mcu's ``SB.10``: poly must
+    extend 0.22um past the SAB edge, while the SAB routinely overhangs the
+    poly sideways). Meaningless, and ignored, for every other check kind.
+
+    ``approximations`` (#5805) declares known fidelity gaps as ``{"class",
+    "description"}`` records. ``coverage.approximated_rules`` includes them for
+    checked rules, even with zero violations. ``runset_note`` is reported for
+    rules that produced a finding. ``None`` declares no approximations.
     """
 
     id: str
@@ -668,6 +841,15 @@ class DrcRule:
     require_containment: bool = False
     other_layer_selection: str | None = None
     layer_selection: str | None = None
+    region_spec: CompCoverageSpec | TapDistanceSpec | None = None
+    net_spec: NetSpaceSpec | None = None
+    report_escapes: bool = True
+    # Issue #4520: how the PDK's own runset treats this rule, surfaced as
+    # `runset_correspondence` in a report only when the rule fires. Keys:
+    # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
+    runset_note: dict[str, Any] | None = None
+    text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
+    approximations: list[dict[str, str]] | None = None
 
 
 class UnknownDeckError(Exception):

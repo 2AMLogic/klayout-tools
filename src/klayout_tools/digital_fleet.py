@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import remote_fleet, remote_transport
+from ._jsonnum import is_number
 from .remote_launcher import (
     RemoteLauncher,
     RemoteLaunchError,
@@ -539,7 +540,7 @@ def build_digital_job_description(
             "check": "place-and-route",
             "name": "place-and-route",
             "args": {"request": PLACE_AND_ROUTE_REQUEST_FILENAME},
-            "threshold": {"metric": "stage_reached", "equals": candidate.target_stage},
+            "threshold": {"metric": "status", "equals": "ok"},
         },
     ]
     metrics: list[dict[str, Any]] = [
@@ -902,7 +903,7 @@ def _is_scoreable(result: CandidateResult) -> bool:
     if result.status != "ok" or not isinstance(result.objective, dict):
         return False
     value = result.objective.get("value")
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return is_number(value)
 
 
 def rank_candidates(results: Sequence[CandidateResult]) -> list[CandidateResult]:
@@ -938,6 +939,6 @@ def rank_candidates(results: Sequence[CandidateResult]) -> list[CandidateResult]
     ranked = sorted(
         scoreable,
         key=lambda r: r.objective["value"],
-        reverse=reverse,  # type: ignore[index]
+        reverse=reverse,
     )
     return [*ranked, *unscoreable]

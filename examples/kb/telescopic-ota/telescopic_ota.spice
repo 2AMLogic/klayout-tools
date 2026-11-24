@@ -1,0 +1,70 @@
+* Telescopic (stacked-cascode) OTA: NMOS input pair, NMOS cascodes stacked
+* directly on it, PMOS cascodes + PMOS current-mirror load on top.
+* sky130 schematic-level netlist BODY -- no .control/.end (klt sim wraps this).
+* Device W/L are in microns (sky130_fd_pr subckt convention: D G S B).
+*
+* Signal path, node by node (matches kb/entries/telescopic-ota.json's topology):
+*   - MNBT/MN0: NMOS tail current sink (diode-referenced, same pattern as
+*     five-transistor-ota), sinking ~itail from the pair's common source "tail".
+*   - M1/M2: NMOS input differential pair, drains at a1/a2.
+*   - MN3/MN4: NMOS cascodes stacked on M1/M2 (source=a1/a2, drain=d1/out).
+*     The signal current never leaves this vertical stack -- that is what
+*     "telescopic" means, versus folded-cascode's opposite-type fold.
+*   - MP3/MP4: PMOS cascodes (source=p1/p2, drain=d1/out), gate at pcasc.
+*   - MP1/MP2: PMOS mirror load, sources at vdd, gates tied together at d1.
+*     MP1 is the reference (its current is whatever the left branch carries);
+*     MP2 mirrors it to the output branch. "out" is the single-ended
+*     high-impedance output.
+*
+* Open-loop gain uses the same DC-feedback technique as
+* folded-cascode-ota/folded_cascode.spice: Lfb/Cfb hold out=vcm at DC while
+* opening the loop at AC, so v(out)/vac is the open-loop transfer.
+*
+* Cascode gate biases (ncasc, pcasc) come from small diode-connected replica
+* stacks driven by ideal DC current references, not a full wide-swing bias
+* generator (simplification; a fuller generator would recover some swing).
+* Every transistor is a real sky130_fd_pr__nfet_01v8/pfet_01v8 device; only
+* the current references are ideal sources, as in the sibling netlists.
+.param vdd=1.8
+.param vcm=1.0
+.param itail=40u
+.param incasc=10u
+.param ipcasc=10u
+.param cl=1p
+
+* --- supplies and stimulus ---
+Vdd  vdd 0 DC {vdd}
+Vcm  cm  0 DC {vcm}
+Vin  inp cm DC 0 AC 1
+CL   out 0 {cl}
+
+* --- DC feedback: closes at DC to bias out=vcm, opens at AC ---
+Lfb  out inn 1e9
+Cfb  inn cm  1e3
+
+* --- tail current sink (NMOS) ---
+Iref_tail vdd nbias_tail DC {itail}
+XMNBT nbias_tail nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XMN0  tail       nbias_tail 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+
+* --- input differential pair (NMOS) ---
+XM1  a1  inp tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  a2  inn tail 0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+
+* --- NMOS cascodes; ncasc from a diode replica of pair + cascode ---
+Iref_ncasc vdd ncasc DC {incasc}
+XMNRB ncasc ncasc nr 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+XMNRA nr    nr    0  0 sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XMN3 d1  ncasc a1 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+XMN4 out ncasc a2 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+
+* --- PMOS cascodes; pcasc from a diode replica of mirror + cascode ---
+Iref_pcasc pcasc 0 DC {ipcasc}
+XMPRB pcasc pcasc pr vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1
+XMPRA pr    pr    vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1
+XMP3 d1  pcasc p1 vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1
+XMP4 out pcasc p2 vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1
+
+* --- PMOS mirror load, gates tied to the reference branch drain d1 ---
+XMP1 p1 d1 vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1
+XMP2 p2 d1 vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=20 nf=1 mult=1

@@ -347,14 +347,31 @@ pub fn mean(xs: &[f64]) -> f64 {
 /// Bessel-corrected (`n - 1`) **sample** standard deviation, matching the
 /// estimator `klt sim`'s own `monte_carlo.stddev` reports. `None` for
 /// `n < 2`, where it is undefined -- never faked as `0.0`.
+///
+/// Zero-spread handling lives here, at the single source, so every
+/// `stddev > 0.0` gate downstream (degenerate verdict, capability,
+/// sensitivity `has_spread`) inherits it: a bit-identical slice returns
+/// exactly `0.0`, and a result at or below [`ZERO_SPREAD_REL_FLOOR`] times
+/// `max(|mean|, f64::MIN_POSITIVE)` is a rounding residue and is also `0.0`.
 pub fn sample_stddev(xs: &[f64]) -> Option<f64> {
     if xs.len() < 2 {
         return None;
     }
+    if xs.iter().all(|&x| x == xs[0]) {
+        return Some(0.0);
+    }
     let m = mean(xs);
     let ss: f64 = xs.iter().map(|x| (x - m) * (x - m)).sum();
-    Some((ss / (xs.len() as f64 - 1.0)).sqrt())
+    let s = (ss / (xs.len() as f64 - 1.0)).sqrt();
+    if s <= ZERO_SPREAD_REL_FLOOR * m.abs().max(f64::MIN_POSITIVE) {
+        return Some(0.0);
+    }
+    Some(s)
 }
+
+/// Relative stddev floor (`stddev / |mean|`) at or below which a sample set
+/// is treated as having zero spread (floating-point rounding residue).
+pub const ZERO_SPREAD_REL_FLOOR: f64 = 1e-12;
 
 /// Central moment of order `k` (population form, divisor `n`).
 fn central_moment(xs: &[f64], k: i32) -> f64 {
@@ -686,6 +703,17 @@ mod tests {
         let (low, high) = clopper_pearson(98, 100, 0.95);
         close(low, 0.929_616_067_528_929_8, 1e-12);
         close(high, 0.997_568_663_176_057_4, 1e-12);
+    }
+
+    #[test]
+    fn sample_stddev_treats_constant_and_residue_sets_as_zero_spread() {
+        assert_eq!(sample_stddev(&vec![1.800306041; 100]), Some(0.0));
+        assert_eq!(sample_stddev(&[2.5, 2.5]), Some(0.0));
+        // tiny but real spread (1e-9 relative) is kept
+        let xs: Vec<f64> = (0..100)
+            .map(|i| 1.8 * (1.0 + 1e-9 * (i % 2) as f64))
+            .collect();
+        assert!(sample_stddev(&xs).unwrap() > 0.0);
     }
 
     #[test]

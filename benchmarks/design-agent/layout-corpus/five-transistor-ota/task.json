@@ -1,0 +1,63 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_task/1",
+  "id": "five-transistor-ota",
+  "title": "Five-transistor OTA (composed)",
+  "pdk": "sky130",
+  "description": "The design-pipeline 5T OTA composed from a tail mos_array and two diff_pair blocks with klt gen-compose (examples/design-pipeline). Only the nets the composer routes (N1, TAIL_NODE, VOUT) and the substrate are top-level pins; gates and unrouted terminals are floating internal nets.",
+  "block_spec": {
+    "spec_class": "ota",
+    "io_nodes": [
+      "INP",
+      "INN",
+      "OUT",
+      "VDD",
+      "VSS"
+    ],
+    "target_specs": null
+  },
+  "frozen_netlist": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/netlist.spice",
+    "sha256": "86a62ad3c9d40d9ea111a0f9edd44fb315e19b5058f3481fab308fbfd5e2bf79"
+  },
+  "reference_layout": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/reference.gds",
+    "sha256": "7a12146ac5edb19bc6eb04d9f6b84a2d8cea4a75f76ee94b736a7acdd062005b",
+    "cell_name": "five_transistor_ota"
+  },
+  "generator_recipe": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/recipe.json",
+    "sha256": "11e7882215d45dc621dbe4056190dc4c35448e464aa3aa0f0d305adde8823da6"
+  },
+  "negative_controls": [
+    {
+      "id": "met1-width",
+      "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/neg-drc.gds",
+      "sha256": "e2e2e6d4eb20ad742db2480d2ee8199a4054192c85f6733b81ab0e60cfd9b5e7",
+      "expected_failure": "drc"
+    },
+    {
+      "id": "resized-device",
+      "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/neg-lvs.gds",
+      "sha256": "85ddd0fb4635e71f8a563772824b7fd6db06bfc92d89b07813c2da638aa17477",
+      "expected_failure": "lvs"
+    }
+  ],
+  "agent_inputs": [
+    "benchmarks/design-agent/layout-corpus/five-transistor-ota/netlist.spice"
+  ],
+  "eligibility": {
+    "rules": {
+      "frozen_netlist": "netlist.spice is a hand-written reference, hashed in task.json; the scorer reads it from the repo, never from an agent sandbox.",
+      "reference_layout_valid": "reference.gds is the recipe's output; the corpus gate re-runs klt drc (sky130 deck: clean) and klt lvs (match) on it.",
+      "generator_reachable": "recipe.json lists only klt gen / klt gen-compose steps; the gate re-runs it and requires a DRC-clean, LVS-matching layout.",
+      "negative_controls": "neg-drc.gds fails only DRC (met1 width sliver) and neg-lvs.gds fails only LVS (resized device); the gate checks each check fires alone.",
+      "open_pdk": "sky130A via open_pdks; no proprietary data."
+    },
+    "arms": {
+      "draw-only": "five-transistor-ota is a bounded layout of a few devices with a netlist-defined target; klt draw primitives can express a legal layout of it, and the gate scores it identically.",
+      "gen-only": "Reachable with klt gen / gen-compose alone: recipe.json is the existence proof and uses no draw verb.",
+      "gen+refine": "Seeded from the gen-only result (protocol seeding decision); every refinement edit is expressible with klt draw (base_gds / erase_um) or gen-compose."
+    }
+  },
+  "notes": null
+}

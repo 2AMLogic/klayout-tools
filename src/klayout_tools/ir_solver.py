@@ -54,6 +54,8 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from ._unionfind import UnionFind
+
 #: Relative residual the conjugate-gradient iteration aims for.
 DEFAULT_TOLERANCE = 1e-12
 
@@ -80,21 +82,6 @@ class IRSolverError(Exception):
     modelling outcome -- a network that is merely unsolvable (an island with
     no pad) is reported per component in the result, not raised.
     """
-
-
-def _find(parent: list[int], x: int) -> int:
-    root = x
-    while parent[root] != root:
-        root = parent[root]
-    while parent[x] != root:
-        parent[x], x = root, parent[x]
-    return root
-
-
-def _union(parent: list[int], a: int, b: int) -> None:
-    ra, rb = _find(parent, a), _find(parent, b)
-    if ra != rb:
-        parent[rb] = ra
 
 
 def _pcg(
@@ -216,7 +203,7 @@ def solve_ir_drop(
                 f"current injection references unknown node {node_id!r}"
             )
 
-    parent = list(range(len(node_list)))
+    uf = UnionFind(range(len(node_list)))
     resistors: list[tuple[str, int, int, float]] = []
     shorted: list[str] = []
     for edge in edges:
@@ -233,7 +220,7 @@ def solve_ir_drop(
             )
         a, b = index[edge["from"]], index[edge["to"]]
         if resistance == 0.0:
-            _union(parent, a, b)
+            uf.union(a, b)
             shorted.append(edge_id)
         resistors.append((edge_id, a, b, resistance))
 
@@ -241,7 +228,7 @@ def solve_ir_drop(
     super_of: list[int] = []
     super_index: dict[int, int] = {}
     for i in range(len(node_list)):
-        root = _find(parent, i)
+        root = uf.find(i)
         if root not in super_index:
             super_index[root] = len(super_index)
         super_of.append(super_index[root])

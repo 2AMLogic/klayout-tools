@@ -62,15 +62,22 @@ foundry rule manual. A "DRC-clean" verdict from `klt drc` is clean *against
 the curated subset*, not a full-deck signoff — do not conflate the two when
 reporting S8's exit criteria met, especially at S11 (signoff).
 
-**Attribution on a mixed/hierarchical macro (issue #451, open):**
+**Attribution on a mixed/hierarchical macro (issue #451, fixed):**
 `klt drc` flattens the whole layout into one `Region` per top cell before
-checking, so a violation's `"cell"` field always names the *top* cell, never
-the placed instance a shape actually came from — including on a mixed
-sky130_fd_sc_hd + analog-macro layout produced via `klt place-and-route`'s
-`request.macros` field (Epic #393 phase 3, issue #456). This does not affect
-whether geometry in either region is checked (the flattened `Region` already
-spans both — see #456's findings), only which instance a hit is attributed
-to in the report.
+checking, so a violation's `"cell"` field still names the *top* cell —
+including on a mixed sky130_fd_sc_hd + analog-macro layout produced via `klt
+place-and-route`'s `request.macros` field (Epic #393 phase 3, issue #456).
+Each violation additionally carries `source_cell`/`source_path`, naming
+the placement it is attributed to; either engine fills them (`--engine
+klayout` runs the same instance-tree walk, so an RDB marker wholly inside
+one placed instance carries that instance). Both are `null` when no single
+placement is attributed. Most rule kinds attribute by bounding-box
+containment, but a native physical-layer `ongrid` marker is attributed
+from the source edges at the marker point (issue #6447), so a marker inside
+a child's bounding box is not necessarily that child's. The full rule and
+its `null` cases are `docs/cli/drc.md` →
+"Per-instance attribution (`source_cell` / `source_path`)" — use those
+fields, not `"cell"`, to find the originating instance.
 
 ## LVS half — fully specified, shipped
 
@@ -139,7 +146,12 @@ tradeoff (the stuck criteria above).
 
 - DRC-clean but LVS-dirty (or the reverse) — Loop B's tradeoff case.
 - A curated DRC deck subset passing while the full foundry deck would not.
-- A `klt drc` violation's `"cell"` field naming the top cell instead of the
-  originating instance on a hierarchical/mixed layout (#451, open) — a
-  reporting-attribution gap, not a coverage gap; always re-check geometry
-  against the actual placed instance positions, not just the reported name.
+- Reading a `klt drc` violation's `"cell"` field (always the top cell) as
+  the originating instance on a hierarchical/mixed layout — use
+  `source_cell`/`source_path` (#451, fixed) instead. Treat a `null` pair as
+  "no placement attributed", never as evidence about any one instance: a
+  native `ongrid` marker inside a child's bounding box can be `null`
+  because the source edges prove that child is not the owner (#6447). Read
+  the attribution rule in `docs/cli/drc.md` →
+  "Per-instance attribution (`source_cell` / `source_path`)" before
+  inferring anything from the box.

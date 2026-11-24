@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:11.652161+00:00",
+  "slug": "sky130-gcedram",
+  "name": "Sky130 Gcedram",
+  "description": "Canary \u2014 sky130 2T/3T gain-cell eDRAM macro. AI-designed, open-source.",
+  "pdk": "sky130",
+  "layer_count": 13,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "gain_cell_2t_v1_array.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "diff.drawing": "renders/65_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "layer_66_5": "renders/66_5.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "layer_67_5": "renders/67_5.png",
+    "li1.drawing": "renders/67_20.png",
+    "mcon.drawing": "renders/67_44.png",
+    "layer_68_5": "renders/68_5.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "layer_69_5": "renders/69_5.png",
+    "met2.drawing": "renders/69_20.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Bitcell topology",
+        "position": "**2T, ratified.** Retention evidence is topology-neutral once a pre-layout capacitance assumption is discounted; density (a hard requirement to beat 6T SRAM on area) decides it. See [`spec/retention-refresh-budget.md`](spec/retention-refresh-budget.md) \u00a7 6."
+      },
+      {
+        "parameter": "Retention time",
+        "position": "**~10.06 \u00b5s, worst case** (`sf` corner, 125 \u00b0C), pre-layout single-cell estimate. See [`spec/retention-refresh-budget.md`](spec/retention-refresh-budget.md) \u00a7 5."
+      },
+      {
+        "parameter": "Refresh budget",
+        "position": "Refresh interval \u2264 **~5.03 \u00b5s** (worst case, 2x margin assumption); bandwidth-overhead formula ratified, numeric percentage pending array/periphery design. See [`spec/retention-refresh-budget.md`](spec/retention-refresh-budget.md) \u00a7 7."
+      },
+      {
+        "parameter": "Supply",
+        "position": "sky130 standard 1.8 V core; boosted wordline is a design decision to record"
+      },
+      {
+        "parameter": "Density vs SRAM",
+        "position": "Must beat a 6T SRAM bitcell on area to justify existing. Comparison against public [OpenRAM](https://openram.org/)/sky130 SRAM cell data performed: see [`spec/density-vs-sram.md`](spec/density-vs-sram.md) (decision issue #100)"
+      },
+      {
+        "parameter": "Temperature range",
+        "position": "**Restricted (outcome C, #24, 2026-10-08); not the full model-corner range.** Wording lives only in [`spec/operating-range-decision-PROPOSED.md`](spec/operating-range-decision-PROPOSED.md) \u2014 proposed, not ratified. Evidence: [`sim/loaded-column/cold-corner/`](sim/loaded-column/cold-corner/README.md). Retention claims at worst case, never typical."
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-gcedram",
+    "ref": "686b1d3f2a394be3bcf007b9d96071792c911bc9",
+    "path": "layout/compact/gain_cell_2t_v1_array.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

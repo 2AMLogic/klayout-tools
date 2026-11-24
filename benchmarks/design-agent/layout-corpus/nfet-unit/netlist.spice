@@ -1,0 +1,3 @@
+.subckt nfet_unit vsubs
+M1 d g s vsubs nfet L=0.5U W=2U
+.ends

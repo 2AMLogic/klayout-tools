@@ -1,12 +1,12 @@
 """SPICE-text -> SPICE-text subcircuit flattener (issue #2889).
 
-``klt extract``'s output is always flat -- one `.SUBCKT` wrapper around PDK
-leaf devices only -- while a design's schematic netlist is normally
-hierarchical: user subcircuits instantiated from the top subcircuit. ``klt
-pex --flatten-schematic`` uses :func:`flatten_spice` to inline every
-*locally defined* user subcircuit down to leaf device cards before the
-schematic-side simulation, so both legs (and the ``model_mismatch``
-diagnostic) compare like with like.
+``klt extract``'s curated-deck output is flat -- one `.SUBCKT` wrapper
+around PDK leaf devices only -- while a design's schematic netlist is
+normally hierarchical: user subcircuits instantiated from the top
+subcircuit. ``klt pex --flatten-schematic`` uses :func:`flatten_spice`
+to inline every *locally defined* user subcircuit down to leaf device
+cards before the schematic-side simulation, so both legs (and the
+``model_mismatch`` diagnostic) compare like with like.
 
 This is deliberately a *text* flattener, not KLayout's in-process
 ``Netlist.flatten()`` (what ``klt lvs``'s ``options.flatten_reference``
@@ -70,8 +70,11 @@ Rules (each one is a documented contract, tested in
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
+
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_tokens import split_spice_tokens
 
 __all__ = ["FlattenResult", "SpiceFlattenError", "flatten_spice"]
 
@@ -99,6 +102,9 @@ class FlattenResult:
     inlined_subckts: list[str] = field(default_factory=list)
     #: `X` targets with no local definition, emitted as leaf cards, sorted.
     external_subckts: list[str] = field(default_factory=list)
+    #: Pins of the `.subckt <top>` synthesized around a fragment's file-level
+    #: device cards (``wrap_pins``), else ``None``.
+    wrapper_pins: list[str] | None = None
 
 
 _GROUND_NODES = frozenset({"0", "gnd"})
@@ -127,10 +133,6 @@ _MULTIPLIABLE = frozenset("RCLMQDJZX")
 
 _HIERARCHY_SEP = "."
 
-#: ngspice inline-comment rule: ``;`` anywhere, or a ``$`` with whitespace
-#: before it and whitespace (or end of line) after it.
-_INLINE_COMMENT = re.compile(r"\s\$(?=\s|$)|;")
-
 
 # --------------------------------------------------------------------------- #
 # Lexing
@@ -140,10 +142,12 @@ _INLINE_COMMENT = re.compile(r"\s\$(?=\s|$)|;")
 def _logical_lines(text: str) -> list[str]:
     """Comment-stripped lines with ``+`` continuations folded.
 
-    Inline comments follow ngspice: ``;`` anywhere, or ``$`` with whitespace
-    on both sides (or whitespace before and end of line).  A ``$`` that is
-    glued to the next token -- ``.include $PDK_ROOT/...`` -- is *not* a
-    comment and survives intact.
+    Inline comments go through the shared
+    :func:`strip_spice_inline_comment` (``;`` anywhere, or a
+    token-delimited ``$`` -- deliberately stricter than ngspice's
+    element-card rule, see ``_SPICE_INLINE_COMMENT``).  A ``$`` glued to
+    the next token -- ``.include $PDK_ROOT/...`` -- is *not* a comment
+    and survives intact.
     """
     lines: list[str] = []
     for raw in text.splitlines():
@@ -151,65 +155,8 @@ def _logical_lines(text: str) -> list[str]:
         if stripped.startswith("*"):
             lines.append("")
             continue
-        lines.append(_INLINE_COMMENT.split(raw, maxsplit=1)[0].rstrip())
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
-        elif stripped:
-            folded.append(line)
-    return folded
-
-
-def _lex(line: str) -> list[str]:
-    """Whitespace split keeping quoted/braced/parenthesised expressions whole."""
-    tokens: list[str] = []
-    current: list[str] = []
-    quote = ""
-    depth = 0
-    for ch in line:
-        if quote:
-            quote = "" if ch == quote else quote
-        elif ch in "'\"":
-            quote = ch
-        elif ch in "{(":
-            depth += 1
-        elif ch in "})":
-            depth = max(depth - 1, 0)
-        elif ch.isspace() and depth == 0:
-            if current:
-                tokens.append("".join(current))
-                current = []
-            continue
-        current.append(ch)
-    if current:
-        tokens.append("".join(current))
-    return tokens
-
-
-def _split_tokens(line: str) -> list[str]:
-    """:func:`_lex`, then re-join ``name = value`` / ``name= value`` /
-    ``name =value`` spellings into one ``name=value`` token."""
-    tokens = _lex(line)
-    merged: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        has_next = index + 1 < len(tokens)
-        if token == "=" and merged and has_next:
-            merged[-1] = f"{merged[-1]}={tokens[index + 1]}"
-            index += 2
-        elif token.endswith("=") and token != "=" and has_next:
-            merged.append(token + tokens[index + 1])
-            index += 2
-        elif token.startswith("=") and token != "=" and merged:
-            merged[-1] = merged[-1] + token
-            index += 1
-        else:
-            merged.append(token)
-            index += 1
-    return merged
+        lines.append(strip_spice_inline_comment(raw))
+    return fold_spice_continuations([line for line in lines if line.strip()])
 
 
 def _is_assignment(token: str) -> bool:
@@ -326,7 +273,7 @@ class _Parsed:
 
 
 def _parse_header(line: str) -> _Subckt:
-    tokens = _split_tokens(line.strip())[1:]
+    tokens = split_spice_tokens(line.strip())[1:]
     if not tokens:
         raise SpiceFlattenError(
             f"`.subckt` header with no name: `{line.strip()}`", code="malformed"
@@ -505,7 +452,7 @@ class _Flattener:
         """One non-`X`-local device card, renamed/re-noded/substituted."""
         if not scope.path:
             return card
-        tokens = _split_tokens(card)
+        tokens = split_spice_tokens(card)
         letter = tokens[0][0].upper()
         if letter in _FIXED_NODE_COUNT:
             rest = self._rewrite_fixed(
@@ -618,7 +565,7 @@ class _Flattener:
                     f"`{directive}` cards are not supported inside an "
                     "inlined subcircuit",
                 )
-            tokens = _split_tokens(card)
+            tokens = split_spice_tokens(card)
             if tokens[0][0].upper() == "X":
                 nodes, target, params = _x_call(tokens)
                 key = target.lower()
@@ -694,7 +641,7 @@ class _Flattener:
             env[name.lower()] = resolved
         for card in subckt.body:
             if _directive(card) == ".param":
-                for token in _split_tokens(card)[1:]:
+                for token in split_spice_tokens(card)[1:]:
                     if _is_assignment(token):
                         name, value = _split_assignment(token)
                         env[name.lower()] = _substitute(_unwrap(value), env)
@@ -731,12 +678,45 @@ def _instantiated(parsed: _Parsed) -> set[str]:
     bodies.append([text for kind, text in parsed.items if kind == "line"])
     for body in bodies:
         for card in body:
-            tokens = _split_tokens(card)
+            tokens = split_spice_tokens(card)
             if tokens and tokens[0][0].upper() == "X":
                 _nodes, target, _params = _x_call(tokens)
                 if target.lower() in parsed.subckts:
                     called.add(target.lower())
     return called
+
+
+def _split_wrapper_cards(emitted: list[str]) -> tuple[list[str], list[str]]:
+    """Split flattened file-level cards into (moved into the wrapper,
+    left outside): element cards plus `.model`/`.param` move; the rest
+    (`.include`, `.lib`, comments, ...) stay."""
+    inside: list[str] = []
+    outside: list[str] = []
+    for card in emitted:
+        head = card.split(None, 1)[0].lower() if card.split() else ""
+        movable = head and (
+            not head.startswith((".", "*")) or head in (".model", ".param")
+        )
+        (inside if movable else outside).append(card)
+    return inside, outside
+
+
+def _wrap_fragment(top: str, pins: Sequence[str], inside: list[str]) -> list[str]:
+    """Render the synthesized ``.subckt <top> <pins>`` around ``inside``."""
+    used = {
+        token.lower()
+        for card in inside
+        if not card.startswith(".")
+        for token in split_spice_tokens(card)[1:]
+    }
+    missing = [pin for pin in pins if pin.lower() not in used]
+    if missing:
+        raise SpiceFlattenError(
+            f"fragment has no net named {', '.join(missing)} for the "
+            f"`.subckt {top}` wrapper pins ({' '.join(pins)})",
+            code="wrapper_pin_unconnected",
+        )
+    return [f".subckt {top} {' '.join(pins)}", *inside, f".ends {top}"]
 
 
 def flatten_spice(
@@ -745,6 +725,7 @@ def flatten_spice(
     top: str | None = None,
     leaf_subckts: Collection[str] | None = None,
     banner: str | None = None,
+    wrap_pins: Sequence[str] | None = None,
 ) -> FlattenResult:
     """Inline every locally defined subcircuit of ``text`` (see the module
     docstring for the full rule set). ``top`` names a subcircuit to keep as
@@ -752,6 +733,14 @@ def flatten_spice(
     ``leaf_subckts``, when given, turns an `X` target that is neither
     defined locally nor in that set into a hard ``undefined_subckt`` error.
     ``banner`` is emitted as a leading ``*`` comment line.
+
+    ``wrap_pins`` (with ``top``) handles a *fragment*: when the text defines
+    no `.subckt <top>`, the file-level element cards plus `.model`/`.param`
+    cards are moved into a synthesized ``.subckt <top> <wrap_pins> ...
+    .ends`` (other file-level cards, e.g. `.include`/`.lib`, stay outside).
+    A wrapper pin that no element card references raises
+    ``wrapper_pin_unconnected``. A text that already defines `<top>` is
+    emitted exactly as without ``wrap_pins``.
 
     Raises :class:`SpiceFlattenError` rather than ever returning a partial
     flatten.
@@ -768,14 +757,21 @@ def flatten_spice(
 
     # File-level cards outside any `.subckt` are one pseudo-root, emitted in
     # place; each kept `.subckt` is emitted flattened where it was defined.
+    # A trailing sentinel item flushes the final file-level run.
+    wrap_top = top if top is not None and top.lower() not in parsed.subckts else None
+    inside: list[str] = []
     file_level: list[str] = []
-    for kind, value in parsed.items:
+    for kind, value in [*parsed.items, ("end", "")]:
         if kind == "line":
             file_level.append(value)
             continue
         if file_level:
-            lines += flattener.emit_root(None, file_level)
+            emitted = flattener.emit_root(None, file_level)
             file_level = []
+            if wrap_top is not None and wrap_pins is not None:
+                moved, emitted = _split_wrapper_cards(emitted)
+                inside += moved
+            lines += emitted
         if value not in keep:
             continue
         subckt = parsed.subckts[value]
@@ -783,8 +779,12 @@ def flatten_spice(
         lines.append(subckt.header)
         lines += flattener.emit_root(value, subckt.body)
         lines.append(f".ends {subckt.name}")
-    if file_level:
-        lines += flattener.emit_root(None, file_level)
+
+    wrapper_pins: list[str] | None = None
+    if wrap_top is not None and wrap_pins is not None:
+        wrapper_pins = list(wrap_pins)
+        lines += _wrap_fragment(wrap_top, wrapper_pins, inside)
+        roots.append(wrap_top)
 
     return FlattenResult(
         text="\n".join(lines) + "\n",
@@ -792,4 +792,5 @@ def flatten_spice(
         inlined_instances=flattener.inlined_instances,
         inlined_subckts=sorted(flattener.inlined, key=str.lower),
         external_subckts=sorted(flattener.external.values(), key=str.lower),
+        wrapper_pins=wrapper_pins,
     )

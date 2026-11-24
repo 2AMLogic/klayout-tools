@@ -1,6 +1,7 @@
 """Public SDF observation gates, with a controlled simulator boundary (#2130)."""
 
 import builtins
+import hashlib
 import io
 import json
 import subprocess
@@ -20,6 +21,7 @@ from test_functional_verification import (
     _stub_runner,
     _write_request,
 )
+from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
 
 
 class ReceiptRunner:
@@ -45,8 +47,14 @@ def _tier_item(report, tmp_path, item_id):
     path.write_text(json.dumps(report))
     aggregate = signoff.build_signoff([str(path)])
     assert aggregate["status"] == "pass"
+    entry = str(path)
+    if item_id == 5:
+        # Digital item 5 needs STA plus the functional suite (issue #3741).
+        sta_path = tmp_path / "sta.json"
+        sta_path.write_text(json.dumps(STA_MULTI_CORNER_CLEAN_ENVELOPE))
+        entry = [entry, str(sta_path)]
     tier = signoff.build_tier_report(
-        {"kind": "digital", "evidence": {str(item_id): str(path)}}
+        {"kind": "digital", "evidence": {str(item_id): entry}}
     )
     return next(item for item in tier["items"] if item["id"] == item_id)
 
@@ -134,6 +142,14 @@ def test_captured_readable_sdf_logs_preserve_coverage(
         assert annotation["dropped"]["timingcheck"]["count"] == 2
     else:
         assert annotation["dropped"] == {}
+    # Issue #5550: the provenance digest covers the user's RTL only -- not
+    # the SDF file, and not the generated wrapper/shim this annotated build
+    # substituted into the build list.
+    assert report["provenance"]["input"] == {
+        "content_hash": "sha256:"
+        + hashlib.sha256((tmp_path / "gcd.v").read_bytes()).hexdigest(),
+        "role": "source",
+    }
     assert _tier_item(report, tmp_path, 7)["status"] == "met"
 
 

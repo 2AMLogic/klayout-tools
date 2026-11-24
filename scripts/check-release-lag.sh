@@ -11,7 +11,7 @@
 #
 # This script makes the rule self-reporting. It is strictly READ-ONLY and
 # ADVISORY: it never tags, pushes, or triggers .github/workflows/publish.yml.
-# Cutting a release stays a human action (see RELEASING.md).
+# Cutting a release is .github/workflows/release.yml's job (see RELEASING.md).
 #
 # The threshold is *parsed from RELEASING.md* rather than hardcoded here, so
 # the two can never drift apart silently — editing the policy edits this
@@ -161,7 +161,7 @@ fi
 # Same ordering RELEASING.md documents: newest tag by creation date.
 LATEST_TAG="$(git -C "$REPO" tag --sort=-creatordate | head -1)"
 
-CHANGELOG_HINT="CHANGELOG.md's \"## Unreleased\" section lists what has landed on main but is not yet in a tagged release."
+CHANGELOG_HINT="See changelog.d/ and CHANGELOG.md's \"## Unreleased\" section for changes pending release."
 
 if [ -z "$LATEST_TAG" ]; then
     STATUS="no_tags"

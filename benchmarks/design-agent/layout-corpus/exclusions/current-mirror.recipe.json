@@ -1,0 +1,80 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_recipe/1",
+  "pdk": "sky130A",
+  "steps": [
+    {
+      "id": "unit",
+      "verb": "gen",
+      "generator": "mos_array",
+      "cell_name": "mirror_unit",
+      "params": {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 0,
+        "w_um": 2,
+        "l_um": 0.5
+      }
+    },
+    {
+      "id": "compose",
+      "verb": "gen-compose",
+      "cell_name": "nfet_current_mirror",
+      "request": {
+        "blocks": [
+          {
+            "id": "ref",
+            "step": "unit"
+          },
+          {
+            "id": "out",
+            "step": "unit"
+          }
+        ],
+        "placement": {
+          "strategy": "row",
+          "order": [
+            "ref",
+            "out"
+          ],
+          "spacing_um": 1.0
+        },
+        "connectivity": [
+          {
+            "net": "IREF",
+            "pins": [
+              {
+                "block": "ref",
+                "port": "U0_D"
+              },
+              {
+                "block": "ref",
+                "port": "U0_G"
+              },
+              {
+                "block": "out",
+                "port": "U0_G"
+              }
+            ]
+          },
+          {
+            "net": "VSS",
+            "pins": [
+              {
+                "block": "ref",
+                "port": "U0_S"
+              },
+              {
+                "block": "out",
+                "port": "U0_S"
+              }
+            ]
+          }
+        ],
+        "routing": {
+          "layer_role": "metal",
+          "width_um": 0.17
+        }
+      }
+    }
+  ]
+}

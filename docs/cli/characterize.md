@@ -6,7 +6,10 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 
 ```
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
+                          [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
+                          [--resume] [--timeout-s SECONDS] [--split-grid N]
+                          [--keep-going]
                           [--compare-to LIB] [--format text|json]
 ```
 
@@ -44,13 +47,63 @@ positional file args. Relative paths inside it (`cell.netlist`,
 - `--lib` — override the emitted Liberty path (default: the request's own
   `output.lib`, else `<outdir>/<library name>.lib`).
 - `--backend` — `klt sim` execution backend for the sweep. The grid is a
-  **single corner**, so the default `local` is normally correct.
+  **single corner**, so the default `local` is normally correct. For
+  `batch`/`remote` with `options.osdi_preload`, see
+  [OSDI (Verilog-A) model preload](#osdi-verilog-a-model-preload) for the
+  `$PDK_ROOT/<rel>` spelling.
+- `--wait-for-capacity SECONDS` — with `--backend batch`, wait up to SECONDS
+  (>= 0) for fleet capacity when a launch is refused (`batch_no_capacity` /
+  `batch_concurrency_cap`), as in `klt sim`. Forwarded to **every** `klt sim`
+  the run makes: each cell's main sweep and each constraint deck. `0` means
+  one attempt; negative values and a non-`batch` `--backend` are refused
+  before any I/O. Omitted, nothing is passed.
 - `--keep-artifacts` — keep the per-corner ngspice log/deck under
   `<outdir>/sim/`.
 - `--cell` — characterize only the named cell out of a batch request's
   `cells` array. Repeatable; default every declared cell. A name the request
   does not declare is an error (never a silent no-op), and `--cell` on a
   single-cell (`cell`) request is an error too.
+- `--resume` — recover an interrupted run (issue #5350). Every cell and
+  constraint deck runs under a deterministic directory
+  (`<outdir>/cells/<cell>/`, `.../constraints/<label>/`). With `--resume`, a
+  leg whose generated testbench and sim request are unchanged and whose
+  `sim-report.json` is already on disk is reloaded, not re-simulated; the
+  remaining legs run through `klt sim --resume`, so with `--backend batch` a
+  leg whose job was already submitted (recorded in that leg's
+  `sim/batch-receipt.json`) re-attaches to it instead of paying for the fleet
+  again. Changed inputs never reuse a stale report or job: they resubmit.
+  Overrides the request's `options.resume`; on a non-batch backend it reuses
+  collected legs and otherwise behaves as `klt sim --resume` does.
+- `--timeout-s SECONDS` — per-sim wall-clock timeout (issue #5380). Overrides
+  the request's `options.timeout_s` (default 900) for every sim the run
+  generates — cell sims and constraint decks — with the same precedence as
+  `klt sim --timeout-s`. A non-positive value is an error (exit `1`). The
+  `timeout_preflight_warning` in a sim report predicts when the default is too
+  small. The timeout is not part of `--resume`'s reuse key (issue #5410):
+  changing only `--timeout-s` on a resumed run reuses collected legs and
+  re-runs only failed ones.
+- `--split-grid N` — split each cell's input-slew rows into at most `N`
+  contiguous chunks (`min(N, rows)`), each its own sim leg (its own fleet job
+  with `--backend batch`) under `<cell dir>/grid-<k>/` (issue #5410). For a
+  cell whose whole grid outruns the fleet job ceiling. The chunks are merged
+  into the same tables, power tables, leakage and pin capacitance an unsplit
+  run produces; leakage and pin capacitance come from chunk 1. Overrides
+  `options.split_grid`; default 1 (one leg, decks byte-identical to before).
+  A non-integer or `< 1` value is an error (exit `1`) before any simulation.
+  A failing chunk is named in the error (`grid chunk k/N`); `--keep-going`
+  still isolates the cell and `--resume` re-runs only the failed chunk. In
+  the response, `simulation.testbench/request/report` name chunk 1 and
+  `runtime_s` sums the chunks.
+- `--keep-going` — batch requests only (issue #5380; refused on a single-cell
+  `cell` request, like `--cell`). A cell whose characterization fails
+  (including a failure inside one of its constraint decks) is recorded in the
+  response's `failed_cells` and skipped; the other cells still run and one
+  `.lib` covers the successful cells. If *every* cell fails, no `.lib` is
+  written and the run errors (exit `1`) listing the failures. Without
+  `--keep-going` the run is fail-fast, as before. A characterization is data,
+  not a verdict, so a partial result exits `0` and the text output warns
+  loudly; re-run with `--resume` to retry only the failed cells — the finished
+  ones are reused. Composes with `--cell`.
 - `--compare-to` — a reference Liberty file (typically the vendor library for
   the same corner) to compare the emitted `.lib` against arc by arc. The
   result lands in the response's `comparison` block; see "Accuracy against a
@@ -69,7 +122,14 @@ corner; every *combinational* timing arc of each cell; `cell_rise`,
 `timing_sense`, `timing_type : combinational`; per-arc `internal_power()`
 with `rise_power`/`fall_power`; per-cell `cell_leakage_power` and one
 `leakage_power()` group per input state; per-input-pin **measured**
-`capacitance` with its `rise_capacitance`/`fall_capacitance` split.
+`capacitance` with its `rise_capacitance`/`fall_capacitance` split. For a
+cell that declares `cell.clock_pin` (edge-triggered) or `cell.enable_pin`
+(level-sensitive latch), also its **clock-to-output** / **enable-to-output**
+arcs (`timing_type : rising_edge`/`falling_edge`), a latch's **transparent**
+data-to-output arcs (`timing_type : combinational`) and, for each pin listed
+in `cell.constrained_pins`, its **setup/hold** constraint arcs
+(`setup_rising`/`hold_rising` or the `*_falling` pair) — see ["Sequential
+cells"](#sequential-cells-clock-to-output-latches-and-setuphold).
 
 **Out of scope**, deliberately — read the absence of a group as "this
 command did not measure it", never as an assertion about the cell:
@@ -77,7 +137,7 @@ command did not measure it", never as an assertion about the cell:
 | Not emitted | Where it belongs |
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
-| sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | not yet filed — a sequential cell is **refused**, not mis-characterized (see "Sequential cells are refused") |
+| the `ff`/`latch` **state** groups, `min_pulse_width`/`min_period`, set-vs-reset priority characterization | not filed (clock-to-output, transparent latch, setup/hold, async `preset`/`clear` and `recovery_*`/`removal_*` are supported; see "Sequential cells") |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -132,6 +192,14 @@ In batch mode steps 1-6 run once **per cell** (one `klt sim` corner per
 cell, artifacts under `<outdir>/cells/<cell>/`), and step 7 runs once over
 the combined library. See "Batch mode".
 
+When the simulation backend resolves to `batch`, the request has more than
+one cell, and it sets `batch.capacity_wait_s` > 0, up to 4 cells are
+characterized concurrently (each submits its own fleet job and waits out a
+capacity refusal). Without `capacity_wait_s` cells stay serial, since a burst
+of concurrent submits would hit `batch_no_capacity`. Results, Liberty cell order and
+the report's `cells` order are unchanged; the first failing cell cancels cells
+not yet started. Other backends stay serial.
+
 ### Input slew: what `index_1` means and what is applied
 
 `index_1` values are Liberty input *transition times*: the time between the
@@ -180,23 +248,245 @@ delay definition, not a measurement failure; real libraries bound it with
 `default_max_transition` rather than by clamping. This command emits what it
 measured and never clamps.
 
-### Sequential cells are refused
+### Sequential cells: clock-to-output, latches and setup/hold
 
-There is no attempt to characterize a flip-flop or latch. A sequential
-cell's output `function` references an internal state node (`IQ`, `IQN`) that
-is not a declared input pin, and that is a hard error:
+A cell that declares `cell.clock_pin` (edge-triggered, issue #4755) or
+`cell.enable_pin` (level-sensitive latch, issue #5521) is characterized as a
+sequential cell. Without either, a sequential cell is still **refused**:
+its output `function` references an internal state node (`IQ`, `IQN`) that is
+not a declared input pin, and that stays a hard error (`... which is not a
+declared input pin of this cell`) rather than a mis-characterized
+combinational arc.
 
+| Field | Meaning |
+|---|---|
+| `cell.clock_pin` | Declared input pin that clocks the cell. Makes the cell **edge-triggered** sequential. Mutually exclusive with `enable_pin`. |
+| `cell.clock_edge` | `"rising"` (default) or `"falling"` — the active edge. Requires `clock_pin`; refused on a latch. |
+| `cell.enable_pin` | Declared input pin that enables a **level-sensitive latch**. Mutually exclusive with `clock_pin`. |
+| `cell.enable_level` | `"high"` (default) or `"low"` — the enable's active level. Requires `enable_pin`. |
+| `cell.static_inputs` | Optional `{pin: bool}` held constant for every non-clock/non-enable input the output `function` does not reference (e.g. `{"RESET_B": true}`); all other unreferenced inputs are held low. |
+| `cell.async_pins` | Optional array of `{"pin", "kind", "active"}` asynchronous set/reset pins; requires `clock_pin`. See "Asynchronous set/reset arcs" below. |
+
+For a sequential cell each output pin's `function` is its **next-state
+expression over the data pins** (`D` for a `Q`, `!D` for a `QN`) — not an
+`IQ`-style state reference. The clock pin may not appear in it. One arc per
+output pin is emitted: `related_pin` = the clock, `timing_type :
+rising_edge` (or `falling_edge`), `timing_sense : non_unate`, with all six
+NLDM tables measured on the same slew × load grid (slew = clock slew). The
+response arc carries `timing_type`. The output pin's Liberty `function` is
+not emitted for these cells.
+
+The testbench drives three clock pulses: a priming pulse that captures the
+output-low state, a pulse after the data moved to the output-high state
+(→ `cell_rise`/`rise_transition`), and a pulse after it returned
+(→ `cell_fall`/`fall_transition`). Setup/hold constraint arcs **are**
+supported — see ["Setup/hold constraint arcs"](#setuphold-constraint-arcs-issue-4756)
+below; they, and the asynchronous set/reset arcs below, are opt-in through
+their own request fields. Still **not supported**: the `ff`/`latch`
+**state** groups, latch time borrowing, min-pulse-width and
+`when`-qualified arcs. Worked example:
+`examples/characterize/request-dff.json`. Internal-power tables for these
+arcs cover the active clock edge's window only and are first-order.
+
+**`clock_pin` asserts edge-triggered semantics.** It is not a generic "this
+pin sequences the cell" field: it yields exactly one clock-to-output arc per
+output and references setup/hold to that same edge, which is wrong for a
+transparent cell on both counts. A latch must be declared with
+`cell.enable_pin` (next section) — the request carries nothing else that
+would tell a latch from a flop, so a latch declared through `clock_pin` is
+characterized as the flop it claims to be rather than refused.
+
+#### Level-sensitive latches (issue #5521)
+
+`cell.enable_pin` (plus optional `cell.enable_level`, `"high"` by default)
+declares the cell a latch. The enable's **opening** edge is the edge onto its
+active level and its **closing** edge is the edge away from it, so an
+active-high enable opens rising and closes falling. Declaring `enable_pin`
+together with `clock_pin` — or with `clock_edge`, whose job `enable_level`
+takes over — is a named error, as is an `enable_pin` that is not a declared
+input pin.
+
+Each output pin's `function` is read the same way as a flop's: its next-state
+expression over the data pins, which for a latch is also what the output
+tracks while the enable is open. Three kinds of group come out of one run,
+per output pin:
+
+| Group | `timing_type` | Measured with |
+|---|---|---|
+| transparent data → output, one per data pin the `function` references | `combinational` | the enable held at its **active** level |
+| enable → output | `rising_edge` (active-high) / `falling_edge` (active-low) — the **opening** edge | the three-pulse enable stimulus every sequential cell uses |
+| setup/hold on each `constrained_pins` entry | `setup_falling`/`hold_falling` (active-high) / `setup_rising`/`hold_rising` (active-low) — the **closing** edge | bisection, below |
+
+All of them carry the six NLDM tables on the same `input_transition_ns` ×
+`output_load_pf` grid as any other arc (the constraint tables use the slew
+axis twice, as for a flop). The transparent arcs get `timing_sense` derived
+from the `function` exactly as a combinational cell's do, and they share the
+enable arc's deck: the sequential schedule's two measured-edge slots are each
+as wide as the whole combinational schedule, so one ramp on the data pin
+measures the same quantity there as it would in a combinational run.
+
+The output pin's Liberty `function` is not emitted (as for a flop), and
+neither is a `latch (IQ, IQN)` state group — the absence of one means this
+command did not model the state, never that the cell has none. Latch time
+borrowing in `klt sta`, async set/reset arcs and `min_pulse_width` stay out
+of scope. Worked example: `examples/characterize/request-dlat.json`.
+
+##### The latch probe's pass criterion
+
+Bisection needs a per-probe pass/fail test, and a latch has no
+clock-to-output delay to degrade: the output already moved when the data
+moved, well before the closing edge. A latch probe therefore **passes when
+both** of these hold, and the reported constraint is the smallest passing
+separation either way:
+
+1. its **transparent data-to-output delay** — the capturing data edge to the
+   output edge it produces — is within `(1 + constraint_degradation)` of the
+   same delay measured at the window's wide end (that wide-end value is what
+   `reference_delay_ns` reports for a latch), **and**
+2. the output still **holds the captured level** at the end of the run, after
+   the enable has closed and the data has moved on.
+
+(2) is what discriminates in practice. A setup probe whose data arrives too
+late closes the latch before the new value propagates, so the output falls
+back to the value it held; a hold probe whose data leaves too early is
+followed transparently back to the old value. (1) keeps the criterion from
+accepting a point that only captured because the transparent path itself had
+degraded. The probe deck opens the enable once, early, and places the data
+waveform relative to the close — same waveform as a flop probe's, referenced
+to the other edge.
+
+#### Setup/hold constraint arcs (issue #4756)
+
+`cell.constrained_pins` (an array of data input pins; requires
+`cell.clock_pin`, or `cell.enable_pin` for a latch) adds setup and hold
+constraints of each listed pin against the clock — or, for a latch, against
+the enable's closing edge. Each pin yields four response entries in the cell's
+`constraints[]` — setup and hold for a rising and a falling data edge — and,
+in the `.lib`, a `timing_type : setup_rising` and a `hold_rising` group (or
+`*_falling` for a falling-edge clock; for a latch the suffix names the
+enable's **closing** edge, so an active-high enable yields `*_falling`) on
+the data pin with
+`rise_constraint`/`fall_constraint` tables over
+`constrained_pin_transition` × `related_pin_transition` (both axes are
+`grid.input_transition_ns`; `output_load_pf` does not apply — the minimum grid
+load is used).
+
+Each constraint is found by **bisection** over the data-edge-to-clock-edge
+separation (50% to 50%). A probe passes when the output still makes the
+expected transition **and** its clock-to-output delay is within
+`(1 + constraint_degradation)` of the delay with the data edge far from the
+clock (the reference). Setup is the smallest passing separation with the data
+edge *before* the clock edge; hold is the smallest passing separation with
+the data edge *after* the clock edge, so hold is negative when the cell
+tolerates the data moving before the clock edge. The reported value is the
+passing side of the final bracket, so it is within `constraint_tolerance_ns`
+of the true boundary and never optimistic. All grid points of an iteration
+share one `klt sim` run (`2 + ceil(log2(window/tolerance))` runs per cell).
+
+| Option (`options.*`) | Default | Meaning |
+|---|---|---|
+| `constraint_degradation` | `0.1` | Allowed clock-to-output delay push-out, as a fraction of the reference, in `(0, 1]`. |
+| `constraint_window_ns` | `[-1.0, 2.0]` | `[low, high]` separation search window; `low < 0 < high`. |
+| `constraint_tolerance_ns` | `0.002` | Bisection stops when the bracket is narrower than this. |
+
+Each `constraints[]` entry carries `pin`, `related_pin`, `output_pin`, `kind`
+(`setup`/`hold`), `data_edge` (`rise`/`fall`), `timing_type`, `constraint`
+(`index_1` = data transition, `index_2` = clock transition, `values`, ns),
+`reference_delay_ns`, `degradation`, `tolerance_ns` and `iterations`. The
+field is additive: it is `[]` for a cell with no `constrained_pins`.
+
+**Failure to converge is a named error, never a fabricated value.** If, at any
+grid point, the output does not make the expected transition even at the
+window's wide end, or the cell still captures at its narrow end, the run fails
+with a message naming the pin, kind, edge and slews (widen
+`constraint_window_ns`, or check `function`/`static_inputs`). For a latch the
+same applies to the held-level half of its criterion: a wide end at which the
+output does not hold the captured value is an unbracketable point, not a
+value. A constrained pin must be a data pin some output's next-state
+`function` toggles with alone. Worked examples:
+`examples/characterize/request-dff-constraints.json` (flop) and
+`examples/characterize/request-dlat.json` (latch).
+
+#### Asynchronous set/reset arcs (issue #5520)
+
+`cell.async_pins` declares the cell's asynchronous set/reset pins — an array
+of `{"pin", "kind", "active"}` objects, requiring `cell.clock_pin`:
+
+| Field | Meaning |
+|---|---|
+| `pin` | A declared non-clock input pin. |
+| `kind` | `"clear"` (the pin drives the cell's stored state to 0) or `"preset"` (to 1). |
+| `active` | `"low"` or `"high"` — the level at which the pin asserts. |
+
+```json
+"async_pins": [
+  {"pin": "R", "kind": "clear",  "active": "low"},
+  {"pin": "S", "kind": "preset", "active": "low"}
+]
 ```
-klt characterize: cell 'dff_demo' pin 'Q': Liberty function "IQ" references
-'IQ', which is not a declared input pin of this cell (declared: CLK, D) -- a
-sequential cell or missing pin metadata, not a combinational arc this command
-can characterize
-```
 
-A refusal is the point: a setup/hold constraint is a fundamentally different
-measurement (a bisection search over a clock/data separation, not a grid
-sweep), and silently characterizing a clock-to-Q path as a combinational arc
-would produce a `.lib` that looks complete and is unusable.
+A declared async pin is **held at its inactive level** for the whole
+clock-to-output and setup/hold measurement, without the request also listing
+it in `static_inputs` — in fact doing so is an error, as is naming the clock,
+an undeclared pin, the same pin twice, a pin `constrained_pins` also lists,
+or one an output's next-state `function` references. A request that declares
+no `async_pins` emits a byte-identical `.lib` and response.
+
+**Propagation arcs: `timing_type` follows the output, not the pin.** Each
+declared pin gets one `timing()` group per output it forces, on the usual
+slew × load grid (slew = the async pin's own transition): `preset` where the
+output is driven **high** (`cell_rise`/`rise_transition` only) and `clear`
+where it is driven **low** (`cell_fall`/`fall_transition` only). So an
+active-low clear pin reads `clear` on `Q` and `preset` on an inverted `QN`.
+The opposite pair of tables is **absent**, not zero: a pin that drives an
+output to a level has no edge in the other direction to measure.
+`timing_sense` follows the pin's own active level — an active-low pin forcing
+an output low moves the same way the pin does, so `positive_unate`.
+
+Which way each output is forced is **measured, not inferred from `kind`**:
+the deck probes both primings of every (output, pin) pair — the clock sets
+the output high in one and low in the other — and asserts the pin in each.
+For a forced output, exactly one priming produces an edge at every grid point.
+An unaffected output has no crossing in either priming and receives no arc
+from that pin. A declared pin must force at least one output. Conflicting
+directions or incomplete measurements across the grid produce a named error.
+
+**Recovery and removal** ride the same bisection as setup/hold, with the
+pin's *release* edge as the constrained edge and the other async pins held
+inactive. Only the release edge is constrained, so each group carries a
+single table — `rise_constraint` for an active-low pin, `fall_constraint` for
+an active-high one — under `timing_type : recovery_rising` / `removal_rising`
+(or `*_falling` for a falling-edge clock), and the cell's `constraints[]`
+gains matching entries with `kind` `recovery`/`removal`. The same
+`constraint_degradation` / `constraint_window_ns` / `constraint_tolerance_ns`
+options apply, and the cases share the setup/hold run, so an async pin adds
+no simulation rounds beyond the propagation deck.
+
+- **Recovery** keeps setup/hold's criterion: the pin is released `r` before
+  the clock edge and the probe passes when the output still makes the
+  captured transition within `(1 + constraint_degradation)` of the reference.
+- **Removal inverts it.** The pin is still asserted at the clock edge and
+  released `h` after it, and the passing outcome is that the clock edge is
+  *ignored* — so a pass is the output making **no** transition at all, the
+  bracket checks invert with it (the window's wide end must not capture, its
+  narrow end must), and `degradation` does not apply. Removal entries
+  therefore report `reference_delay_ns : null` and `degradation : null`.
+  Failure to bracket is the same named error setup/hold raises.
+
+The `async_arcs[]` field carries the measured propagation arcs: `pin`,
+`output_pin`, `related_pin`, `timing_type`, `timing_sense`, `forced_level`
+(`high`/`low`), `active`, `side_inputs`, and the one measured
+delay/transition table pair. It is **present only for a cell that declares
+`async_pins`**, which is what keeps a request without them byte-identical.
+Internal-power tables are not emitted for forced arcs.
+
+**Out of scope here**: set-vs-reset priority when both pins are asserted (the
+vendor `dffsr_1` expresses this with `when`-qualified arcs; every arc here is
+measured with the other async pin inactive and emitted unqualified),
+`min_pulse_width`/`min_period`, `ff`/`latch` groups, `non_seq_setup`/
+`non_seq_hold` between the two async pins, and making `klt sta` *use* the new
+groups (`native/statime` keeps reading them as an untyped arc). Worked
+example: `examples/characterize/request-dffsr.json`.
 
 ### Multiple corners
 
@@ -376,8 +666,9 @@ batch shares the request's one `corner`, `grid`, `thresholds`, `models`, and
   over it.
 - **Every cell is validated before any is simulated** -- a typo in the fifth
   cell's pin list does not cost the first four cells' simulation time.
-- **All or nothing.** If any cell fails, nothing is emitted and the error
-  names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
+- **All or nothing** (unless `--keep-going`, which skips failed cells and
+  lists them in `failed_cells`). If any cell fails, nothing is emitted and the
+  error names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
   entry (`request.cells[3].pins ...`).
 - Cell names must be unique (a library holds one `cell()` group per name).
 - The single-cell `request.arcs` override is refused in batch mode; put an
@@ -406,8 +697,18 @@ generates for each corner. The generated testbench itself carries **no**
 `.control` block — it is a plain circuit body, per [`sim.md`](sim.md)'s "a
 circuit body, not a full deck" convention — and `klt sim`'s report records
 each preloaded library and its SHA-256 under `environment.osdi_preload`. The
-same `klt sim` rules apply: the option works on the `local`/`local-parallel`
-backends (the default here) and is refused by name for `remote`/`batch`.
+same `klt sim` rules apply: host-local paths work on the `local`/`local-parallel`
+backends (the default here) and are refused by name for `remote`/`batch`.
+
+For `--backend batch` (or `remote`), name the library the way `klt sim` does
+(issue #3819): a literal `$PDK_ROOT/<rel>.osdi`, or a path under
+`models.pdk_root`. Such an entry is image-baked on the runner, so
+`klt characterize` does not expand or existence-check it on the submitting
+host and forwards it **unexpanded** to the generated `klt sim` request.
+Host-local entries keep the resolve + existence check, and a mixed list keeps
+its declared order. On the `local` backend the same `$PDK_ROOT/...` entry is
+still existence-checked (`osdi_preload file not found` when `PDK_ROOT` is unset).
+This is also the fix for `osdi_abi_mismatch` on a host with ngspice < 44.
 
 ## Request
 
@@ -558,9 +859,12 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.settle_ns` | number | Settle window per edge. Default `max(2, 3 x longest ramp)`. See "Transient window". |
 | `options.tran_step_ns` | number | Transient step, also used as `tmax`. Default `min(0.001, shortest ramp / 10)`. |
 | `options.timeout_s` | number | Per-corner ngspice timeout. Default `900`. |
+| `options.split_grid` | integer | Same as `--split-grid`. Default `1`. |
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
+| `options.resume` | boolean | Same as `--resume`. Default `false`. |
 | `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |
-| `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"`), for provenance on a post-extraction run. |
+| `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"` / `"gate-level"`), for provenance on a post-extraction or gate-level run. |
+| `batch` | object | Forwarded verbatim to every generated `klt sim` request (each cell's main sweep and constraint decks), e.g. `{"capacity_wait_s": 600}`; `--wait-for-capacity` overrides it. |
 
 ### Non-unate arcs
 
@@ -679,6 +983,7 @@ state it measured so the limitation is visible rather than implied.
   ],
   "liberty": {
     "path": "/abs/path/.klt/characterize/characterize_demo_tt_1p80V_25C.lib",
+    "sha256": "9f2b…64 hex chars…e1",
     "library_name": "characterize_demo_tt_1p80V_25C",
     "cell_count": 1,
     "time_unit": "1ns",
@@ -699,9 +1004,16 @@ state it measured so the limitation is visible rather than implied.
     "runtime_s": 2.374,
     "engine": "ngspice",
     "engine_version": "46",
+    "engine_build": {
+      "version_banner": "ngspice-46 : Circuit level simulation program",
+      "binary_sha256": "<hex>",
+      "probe": "ok",
+      "reason": null
+    },
     "window": { "settle_ns": 3.6, "tran_step_ns": 0.001 }
   },
   "comparison": null,
+  "failed_cells": [],
   "provenance": {
     "klt_version": "0.6.0",
     "klayout_version": "0.30.10",
@@ -724,13 +1036,13 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 | `grid` | object | The two index axes plus derived counts, summed over every cell: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (timing cards, `points * arc_count * 4` -- unchanged from #2502), `power_measurement_count` (`INTEG` rail-charge cards, `points * arc_count * 4`), `leakage_measurement_count` (one per input state per cell), `capacitance_measurement_count` (two per input pin per cell, one per edge), and `total_measurement_count` (their sum). |
 | `thresholds` | object | Every resolved Liberty threshold, defaults included — the definitions the tables mean. |
 | `units` | object | The units of every value in this response and the `.lib`: `time` `ns`, `capacitance` `pF`, `internal_energy` `pJ`, `leakage_power` `pW`. |
-| `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, simulation}`, each shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
+| `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, constraints, simulation}` — plus `async_arcs` for a cell that declares `cell.async_pins` (see "Asynchronous set/reset arcs"). `cell`/`arcs`/`leakage`/`simulation` are shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
 | `cell` | object \| null | Single-cell form: `cells[0].cell`. `null` in batch mode (there is no one cell to describe). |
 | `arcs` | array \| null | Single-cell form: `cells[0].arcs`; `null` in batch mode. One entry per characterized arc: `output_pin`, `related_pin`, `timing_sense`, `measured_sense`, `side_inputs` (the full held state, including inputs the function does not reference), and the six tables `cell_rise`/`cell_fall`/`rise_transition`/`fall_transition`/`rise_power`/`fall_power` as `{index_1, index_2, values}` in the library's own units. Same numbers as the `.lib`, so a consumer need not re-parse Liberty to read them. |
 | `leakage` | object \| null | Single-cell form: `cells[0].leakage`; `null` in batch mode. `cell_leakage_power_pw` (the mean over states) and `states[]` of `{when, inputs, value_pw}`, one per input state. |
-| `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
+| `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `sha256` (bare-hex SHA-256 of that file's bytes, via the shared `sha256_file`; re-hash the file to detect an in-place edit after the run — additive, no `schema_version` bump), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
 | `liberty.roundtrip` | object | `{engine, status, message, probe_netlist}`. See "Round-trip verification". |
-| `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine and its version, and the resolved transient `window`. |
+| `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine, its major version, `engine_build` (the full build identity -- version banner and binary sha256 -- copied verbatim from the sim report's `environment.engine_build`, shaped as in [`sim.md`](sim.md); `null` when the report has none, e.g. xyce), and the resolved transient `window`. |
 | `comparison` | object \| null | The `--compare-to` report (see "Accuracy against a vendor library"); `null` when not asked for. |
 | `provenance` | object | The shared reproducibility block from [`../json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk`/`pdk_root` (else `null`); `input` pins the (first) cell's netlist (`role: "netlist"`). |
 
@@ -748,6 +1060,13 @@ and the capacitance block (issue #2512):
 | `declared_capacitance_pf` | number \| null | The request's `pins[].capacitance_pf`, if any. |
 | `measured_capacitance_pf` | number \| null | This run's own measurement — reported even when a declared value overrode it, so the override is auditable. |
 | `measured_rise_capacitance_pf` / `measured_fall_capacitance_pf` | number \| null | The per-edge split. Emitted into the `.lib` as `rise_capacitance`/`fall_capacitance` **only** when `capacitance_source` is `"measured"`. |
+
+`cells[].constraints` is the setup/hold and recovery/removal list (`[]` for a
+cell that declares neither `constrained_pins` nor `async_pins`), and
+`cells[].async_arcs` the measured `preset`/`clear` propagation arcs — the one
+field that is **absent**, not empty, when the cell declares no `async_pins`,
+so a request without them is byte-identical to before #5520. Both are
+documented under "Sequential cells".
 
 **Compatibility.** Every #2502 field is still present with its #2502 meaning
 for a single-cell (`cell`) request; power tables, `leakage`, `units`,
@@ -767,7 +1086,7 @@ because it is an *input* being pinned (matching `klt sim`'s own `netlist`).
 generated artifacts a caller opens or chains onward — the same role
 `klt extract`'s `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill.
 Both shapes and the per-field inventory are documented in
-[`../json-contract.md`](../json-contract.md)'s "Output-artifact path fields".
+[`../json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string".
 A committed report must therefore not carry this envelope verbatim; see that
 document's "Repo-relative provenance in *committed* artifacts".
 
@@ -848,6 +1167,19 @@ was compared at least once, every point is inside its bound, and `missing`
 is empty — "never compared" is not "within tolerance". The text report prints
 `NOT COMPARED` for a field with no compared points.
 
+### Units
+
+Each library's own `time_unit`, `capacitive_load_unit`, `voltage_unit` and
+`leakage_power_unit` are read and every table axis, table value and leakage
+number is converted to **ns / pF / pJ / pW** before comparison (energy unit =
+`voltage_unit² × capacitive_load_unit`), so a reference in `1ps` / `(1, ff)`
+compares correctly against klt's `1ns` / `(1, pf)` output. The tolerances'
+`abs` floors are in those canonical units. A missing or unparseable unit
+declaration in either file is an error naming the file and attribute — units
+are never guessed. The declared units of both files are echoed in the
+additive `units` object (`ours` / `reference`) of the `comparison` block;
+no `schema_version` bump.
+
 ### The `comparison` block
 
 ```json
@@ -855,6 +1187,10 @@ is empty — "never compared" is not "within tolerance". The text report prints
   "schema_version": 1,
   "ours": "/abs/out/klt_characterize_typ_1p20V_25C.lib",
   "reference": "/abs/.../sg13g2_stdcell_typ_1p20V_25C.lib",
+  "units": {
+    "ours":      { "time_unit": "1ns", "capacitive_load_unit": "1, pf", "voltage_unit": "1V", "leakage_power_unit": "1pW" },
+    "reference": { "time_unit": "1ns", "capacitive_load_unit": "1, pf", "voltage_unit": "1V", "leakage_power_unit": "1pW" }
+  },
   "tolerances": { "cell_rise": { "rel": 0.15, "abs": 0.005 }, "...": {} },
   "cells": [
     {
@@ -1026,6 +1362,8 @@ bound means updating this table with the new observed spread and its cause.
 | `0` | Every requested cell was characterized and the `.lib` was written. With `--compare-to`, regardless of whether the comparison is within tolerance — the comparison is data, reported in `comparison.summary.within_tolerance`; the enforced bar is the automated test (see below). |
 | `1` | Failed to run: malformed request, unresolvable/unparseable netlist, pin metadata that does not describe a combinational cell, a simulation that did not complete, a grid point with no measured value, a transient window too short, an emitted `.lib` the round-trip reader rejects, an unknown `--cell` name, or an unreadable `--compare-to` library. |
 | `2` | Argparse usage error (as with every other `klt` subcommand). |
+
+With `--keep-going`, `0` means at least one cell was characterized; the cells that were not are in `failed_cells` (`[{"cell": ..., "error": ...}]`, always present, `[]` when none — additive per `docs/json-contract.md`). If every cell fails the run exits `1`.
 
 There is no pass/fail code — see "no top-level `status`" above.
 

@@ -481,10 +481,10 @@ boxes share one current-flow axis and axial extent:
   scope**: the coax shield's four wall segments in "Worked example: coax"
   below sit on two *different* current-flow axes (north/south run along one
   axis, east/west along the perpendicular one), so that shape is still
-  rejected — see the general Ruehli mesh note below. That remains a
-  follow-up beyond increments (i) and (ii). (A *connected, non-branching
-  winding* — an L/U trace or a square spiral — is the exception: see "Series
-  windings" below.)
+  rejected — see the general Ruehli mesh note below. Coax-style (non-path)
+  mixed-axis shapes stay rejected. (A *connected, non-branching winding* —
+  an L/U trace or a square spiral — is the exception: see "Series windings"
+  below.)
 - **A true 3-D bar.** All three of a box's extents (x, y, z) must be
   non-zero — a flat, zero-thickness plate (fine for capacitance) has no
   cross-sectional area to carry current.
@@ -509,8 +509,9 @@ special case. A rectangular loop, a single straight bar, an L-shaped trace
 length or axial position), and a multi-box conductor whose boxes share one
 axis (e.g. a dual-strip rail — "Worked example: multi-box conductor" below)
 all satisfy this scope; a coax shield (mixed-axis boxes within one
-conductor) or a pad (not elongated enough to have a well-defined
-current-flow axis) do not (yet).
+conductor, i.e. a non-path shape) or a pad (not elongated enough to have a
+well-defined current-flow axis) do not. A connected, non-branching
+mixed-axis winding is supported — see "Series windings" below.
 
 ### Method: filament bundle + Neumann's formula
 
@@ -1195,23 +1196,36 @@ oracles), for the exact geometry and measured accuracy.
   canonical two-port transmission-line case — the same two-conductor
   restriction the characteristic-impedance/propagation-constant derivation
   already has. A general N-port network (more than two conductors/ports) is
-  a follow-up beyond this MVP, delivered by
-  [#894](https://github.com/2AMLogic/klayout-tools/issues/894), Phase 2b of
-  epic #701.
+  not supported. A request combining a series winding with `ports` is
+  rejected with a diagnostic — see "Series windings in the frequency sweep"
+  above. Phase 2b of epic #701
+  ([#894](https://github.com/2AMLogic/klayout-tools/issues/894)) delivered
+  the two-port case.
+- **Series-winding restrictions.** A connected, non-branching winding
+  ("Series windings (static solve)", "Series windings in the frequency
+  sweep" above) is accepted; branched, disconnected/overlapping, closed-loop
+  and ambiguous-corner shapes and curved polygons are rejected. A winding
+  combined with `ports` is rejected and reports no `Z0`/`gamma`/S-parameters.
+  The sweep gives series `Z` only (no shunt C or self-resonance), needs cell
+  size about the trace width, carries the documented 5.5% thin-wire vs PEEC
+  kernel offset, and is valid only well below self-resonance (`k*length`
+  of order 1 or less).
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
   scope than the capacitance solve's (every box true 3-D and elongated; a
   conductor may contribute more than one box as long as its own boxes share
-  one axis/extent — a request mixing axes within one conductor, e.g. a coax
-  shield's wall segments, remains out of scope). A request that does not
+  one axis/extent, or form a connected, non-branching winding — a request
+  mixing axes within one conductor in any other shape, e.g. a coax shield's
+  wall segments, is rejected). A request that does not
   fit is rejected with a clear error naming which restriction it violates,
   not silently approximated. Since
   [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
   conductors no longer need to share a current-flow axis or axial extent —
   a coiled/spiral winding or an L-shaped loop is in scope, provided every
-  box is still a bar-shaped box and each conductor's own boxes stay on one
-  axis. The full-wave solve's derived
+  box is still a bar-shaped box and each conductor's own boxes either stay on
+  one axis or form a connected, non-branching winding (see "Series
+  windings" above). The full-wave solve's derived
   characteristic-impedance/propagation-constant
   fields are further restricted to exactly two conductors that *do* share
   one axis and axial span (the canonical transmission-line case); a request

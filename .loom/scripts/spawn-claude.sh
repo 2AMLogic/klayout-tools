@@ -106,8 +106,8 @@
 #                          of asking the local daemon for it. A test hook,
 #                          and the escape hatch for a host whose concurrent
 #                          agents this daemon does not track.
-#   LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS  Hard bound on that daemon probe
-#                          (default `10`). On timeout the divisor falls back
+#   LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS  Hang-guard bound on that daemon probe
+#                          (default `60`, above the CLI budget). On timeout the divisor falls back
 #                          to `1`, i.e. exactly pre-#5979 behavior.
 #   LOOM_SWEEP_CPU_BUDGET_CORES  OUTPUT, not an input: exported into the
 #                          spawned session with the computed per-sweep core
@@ -415,9 +415,14 @@ if [[ "${LOOM_SWEEP_CPU_QUOTA:-1}" != "0" ]]; then
     # on its side.
     export LOOM_SWEEP_CPU_BUDGET_CORES="$_cpu_budget_cores"
     if [[ "$_cpu_shared" == "1" ]]; then
+        # #12884: the sweep count the budget was divided by, for the phase
+        # spans. Only a shared budget measured it; unshared, `1` is a
+        # placeholder, so the key is unset (no parent value leaks through).
+        export LOOM_SWEEP_CPU_INFLIGHT="$_cpu_inflight"
         log_info "spawn-claude: CPU budget = ${_cpu_budget_cores} core(s) of ${_cpu_total_cores} (reserved ${_cpu_reserved}) divided across ${_cpu_inflight} in-flight sweep(s) on this host — exported as LOOM_SWEEP_CPU_BUDGET_CORES (issues #5111/#5979)"
     else
         log_info "spawn-claude: CPU budget = ${_cpu_budget_cores} core(s) of ${_cpu_total_cores} (reserved ${_cpu_reserved}) — host-wide sharing disabled (LOOM_SWEEP_SHARED_CPU_BUDGET=0, #5979) — exported as LOOM_SWEEP_CPU_BUDGET_CORES (issue #5111)"
+        unset LOOM_SWEEP_CPU_INFLIGHT
     fi
 
     _systemd_user_lib="${_script_dir}/lib/systemd-user.sh"
@@ -633,9 +638,11 @@ fi
 # registry — the SAME "sweeps survive by design" property launchd already
 # gives bare-metal sweeps today (see daemon-reference.md), now extended to
 # systemd too, via the container boundary instead of process reparenting.
-# `loom-daemon restart --drain` remains the recommended path on both
-# supervisors — it waits for in-flight sweeps (containerized or not) to
-# finish before the daemon exits, so the orphan case above is a hard-stop
+# `loom-daemon restart --drain` (relaunch) and `restart --pause --then-exit`
+# (host maintenance, #11812) remain the recommended paths on both
+# supervisors — the first waits for in-flight sweeps (containerized or not)
+# to finish before the daemon exits, the second pauses them for the next
+# start's H5 to resume — so the orphan case above is a hard-stop
 # fallback, not the common path. Reconciling a still-running orphaned
 # container after a daemon restart (`SweepRegistry::reconstruct`'s
 # container-recognition extension) remains a real, named Phase 3 obligation
@@ -1158,7 +1165,7 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     _account_provider="$(_loom_account_provider_for_runtime claude)"
     _select_args=(tokens select --workspace "$WORKSPACE" --provider "$_account_provider" --export)
     # Pre-flight: auto-unpin if every allowlisted account has hit the
-    # consecutive-failure threshold (default 5). Without this, an
+    # failure-count threshold (default 5). Without this, an
     # operator-set pin can trap the spawner once all pinned accounts
     # exhaust their weekly quota. Empty-pool guard: we never silently
     # clear .bad_tokens — if that file blocks every account, the user
@@ -1271,6 +1278,21 @@ if [[ "$_loom_print_mode" == "true" ]]; then
     export LOOM_HEADLESS_SESSION=1
 fi
 unset _loom_print_mode
+
+# --- Refuse to invent a git identity (issue #13088) ---
+# A worker with no user.name/user.email commits as `user@hostname` (git's
+# auto-detected fallback), which fails DCO/attribution checks only after a full
+# Judge/Doctor cycle. `user.useConfigOnly=true` makes git refuse to commit
+# unless the identity is explicit (config or GIT_AUTHOR_*/GIT_COMMITTER_*
+# env). Injected per-process via GIT_CONFIG_COUNT/KEY_n/VALUE_n, appending
+# after any count already set, so no config file (the shared primary clone or
+# the host-global config) is written. Fix on refusal: set a real identity
+# (git config --global user.name/user.email, or GIT_AUTHOR_* env).
+_gc_count="${GIT_CONFIG_COUNT:-0}"
+[[ "$_gc_count" =~ ^[0-9]+$ ]] || _gc_count=0
+export "GIT_CONFIG_KEY_${_gc_count}=user.useConfigOnly" "GIT_CONFIG_VALUE_${_gc_count}=true"
+export GIT_CONFIG_COUNT=$((_gc_count + 1))
+unset _gc_count
 
 # --- Session pinning and roll resume (issue #10830) ---
 # Pause-and-roll (docs/design/daemon-roll-pause-resume.md) resumes a paused

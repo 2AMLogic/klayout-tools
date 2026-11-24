@@ -42,7 +42,7 @@ from ..equiv import (
     rerun_equiv_report,
     run_equiv,
 )
-from .output import emit_error, emit_success, render_rerun_drift
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 EXIT_EQUIVALENT = 0
 EXIT_COUNTEREXAMPLE = 3
@@ -112,24 +112,10 @@ def _run_check(args: argparse.Namespace) -> int:
         return emit_error("equiv", str(exc), args.format)
 
     emit_success(
-        result, args.format, render_rerun_drift if args.rerun else _print_check_text
+        result, args.format, render_rerun_drift if args.rerun else render_check_text
     )
 
     return EXIT_DRIFTED if result["status"] == "drifted" else EXIT_MATCH
-
-
-def _print_check_text(result: dict) -> None:
-    """``--format text`` rendering of a cheap-mode ``--check`` result -- the
-    same shape ``synthesize_cmd._print_check_text`` renders, so every
-    verb's verification output reads the same way."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_resume_line(resume: dict | None) -> None:

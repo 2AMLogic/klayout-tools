@@ -995,3 +995,10 @@ generous factor-of-two band the single-device test uses, for the same
 reason: a tighter band would encode PDK-release-specific numbers as a
 regression bar. Like the single-device canary test it is skipped wherever no
 sky130A ngspice model library is installed, including CI.
+
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420, ngspice 46: the
+> single-device canary sizes 5.44 um (target 17.02 S/A) and the joint
+> topology test measures a spec of `gm/Id = 14.23 / 19.13 / 8.93 S/A` and
+> widths of 9.83 / 8.74 / 6.41 um for tail / input pair / mirror. Both
+> tests pass. Every figure above is unchanged to the digits quoted: nothing
+> moved past tolerance. The c6d73a3 numbers above are kept as measured.

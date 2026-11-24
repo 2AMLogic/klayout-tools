@@ -1,59 +1,30 @@
 """Tests for the per-device operating-point sanity lint (`klt sim --op-lint`,
 `klt eval`'s `op-sanity` gate) and the `klayout_tools.op_sanity` library.
 
-Two tiers, mirroring `test_sim.py`/`test_size.py`:
-
-- **Unit tests** (the majority) exercise the netlist parser, the rail
-  classification, every check, the corner-aware triode margin, and the full
-  `run_op_sanity` pipeline with `subprocess.run` stubbed by a fake ngspice
-  that *reads the generated deck* and answers exactly the vectors it asks
-  for. These always run, everywhere, and are what a check/parse regression
-  actually gets caught by.
-- **Integration tests** run the real `ngspice -b` against the installed
-  sky130A/gf180mcu ngspice model libraries -- the acceptance criterion that
-  per-device `Vth` comes from the model rather than a constant can only be
-  checked that way. They skip (never silently pass) when ngspice or the PDK
-  model library is absent, as CI installs neither ngspice model tree, when
-  `KLT_SKIP_NGSPICE_TESTS=1` opts the host out of this slow tier, and when
-  the run they did start was killed by its own wall-clock budget rather
-  than reaching an answer (issue #2677 --
-  `_skip_if_the_simulator_ran_out_of_wall_clock`). Every *other* way they
-  can fail still fails.
+Unit tests read the generated ngspice deck and return only the requested
+vectors. Integration tests check model-derived values against real sky130A
+and gf180mcu libraries. They skip when the model library or ngspice is
+unavailable, when KLT_SKIP_NGSPICE_TESTS=1, or when the simulator exceeds
+its wall-clock budget (see _skip_if_the_simulator_ran_out_of_wall_clock).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import eval as eval_mod
 from klayout_tools import op_sanity
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-#: The integration tests at the bottom of this file invoke a real `ngspice`
-#: against a real vendor model library -- slow and host-load-sensitive, the
-#: tier issue #1651 carved out. `KLT_SKIP_NGSPICE_TESTS=1` (set by `npm run
-#: check:ci`'s local-only test script, never by CI) lets a host that *has*
-#: ngspice still opt out, exactly as `tests/test_extract.py`,
-#: `tests/test_sim.py` and `tests/test_eval.py` already do. Issue #2677:
-#: this file was never wired into that knob, so a saturated 8-vCPU dispatch
-#: worker ran these under the build gate and lost the operating point to a
-#: wall-clock timeout -- a red gate for a host-contention reason. CI, which
-#: never sets the variable, still runs them and still catches regressions.
-HAVE_NGSPICE = (
-    shutil.which("ngspice") is not None
-    and os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
@@ -134,26 +105,59 @@ _PRINT_V_RE = re.compile(r"^print v\((.+)\)$")
 _MARKER_RE = re.compile(r"^echo KLT_OP_DEVICE (\d+) (\S+)$")
 
 
+_DeviceValues = dict[str, dict[str, float]]
+
+
+def _probe_responses(deck_lines, device_values, candidate_index, node_voltages):
+    """Emulate only the marker and print commands emitted by the op-lint deck."""
+    out = []
+    current = None
+    candidates = []
+    for line in deck_lines:
+        marker = _MARKER_RE.match(line)
+        if marker is not None:
+            current = marker.group(2)
+            candidates = []
+            out.append(f"KLT_OP_DEVICE {marker.group(1)} {marker.group(2)}")
+            continue
+        if line == "echo KLT_OP_NODES":
+            current = None
+            out.append("KLT_OP_NODES")
+            continue
+        op_match = _PRINT_OP_RE.match(line)
+        if op_match is not None and current is not None:
+            path, param = op_match.groups()
+            if path not in candidates:
+                candidates.append(path)
+            if candidates.index(path) != candidate_index:
+                out.append(f"Error: no such device or model name {path}")
+                continue
+            value = device_values.get(current, {}).get(param)
+            if value is None:
+                out.append(f"Error: no such parameter {param}.")
+            else:
+                out.append(f"@{path}[{param}] = {value:.6e}")
+            continue
+        node_match = _PRINT_V_RE.match(line)
+        if node_match is not None:
+            node = node_match.group(1)
+            out.append(f"v({node}) = {(node_voltages or {}).get(node, 0.0):.6e}")
+    return out
+
+
 def _install_fake_ngspice(
     monkeypatch,
-    values: dict[str, dict[str, float]],
+    values: _DeviceValues | None = None,
     *,
+    by_temp: dict[float, _DeviceValues | None] | None = None,
     node_voltages: dict[str, float] | None = None,
     candidate_index: int = 0,
     prologue: str = "",
     side_effect: BaseException | None = None,
 ):
-    """Stub `subprocess.run` with a fake ngspice that reads the generated
-    deck and answers exactly the vectors it asks for.
-
-    Reading the deck (rather than replaying a canned log) is what makes
-    these tests real: the device order, the candidate instance paths, and
-    the probed node list all come from the code under test, so a deck-
-    generation regression shows up as a parse failure here instead of
-    passing against a stale fixture. `candidate_index` picks *which* of a
-    device's candidate paths answers -- everything else gets ngspice's real
-    non-fatal "no such device or model name" line, exactly as the PDK whose
-    convention was not matched does.
+    """Answer the generated deck's print commands on the selected candidate path.
+    A by_temp entry supplies the device values for that corner's .temp card.
+    A None entry simulates a corner that fails to converge.
     """
 
     def fake_run(cmd, capture_output, text, timeout):
@@ -167,39 +171,23 @@ def _install_fake_ngspice(
         ]
         if prologue:
             out.append(prologue)
-        current: str | None = None
-        candidates: list[str] = []
         with open(deck_path, encoding="utf-8") as handle:
             deck_lines = [line.strip() for line in handle.read().splitlines()]
-        for line in deck_lines:
-            marker = _MARKER_RE.match(line)
-            if marker is not None:
-                current = marker.group(2)
-                candidates = []
-                out.append(f"KLT_OP_DEVICE {marker.group(1)} {marker.group(2)}")
-                continue
-            if line == "echo KLT_OP_NODES":
-                current = None
-                out.append("KLT_OP_NODES")
-                continue
-            op_match = _PRINT_OP_RE.match(line)
-            if op_match is not None and current is not None:
-                path, param = op_match.groups()
-                if path not in candidates:
-                    candidates.append(path)
-                if candidates.index(path) != candidate_index:
-                    out.append(f"Error: no such device or model name {path}")
-                    continue
-                value = values.get(current, {}).get(param)
-                if value is None:
-                    out.append(f"Error: no such parameter {param}.")
-                else:
-                    out.append(f"@{path}[{param}] = {value:.6e}")
-                continue
-            node_match = _PRINT_V_RE.match(line)
-            if node_match is not None:
-                node = node_match.group(1)
-                out.append(f"v({node}) = {(node_voltages or {}).get(node, 0.0):.6e}")
+        device_values = values or {}
+        if by_temp is not None:
+            temp = next(
+                line.split()[1] for line in deck_lines if line.startswith(".temp ")
+            )
+            point = by_temp[float(temp)]
+            if point is None:
+                Path(log_path).write_text(
+                    "Error: no convergence\nsimulation(s) aborted\n", encoding="utf-8"
+                )
+                return fake_completed("** ngspice-99\n")
+            device_values = point
+        out.extend(
+            _probe_responses(deck_lines, device_values, candidate_index, node_voltages)
+        )
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(out) + "\nngspice-99 done\n")
         return fake_completed("** ngspice-99\n")
@@ -209,6 +197,7 @@ def _install_fake_ngspice(
 
 #: A saturated NMOS: comfortably above Vth, Vds well above Vdsat.
 _SATURATED_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdsat": 0.15, "id": 4.5e-5}
+_OSDI_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdss": 0.15, "id": 4.5e-5}
 #: A saturated PMOS (BSIM4 reports every value as a positive magnitude).
 _SATURATED_PMOS = {"vgs": 1.2, "vth": 0.75, "vds": 0.9, "vdsat": 0.39, "id": 4.5e-5}
 
@@ -297,6 +286,173 @@ def test_parse_netlist_ignores_devices_inside_a_subckt_definition():
     assert [device.name for device in parsed.devices] == ["XTOP"]
 
 
+def test_parse_netlist_expands_an_instantiated_subckt_with_hierarchical_names():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt dut in out vdd\n"
+        "M1 out in 0 0 nch w=10u l=1u\n"
+        "Rl vdd out 10k\n"
+        ".ends dut\n"
+        "Vdd vdd 0 DC 1.8\n"
+        "Vin in 0 DC 1\n"
+        "Xdut in out vdd dut\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    device = parsed.devices[0]
+    assert device.kind == "nmos"
+    assert device.nodes["drain"] == "out"
+    assert device.nodes["gate"] == "in"
+    assert device.op_candidates == ["m.xdut.m1"]
+    # `out` has the Rl and M1 terminals plus nothing floating.
+    assert parsed.node_degree["out"] == 2
+    assert not parsed.unexpanded
+
+
+def test_parse_netlist_maps_internal_nodes_and_nested_subckts():
+    parsed = op_sanity.parse_netlist(
+        ".model nch nmos level=1\n"
+        ".subckt inner a b\n"
+        "M1 a b 0 0 nch\n"
+        ".ends\n"
+        ".subckt outer p\n"
+        "Xi p mid inner\n"
+        "R1 mid 0 1k\n"
+        ".ends\n"
+        "Xo top outer\n",
+        {},
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xo.Xi.M1"]
+    assert parsed.devices[0].nodes["drain"] == "top"
+    assert parsed.devices[0].nodes["gate"] == "xo.mid"
+    assert parsed.devices[0].op_candidates == ["m.xo.xi.m1"]
+
+
+def test_parse_netlist_follows_includes_inside_a_subckt(tmp_path):
+    (tmp_path / "flat.spice").write_text(
+        ".model nch nmos level=1\nM1 out in 0 0 nch w=10u l=1u\nRl vdd out 10k\n"
+    )
+    parsed = op_sanity.parse_netlist(
+        '.subckt dut in out vdd\n.include "flat.spice"\n.ends dut\n'
+        "Xdut in out vdd dut\n",
+        {},
+        str(tmp_path),
+    )
+
+    assert [device.name for device in parsed.devices] == ["Xdut.M1"]
+    assert parsed.devices[0].kind == "nmos"
+
+
+def test_parse_netlist_flags_an_unresolvable_subckt_instance():
+    parsed = op_sanity.parse_netlist(
+        '.include "missing.spice"\nXdut in out vdd dut\nR1 in out 1k\n',
+        {},
+        "/nonexistent",
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["Xdut"]
+
+
+def test_parse_netlist_survives_a_recursive_subckt():
+    parsed = op_sanity.parse_netlist(
+        ".subckt loop a\nXl a loop\n.ends\nX1 n loop\n",
+        {},
+    )
+
+    assert parsed.devices == []
+    assert parsed.unexpanded == ["X1.Xl"]
+
+
+def _fan_out_netlist(levels: int, fan_out: int) -> str:
+    """A `levels`-deep hierarchy where every level instantiates the next
+    `fan_out` times and the last level holds one MOS."""
+    lines = [".subckt lvl0 a b\nM1 a b 0 0 nmos\n.ends"]
+    for level in range(1, levels):
+        calls = "\n".join(f"X{i} a b lvl{level - 1}" for i in range(fan_out))
+        lines.append(f".subckt lvl{level} a b\n{calls}\n.ends")
+    lines.append(f"Xtop in out lvl{levels - 1}")
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_netlist_caps_total_expanded_instances(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == 50
+    # Devices reached before the cap are still reported.
+    assert parsed.devices
+
+
+def test_parse_netlist_below_the_expansion_cap_is_untouched(monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+
+    assert not parsed.expansion_truncated
+    assert len(parsed.devices) == 4
+
+
+def test_parse_netlist_expansion_cap_boundary_is_exact(monkeypatch):
+    # lvl1 -> 4x lvl0: 1 top call + 4 leaf calls = 5 expansions.
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 5)
+    exact = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert not exact.expansion_truncated
+    assert len(exact.devices) == 4
+
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 4)
+    over = op_sanity.parse_netlist(_fan_out_netlist(2, 4), {})
+    assert over.expansion_truncated
+    assert len(over.devices) == 3
+
+
+def test_parse_netlist_fan_out_case_returns_quickly_at_the_default_cap():
+    import time
+
+    start = time.monotonic()
+    parsed = op_sanity.parse_netlist(_fan_out_netlist(7, 8), {})
+
+    assert parsed.expansion_truncated
+    assert parsed.expanded_instances == op_sanity._MAX_EXPANDED_INSTANCES
+    assert time.monotonic() - start < 2.0
+
+
+def test_expansion_cap_emits_one_unsupported_hierarchy_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(op_sanity, "_MAX_EXPANDED_INSTANCES", 50)
+    request = _write_request(tmp_path, _fan_out_netlist(7, 8) + "Vdd vdd 0 1.8\n")
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    capped = [
+        entry
+        for entry in report["diagnostics"]
+        if entry["code"] == "unsupported_hierarchy" and "cap" in entry["message"]
+    ]
+    assert len(capped) == 1
+    assert capped[0]["severity"] == "warning"
+    assert "50" in capped[0]["message"]
+
+
+def test_behavioural_source_terminals_count_for_the_floating_node_check():
+    parsed = op_sanity.parse_netlist(
+        "Vs vs 0 DC 1\n"
+        "Bdrv n1 0 V = v(vs) * 2\n"
+        "Brd n2 0 V = v(n1) + 1\n"
+        "Bdangling n3 0 V = 1\n",
+        {},
+    )
+
+    findings = op_sanity._hygiene_findings(parsed, [], {"0"}, set())
+    assert [finding["node"] for finding in findings] == ["n2", "n3"]
+    # n1 is driven by one B and read by another -> two terminals, not floating.
+    assert parsed.node_degree["n1"] == 2
+
+
 def test_parse_netlist_joins_continuation_lines_and_strips_params():
     parsed = op_sanity.parse_netlist(
         "XM1 out in 0 0 sky130_fd_pr__pfet_01v8\n+ L = 0.15 W={2*wu} nf=1\n", {}
@@ -371,16 +527,28 @@ def test_model_kind_override_beats_a_conflicting_naming_heuristic():
 
 
 def test_op_candidates_cover_both_pdk_inner_element_conventions():
-    # sky130 names the inner element `m<subckt>`, gf180mcu names it `m0`
-    # (both verified against the installed PDKs -- see op_sanity.py).
-    assert op_sanity._op_candidates("XM1", "sky130_fd_pr__nfet_01v8", None)[0] == (
-        "m.xm1.msky130_fd_pr__nfet_01v8"
-    )
-    assert "m.xm1.m0" in op_sanity._op_candidates("XM1", "nfet_03v3", None)
-    # A plain `M` element's vectors live directly under its own name.
-    assert op_sanity._op_candidates("M2", "nch", None) == ["m2"]
-    # An explicit override replaces the whole candidate list.
-    assert op_sanity._op_candidates("XM1", "weird", "mcore") == ["m.xm1.mcore"]
+    assert op_sanity._op_candidates("XM1", "nfet", None) == [
+        "m.xm1.mnfet",
+        "m.xm1.m0",
+        "m.xm1.mnfet_0",
+        "n.xm1.mnfet",
+        "n.xm1.m0",
+        "n.xm1.mnfet_0",
+    ]
+    assert op_sanity._op_candidates("M2", "nfet", None) == ["m2"]
+
+
+@pytest.mark.parametrize(
+    ("override", "paths"),
+    [
+        ("mcore", ["m.xm1.mcore", "n.xm1.mcore"]),
+        ("m.mcore", ["m.xm1.mcore"]),
+        ("n.nsg13_hv_pmos", ["n.xm1.nsg13_hv_pmos"]),
+        ("n.", ["m.xm1.n.", "n.xm1.n."]),
+    ],
+)
+def test_op_candidate_override(override, paths):
+    assert op_sanity._op_candidates("XM1", "nfet", override) == paths
 
 
 # --------------------------------------------------------------------------- #
@@ -410,16 +578,31 @@ def test_triode_margin_honours_explicit_overrides():
 # --------------------------------------------------------------------------- #
 
 
-def test_golden_path_reports_no_findings(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("nmos", "candidate", "path", "vdsat"),
+    [
+        (_SATURATED_NMOS, 0, "m.xm1.mnmos_demo", 0.15),
+        (_OSDI_NMOS, 3, "n.xm1.mnmos_demo", 0.15),
+        ({**_SATURATED_NMOS, "vdss": 0.14}, 0, "m.xm1.mnmos_demo", 0.14),
+    ],
+    ids=["bsim", "osdi", "both-aliases"],
+)
+def test_golden_path_reports_no_findings(
+    tmp_path, monkeypatch, nmos, candidate, path, vdsat
+):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(
         monkeypatch,
-        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        {"XM1": nmos, "XM2": _SATURATED_PMOS},
+        candidate_index=candidate,
         node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
     )
 
     report = op_sanity.run_op_sanity(str(request))
 
+    assert report["diagnostics"] == []
+    assert report["devices"][0]["op_point_element"] == path
+    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(vdsat)
     assert report["status"] == "clean"
     assert report["findings"] == []
     assert report["finding_count"] == 0
@@ -479,14 +662,15 @@ def test_subthreshold_but_conducting_device_is_not_reported_off(tmp_path, monkey
     assert report["devices"][0]["region"] == "subthreshold"
 
 
-def test_triode_device_is_reported_as_a_warning_with_values(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("nmos", "candidate"), [(_SATURATED_NMOS, 0), (_OSDI_NMOS, 3)])
+def test_triode_device_is_reported_as_a_warning_with_values(
+    tmp_path, monkeypatch, nmos, candidate
+):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(
         monkeypatch,
-        {
-            "XM1": {"vgs": 0.9, "vth": 0.7, "vds": 0.10, "vdsat": 0.15, "id": 3e-5},
-            "XM2": _SATURATED_PMOS,
-        },
+        {"XM1": {**nmos, "vds": 0.10, "id": 3e-5}, "XM2": _SATURATED_PMOS},
+        candidate_index=candidate,
     )
 
     report = op_sanity.run_op_sanity(str(request))
@@ -794,6 +978,8 @@ def test_unanswered_op_vectors_produce_an_actionable_diagnostic(tmp_path, monkey
     assert report["devices"][0]["region"] == "unknown"
     message = report["diagnostics"][0]["message"]
     assert "op_point_element" in message
+    assert "@m.xm1.m0" in message and "@n.xm1.m0" in message
+    assert "m. or n. prefix" in message
 
 
 def test_op_point_element_override_resolves_a_nonstandard_pdk(tmp_path, monkeypatch):
@@ -937,6 +1123,33 @@ def test_unrecovered_singular_matrix_is_an_error_status(tmp_path, monkeypatch):
     assert report["status"] == "error"
 
 
+def test_unexpanded_instance_with_no_devices_is_not_clean(tmp_path, monkeypatch):
+    """An empty device list caused by an unexpandable `X` instance must
+    never read as `clean` (i.e. "every device is saturated")."""
+    netlist = "Xdut in out vdd missing_cell\nVdd vdd 0 1.8\nR1 in out 1k\n"
+    request = _write_request(tmp_path, netlist)
+    _install_fake_ngspice(monkeypatch, {})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["device_count"] == 0
+    assert report["status"] == "findings"
+    assert any(
+        entry["code"] == "unsupported_hierarchy" for entry in report["diagnostics"]
+    )
+
+
+def test_op_status_precedence():
+    parsed = op_sanity.ParsedNetlist()
+    error = [{"severity": "error", "code": "timeout", "message": "x"}]
+
+    assert op_sanity._op_status(error, parsed, False, True) == "error"
+    assert op_sanity._op_status([], parsed, False, True) == "findings"
+    assert op_sanity._op_status([], parsed, False, False) == "clean"
+    parsed.unexpanded.append("Xdut")
+    assert op_sanity._op_status([], parsed, False, False) == "findings"
+
+
 def test_unknown_corner_is_a_request_error(tmp_path, monkeypatch):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(monkeypatch, {})
@@ -981,6 +1194,79 @@ def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
     (deck,) = decks
     pre = deck.index(f"pre_osdi {osdi}")
     assert deck.index(".control") < pre < deck.index("op")
+
+
+_PWL_NETLIST = _GOOD_NETLIST.replace("Vdd vdd 0 DC {vdd}", "Vdd vdd 0 PWL(0 0 1u 1.8)")
+
+
+def _record_decks(monkeypatch) -> list[list[str]]:
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    decks: list[list[str]] = []
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        deck = Path(cmd[cmd.index("-b") + 1])
+        decks.append(deck.read_text().splitlines())
+        # The work dir is removed on exit; capture the included copy now.
+        for line in decks[-1]:
+            if line.startswith(".include "):
+                decks[-1].append("INCLUDED " + Path(line.split(" ", 1)[1]).read_text())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+    return decks
+
+
+def test_supply_waveform_rail_is_scaled_not_altered_in_the_op_lint_deck(
+    tmp_path, monkeypatch
+):
+    """Issue #3624: `alter` on a PWL source is a no-op in ngspice, so the lint
+    deck must skip it and include the per-corner scaled netlist copy, as the
+    sweep deck does (issue #2902); a DC rail is still `alter`ed."""
+    request = _write_request(tmp_path, _PWL_NETLIST)
+    doc = json.loads(request.read_text())
+    doc["corners"] = {
+        "supply_v": {"vdd": [1.2], "Vbias": [0.5]},
+        "temperature_c": [27],
+        "supply_waveforms": ["vdd"],
+    }
+    request.write_text(json.dumps(doc))
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert not any(line.startswith("alter vdd=") for line in deck)
+    assert "alter Vbias=0.5" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("netlist.supply_waveforms.cir")
+    assert "PWL(0 0 1u 1.2)" in next(x for x in deck if x.startswith("INCLUDED "))
+
+
+def test_op_lint_deck_without_supply_waveforms_is_unchanged(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert "alter vdd=1.8" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("body.spice")
+
+
+def test_unsupported_supply_waveform_source_is_an_op_sanity_error(tmp_path):
+    request = _write_request(tmp_path, _GOOD_NETLIST)  # DC source, not PWL
+    doc = json.loads(request.read_text())
+    doc["corners"]["supply_waveforms"] = ["vdd"]
+    request.write_text(json.dumps(doc))
+
+    with pytest.raises(op_sanity.OpSanityError, match="PWL/PULSE"):
+        op_sanity.run_op_sanity(str(request))
 
 
 def test_per_section_corner_libs_reach_the_op_lint_deck(tmp_path, monkeypatch):
@@ -1430,3 +1716,88 @@ def test_integration_gf180_resolves_its_own_inner_element_convention(tmp_path):
     assert device["values"]["vth_v"] is not None
     assert device["values"]["vdsat_v"] is not None
     assert device["region"] in ("saturation", "triode")
+
+
+# --------------------------------------------------------------------------- #
+# --op-lint-corner all: per-corner saturation margin table (issue #4650)
+# --------------------------------------------------------------------------- #
+
+
+def _three_corner_request(tmp_path):
+    return _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [27, 70, 125]},
+    )
+
+
+@pytest.mark.parametrize(("nmos", "candidate"), [(_SATURATED_NMOS, 0), (_OSDI_NMOS, 3)])
+def test_corner_all_tabulates_worst_margin_per_corner(
+    tmp_path, monkeypatch, nmos, candidate
+):
+    request = _three_corner_request(tmp_path)
+    _install_fake_ngspice(
+        monkeypatch,
+        node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2},
+        by_temp={
+            27.0: {"XM1": nmos, "XM2": _SATURATED_PMOS},
+            70.0: {"XM1": nmos, "XM2": {**_SATURATED_PMOS, "vds": 0.5}},
+            125.0: {"XM1": {**nmos, "vds": 0.1}, "XM2": _SATURATED_PMOS},
+        },
+        candidate_index=candidate,
+    )
+
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+
+    margins = report["corner_margins"]
+    assert len(margins) == 3
+    by_id = {entry["corner_id"]: entry for entry in margins}
+    assert margins[0]["worst_margin_v"] <= margins[1]["worst_margin_v"]
+    assert margins[0]["worst_device"] == "XM1"
+    assert margins[0]["worst_margin_v"] == pytest.approx(-0.05)
+    assert margins[0]["triode_count"] == 1
+    other = [e for e in margins if e["triode_count"] == 0]
+    assert {e["worst_device"] for e in other} == {"XM2"}
+    assert by_id[margins[0]["corner_id"]] is margins[0]
+    # Top-level report still describes the first corner.
+    assert report["corner"]["temperature_c"] == 27
+    assert report["status"] == "clean"
+
+
+def test_corner_default_has_null_corner_margins(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+    assert op_sanity.run_op_sanity(str(request))["corner_margins"] is None
+
+
+def test_corner_all_failing_corner_has_null_margin(tmp_path, monkeypatch):
+    request = _three_corner_request(tmp_path)
+    ok = {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS}
+    _install_fake_ngspice(monkeypatch, by_temp={27.0: ok, 70.0: ok, 125.0: None})
+
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+
+    failed = [e for e in report["corner_margins"] if e["worst_margin_v"] is None]
+    assert len(failed) == 1
+    assert failed[0]["worst_device"] is None
+    assert failed[0]["diagnostics"]
+    assert report["corner_margins"][-1] is failed[0]
+    assert report["status"] == "error"
+
+
+def test_corner_all_single_corner_matrix(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+    assert len(report["corner_margins"]) == 1
+
+
+def test_corner_all_refuses_param_axis(tmp_path, monkeypatch):
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={"supply_v": {"vdd": [1.8]}, "params": {"w": [1, 2]}},
+    )
+    _install_fake_ngspice(monkeypatch, {})
+    with pytest.raises(op_sanity.OpSanityError, match="corners.params"):
+        op_sanity.run_op_sanity(str(request), corner="all")

@@ -17,6 +17,10 @@
       "minLength": 1,
       "description": "REQUIRED. The shell command the harness runs under `bash -c` in the job directory. For `klt sim` this is always a `klt sim \"$EDA_INPUT_DIR/request.json\" --backend local-parallel --format json` invocation whose stdout is redirected to \"$EDA_OUTPUT_DIR/report.json\" -- the redirect is load-bearing, not cosmetic: the harness merges its own log lines and the job command's into one harness.log, so stdout is not a clean channel back to the submitter (only outputs/** and status.json are). Stderr is additionally teed into \"$EDA_OUTPUT_DIR/stderr.log\" (still forwarded to harness.log) because klt writes its --format json error envelope to stderr; the command ends with `; rc=$?; wait $! 2>/dev/null; exit $rc` so the job keeps klt's own exit code. When options.keep_artifacts is set, `--outdir \"$EDA_OUTPUT_DIR/artifacts\"` is appended so per-corner logs/rawfiles land inside the collected tree too."
     },
+    "image_profile": {
+      "enum": ["simlong"],
+      "description": "Opt-in simulation fleet profile. The default sim path omits this field."
+    },
     "pdk_variant": {
       "type": "string",
       "minLength": 1,
@@ -34,7 +38,7 @@
     "timeout_seconds": {
       "type": "integer",
       "minimum": 1,
-      "description": "Per-job wall-clock cap, clamped *down* (never up) by the instance watchdog. Derived as the fully-serial worst case (`options.timeout_s` * corner count) plus startup slack -- see sim_batch._default_batch_job_timeout_s. A real run finishes far inside it; it exists so a wedged job is killed rather than billing until the watchdog fires."
+      "description": "Per-job wall-clock cap, clamped *down* (never up) by the instance watchdog. Derived as the fully-serial worst case (`options.timeout_s` * corner count) plus startup slack -- see sim_batch._default_batch_job_timeout_s -- or, when the request states `batch.job_timeout_s` (issue #5544), that stated bound itself (see sim_batch_job_timeout.resolve_job_timeout_s); every shard of a split run carries the same value either way. A real run finishes far inside the serial bound (its units run concurrently); it exists so a wedged job is killed rather than billing until the watchdog fires."
     }
   }
 }

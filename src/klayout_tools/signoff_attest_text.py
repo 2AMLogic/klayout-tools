@@ -1,0 +1,169 @@
+"""Text rendering of one ``klt signoff --attest`` check (split out of the CLI
+module for the file-size ratchet; issue #4848)."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from .signoff_attest_command import failed_output_tail
+
+
+def check_label(check: Mapping[str, Any]) -> str:
+    """The short name a text line gives a command check."""
+    return (
+        check.get("target")
+        or check.get("name")
+        or check.get("testbench")
+        or check["role"]
+    )
+
+
+def _what_present(c: dict) -> str:
+    if c.get("role") == "testbench_dependency":
+        return f"dependency {c['path']} of {c['testbench']} present"
+    what = f"{c['role']} {c['path']} present"
+    benches = c.get("testbenches")
+    if benches:
+        what += f" (bench: {', '.join(benches)})"
+    return what
+
+
+def _what_stream_readable(c: dict) -> str:
+    return f"layout stream readable ({c['content_hash']})"
+
+
+def _what_top_cell(c: dict) -> str:
+    return f"non-empty top cell(s): {', '.join(c['top_cells']) or 'none'}"
+
+
+def _what_dbu(c: dict) -> str:
+    return f"dbu on grid ({c['dbu']})"
+
+
+def documented_suffix(check: Mapping[str, Any]) -> str:
+    """The validation-only marker for a command check that carries a
+    ``documented_argv`` (issue #5463): the command that ran only validated the
+    bench, and this is the invocation that reproduces it. Empty otherwise."""
+    argv = check.get("documented_argv")
+    if not argv:
+        return ""
+    return f" (validates only; documented: {' '.join(argv)})"
+
+
+_SKEW_REMEDY = (
+    "version skew -- written by an older klt than this one recognises; "
+    "re-run the cited check under the current klt"
+)
+
+
+def _what_envelope(c: dict) -> str:
+    what = f"{c['role']} {c['path']} envelope"
+    if c["passed"]:
+        return f"{what} ({c['kind']})"
+    if c.get("reason") == "envelope_version_skew":  # issue #5986
+        return f"{what}: {_SKEW_REMEDY}"
+    return f"{what}: not a recognised envelope"
+
+
+def _what_command(c: dict) -> str:
+    label = check_label(c)
+    status = c.get("error") or f"exit {c['exit_status']}"
+    argv = " ".join(c["argv"])
+    duration = c.get("duration_s")
+    ran = f" in {duration:.1f}s" if duration is not None else ""
+    return f"{c['role']} {label}: {argv} ({status}){ran}{documented_suffix(c)}"
+
+
+def _what_unbenched(c: dict) -> str:
+    return f"row {c['row']} has no testbench (issue #{c['issue']})"
+
+
+def _what_uncited(c: dict) -> str:
+    return f"row {c['row']} has no citation yet (issue #{c['issue']})"
+
+
+def _what_dependency_binding(c: dict) -> str:
+    return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
+
+
+def _what_citation(c: dict) -> str:
+    cited = ", ".join(c["envelopes"]) or "no envelope cited"
+    return f"spec row {c['row']}: {cited}"
+
+
+def _what_recorded_hash(c: dict) -> str:
+    what = f"{c['role']} {c['target']} recorded hash"
+    if not c["passed"]:
+        paths = ", ".join(m["path"] for m in c.get("mismatches", []))
+        what += f" mismatch: {paths}"
+    return what
+
+
+def _what_metric(c: dict) -> str:
+    value = c.get("value")
+    return (
+        f"{c['role']} {c['corner']} {c['metric']}: "
+        f"{'missing' if value is None else value}"
+    )
+
+
+def _what_unmeasured_metric(c: dict) -> str:
+    return f"{c['role']} {c['corner']} {c['metric']}: unmeasured ({c['reason']})"
+
+
+def _what_pin(c: dict) -> str:
+    if c["role"] == "tool_version":
+        what = f"pin {c['tool']} {c['value']}"
+        if c.get("unverifiable"):
+            return f"{what} (running version unverifiable)"
+        if not c["passed"]:
+            return f"{what} (running {c['running']})"
+        return what
+    shown = c["value"] if c["passed"] else c.get("reason", "missing")
+    return f"pin {c['role']}: {shown}"
+
+
+_WHAT_RENDERERS = {
+    "present": _what_present,
+    "stream_readable": _what_stream_readable,
+    "top_cell_non_empty": _what_top_cell,
+    "dbu_on_grid": _what_dbu,
+    "command": _what_command,
+    "unbenched_row": _what_unbenched,
+    "uncited_row": _what_uncited,
+    "dependency_binding": _what_dependency_binding,
+    "citation": _what_citation,
+    "envelope": _what_envelope,
+    "recorded_hash": _what_recorded_hash,
+    "metric": _what_metric,
+    "unmeasured_metric": _what_unmeasured_metric,
+    "pin": _what_pin,
+}
+
+
+def note_lines(result: Mapping[str, Any]) -> list[str]:
+    """``[NOTE]`` text lines for a ``--check`` result's informational
+    notes (issue #5862: a yaml entry's raw bytes drifted while its
+    canonical hash held). Empty for a result carrying none."""
+    return [
+        f"[NOTE] {note['path']}: {note['note']}" for note in result.get("notes", [])
+    ]
+
+
+def attestation_check_line(check: dict) -> str:
+    marker = "SKIP" if check.get("skipped") else ("PASS" if check["passed"] else "FAIL")
+    renderer = _WHAT_RENDERERS.get(check["check"])
+    if renderer is None:
+        raise ValueError(f"unknown attestation check kind: {check['check']!r}")
+    line = f"[{marker}] {renderer(check)}"
+    if check["check"] == "command" and not check["passed"]:
+        tail = failed_output_tail(check)
+        if tail:
+            line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+        # Live-only, and only ever present on a generate-mode result: see
+        # `signoff_attest_live.attach_record_check_hints` (issue #5538).
+        hint = check.get("hint")
+        if hint:
+            line += f"\n    hint: {hint}"
+    return line

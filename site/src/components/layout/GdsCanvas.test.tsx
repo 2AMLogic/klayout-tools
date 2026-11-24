@@ -164,10 +164,10 @@ describe("drawLayout — the gallery's real blocks", () => {
   it.skipIf(!hasBlocks)("draws gf180-bandgap with gf180mcu's own layer colors", () => {
     const { layout, calls } = renderBlock("gf180-bandgap", "bandgap_top.gds", "gf180mcu");
 
-    // One fill per layer that has polygons; 8624 subpaths for its geometry.
+    // One fill per layer that has polygons; 11991 subpaths for its geometry.
     const layersWithPolygons = layout.layers.filter((layer) => layer.polygons.length > 0).length;
     expect(calls.filter((call) => call.op === "fill")).toHaveLength(layersWithPolygons);
-    expect(calls.filter((call) => call.op === "closePath")).toHaveLength(8624);
+    expect(calls.filter((call) => call.op === "closePath")).toHaveLength(11991);
 
     // Metal1 (34/0) must be gf180mcu's Metal1 color, not sky130's 34/0.
     expect(resolveLayerStyle(34, 0, "gf180mcu")).toMatchObject({
@@ -216,7 +216,8 @@ describe("GdsCanvas", () => {
   beforeEach(() => {
     recording = recordingContext();
     getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, "getContext");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // The cast lets this test double, which returns the recording 2D
+    // context, stand in for `getContext`'s overloaded signature.
     getContextSpy.mockImplementation(((..._args: unknown[]) => recording.ctx) as any);
     // jsdom reports a zero-sized layout for everything; give the viewer a
     // surface so its fit-to-view math has something to work with.

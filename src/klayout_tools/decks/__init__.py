@@ -12,10 +12,9 @@ Deck data lives in per-PDK sibling modules (``sky130.py``, ``gf180mcu.py``);
 this module only aggregates them into a name -> deck registry.
 
 The domain dataclasses/exceptions themselves live in three sibling modules
-split out of this one (issue #1821), grouped by independent domain -- none
-of the three references either of the others, except that ``extraction.py``
-reuses ``rules.py``'s :class:`RuleProvenance` for its own devices'
-provenance fields:
+split out of this one (issue #1821), grouped by independent domain -- none of
+the three references either of the others, except that ``extraction.py`` reuses
+``rules.py``'s :class:`RuleProvenance` for its own devices' provenance fields:
 
 - :mod:`klayout_tools.decks.rules` -- the DRC rule domain
   (:class:`DerivedLayer`, :class:`RuleProvenance`, :class:`DrcRule`,
@@ -23,11 +22,11 @@ provenance fields:
 - :mod:`klayout_tools.decks.extraction` -- the extraction device domain
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
-  :class:`CapacitorDevice`,
-  :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`InvalidLabelLayerError`).
+  :class:`CapacitorDevice`, :class:`CapacitorFlavour`,
+  :class:`MomCapacitorDevice`, :class:`DiodeDevice`, :class:`InductorDevice`,
+  :class:`LayerExpr`, :class:`SizeFilter`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
-  (:class:`LayerRC`, :class:`ParasiticsDeck`,
+  (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
 
 Every public name from those three modules is re-exported below, so
@@ -39,61 +38,104 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Mapping
+from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from .extraction import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
     LayerExpr,
     MomCapacitorDevice,
+    MosCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
+    SizeFilter,
     TerminalRelation,
+    UnmodelledDeviceFamily,
+    UnsupportedDeviceMarker,
 )
-from .finfet import FinFETExtractionDeck, FinFETFlavour
+from .extraction_inductor import InductorDevice
+from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .parasitics import (
+    HIGH_CORNER,
+    LOW_CORNER,
+    NOMINAL_CORNER,
+    RESISTANCE_CORNERS,
+    CutRC,
     InvalidDeckOptionError,
     LayerRC,
     ParasiticsDeck,
     UnknownExtractionDeckError,
+    describe_cut_resistance_gaps,
 )
-from .rules import DerivedLayer, DrcRule, RuleProvenance, UnknownDeckError
+from .rules import (
+    CompCoverageSpec,
+    DerivedLayer,
+    DrcRule,
+    NetSpaceSpec,
+    RuleProvenance,
+    TapDistanceSpec,
+    UnknownDeckError,
+)
 
 __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
+    "CapacitorVariant",
+    "CompCoverageSpec",
+    "CutRC",
+    "NetSpaceSpec",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "FinFETPassiveCapacitor",
+    "HIGH_CORNER",
+    "InductorDevice",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",
+    "LOW_CORNER",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
+    "NOMINAL_CORNER",
     "ParasiticsDeck",
+    "RESISTANCE_CORNERS",
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
     "TerminalRelation",
+    "SizeFilter",
+    "TapDistanceSpec",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
+    "MosCapacitorDevice",
+    "UnsupportedDeviceMarker",
     "deck_names",
+    "describe_cut_resistance_gaps",
+    "deck_content_hash",
     "deck_source_path",
     "get_deck",
     "get_extraction_deck",
     "get_layer_names",
     "get_nominal_dbu",
     "get_parasitics_deck",
+    "get_unmodeled_device_markers",
+    "get_unmodeled_rules",
+    "get_marker_blind_layers",
+    "get_unchecked_rules",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
     "resolve_deck_option_values",
@@ -101,50 +143,57 @@ __all__ = [
 
 
 def deck_source_path(name: str) -> str | None:
-    """Absolute path to the Python module source that defines deck ``name``.
-
-    Our decks are declarative Python tables in per-PDK sibling modules
-    (``sky130.py``, ``gf180mcu.py``) rather than standalone rule-deck files,
-    so the "deck file" whose content hash pins a run's rule set (see
-    :func:`klayout_tools._provenance.build_provenance`) is that module's
-    source. Deck names map 1:1 to those sibling module names (see the
-    registries below). Returns ``None`` when the module can't be located.
-    """
-    from importlib import import_module
-
-    try:
-        module = import_module(f"{__package__}.{name}")
-    except ImportError:
+    """Absolute path to the primary Python source for this deck, if available."""
+    if not isinstance(name, str) or not name.isidentifier():
         return None
-    return getattr(module, "__file__", None)
+    primary = Path(__file__).with_name(f"{name}.py")
+    return str(primary) if primary.is_file() else None
+
+
+def deck_content_hash(name: str) -> str | None:
+    """Identity of the installed primary module and its curated rule sources."""
+    from .._deck_hash import source_file_hash
+
+    return source_file_hash(deck_source_path(name))
+
+
+# Keep name lookup independent of rule execution: a missing hook still has
+# to produce a structured "hash unavailable" from `klt deck hash`.
+_CURATED_DECKS = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l")
+_EXTRACTION_DECKS = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l", "asap7")
 
 
 def deck_names() -> list[str]:
-    """Every built-in deck name *this build* ships, sorted.
+    """Every registered built-in DRC or extraction deck in this build."""
+    return sorted(set(_CURATED_DECKS) | set(_EXTRACTION_DECKS))
 
-    The union of the DRC registry (:func:`get_deck`) and the extraction
-    registry (:func:`get_extraction_deck`) -- deliberately separate rule
-    tables that happen to share PDK-family names, so a name registered in
-    either is a real deck a run can name. Used to validate a deck name before
-    :func:`deck_source_path` imports it (issue #1202): every deck name maps to
-    a sibling module, but not every sibling module is a deck, so an unchecked
-    name would happily hash ``history.py``.
 
-    Note this answers "what does this build ship", which is a different
-    question from :func:`klayout_tools.decks.history.known_deck_names`'s "what
-    have past releases shipped".
-    """
-    return sorted(set(_registry()) | set(_extraction_registry()))
+def drc_deck_names() -> list[str]:
+    """Names with curated DRC rules. ASAP7 ships a standalone KLayout script."""
+    return sorted(_CURATED_DECKS)
+
+
+def deck_provides(name: str) -> list[str]:
+    """The capabilities deck ``name`` supplies in this build (issue #3783):
+    any of ``curated_drc`` (a rule table :func:`get_deck` accepts),
+    ``klayout_drc`` (a shipped KLayout DRC-DSL script) and ``extraction``
+    (:func:`get_extraction_deck`). Derived from the registries, not a
+    parallel table."""
+    from . import asap7_rules
+
+    provides = []
+    if name in _registry():
+        provides.append("curated_drc")
+    if name == "asap7" and asap7_rules.DECK_PATH.is_file():
+        provides.append("klayout_drc")
+    if name in _extraction_registry():
+        provides.append("extraction")
+    return sorted(provides)
 
 
 def _registry() -> dict[str, list[DrcRule]]:
-    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
-
     return {
-        "sky130": sky130.DECK,
-        "gf180mcu": gf180mcu.DECK,
-        "sg13g2": sg13g2.DECK,
-        "sg13cmos5l": sg13cmos5l.DECK,
+        name: import_module(f"{__package__}.{name}").DECK for name in _CURATED_DECKS
     }
 
 
@@ -171,6 +220,12 @@ def get_deck(name: str) -> list[DrcRule]:
         return decks[name]
     except KeyError:
         available = ", ".join(sorted(decks))
+        if name in _extraction_registry():
+            raise UnknownDeckError(
+                f"deck '{name}' has no curated DRC rule table "
+                f"(available: {available}); its DRC is a KLayout script: "
+                "use `klt drc --engine klayout --deck-file <deck>.drc`"
+            ) from None
         raise UnknownDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None
@@ -244,6 +299,72 @@ def get_unmodeled_voltage_markers(name: str) -> dict[tuple[int, int], str]:
     return _unmodeled_voltage_marker_registry().get(name, {})
 
 
+def get_unmodeled_device_markers(name: str) -> dict[tuple[int, int], str]:
+    """Return the ``(layer, datatype) -> description`` map of
+    device-recognition marker layers ``name``'s deck draws but has no native
+    recognition for (issue #3858) -- e.g. sg13g2's ``Recog.esd`` (99/30).
+
+    ``klt extract`` appends one prose ``warnings[]`` entry per registered
+    marker that carries shapes, so the missing device is not silent. Unlike
+    :func:`get_unmodeled_voltage_markers` the marker need not overlap any
+    extracted geometry. A deck with no such declaration (or an unregistered
+    name) returns an empty map rather than raising.
+    """
+    from . import sg13g2
+
+    return {"sg13g2": sg13g2.UNMODELED_DEVICE_MARKERS}.get(name, {})
+
+
+def get_unmodeled_rules(name: str) -> list[str]:
+    """Return the sorted official rule ids ``name``'s deck knowingly does not
+    transcribe (issue #3031), surfaced as ``klt drc``'s
+    ``coverage.unmodeled_rules`` so a ``clean`` verdict is not read as full
+    coverage of the foundry runset. A deck with no such declaration (or an
+    unregistered name) returns an empty list rather than raising, mirroring
+    :func:`get_unmodeled_voltage_markers`.
+    """
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
+
+    modules = {
+        "sky130": sky130,
+        "gf180mcu": gf180mcu,
+        "sg13g2": sg13g2,
+        "sg13cmos5l": sg13cmos5l,
+    }
+    module = modules.get(name)
+    return sorted(getattr(module, "UNMODELED_RULES", ())) if module else []
+
+
+def get_unchecked_rules(name: str) -> dict[str, tuple[tuple[int, int], str]]:
+    """Return ``{rule id: ((layer, datatype), description)}`` for foundry
+    rules ``name``'s deck knows about but cannot evaluate (issue #3012).
+
+    ``drc.py`` surfaces each as ``coverage.unchecked_rules`` when its layer is
+    in the stream, so a ``clean`` verdict is not misread as covering it.
+    Decks that declare none (and unregistered names) return an empty map.
+    """
+    from . import sg13cmos5l, sg13g2
+
+    return {
+        "sg13cmos5l": sg13cmos5l.UNCHECKED_RULES,
+        "sg13g2": sg13g2.UNCHECKED_RULES,
+    }.get(name, {})
+
+
+def get_marker_blind_layers(name: str) -> list[tuple[int, int]]:
+    """Return the sorted ``(layer, datatype)`` area-marker layers whose
+    rule-switching ``name``'s deck does not model (issue #3815).
+
+    A marker such as sky130's ``areaid.ce`` (81/2) is accepted in a stream but
+    changes no rule's result; ``drc.py`` and ``klt deck rules`` surface the
+    declaration so that is discoverable. Decks that declare none (and
+    unregistered names) return an empty list.
+    """
+    from . import sky130
+
+    return {"sky130": sorted(sky130.MARKER_BLIND_LAYERS)}.get(name, [])
+
+
 def _nominal_dbu_registry() -> dict[str, float]:
     from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
@@ -276,17 +397,9 @@ def get_nominal_dbu(name: str) -> float:
 
 
 def _extraction_registry() -> dict[str, ExtractionDeck]:
-    from . import asap7, gf180mcu, sg13cmos5l, sg13g2, sky130
-
     return {
-        "sky130": sky130.EXTRACTION_DECK,
-        "gf180mcu": gf180mcu.EXTRACTION_DECK,
-        "sg13g2": sg13g2.EXTRACTION_DECK,
-        "sg13cmos5l": sg13cmos5l.EXTRACTION_DECK,
-        # Issue #2761: extraction-only FinFET deck. ASAP7 is deliberately
-        # absent from the DRC registries above (#2760) and from
-        # `_parasitics_registry` below -- see `pdk_capabilities.DECISIONS`.
-        "asap7": asap7.EXTRACTION_DECK,
+        name: import_module(f"{__package__}.{name}").EXTRACTION_DECK
+        for name in _EXTRACTION_DECKS
     }
 
 
@@ -300,7 +413,7 @@ def known_extraction_deck_names() -> tuple[str, ...]:
     first tagged release). Used as the default deck set for ``klt deck
     info`` (issue #1209) when no ``--deck`` is given.
     """
-    return tuple(sorted(_extraction_registry()))
+    return tuple(sorted(_EXTRACTION_DECKS))
 
 
 def get_extraction_deck(
@@ -357,6 +470,7 @@ def get_extraction_deck(
             f"unknown deck '{name}' (available: {available})"
         ) from None
     if deck_options:
+        deck = _resolve_capacitor_variant(name, deck, deck_options)
         deck = _resolve_device_flavours(name, deck, deck_options)
     return deck.with_label_layers(label_layers, deck_name=name)
 
@@ -383,6 +497,34 @@ def resolve_deck_option_values(
     return get_extraction_deck(name, deck_options).resolved_option_values
 
 
+def _resolve_capacitor_variant(
+    name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
+) -> ExtractionDeck:
+    """Apply the capacitor-variant selector (issue #2920, gf180mcu's
+    ``mim_option``) in ``deck_options`` to ``deck``: swap ``capacitors`` for
+    the selected :class:`CapacitorVariant`'s. Returns ``deck`` unchanged when
+    it declares no variants, the key is absent, or the default is selected.
+    Runs before :func:`_resolve_device_flavours`, so a flavour key is then
+    validated against the *selected* variant's entries.
+    """
+    if not deck.capacitor_variants:
+        return deck
+    option = deck.capacitor_variants[0].option
+    if option not in deck_options:
+        return deck
+    value = deck_options[option]
+    variant = next((v for v in deck.capacitor_variants if v.value == value), None)
+    if variant is None:
+        available = ", ".join(v.value for v in deck.capacitor_variants)
+        raise InvalidDeckOptionError(
+            f"deck '{name}' option '{option}={value}' is not one of this "
+            f"deck's declared values (available: {available})"
+        )
+    return dataclasses.replace(
+        deck, capacitors=variant.capacitors, capacitor_variant_selected=value
+    )
+
+
 def _resolve_device_flavours(
     name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
 ) -> ExtractionDeck:
@@ -404,6 +546,9 @@ def _resolve_device_flavours(
         for device in (*deck.resistors, *deck.capacitors)
         if device.flavour_option is not None
     }
+    # The capacitor-variant selector (issue #2920) was consumed by
+    # `_resolve_capacitor_variant` before this runs, but stays a valid key.
+    selectable_keys.update(variant.option for variant in deck.capacitor_variants)
     unknown_keys = sorted(set(deck_options) - selectable_keys)
     if unknown_keys:
         available = ", ".join(sorted(selectable_keys)) or "none"
@@ -480,9 +625,10 @@ def _resolve_flavour(
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:
-    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
+    from . import asap7, gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
+        "asap7": asap7.PARASITICS,
         "sky130": sky130.PARASITICS,
         "gf180mcu": gf180mcu.PARASITICS,
         "sg13g2": sg13g2.PARASITICS,

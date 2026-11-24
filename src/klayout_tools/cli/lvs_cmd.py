@@ -14,8 +14,8 @@ Exit codes (see ``docs/cli/lvs.md`` for the full table):
     4 - ran, but the compare the request asked for could not be performed, so
         no verdict about the design was reached (``status: "inconclusive"``,
         issue #1370 -- ``options.combine_devices`` exhausted its retry budget
-        and both sides were rolled back to their uncombined state); never
-        ``0``
+        and both sides were rolled back to their uncombined state), or a
+        recorded input is unavailable under cheap --check
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. The 0/1/2/3 split is `klt drc`'s -- LVS is a clean/dirty verdict
 like DRC -- and `4` is `klt equiv`'s ``EXIT_INCONCLUSIVE`` reused verbatim for
@@ -26,19 +26,29 @@ the one case where LVS genuinely cannot reach a verdict; see docs/cli/lvs.md's
 compare into *verifying a previously committed* ``--format json`` report
 still reproduces -- see ``docs/cli/lvs.md``, "--check" -- and is mutually
 exclusive with the positional ``request`` argument (inputs are read from the
-committed report itself). Cheap mode (default): re-hash the layout/
-reference netlists (and extraction deck, when one was used) named in the
-report and compare against its own recorded hash values, no compare engine
+committed report itself). ``--layout PATH`` (issue #2699) supplies the layout
+explicitly, overriding the recorded one unconditionally. Cheap mode (default):
+re-hash the layout/reference netlists (and extraction deck, when one was used)
+named in the report and compare against its own recorded hash values, no compare engine
 re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
-compare the report describes and diff verdict-bearing fields. Both reuse
-``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
-normal run (see ``klayout_tools._report_verify``).
+compare the report describes and diff verdict-bearing fields. Both report match (0)
+or drifted (3). Cheap mode also reports unverifiable (4) for an unavailable input.
 """
 
 import argparse
+import sys
 
+from ..deck_hash_assertion import assert_deck_hash
+from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
-from .output import emit_error, emit_success, render_rerun_drift
+from ._parsing import parse_deck_options
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 3
@@ -61,20 +71,95 @@ _EXIT_BY_STATUS = {
 }
 
 
+def configure(parser: argparse.ArgumentParser) -> None:
+    """Add ``-o/--output`` (issue #4984) and bind ``run`` as the handler."""
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the JSON envelope to PATH (same as --format json "
+            "stdout; written atomically, '.gz' gzip-compressed; stdout is "
+            "unchanged). An unwritable PATH is a clean error (exit 1). "
+            "Rejected with --check"
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
     # `request` and `--check` are a required, mutually exclusive argparse
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.
     if args.check is not None:
+        if args.deck is not None or args.deck_file is not None or args.deck_var:
+            return emit_error(
+                "lvs",
+                "--deck/--deck-file/--deck-var apply to a fresh run; --check "
+                "reads the deck from the committed report",
+                args.format,
+            )
+        if args.expect_deck_hash is not None:
+            # Issue #5806: a fresh-run assertion; --check re-verifies the
+            # committed report's own recorded deck hash instead.
+            return emit_error(
+                "lvs",
+                "--expect-deck-hash cannot be combined with --check: --check "
+                "verifies the committed report's own recorded deck hash",
+                args.format,
+            )
+        if getattr(args, "omit_mismatches", False):
+            return emit_error(
+                "lvs",
+                "--omit-mismatches applies to a fresh run; --check reads "
+                "the committed report as-is (a report produced with the "
+                "flag already carries mismatches: [] and mismatches_omitted: "
+                "true, and --rerun replays the omission from that echo)",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("lvs", "--rerun requires --check <report>", args.format)
 
+    if args.layout is not None:
+        return emit_error("lvs", "--layout requires --check <report>", args.format)
+
+    if args.reference is not None:
+        return emit_error("lvs", "--reference requires --check <report>", args.format)
+
     try:
-        report = run_lvs(args.request)
+        report = run_lvs(
+            args.request,
+            deck=args.deck,
+            deck_file=args.deck_file,
+            # Repeatable `--deck-var NAME=VALUE` (issue #3206), parsed by the
+            # helper `klt drc`/`klt extract` share (issue #6738) so the three
+            # verbs accept one spelling.
+            deck_vars=(
+                parse_deck_options(args.deck_var, LvsError, flag="--deck-var") or {}
+            ),
+            # `--progress` (issue #4347), same default as `klt extract`:
+            # heartbeat only, and only when stderr is not a TTY.
+            progress=(
+                args.progress
+                if args.progress is not None
+                else ("heartbeat" if not sys.stderr.isatty() else False)
+            ),
+            # `--omit-mismatches` (issue #5610), mirroring `klt erc
+            # --omit-antenna-tables`.
+            omit_mismatches=getattr(args, "omit_mismatches", False),
+        )
+        # Issue #5806: the caller's deck-pin assertion, before anything is
+        # written or emitted -- a mismatch produces only the error envelope.
+        assert_deck_hash(report, args.expect_deck_hash, LvsError)
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
+
+    write_failure = _write_output(report, args)
+    if write_failure is not None:
+        return write_failure
 
     emit_success(report, args.format, _print_text)
 
@@ -83,24 +168,85 @@ def run(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(report["status"], EXIT_MISMATCH)
 
 
+def _write_output(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``-o/--output`` file copy; return an exit code only on failure.
+
+    Issue #4984, mirroring ``klt drc -o`` (#4393): an additive copy of the
+    envelope, written before emitting so it lands regardless of the verdict's
+    exit code and an unwritable path fails with the error envelope.
+    """
+    if not args.output:
+        return None
+    try:
+        write_json_file(report, args.output)
+    except OSError as exc:
+        return emit_error(
+            "lvs",
+            f"could not write report to '{args.output}': {exc}",
+            args.format,
+        )
+    return None
+
+
 def _run_check(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        return emit_error(
+            "lvs",
+            "-o/--output cannot be combined with --check: --check emits no "
+            "run report to write",
+            args.format,
+        )
     try:
         if args.rerun:
-            result = rerun_lvs_report(args.check)
+            result = rerun_lvs_report(
+                args.check,
+                layout_path=args.layout,
+                reference_path=args.reference,
+            )
         else:
-            result = check_lvs_report(args.check)
+            result = check_lvs_report(
+                args.check,
+                layout_path=args.layout,
+                reference_path=args.reference,
+            )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
-    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+    return {"match": EXIT_MATCH, "unverifiable": EXIT_INCONCLUSIVE}.get(
+        result["status"], EXIT_DRIFTED
+    )
+
+
+def _print_report_notices(report: dict) -> None:
+    """Show optional mismatch-compaction and extraction notices."""
+    if report.get("mismatches_omitted"):
+        print("mismatches_omitted: True (--omit-mismatches)")
+    for warning in report.get("warnings", []):
+        print(f"warning: {warning}")
+
+
+def _print_excluded_pins(power: dict) -> None:
+    """Issue #4363: name each well-layer LEF pin the power check skipped."""
+    for excluded in power.get("excluded_pins") or []:
+        print(
+            f"  excluded_pin: {excluded['pin']} "
+            f"({excluded['instance_count']} instance(s)) -- {excluded['reason']}"
+        )
 
 
 def _print_text(report: dict) -> None:
-    print(f"layout: {report['layout']}")
-    print(f"reference: {report['reference']}")
+    # `layout` is the `{path, scope}` object
+    # `env_provenance.repo_relative_path` defines (issue #2659, extended to
+    # the klayout-runset engine by issue #5666) -- rendered through the same
+    # courtesy helper `klt sim`/`klt pex` use, so the absolute path is never
+    # printed even in text mode. `reference` is still the runset request's
+    # own verbatim echo (a plain string); `render_path_field` passes such a
+    # string through verbatim (issue #5666), so no per-field guard remains.
+    print(f"layout: {render_path_field(report['layout'])}")
+    print(f"reference: {render_path_field(report['reference'])}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top
     # circuits -- the ordinary compare's output is unchanged, but a negative
@@ -116,6 +262,11 @@ def _print_text(report: dict) -> None:
         print(f"parameter_tolerance: {report['parameter_tolerance']}")
     print(f"status: {report['status']}")
     print(f"mismatches: {report['mismatch_count']}")
+    # Issue #5610: the `--omit-mismatches` note, printed only when the flag
+    # was used -- without it, a compacted report's per-entry section is
+    # empty and would be indistinguishable from a clean report's tail (the
+    # renderer returns early on an empty list, after the counts above).
+    _print_report_notices(report)
     # Issue #1132: printed unconditionally (like `mismatches` above), even
     # when 0, so a caller skimming text output can tell "0 mismatches" and
     # "N mismatches, 0 of them errors" apart from "no report at all".
@@ -152,6 +303,7 @@ def _print_text(report: dict) -> None:
                 "options.power_connectivity.expected_nets but never "
                 "observed on any layout-side instance)"
             )
+        _print_excluded_pins(power)
         for finding in power["findings"]:
             print(
                 f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"
@@ -173,41 +325,4 @@ def _print_text(report: dict) -> None:
         print(
             f"[{entry['severity']}] {entry['category']}  ({entry['side']})  "
             f"{entry['description']}"
-        )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            # Issue #2595: an echoed `layout`/`reference` that resolves to no
-            # existing file re-hashes to `null`, which on its own reads as
-            # "the recorded hash moved". Say what actually happened, and --
-            # for the common cause, a committed request/report pair whose
-            # relative paths were written against the report's own directory
-            # -- where the input really is.
-            missing = check.get("input_not_found")
-            if missing is None:
-                print(f"      actual:   {check['actual']}")
-            else:
-                print(f"      actual:   None (input not found: {missing['resolved']})")
-                if missing["found_relative_to_report"] is not None:
-                    print(
-                        "      note:     it exists relative to the report's own "
-                        f"directory ({missing['found_relative_to_report']}); "
-                        "--check resolves relative paths against the current "
-                        "working directory -- re-run from there"
-                    )
-    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
-    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
-    # affect `status`/exit code, so a scripted gate parsing that list alone
-    # never sees it.
-    for advisory in result.get("advisories", ()):
-        print(
-            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
-            f"vs {advisory['current']} (current)"
         )

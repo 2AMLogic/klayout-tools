@@ -8,15 +8,19 @@ Capability A of [Epic #393](https://github.com/2AMLogic/klayout-tools/issues/393
 ("mixed-signal as a first-class path"), issue #438.
 
 ```
-klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
+klt lef-abstract (<file> | --no-layout) --socket <descriptor.json> --macro-name <name>
                   --cell-library <library> [--top <cell>] [--class <CLASS>]
                   [--symmetry "<axes>"] [--pdk <variant>] [--pdk-root <root>]
-                  [-o/--output <path.lef>] [--require-power-pins]
+                  [-o/--output <path.lef>] [--obs-mode {detailed,coarse}]
+                  [--require-power-pins]
                   [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read.
+- `--no-layout` — emit a layout-free black-box abstract from the socket
+  descriptor alone (issue #5714); see "Layout-free mode" below. Exactly one
+  of `<file>` / `--no-layout` is required.
 - `--socket` — required. Path to a socket descriptor JSON file (see
   [`docs/schemas/socket.schema.json`](../schemas/socket.schema.json), the
   same descriptor `klt socket-check` validates a layout against). Not
@@ -36,6 +40,12 @@ klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
 - `--pdk` / `--pdk-root` — PDK variant/root overrides, same semantics as
   every other `klt` verb's PDK flags.
 - `-o` / `--output` — output LEF path (default: `<macro-name>.lef`).
+- `--obs-mode {detailed,coarse}` — obstruction granularity (issue #4283).
+  `detailed` (default) emits every merged routing-layer region, unchanged.
+  `coarse` emits, per routing LEF layer, the merged region's bounding
+  rectangle minus the declared pin ports (ports stay unblocked), so the OBS
+  size is O(pins) instead of O(shapes). The mode used is reported as the
+  `obs_mode` JSON field.
 - `--require-power-pins` — exit `3` when the supply-pin verdict
   (`power_pins`, issue #2839) fails. Without it the verdict is reported only.
 - `--format` — `text` (default, a human-readable summary) or `json`.
@@ -102,8 +112,10 @@ Each declared pin becomes a `PIN <name>` block:
   LEF's own `USE` value for exactly this pin class, and this command's
   macros are analog blocks per Epic #393's own scope. There is no
   mechanical way to derive true signal direction from geometry alone.
-- **`PORT` geometry** — real drawn shapes whose bounding box contains the
-  declared `(x, y)` position (every such shape becomes its own `RECT`,
+- **`PORT` geometry** — real drawn shapes that contain the declared
+  `(x, y)` position (the polygon itself, edges inclusive — not merely its
+  bounding box, so a notched polygon whose bbox covers the pin is not
+  absorbed into the PORT, issue #4283; every such shape becomes its own `RECT`,
   mirroring how a real standard-cell LEF's multi-`RECT` pins look). The
   search covers **every** GDS `(layer, datatype)` pair that the resolved
   layer map maps to the same LEF layer *name* as the pin's declared
@@ -115,7 +127,13 @@ Each declared pin becomes a `PIN <name>` block:
   layer, e.g. `Metal1`) — searching every sibling datatype (mirroring how
   `OBS` geometry below is already unioned across every datatype sharing a
   LEF layer name) finds real geometry a single-datatype search would
-  silently miss (issue #1614). Otherwise a **synthesized** placeholder
+  silently miss (issue #1614). If the declared `(layer, datatype)` is itself
+  absent from the layer map (e.g. a label purpose such as sky130 `met3.label`
+  70/5), the LEF layer is resolved through the other datatypes of the same GDS
+  layer number that map to a routing layer (drawing datatype 20 preferred,
+  else the lowest). When the pin declares `width_um`/`height_um` and a
+  matched drawn rect exceeds them, a warning names the pin and rect (geometry
+  is kept). Otherwise a **synthesized** placeholder
   box, centered at `(x, y)`, sized from the descriptor's own
   `width_um`/`height_um` when given, else the resolved tech-LEF routing
   layer's own `WIDTH`. Each pin's response entry reports which
@@ -152,12 +170,48 @@ KLayout's own hole-resolution via `to_simple_polygon()` keeps this a single,
 self-touching point list, an acceptable simplification for an abstract
 view rather than a hole-aware multi-`RECT` decomposition).
 
+### Routing-resource figure
+
+Issue #5677 (additive). A hierarchical floorplan has to answer, before it
+commits, *"how much routing resource does this abstract leave over the
+macro, per layer?"* — the question that decides whether a top-level route
+can cross a hard macro at all when macros abut with no channel. The
+`routing_resource` array answers it from the same final OBS regions the
+command has already built (pin ports subtracted, clipped to the outline),
+in either `--obs-mode`, so it is a static property of the emitted abstract
+rather than a guess from the tech LEF's pitches:
+
+- `obstructed_fraction` — the OBS area actually written, divided by the
+  macro outline area. `0.0` on a fully free layer; in `coarse` mode the
+  whole-macro bounding rectangle normally drives it near `1.0`.
+- `free_tracks` — the count of the layer's preferred-direction tracks whose
+  **full-length** strip across the macro (at the layer's own `WIDTH`,
+  centred on each track, entirely inside the outline) is unobstructed. This
+  is the "will N nets fit across this macro?" number. Track positions use
+  the tech LEF `OFFSET`/`PITCH` for the layer; a missing `OFFSET` defaults
+  the track origin to `0` (the LEF/DEF convention for an unstated grid
+  origin).
+- `direction` and `pitch_um` — the tech LEF's own `DIRECTION` and the
+  track pitch (the `PITCH` component along the non-preferred axis), so the
+  figure is auditable against the deck it came from.
+
+One entry exists per routing layer of the tech LEF — including layers with
+no OBS geometry at all, so a fully free layer is never silently absent. In
+`coarse` mode a layer whose bounding rectangle spans the outline honestly
+reports `free_tracks: 0`; in `detailed` mode the real remainder shows.
+A layer missing a usable `DIRECTION`, `PITCH`, or `WIDTH` — or whose pitch
+or width does not survive the conversion to the layout's database units
+(rounds to ≤ 0 dbu) — cannot enumerate a track grid: it reports
+`free_tracks: null` (and `pitch_um: null` when `DIRECTION`/`PITCH` is the
+missing one) plus a `warnings[]` entry — never a guessed grid.
+`obstructed_fraction` needs none of those and is always reported.
+
 ## Response
 
 ```json
 {
-  "schema_version": 1,
-  "file": "analog_block.gds",
+  "schema_version": 2,
+  "file": {"path": "analog_block.gds", "scope": "repo"},
   "socket": "analog_block.socket.json",
   "output": "analog_block.lef",
   "macro_name": "analog_block",
@@ -175,6 +229,10 @@ view rather than a hole-aware multi-`RECT` decomposition).
   "unroutable_pins": [],
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
+  "routing_resource": [
+    { "layer": "li1", "direction": "VERTICAL", "pitch_um": 0.46, "obstructed_fraction": 0.0, "free_tracks": 11 },
+    { "layer": "met1", "direction": "HORIZONTAL", "pitch_um": 0.34, "obstructed_fraction": 0.06, "free_tracks": 13 }
+  ],
   "warnings": [],
   "self_check": { "status": "pass", "findings": [], "missing_macros": [], "unexpected_macros": [] },
   "power_pins": {
@@ -195,7 +253,8 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
-| `file` / `socket` | string | Echo of the input paths exactly as provided. |
+| `file` | object | (issue #2703) The input layout as `{path, scope}` (`schema_version` 2): repo-relative `path` with `scope: "repo"`, or `path: null` with `scope: "external"` outside any repo. |
+| `socket` | string | Echo of the socket path exactly as provided. |
 | `output` | string | The LEF path actually written. |
 | `macro_name` | string | Echo of `--macro-name`. |
 | `class` | string | Echo of `--class` (default `"BLOCK"`). |
@@ -207,9 +266,11 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `pins` | array\<object\> | One entry per descriptor pin, in name-sorted order: `{name, direction, use, layer, gds_layer, geometry_source, rects_um}`. `layer` is the resolved LEF layer name, or `null` when unresolvable. `gds_layer` (issue #2839, additive) is the descriptor's declared `[layer, datatype]` for the pin, so a consumer can match the PIN to the same pin's `klt socket-check` port facts. `rects_um` is `[]` for `geometry_source: "none"`. |
 | `pin_count` | integer | `len(pins)`. |
 | `unroutable_pins` | array\<object\> | `{name, layer: [gds_layer, gds_datatype]}` for every pin with `geometry_source: "none"` — a programmatically-checkable echo of the same condition (issue #464), so a caller composing this command's output into `klt place-and-route`'s `request.macros` can check it directly instead of grepping `warnings[]`. `[]` on a run with no such pins. |
+| `obs_mode` | string | `"detailed"` or `"coarse"` — echo of `--obs-mode` (issue #4283, additive). |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
-| `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |
+| `routing_resource` | array\<object\> | Issue #5677 (additive): one entry per routing layer of the tech LEF — layers with OBS geometry and fully free layers alike — layer-name sorted: `{layer, direction, pitch_um, obstructed_fraction, free_tracks}`. See "Routing-resource figure" below. |
+| `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, a pin's layer did not resolve to a known routing LEF layer, or a routing layer's `routing_resource` entry could not enumerate a track grid (no usable `DIRECTION`/`PITCH`/`WIDTH` — that layer reports `free_tracks: null` instead of a guess). `[]` on a run with no such notes. |
 | `self_check` | object | Structural self-check of the LEF file **read back from disk** after writing (issue #2769) — see "Structural self-check" below. `{status, findings, missing_macros, unexpected_macros}`; `status` is `"pass"` or `"fail"` and is the verdict of record for whether `output` may be consumed. |
 | `power_pins` | object | Issue #2839 (additive): the supply-pin verdict over the same read-back bytes — see "Supply-pin verdict" below. Affects the exit code only with `--require-power-pins`. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names `--cell-library` and hashes the resolved tech LEF; `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `<file>`. |
@@ -308,8 +369,8 @@ envelope for the GDS side) to check that every declared supply has a LEF
 | Code | Meaning |
 | --- | --- |
 | `0` | The LEF abstract was written and `self_check.status` is `"pass"`. |
-| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
-| `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `1` | Failed to run — bad layout/socket descriptor, a tech LEF with no `DATABASE MICRONS` under `--no-layout`, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
+| `2` | Usage error (missing argument, bad `--format` value, neither/both of `<file>` and `--no-layout`, or `--no-layout` with `--top`/`--obs-mode`/`--require-power-pins`) — from argparse. |
 | `3` | The LEF abstract was written and the full report emitted, but `self_check.status` is `"fail"` (issue #2769). Do not consume the file. Also returned, with `--require-power-pins` only, when `power_pins.status` is `"fail"` (issue #2839). |
 
 A pin resolving to synthesized (rather than drawn) geometry, or to no
@@ -320,6 +381,35 @@ Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
 contract, a future release may still add a code above `2`; a consumer
 should gate on the payload's own fields rather than assume the codes above
 are exhaustive forever.
+
+## Layout-free mode (`--no-layout`, issue #5714)
+
+For a block that has no layout and will not get one (a compiled memory, a
+third-party hard macro, a deliberately scoped-out sub-block), the socket
+descriptor alone is a sufficient declaration — no second schema:
+
+- **Footprint** — the descriptor `outline`, as always.
+- **Pins** — every pin is `geometry_source: "synthesized"` (sized from the
+  pin's `width_um`/`height_um`, else the tech-LEF routing layer `WIDTH`); a
+  pin whose layer does not resolve to a routing LEF layer is still
+  `"none"` and listed in `unroutable_pins`. `pins: []` gives a footprint-only
+  black box.
+- **OBS** — one rectangle per routing LEF layer covering the whole outline,
+  minus the declared pin ports (the `coarse` shape with the outline as the
+  region): the interior is out of scope and the pins are the only way in.
+- **Database unit** — taken from the tech LEF's `DATABASE MICRONS`.
+- **Report** — `file` is `{"path": null, "scope": "absent"}`;
+  `provenance.input` pins the socket descriptor with role `source`.
+  `obs_mode` echoes the resolved default `"detailed"` (the flag itself is a
+  usage error here; the field is a fixed echo in this mode, not a mode
+  selection).
+  `schema_version` is unchanged.
+- **`power_pins`** is still reported but can only fail (`port_not_drawn`
+  for every supply pin), so `--require-power-pins` is rejected as a usage
+  error. `--top` and `--obs-mode` are rejected too (nothing to select or
+  vary).
+
+SITE/row/track quantisation of the footprint is not performed in either mode.
 
 ## Round-tripping through `klt place-and-route`
 

@@ -28,10 +28,13 @@ Private to the :mod:`klayout_tools.cli` package -- not part of the public
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from collections.abc import Callable
 from typing import Any
+
+from .._jsonnum import is_number
 
 ErrorFactory = Callable[[str], Exception]
 
@@ -58,7 +61,7 @@ def load_json_path_or_inline(
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise error_cls(f"could not read {flag} file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise error_cls(f"{flag} file '{value}' is not valid JSON: {exc}") from exc
@@ -143,9 +146,7 @@ def load_region(
     if (
         not isinstance(data, list)
         or len(data) != 4
-        or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in data
-        )
+        or not all(is_number(v) for v in data)
     ):
         raise error_cls(
             f"{flag} must be a JSON array of four numbers "
@@ -172,8 +173,11 @@ def parse_deck_options(
 
     Shared by ``klt extract`` and ``klt pex`` (issue #1558) -- both forward
     the result to ``run_extract``'s own ``deck_options`` parameter, so the
-    accepted spelling must stay identical between them. ``flag`` and
-    ``error_cls`` behave as in :func:`load_json_path_or_inline`.
+    accepted spelling must stay identical between them. It is also the one
+    parser behind the repeatable ``--deck-var NAME=VALUE`` flag of ``klt
+    drc``, ``klt lvs`` and ``klt extract`` (``flag="--deck-var"``, issue
+    #6738); do not fork it per verb. ``flag`` and ``error_cls`` behave as in
+    :func:`load_json_path_or_inline`.
 
     Raises ``error_cls`` for a malformed entry (no ``=``, or a blank key) --
     a likely typo, not a meaningful "no options" request. A later ``KEY``
@@ -192,6 +196,74 @@ def parse_deck_options(
             )
         options[key] = value.strip()
     return options
+
+
+def parse_tie_nets(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--tie-net",
+) -> list[tuple[str, str]] | None:
+    """Parse the ``--tie-net`` flag's ``EXTRACTED_NET=SCHEMATIC_NET`` entries
+    (issue #4245, repeatable) into ordered ``(extracted_net, schematic_net)``
+    pairs, or ``None`` when the flag was never given.
+
+    Several extracted nets may name one schematic net; one extracted net named
+    twice with different schematic nets is an error (the tie would be
+    ambiguous), and a verbatim repeat is collapsed. Whether the extracted net
+    is a reported unbiased net is checked by ``run_pex``, which has the
+    extraction to hand.
+    """
+    if raw is None:
+        return None
+    pairs: dict[str, str] = {}
+    for entry in raw:
+        extracted, sep, schematic = entry.partition("=")
+        extracted = extracted.strip()
+        schematic = schematic.strip()
+        if not sep or not extracted or not schematic:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not EXTRACTED_NET=SCHEMATIC_NET "
+                f"-- e.g. {flag} '\\$5=VDD'"
+            )
+        if pairs.get(extracted, schematic) != schematic:
+            raise error_cls(
+                f"{flag} names extracted net {extracted!r} twice with "
+                f"different schematic nets ({pairs[extracted]!r} and "
+                f"{schematic!r})"
+            )
+        pairs[extracted] = schematic
+    return list(pairs.items())
+
+
+def parse_device_models(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--device-model",
+) -> dict[str, str] | None:
+    """Parse the ``--device-model`` flag's ``CLASS=SUBCKT`` entries (issue
+    #4234, repeatable) into the ``{device class: PDK model name}`` mapping
+    ``run_extract``'s ``device_models`` parameter takes, or ``None`` when the
+    flag was never given. Shared by ``klt extract`` and ``klt pex``.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, blank class or blank
+    model name). A later entry for the same CLASS wins. Whether CLASS exists
+    in the deck, or already has a curated binding, is checked at binding
+    resolution, where the deck's class list can be quoted.
+    """
+    if raw is None:
+        return None
+    models: dict[str, str] = {}
+    for entry in raw:
+        name, sep, value = entry.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not sep or not name or not value:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not CLASS=SUBCKT -- e.g. "
+                f"{flag} bjt=pnp_05p00x05p00"
+            )
+        models[name] = value
+    return models
 
 
 #: The spelling :func:`parse_label_layers` accepts for "this role reads no
@@ -366,6 +438,15 @@ def parse_probes(
     return probes
 
 
+class OrderedPinSet(frozenset):
+    """A ``frozenset`` of declared pin names that remembers the order the
+    caller gave them in (``order``, issue #5255). Set semantics are unchanged,
+    so every existing ``declared_pins`` consumer is unaffected; only the
+    top-``.SUBCKT`` pin reorder reads ``order``."""
+
+    order: tuple[str, ...] = ()
+
+
 def parse_declared_pins(
     raw: str | None,
     error_cls: ErrorFactory,
@@ -385,7 +466,9 @@ def parse_declared_pins(
     """
     if raw is None:
         return None
-    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    ordered = tuple(dict.fromkeys(n.strip() for n in raw.split(",") if n.strip()))
+    names = OrderedPinSet(ordered)
+    names.order = ordered
     if not names:
         raise error_cls(
             f"{flag} was given but contains no non-empty name "
@@ -393,3 +476,25 @@ def parse_declared_pins(
             f"e.g. {flag} A,B,VDD,VSS"
         )
     return names
+
+
+def parse_resistance_graph_caps(
+    args: argparse.Namespace,
+) -> dict[str, int] | None:
+    """The ``--resistance-graph-max-*`` flags of a parsed ``args`` as the
+    ``{builder keyword: value}`` mapping ``run_extract``'s
+    ``resistance_graph_caps`` parameter takes (issue #6964), or ``None`` when
+    no flag was given -- the exact call every site that predates them makes.
+
+    Shared by ``klt extract`` and ``klt pex``, like :func:`parse_deck_options`
+    above. A flag's ``dest`` is ``resistance_graph_<builder keyword>``, so the
+    mapping needs no second table. The values themselves are validated by
+    ``run_extract`` (``validate_run_extract_args``), where the flag,
+    request-document and library forms meet.
+    """
+    caps = {
+        dest.removeprefix("resistance_graph_"): value
+        for dest, value in vars(args).items()
+        if dest.startswith("resistance_graph_max_") and value is not None
+    }
+    return caps or None

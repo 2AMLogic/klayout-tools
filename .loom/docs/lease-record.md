@@ -36,6 +36,7 @@ documented here.
 - [Publish-side yield-exclusion (Loom #7639; kicad-tools #5331)](#publish-side-yield-exclusion-loom-7639-kicad-tools-5331)
 - [Reclaim instrumentation: absent vs. stale (#6320)](#reclaim-instrumentation-absent-vs-stale-6320)
 - [PR-phase leases (#9401)](#pr-phase-leases-9401)
+- [Dead-record pruning keeps comment volume bounded (#13245)](#dead-record-pruning-keeps-comment-volume-bounded-13245)
 <!-- toc:end -->
 
 ## What a lease record is
@@ -66,8 +67,11 @@ The comment body's literal **first line** is the marker:
   `opaque_host_id(host_identity())` — `host-` followed by the first 8
   lowercase hex chars of `sha256("loom-lease-host-id-v1:" + host_identity())`
   — instead of the raw `sweep_registry::host_identity()` value
-  (`LOOM_HOST_ID` env > `$HOSTNAME` > the `hostname` binary >
-  `unknown-host`).
+  (`LOOM_LEASE_HOST_ID` env > `LOOM_HOST_ID` env > `$HOSTNAME` > the
+  `hostname` binary > `unknown-host`; `LOOM_LEASE_HOST_ID` is what a
+  dispatcher exports to a session it spawns, so a session in a container
+  with its own hostname still resolves its dispatcher's lease host, and
+  `sweep-lease-*.sh` read it first too).
   - **This id is still directly `==`-comparable** across every reader in
     this subsystem — [claim-then-verify-order](#phase-2-dispatch-time-half-claim-then-verify-order-6287)
     (`resolve_lease_order`) and sweep-side [fencing](#phase-3-issue-6309-has-now-shipped-sweep-side-fencing-before-pushpr-open)
@@ -452,7 +456,11 @@ EITHER leg holds:
    (genuinely **renewed**, not merely created) and still within the
    reclamation TTL (`LOOM_LEASE_TTL_MINUTES`, default 15 — the same window
    the #6286 reclamation gate and `sweep-lease-fence.sh` use) — Issue
-   **#8840**.
+   **#8840**. A never-renewed record (`updated_at == created_at`) is also
+   admitted while it is younger than `FIRST_RENEWAL_WINDOW_SECS` (360s: the
+   renewer's 300s cadence plus grace), because the renewer sleeps first and a
+   live lease is otherwise invisible from 90s to its first renewal — Issue
+   **#12825**. Older never-renewed records stay excluded.
 
 Leg 2 exists because **a lease is renewed in place**: `sweep-lease-renew.sh`
 PATCHes the same comment, so a live owner's `created_at` stays frozen at the
@@ -810,7 +818,11 @@ the same lease semantics, **keyed by role**:
   hold at once. Removing and re-adding the same label does not (the set is
   unchanged); to force a re-review, push or run with
   `LOOM_JUDGE_BACKSTOP=0`, which turns the backstop off. An unreadable record
-  list serves the PR. Rules: `loom-daemon/src/judge_backstop.rs`.
+  list serves the PR. A pass a verdict gate refused (`post-verdict.sh` exit 7,
+  e.g. the stale-read gate) releases with `--skip-reason gate-refused:<token>`
+  (#13135): its record carries `refused=<token>`, holds the PR for only 15
+  minutes, and counts toward neither the window cap nor the escalation; exit
+  6 names the token. Rules: `loom-daemon/src/judge_backstop.rs`.
 - **A Judge the timeout kills is still counted (#11931).** The role runner
   ends a role run at its fixed 1800 s ceiling (`DEFAULT_ROLE_TIMEOUT` in
   `loom-daemon/src/role_runner.rs`; there is no per-role or config knob),
@@ -831,10 +843,6 @@ the same lease semantics, **keyed by role**:
   the lease: concurrent reclaimers of the same stale claim each post a lease,
   and the earliest comment `id` is the only winner. Rules:
   `loom-daemon/src/pr_lease_reap.rs`.
-- **Provenance.** Lease and yield comments end with the `loom:provenance v1`
-  line (`loom-daemon provenance`'s format). Its `host=` carries the published id
-  rather than the raw hostname, so one comment never pairs an opaque id with
-  the name it hides.
 - **Gitea** has no `gh api` comments path, so every verb exits 0 there and
   the label claim works as before.
 - **Older binaries.** A `loom-daemon` without `lease pr` exits 2 (clap's usage
@@ -873,3 +881,20 @@ duplicated work.
   read against the reader's clock. The renewer's own offset cancels out, but a
   peer whose clock runs ahead of the forge by more than the remaining margin
   sees the lease expire early and may claim. Keep skew well under the margin.
+
+## Dead-record pruning keeps comment volume bounded (#13245)
+
+Every claim posts a new lease comment (the earliest-`id` tie-break needs
+that), so a repeatedly redrawn issue or PR would otherwise grow without bound
+toward GitHub's per-thread comment cap. A successful claim therefore deletes
+its **own host's** dead records beyond the newest 3, best-effort (a failed
+delete only logs; the claim proceeds):
+
+- Issue leases (`loom:lease`): comments whose own `updated_at` is past the TTL.
+- PR/step leases (`loom:pr-lease*`): released records, expired leases, and
+  yields whose lease is no longer live.
+
+A live lease, another host's record and the newest 3 dead ones are never
+deleted, so the released markers the Judge backstop and step-lease owner
+read back survive. The Builder step-outcome comment
+(`loom:builder-step-outcome`) is edited in place instead of re-posted.

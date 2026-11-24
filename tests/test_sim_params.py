@@ -14,21 +14,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_remote
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 #: The issue's fixture, as an included body: a top-level `.param` default, a
 #: dependent `.param`, a DC source and the resistor it loads.
@@ -390,15 +383,15 @@ def test_save_mode_netlist_still_orders_reset_before_alter():
 
 def test_deck_without_params_is_unchanged():
     point = sim.CornerPoint(None, {"v1": 2.0}, 27)
-    lines = _control(point)
-    assert not any(line.startswith("alterparam") or line == "reset" for line in lines)
-    assert lines == [
+    assert _control(point) == [
         ".control",
         "save all",
         "alter v1=2.0",
         "op ",
+        "echo klt_expr_begin i",
         "let i = i(v1)",
         "print i",
+        "echo klt_expr_end",
         "quit",
         ".endc",
     ]
@@ -438,11 +431,6 @@ def test_xyce_refuses_a_parameter_axis():
             corners_spec={"params": {"r": [1]}},
             monte_carlo_declared=False,
             fail_fast_probe=False,
-            osdi_preload_declared=False,
-            expr_measurements_declared=False,
-            save_mode_declared=False,
-            analysis_steps_declared=False,
-            crossings_declared=False,
         )
 
 
@@ -824,3 +812,74 @@ def test_real_ngspice_unknown_target_in_a_request_fails_visibly(tmp_path):
     request = _engine_request(tmp_path, corners={"params": {"nope": [1]}})
     with pytest.raises(sim.SimError, match="'nope'"):
         sim.run_sim(str(request), artifacts_dir=str(tmp_path / "a"))
+
+
+# --------------------------------------------------------------------------- #
+# corners.temperature_param (issue #3994)
+# --------------------------------------------------------------------------- #
+
+
+def test_temperature_param_tracks_each_point_temperature():
+    points = _expand({"temperature_c": [-40, 27, 125], "temperature_param": "Temp_C"})
+    assert [(p.temperature_c, p.params) for p in points] == [
+        (-40, {"temp_c": -40}),
+        (27, {"temp_c": 27}),
+        (125, {"temp_c": 125}),
+    ]
+    lines = _control(points[0])
+    assert "alterparam temp_c=-40" in lines
+    assert lines.count("reset") == 1
+
+
+def test_temperature_param_merges_with_a_param_axis_without_crossing():
+    points = _expand(
+        {
+            "temperature_c": [27, 85],
+            "params": {"rload": [1, 2]},
+            "temperature_param": "t",
+        }
+    )
+    assert len(points) == 4
+    assert all(p.params["t"] == p.temperature_c for p in points)
+
+
+def test_omitting_temperature_param_keeps_points_unchanged():
+    with_none = _expand({"temperature_c": [27, 85], "temperature_param": None})
+    without = _expand({"temperature_c": [27, 85]})
+    assert [(p.params, p.corner_id) for p in with_none] == [
+        (p.params, p.corner_id) for p in without
+    ]
+    assert all(p.params == {} for p in without)
+
+
+@pytest.mark.parametrize(
+    "corners, message",
+    [
+        ({"temperature_param": 5}, "corners.temperature_param"),
+        ({"temperature_param": "1bad"}, "corners.temperature_param"),
+        ({"temperature_param": "mc_x"}, "corners.temperature_param"),
+        (
+            {"temperature_param": "T", "params": {"t": [1]}},
+            "corners.temperature_param.*corners.params",
+        ),
+        (
+            {"temperature_param": "v1", "supply_v": {"V1": [1]}},
+            "corners.temperature_param.*supply_v",
+        ),
+    ],
+)
+def test_temperature_param_refusals(corners, message):
+    with pytest.raises(sim.SimError, match=message):
+        _expand(corners)
+
+
+def test_temperature_param_is_a_target_the_netlist_must_declare(tmp_path):
+    body = _write_body(tmp_path)
+    points = _expand({"temperature_c": [27], "temperature_param": "temp_c"})
+    with pytest.raises(sim.SimError, match="'temp_c'.*not declared"):
+        sim._validate_param_targets(str(body), points)
+
+
+def test_xyce_refuses_temperature_param():
+    with pytest.raises(sim.SimError, match="temperature_param"):
+        sim._refuse_xyce_params_axis({"temperature_param": "temp_c"})

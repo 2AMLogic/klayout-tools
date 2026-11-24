@@ -10,10 +10,15 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+)
 
 
 def _pcell_params(pcell: object, *names: str) -> list:
@@ -25,6 +30,24 @@ def _pcell_params(pcell: object, *names: str) -> list:
 def _series_joint_boxes(info: dict, series: bool) -> list:
     """Absolute-um boxes of the ``series=true`` joint jumpers (none otherwise)."""
     return [j["box_um"] for j in info["jumpers"]] if series else []
+
+
+def _declare_double_param(
+    helper: Any, name: str, description: str, *, hidden: bool = False
+) -> None:
+    """Declare a ``0.0``-default ``TypeDouble`` PCell parameter.
+
+    Takes the helper as ``Any`` so a new parameter does not grow the type
+    baseline with another untyped ``PCellDeclarationHelper`` attribute access.
+    """
+    helper.param(name, helper.TypeDouble, description, default=0.0, hidden=hidden)
+
+
+def _grow_boxes_across_axis(
+    boxes: list[tuple[float, float, float, float]], extension_um: float
+) -> list[tuple[float, float, float, float]]:
+    """Grow each box by ``extension_um`` on both y sides (0.0 = unchanged)."""
+    return [(x0, y0 - extension_um, x1, y1 + extension_um) for x0, y0, x1, y1 in boxes]
 
 
 def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -45,8 +68,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _insert_boxes,
         _res_array_layout,
-        _res_flavor_mask_box_um,
     )
+    from klayout_tools.gen_res_head import _res_flavor_mask_box_um
 
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
         """Unit resistor/capacitor array (spike section 4's family 2): a row
@@ -106,7 +129,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "by which implant/precision-resistor masks cover each body: "
                 "'generic' (default, the base sheet-rho flavour -- "
                 "res_generic_po on sky130, ppolyf_u on gf180mcu, rsil on "
-                "sg13g2), or, on sky130, 'high' (res_high_po) / 'xhigh' "
+                "sg13g2/sg13cmos5l; also spelled 'rsil' on both), or, on "
+                "sky130, 'high' (res_high_po) / 'xhigh' "
                 "(res_xhigh_po), or, on gf180mcu, '1k' / '2k' / '3k' "
                 "(ppolyf_u_1k/_2k/_3k, selected at extraction time via "
                 "'klt extract --deck-option poly_res='), or, on sg13g2, "
@@ -127,29 +151,40 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0,
             )
             self.param(
+                "snap",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Poly-body only: round length_um to the nearest multiple of "
+                "the PDK manufacturing grid before drawing (default True; "
+                "the requested/realised lengths and the resistance delta are "
+                "reported in drc_hints.length_snap). False draws length_um "
+                "verbatim and only warns (issue #4666)",
+                default=True,
+            )
+            self.param(
+                "short_length",
+                kdb.PCellParameterDeclaration.TypeString,
+                "Poly-body only: what to do when the (snapped) length_um is "
+                "below the deck's SAB/implant minimum mask width -- 'refuse' "
+                "(default, error naming the floor) or 'lengthen' (raise to "
+                "the smallest on-grid length >= the floor and report the "
+                "delta). Ignored when snap is False (issue #4666)",
+                default="refuse",
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "res_mark_layer",
                 self.TypeLayer,
                 "Resistor-ID (device-mark) drawing layer covering each unit's "
                 "body segment (only used when res_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "res_mark_present",
@@ -157,6 +192,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether res_mark_layer is a real, DRC-checked layer for the "
                 "resolved PDK",
                 default=False,
+                hidden=True,
             )
             # One static slot per mask the *widest* flavour in
             # `_PDK_RES_FLAVOR_LAYERS` requires (issue #1451). A KLayout
@@ -175,6 +211,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "drawn over the body segment for device recognition "
                     f"(only used when res_flavor_{i}_present)",
                     default=kdb.LayerInfo(0, 0),
+                    hidden=True,
                 )
                 self.param(
                     f"res_flavor_{i}_present",
@@ -182,16 +219,27 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"Whether res_flavor_{i}_layer is a real, DRC-checked "
                     "layer the resolved PDK's requested flavour requires",
                     default=False,
+                    hidden=True,
                 )
                 # Issue #2449: > 0.0 draws this mask over the whole unit
                 # (body + end heads) at this enclosure instead of the
-                # body-only marker box -- see gen._res_flavor_mask_box_um.
+                # body-only marker box -- see gen_res_head._res_flavor_mask_box_um.
                 self.param(
                     f"res_flavor_{i}_head_enclosure_um",
                     self.TypeDouble,
                     f"Enclosure (um) of the whole unit (end heads included) by "
                     f"res_flavor_{i}_layer -- 0.0 covers the body segment only",
                     default=0.0,
+                    hidden=True,
+                )
+                # Issue #3000: > 0.0 grows this mask across the body axis,
+                # beyond the poly body (gf180mcu SAB, SB.9/SB.10).
+                _declare_double_param(
+                    self,
+                    f"res_flavor_{i}_side_extension_um",
+                    f"Extension (um) of res_flavor_{i}_layer past the body "
+                    "edges across the current-flow axis -- 0.0 matches the body",
+                    hidden=True,
                 )
             self.param(
                 "dummy_layer",
@@ -200,14 +248,9 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "unit resistor's recognised body segment (only used when "
                 "dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
+            declare_dummy_marker_params(self)
             # `metal_level`'s own per-level geometry floors (issue #1639) --
             # harness-computed from the resolved PDK family/level exactly
             # like `cap_array`'s own `cap_top_via_min_w_um`/friends. `0.0`
@@ -221,6 +264,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "resolved PDK family -- 0.0 leaves the generic "
                 "CONTACT_SIZE_UM cut unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "metal_res_via_enclosure_min_um",
@@ -229,6 +273,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "and landing-pad layers on the resolved PDK family -- 0.0 "
                 "leaves the generic ENCLOSURE_MARGIN_UM unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "metal_res_via_space_min_um",
@@ -237,18 +282,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "adjacent unit resistors on the resolved PDK family -- 0.0 "
                 "draws exactly the requested spacing_um",
                 default=0.0,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
+                hidden=True,
             )
             # Issue #2449: rectangular precision-poly end contact (sky130
             # high/xhigh licon.1b/c = 0.19um x 2.0um); 0.0 = square cut.
@@ -258,6 +292,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Rectangular end-contact extent (um) along the current-flow "
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "end_contact_h_um",
@@ -265,14 +300,35 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Rectangular end-contact extent (um) across the current-flow "
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
+                hidden=True,
+            )
+            # Issue #3000: gf180mcu salicide block (SAB) clearance from the
+            # end contacts (SB.4); 0.0 = the generic enclosure margin.
+            _declare_double_param(
+                self,
+                "res_contact_space_um",
+                "Minimum space (um) from the body-segment marker / salicide "
+                "block to the end contact -- 0.0 keeps the generic margin",
+                hidden=True,
+            )
+            # Issue #5704: sky130 high/xhigh end-head extension to the PDK's
+            # 2.16um precision-resistor contact-extension rule (licon.1c +
+            # li.5); 0.0 = the generic enclosure-derived head.
+            _declare_double_param(
+                self,
+                "res_head_len_um",
+                "Minimum end-head length (um) along the current-flow axis -- "
+                "0.0 keeps the generic enclosure-derived head",
+                hidden=True,
             )
             self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
+                "res_poly_heads_only",
+                self.TypeBoolean,  # type: ignore[attr-defined]
+                "Draw poly_layer as only the two end heads (the resistive "
+                "body is the res_mark_layer segment alone, abutting them) -- "
+                "the IHP sg13g2 PCell convention (issue #2679)",
+                default=False,
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:
@@ -299,6 +355,9 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_space_min_um,
                 self.end_contact_w_um,
                 self.end_contact_h_um,
+                getattr(self, "res_contact_space_um"),  # noqa: B009
+                getattr(self, "res_head_len_um"),  # noqa: B009
+                self.res_poly_heads_only,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -335,13 +394,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # :func:`_res_unit_layout` for why the marker box excludes the
             # contacted end pads.
             marker_boxes = unit_boxes["marker"]
-            for present, layer_param, head_enc in [
-                (self.res_mark_present, self.res_mark_layer, 0.0),
+            for present, layer_param, head_enc, side_ext in [
+                (self.res_mark_present, self.res_mark_layer, 0.0, 0.0),
             ] + [
                 (
                     getattr(self, f"res_flavor_{i}_present"),
                     getattr(self, f"res_flavor_{i}_layer"),
                     getattr(self, f"res_flavor_{i}_head_enclosure_um"),
+                    getattr(self, f"res_flavor_{i}_side_extension_um"),
                 )
                 for i in range(_MAX_RES_FLAVOR_LAYERS)
             ]:
@@ -356,6 +416,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     if head_enc > 0.0
                     else marker_boxes
                 )
+                # Issue #3000: gf180mcu's SAB runs past the body edges.
+                boxes = _grow_boxes_across_axis(boxes, side_ext)
                 for c in all_cells:
                     _insert_boxes(
                         self.cell, li_mark, dbu, boxes, c["x0_um"], c["y0_um"]

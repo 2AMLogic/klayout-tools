@@ -1,0 +1,62 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_task/1",
+  "id": "pfet-unit",
+  "title": "Single PMOS unit",
+  "pdk": "sky130",
+  "description": "One sky130 core PMOS in its own n-well, W/L = 2/0.5 um. The generators draw label-free cells, so only the substrate is a top-level pin; gate/source/drain nets are internal and LVS compares topology and device W/L.",
+  "block_spec": {
+    "spec_class": "other",
+    "io_nodes": [
+      "D",
+      "G",
+      "S",
+      "VDD"
+    ],
+    "target_specs": null
+  },
+  "frozen_netlist": {
+    "path": "benchmarks/design-agent/layout-corpus/pfet-unit/netlist.spice",
+    "sha256": "0fa4ebf872460e7fc95d6fda1e6c063928dc427aad3cc89430c0199b8dfe587f"
+  },
+  "reference_layout": {
+    "path": "benchmarks/design-agent/layout-corpus/pfet-unit/reference.gds",
+    "sha256": "5418d67b035447da11f3a71f840357a0592c5d782eff9f1f08e5956333250c66",
+    "cell_name": "pfet_unit"
+  },
+  "generator_recipe": {
+    "path": "benchmarks/design-agent/layout-corpus/pfet-unit/recipe.json",
+    "sha256": "fbe35cba1eb0fdc7711829d8d64979e76c3d20e190c5792686b7261c6c94e7bd"
+  },
+  "negative_controls": [
+    {
+      "id": "met1-width",
+      "path": "benchmarks/design-agent/layout-corpus/pfet-unit/neg-drc.gds",
+      "sha256": "67f61a660f581d304c368d9e7cfe22dcebf510aa9025ee5ca1dd0d669e5f3df7",
+      "expected_failure": "drc"
+    },
+    {
+      "id": "resized-device",
+      "path": "benchmarks/design-agent/layout-corpus/pfet-unit/neg-lvs.gds",
+      "sha256": "49837b11a5690bb09e9700117185aab8815ded55aca788314bc0b600505d5110",
+      "expected_failure": "lvs"
+    }
+  ],
+  "agent_inputs": [
+    "benchmarks/design-agent/layout-corpus/pfet-unit/netlist.spice"
+  ],
+  "eligibility": {
+    "rules": {
+      "frozen_netlist": "netlist.spice is a hand-written reference, hashed in task.json; the scorer reads it from the repo, never from an agent sandbox.",
+      "reference_layout_valid": "reference.gds is the recipe's output; the corpus gate re-runs klt drc (sky130 deck: clean) and klt lvs (match) on it.",
+      "generator_reachable": "recipe.json lists only klt gen / klt gen-compose steps; the gate re-runs it and requires a DRC-clean, LVS-matching layout.",
+      "negative_controls": "neg-drc.gds fails only DRC (met1 width sliver) and neg-lvs.gds fails only LVS (resized device); the gate checks each check fires alone.",
+      "open_pdk": "sky130A via open_pdks; no proprietary data."
+    },
+    "arms": {
+      "draw-only": "pfet-unit is a bounded layout of a few devices with a netlist-defined target; klt draw primitives can express a legal layout of it, and the gate scores it identically.",
+      "gen-only": "Reachable with klt gen / gen-compose alone: recipe.json is the existence proof and uses no draw verb.",
+      "gen+refine": "Seeded from the gen-only result (protocol seeding decision); every refinement edit is expressible with klt draw (base_gds / erase_um) or gen-compose."
+    }
+  },
+  "notes": null
+}

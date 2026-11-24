@@ -285,6 +285,7 @@ REPO_REMOTE_SETUP="make setup"            # optional first-boot command; fallbac
 # --- session ---
 REPO_REMOTE_IDLE_SHUTDOWN_MIN=120         # interactive-host default; use ~20 for daemon-managed/worker hosts; 0 disables the guard entirely (see below)
 REPO_REMOTE_IDLE_MARKER=                   # optional idle-exit marker path (default: /var/run/repo-remote-daemon-idle.marker)
+REPO_REMOTE_RUST=0                        # AWS only: 1 installs rustup/cargo system-wide at first boot (see "Rust toolchain" below)
 
 # --- fleet-marker guard (refuse to reuse a managed fleet host) ---
 REPO_REMOTE_FLEET_TAG_KEY=Fleet           # tag (AWS) / label (GCP) key that marks a managed fleet host; empty disables the check
@@ -295,6 +296,8 @@ REPO_REMOTE_SSH_CIDR=                     # optional: pin the SG's SSH-ingress C
                                            # overrides current-IP detection outright. Validated — see below
 REPO_REMOTE_SSH_MIN_PREFIX=32             # narrowest IPv4 prefix accepted for SSH ingress (default 32 = one address;
                                            # set e.g. 24 to allow a known ISP block)
+REPO_REMOTE_SSH_STALE_DAYS=7                # days a tool-owned rule for a DIFFERENT address is kept before `up` revokes it
+                                           # as stale (0 = revoke immediately); keeps both IPs of an alternating egress
 REPO_REMOTE_ALLOW_WORLD_SSH=              # "1" opts in, loudly, to a CIDR wider than the minimum (0.0.0.0/0, ::/0)
 REPO_REMOTE_CALLER=                       # optional: caller id stamped into this host's SSH rule Description
                                            # (default: short hostname); set it when hosts share a short hostname
@@ -905,11 +908,19 @@ landed before it ever calls `run-instances`:
    the other's rule. Conversely, give one operator the *same* value on every
    machine only if you want each `up` to reclaim the others' rules.
 
-   4a. **Replace, don't accumulate — but only your own rules.** Before
-   authorizing the current address, any tcp/22 rule on the group whose
-   `Description` starts with **this caller's** marker,
+   4a. **Replace, don't accumulate — but only your own rules, and only once
+   they are stale.** Before authorizing the current address, any tcp/22 rule on
+   the group whose `Description` starts with **this caller's** marker,
    `repo-remote:<repo-name>:<caller>:` — i.e. one *this host* wrote on an
-   earlier run — is revoked. Without this, every `up` from a new address added
+   earlier run — is revoked **if the date at the end of its `Description` is
+   older than `REPO_REMOTE_SSH_STALE_DAYS` (default 7)**. A rule for another
+   address authorized within that window is kept (and logged), because a caller
+   whose egress alternates between two addresses (e.g. an HTTPS proxy vs. the
+   direct SSH path) would otherwise revoke the address its next launch needs
+   and leave boxes unreachable (rjwalters/repo#703). Re-authorizing an address
+   whose rule already exists refreshes that rule's date, so an address still in
+   use never ages out; a rule whose date cannot be parsed is kept. Set
+   `REPO_REMOTE_SSH_STALE_DAYS=0` for the old immediate-revoke behaviour. Without this, every `up` from a new address added
    a `/32` and removed none, so a few weeks of roaming left a group admitting
    every address the operator had ever had. A rule for the address being
    authorized now is kept (a repeat run from the same place does not flap it).
@@ -932,6 +943,10 @@ landed before it ever calls `run-instances`:
    A revoke that fails (e.g. credentials without
    `RevokeSecurityGroupIngress`) is a loud notice with the manual command, not
    a failed `up`: it leaves a stale-but-narrow rule behind, never a wider one.
+
+   If SSH readiness fails, `up` logs a `diagnostic:` line with the group's
+   current tcp/22 CIDRs and the address authorized this run before exiting, so
+   a caller-address mismatch is visible at a glance.
 5. **Verify before spending money.** `describe-security-groups` on the
    resolved group must show a tcp/22 rule, or the run fails loudly (exit `4`)
    before `run-instances` is ever called — this is what would have caught the
@@ -1178,6 +1193,24 @@ instance's actual lifecycle.
 Any value other than exactly `on-demand` or `spot` (including `Spot`), and
 `spot` with GCP, fails before any cloud call (exit `2`), on `up` (dry run
 included) and on `down`.
+
+#### Rust toolchain (`REPO_REMOTE_RUST=1`, AWS)
+
+Opt-in and off by default; with it off the user-data is unchanged. When set to
+`1`, a newly created AWS box's user-data installs rustup system-wide
+(`/opt/rust`, minimal profile, stable toolchain; plus `build-essential` if there
+is no C compiler) and puts `cargo`, `rustc` and `rustup` wrapper scripts (which set `RUSTUP_HOME`) in
+`/usr/local/bin`, so `ssh box cargo --version` works non-interactively. The
+fragment runs last and is non-fatal: a failed install leaves ssh keys, host
+identity and the idle guard intact (log: `/var/log/repo-remote-rust.log`).
+
+- **Wait for the marker.** User-data runs asynchronously after ssh is
+  reachable, so `up` returning does not mean Rust is ready. The file
+  `/var/lib/repo-remote/rust-ready` appears only after `cargo` and `rustc`
+  ran successfully with `RUSTUP_HOME`/`CARGO_HOME` unset (as over ssh); poll for it before an on-box `cargo install`.
+- **Existing boxes are not retrofitted.** `up` never re-attaches user-data to a
+  reused instance, so recreate the box (or install Rust by hand once).
+- GCP is not covered.
 
 #### The idle-shutdown guard
 
@@ -1640,6 +1673,23 @@ Update the line in place if present, else append it. Report the edit.
 
 ### 5. Get the repo onto the instance
 
+**Resolve the code identity first**, before any clone or rsync, so the box can
+record exactly what it was given. `git rev-parse HEAD` works on a detached HEAD
+and with no `origin`, so neither case needs special handling:
+
+```bash
+SHA=$(git rev-parse HEAD)
+DIRTY=$(git status --porcelain --untracked-files=no | grep -q . && echo true || echo false)
+```
+
+`DIRTY` covers tracked changes only; untracked and gitignored files never count.
+
+**Opt-in clean run.** If the user asked for a clean run (for example "run this
+clean" or "refuse a dirty tree"), and `DIRTY` is `true`, stop step 5 here: tell
+the user which tracked files differ from `HEAD` and do not rsync anything. By
+default, with no such request, a dirty tree is **not** refused: step 5 keeps
+syncing uncommitted work as before.
+
 - **Repo has an `origin` remote:** clone on the VM and check out the current
   branch. For a private GitHub repo, run the clone through `attach` so it is
   authenticated by a freshly resolved session token and nothing is stored:
@@ -1657,6 +1707,20 @@ rsync -az --delete \
   --filter=':- .gitignore' --exclude '.git/' \
   ./ repo-remote-<name>:~/<repo-name>/
 ```
+
+**Then record the identity on the box, after the rsync.** `rsync --delete`
+removes any file on the box that is not in the local tree, so a marker written
+earlier would be deleted. Write `~/<repo-name>/.repo-remote-sha` with the SHA
+and the dirty flag:
+
+```bash
+repo-remote attach --host --command "printf 'sha: %s\ndirty: %s\n' $SHA $DIRTY > ~/<repo-name>/.repo-remote-sha"
+```
+
+**Report the recorded SHA and the dirty flag to the user** (for example
+`recorded sha 1a2b3c4 dirty: false`). A job on the box can read
+`.repo-remote-sha` to know which commit, and whether uncommitted tracked
+changes, it ran against.
 
 Always target the SSH alias `repo-remote-<name>`, not a raw IP. The alias
 carries the user, key, and on `REPO_REMOTE_TRANSPORT=ssm` the SSM

@@ -46,7 +46,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route, synthesize
@@ -328,8 +328,8 @@ def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:2] == ["openroad", "-version"]:
         return fake_completed(stdout="26Q3-771-gdeadbeef \n")
     assert cmd[0] == "openroad"
-    metrics_path = cmd[4]
-    script_path = cmd[5]
+    metrics_path = cmd[cmd.index("-metrics") + 1]
+    script_path = cmd[-1]
     if script_path.endswith("_route_corners.tcl"):
         # The post-route corner-sweep invocation (issue #949,
         # `place_and_route._corner_sweep_script_lines`) -- a second,
@@ -371,7 +371,7 @@ def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:
         raise AssertionError(f"unexpected subprocess invocation: {cmd!r}")
 
     assert synthesize.subprocess is place_and_route.subprocess
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _make_layout(clean: bool) -> kdb.Layout:
@@ -395,6 +395,7 @@ def _stub_merge_def_to_gds(
         layout.write(kwargs["out_path"])
         layout.write(str(block_layout_path))
         return {
+            "output_dbu_um": 0.001,
             "path": None,
             "resolution": "none",
             "def_net_names": {

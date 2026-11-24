@@ -40,12 +40,9 @@ defines/imports them itself (the same "own same-name function" case
 ``_endpoint_stub_widen_um``) -- the test suite monkeypatches both by their
 ``klayout_tools.sim`` re-export (predating this split), and only a call
 routed back through ``sim`` at call time still observes that patch.
-``CornerPoint``, ``_Checkpoint``, and ``RemoteLauncher`` (the last also
-defined in ``sim.py``, re-exported by it) appear only in type annotations
-here -- ``from __future__ import annotations`` defers them to strings, so
-none needs a *runtime* import, but they are still imported under
-``TYPE_CHECKING`` below so static analysis (ruff's F821, mypy) can resolve
-them without creating a load-time cycle. ``sim.py`` in turn imports this
+``TYPE_CHECKING`` imports ``CornerPoint``, ``_Checkpoint``, and
+``RemoteLauncher`` from their defining modules for type annotations.
+``sim.py`` in turn imports this
 module's entry points back (module scope, no cycle -- this module never
 imports ``sim`` at its own module scope) to preserve
 ``klayout_tools.sim.<name>`` as a working import path for every name the
@@ -62,11 +59,15 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport, sim_staging, sim_steps
+from . import remote_fleet, remote_transport, sim_derive, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
+from .sim_echo_checks import check_runner_option_echoes
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
-    from .sim import CornerPoint, RemoteLauncher, _Checkpoint
+    from .remote_launcher import RemoteLauncher
+    from .sim_checkpoint import _Checkpoint
+    from .sim_corner_point import CornerPoint
 
 # --------------------------------------------------------------------------- #
 # Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS
@@ -108,8 +109,6 @@ def _shard_corner_points(
     trailing shards are simply empty lists; :func:`_run_sharded` never calls
     the shard runner for an empty shard.
     """
-    from .sim import SimError
-
     if hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
     total = len(corner_points)
@@ -192,8 +191,7 @@ def _unrun_corner_report(
             "unit": spec.get("unit"),
             "status": "error",
             "margin": None,
-            # Issue #2482: the same additive `step`/`derived_from`
-            # provenance a ran corner's entry carries (empty otherwise).
+            # Issue #2482: additive `step`/`derived_from` provenance, as a ran corner.
             **sim_steps.measurement_provenance(spec),
         }
         for spec in measurements_spec
@@ -207,6 +205,10 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        if "seed_mode" in point.mc_seed:
+            monte_carlo["seed_mode"] = point.mc_seed["seed_mode"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -222,6 +224,9 @@ def _unrun_corner_report(
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
         **({"params": dict(point.params)} if point.params else {}),
+        **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"analysis_args": point.analysis_args} if point.analysis_args else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
         "engine_exit_code": None,
@@ -230,6 +235,7 @@ def _unrun_corner_report(
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
+        **({"variant": point.variant} if point.variant is not None else {}),
     }
 
 
@@ -252,12 +258,61 @@ def _lost_shard_corner(
     return report
 
 
+def _await_shards(
+    pool: ThreadPoolExecutor,
+    future_to_index: dict[Any, int],
+    results: list[Any],
+    lost_reasons: list[str | None],
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
+) -> None:
+    """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
+
+    An interrupt while waiting cancels the not-yet-started futures first: with
+    a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
+    would otherwise launch every still-queued shard as a new billable job.
+
+    ``on_interrupt`` (issue #4018) is told the interrupting exception; when it
+    returns a reason string the interrupt is *absorbed*: shards that already
+    finished keep their results, every other shard is reported lost with that
+    reason, and the caller gets a partial merge instead of an exception.
+    Returning ``None`` re-raises, as without a hook.
+    """
+    try:
+        for future in as_completed(future_to_index):
+            _collect_shard(future, future_to_index[future], results, lost_reasons)
+    except BaseException as exc:
+        pool.shutdown(wait=False, cancel_futures=True)
+        reason = None if on_interrupt is None else on_interrupt(exc)
+        if reason is None:
+            raise
+        for future, index in future_to_index.items():
+            if future.done() and not future.cancelled():
+                _collect_shard(future, index, results, lost_reasons)
+            else:
+                lost_reasons[index] = reason
+
+
+def _collect_shard(
+    future: Any,
+    index: int,
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    try:
+        results[index] = future.result()
+        lost_reasons[index] = None
+    except Exception as exc:  # - "shard never returned"
+        lost_reasons[index] = str(exc)
+
+
 def _run_sharded(
     *,
     shard_runner: ShardRunner,
     corner_points: list[CornerPoint],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    max_concurrent: int | None = None,
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -276,6 +331,15 @@ def _run_sharded(
     never aborts a sibling shard, mirroring `local-parallel`'s per-corner
     failure isolation one level up. An empty shard (``hosts`` exceeds the
     unit count) is never handed to ``shard_runner`` at all.
+
+    ``max_concurrent`` (issue #3914) bounds how many shards are in flight at
+    once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
+    remaining shards start as earlier ones finish; ``None`` runs every shard
+    at once, as before.
+
+    ``on_interrupt`` (issue #4018) is :func:`_await_shards`' hook: an
+    interrupt it absorbs yields the partial merge, every unfinished shard
+    reported lost with the hook's reason.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -307,16 +371,16 @@ def _run_sharded(
     ] = [None] * len(shards)
     lost_reasons: list[str | None] = [None] * len(shards)
 
-    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+    workers = max(1, hosts)
+    if max_concurrent is not None:
+        workers = min(workers, max(1, max_concurrent))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
+        _await_shards(
+            pool, future_to_index, results, lost_reasons, on_interrupt=on_interrupt
+        )
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
@@ -438,7 +502,7 @@ def _run_remote(
     *this* process's own host, which is not a representative sample of the
     provisioned remote box's hardware.
     """
-    from .sim import RemoteLauncher, SimError
+    from .sim import RemoteLauncher
 
     del analysis, measurements_spec, models_lib, max_workers  # see docstring
     del deadline, initial_ppid, checkpoint, probe_abort  # not yet honored
@@ -461,6 +525,7 @@ def _run_remote(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -552,6 +617,35 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _points_to_push(
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    explicit_points: list[CornerPoint] | None,
+) -> list[CornerPoint] | None:
+    """The explicit point list to push to the job box, or ``None`` to forward
+    ``corners``/``monte_carlo`` for the box to re-expand.
+
+    A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
+    client-side: a runner older than the field would silently drop it and
+    re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
+    instead (the same wire a fleet shard uses). A declared
+    ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
+    an older runner cannot silently run an unscaled sweep. A non-default
+    ``monte_carlo.seed_mode`` (issue #4173) is shipped the same way. The default
+    forwards the request unchanged.
+    """
+    if explicit_points is not None:
+        return explicit_points
+    mc_spec = request.get("monte_carlo")
+    if isinstance(mc_spec, dict) and (
+        mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or mc_spec.get("seed_mode", "derived") != "derived"
+        or "mismatch_scale" in mc_spec
+    ):
+        return corner_points
+    return None
+
+
 def _run_remote_dispatch(
     *,
     launcher: RemoteLauncher,
@@ -596,7 +690,7 @@ def _run_remote_dispatch(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         max_workers=max_workers,
     )
     job = _build_remote_job_description(
@@ -633,9 +727,7 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
-    from .sim import check_ngspice_options_echo
-
-    check_ngspice_options_echo(request, remote_report)
+    check_runner_option_echoes(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
@@ -664,25 +756,14 @@ def _build_remote_request(
     recursively) and ``netlist`` repointed at the pushed file's job-relative
     path.
 
-    ``models`` is forwarded unchanged -- per decision 4, the remote host
-    resolves its own baked model library the same way ``_resolve_models_lib``
-    resolves a local one (``models.pdk`` plus the AMI's own ``$PDK_ROOT``, so
-    long as ``models.pdk_root`` is not itself an operator-local absolute path
-    that only exists on the caller's own machine -- see docs/cli/sim.md's
-    "Remote backend" section for this constraint). ``options.max_workers`` is
-    dropped so the remote run resolves its own default from that box's own
-    CPU count (see ``_run_remote``'s docstring).
+    The host resolves the forwarded model library against its own PDK_ROOT;
+    models.pdk_root must be accessible on the host (see docs/cli/sim.md).
+    Dropping options.max_workers lets the host size its pool to its CPUs.
 
-    ``explicit_points`` (issue #906's fleet-shard wiring) -- when given --
-    replaces ``corners``/``monte_carlo``/``exclude`` with the internal
-    ``_explicit_points`` wire field (:func:`_corner_points_to_wire`) instead
-    of forwarding them verbatim, so the remote box's own ``run_sim`` runs
-    *exactly* this caller's ``corner_points`` (see ``run_sim``'s handling of
-    ``request["_explicit_points"]``) rather than re-expanding the whole
-    matrix from ranges -- correct only when the whole matrix is meant to run
-    on one host, which a fleet shard is not. ``None`` (the default,
-    ``_run_remote``'s own case) forwards ``corners``/``monte_carlo``
-    unchanged, exactly as before this parameter existed.
+    Explicit points replace the original expansion axes. They carry resolved
+    seeds on a single job and restrict a fleet job to its assigned shard.
+    Each regrade shard receives the corresponding part of the client's
+    ordered selection. Without explicit points the worker expands the request.
 
     ``max_workers`` (issue #2084) -- when given -- pins the remote pool to
     that many concurrent units, which is how a multi-wave single-host run
@@ -690,8 +771,9 @@ def _build_remote_request(
     (the default) keeps the guest's own CPU-derived default.
     """
     from .sim import _corner_points_to_wire
+    from .sim_regrade import REGRADE_REQUEST_FIELD
 
-    remote_request = dict(request)
+    remote_request = sim_derive.without_derive(dict(request))  # issue #7184
     remote_request.pop("remote", None)
     remote_request["backend"] = "local-parallel"
     remote_request["netlist"] = remote_transport.REMOTE_NETLIST_FILENAME
@@ -701,15 +783,20 @@ def _build_remote_request(
         remote_request.pop("monte_carlo", None)
         remote_request.pop("exclude", None)
         remote_request["_explicit_points"] = _corner_points_to_wire(explicit_points)
+        if (spec := request.get(REGRADE_REQUEST_FIELD)) is not None:
+            assigned = {point.corner_id for point in explicit_points}
+            remote_request[REGRADE_REQUEST_FIELD] = {
+                **spec,
+                "select_corner_ids": [
+                    cid for cid in spec["select_corner_ids"] if cid in assigned
+                ],
+            }
 
-    options = dict(request.get("options") or {})
-    options["timeout_s"] = timeout_s
+    options = dict(request.get("options") or {}, timeout_s=timeout_s)
     options["keep_artifacts"] = keep_artifacts
     options["waveforms"] = want_waveforms
     options.pop("max_workers", None)
-    # Issue #3462: submit-side gate (the `batch` backend checks the collected
-    # worker stamp); the job instance runs `local-parallel`, which refuses it.
-    options.pop("require_pdk_match", None)
+    options.pop("require_pdk_match", None)  # Graded by the submitter after collection.
     if max_workers is not None:
         options["max_workers"] = max_workers
     remote_request["options"] = options
@@ -763,7 +850,7 @@ def _run_remote_fleet(
     nothing) -- an idle fleet member is still billed, so there is no benign
     reading of "more hosts than units" here.
     """
-    from .sim import SimError, _shard_corner_points
+    from .sim import _shard_corner_points
 
     if hosts > len(corner_points):
         raise SimError(
@@ -792,6 +879,7 @@ def _run_remote_fleet(
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
     _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -937,7 +1025,7 @@ def _build_remote_job_description(
     collected artifacts directory.
 
     The include closure (issue #2485) is resolved by
-    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    :func:`sim_staging.stage_sim_job` -- the *same* call
     ``sim_batch._build_batch_job_spec`` makes, so the two independently
     built input lists cannot drift apart on include handling. Each staged
     file lands beside ``netlist.cir`` in the job directory under a flat
@@ -985,11 +1073,33 @@ def _build_remote_job_description(
             ),
         ),
         command=(
-            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            _remote_feature_preflight(remote_request)
+            + f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
             "--backend local-parallel --format json"
         ),
         success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
         artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
+
+
+def _remote_feature_preflight(remote_request: dict[str, Any]) -> str:
+    """Host-side refusal prefix for a request using a mandatory runner feature
+    (issue #2924); ``sim_batch`` owns the registry and imports this module,
+    hence the function-local import."""
+    from . import sim_batch
+
+    return sim_batch.remote_feature_preflight(remote_request)
+
+
+def _assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, remote_spec: dict[str, Any]
+) -> None:
+    """Pre-launch half of the same gate; see
+    :func:`sim_batch.assess_remote_runner_features`."""
+    from . import sim_batch
+
+    sim_batch.assess_remote_runner_features(
+        request, pdk, remote_spec.get("region"), remote_spec.get("ami_manifest")
     )
 
 
@@ -1017,15 +1127,15 @@ def _rewrite_remote_artifact_paths(
     filesystem (where the pulled report JSON was generated) to the local
     path :func:`remote_transport.pull_artifacts` just copied them to.
 
-    The response's ``artifacts`` block always describes paths on the machine
-    the caller is running on -- ``local``/``local-parallel``/``remote``
-    alike -- so a raw remote path would be meaningless (and unreadable) to a
-    caller inspecting the returned report.
+    The response's ``artifacts`` block always describes paths on the caller's
+    own machine (local, local-parallel and remote alike), so a raw remote
+    path would be meaningless there. Only path-valued entries are rewritten;
+    non-path metadata (``raw_bytes``, issue #5622) passes through untouched.
     """
     for corner in corners:
         artifacts = corner.get("artifacts") or {}
         for key, value in list(artifacts.items()):
-            if not value:
+            if not isinstance(value, str) or not value:
                 continue
             relative = os.path.relpath(value, remote_root)
             artifacts[key] = os.path.join(local_root, relative)

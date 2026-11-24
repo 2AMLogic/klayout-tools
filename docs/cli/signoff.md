@@ -1,6 +1,6 @@
 # `klt signoff`
 
-Four modes, one verb:
+Six modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
    more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield`/`klt pex`/`klt
@@ -26,9 +26,11 @@ Four modes, one verb:
    report"), the one T1 item with no named `klt` verb, accept a generic
    evidence citation too — no other item may cite one. Since issue #2044
    **every T1 item that names evidence (3-8) is kind-restricted**. Items 1,
-   2, 9 and 10, which name none, still accept any passing envelope. Since
-   issue #2718 they can also be bound to an audited artifact through an
-   artifact-anchored generic envelope. See "Tier-verdict report" below.
+   2, 9 and 10 name none. Since issue #2718 they can be bound to an audited
+   artifact through an artifact-anchored generic envelope, and since issue
+   #2844 that is the **only** evidence items 1, 9 and 10 accept (mode 5
+   produces it). Item 2 still accepts any passing envelope. See
+   "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
    block) and reduce each block's result down to its current tier and, for
@@ -39,6 +41,24 @@ Four modes, one verb:
    which T1 item ids this build has grading rules for, plus the content hash
    identifying the grading code itself, without reading a manifest or
    running any check. See "Identifying the grading build" below.
+5. **Attest T1 items 1, 8, 9 and 10** (`--attest {1,8,9,10} --inventory FILE`,
+   issues #2844, #4311) — run the item-specific mechanical checks a versioned
+   inventory declares and emit the artifact-anchored `generic` envelope
+   `--manifest` binds for that item. Item 2 is attested from the committed
+   stream instead (`--attest 2 --input FILE`, issue #4188 — first ships in
+   `klt` 0.9.0 (PyPI); see "Minting above the grading pin" below). Its
+   `status` is derived from the
+   checks, not asserted. Since this producer exists, items 1, 9 and 10
+   **no longer accept native envelopes** (item 2 still does; item 8 still
+   accepts a bare generic envelope — `--attest 8` is the tool-produced
+   alternative). See "Attesting items 1, 8, 9 and 10" below.
+6. **Compare two saved reports** (`--diff-reports OLD NEW`, issue #6850) —
+   diff the *checklist* surfaces of two previously committed tier reports
+   (the source doc + content hash and each row's `title`/`text`/`notes`),
+   reading nothing but the two files — for the evidence reviewer who has
+   the two snapshots but no longer has the manifest, the evidence, or the
+   grading build. See "Comparing two saved reports: `--diff-reports`"
+   below.
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
@@ -57,6 +77,12 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 klt signoff --manifest <manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --describe-grader [--format text|json]
+klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope> [--skip-local-only]] [--format text|json]
+klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
+# The --attest 2 (stream) forms first ship in klt 0.9.0 (PyPI); 0.8.0 and earlier refuse --attest 2.
+klt signoff --attest 2 --input <stream> [--inventory <file>] [--generator CMD --regenerated-hash sha256:<hash>] [-o <envelope> [--skip-local-only]] [--format text|json]
+klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format text|json]
+klt signoff --diff-reports <old-report> <new-report> [--format text|json] [--color auto|always|never] [--no-color]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -94,10 +120,62 @@ klt signoff --describe-grader [--format text|json]
   (issue #2526). Use this instead of byte-comparing a committed report
   against a fresh render — see "Verifying a committed report: `--check`"
   below.
+- `--diff-reports` — two paths to previously committed `--manifest` tier
+  report JSON files (issue #6850): compare the two snapshots' *checklist*
+  surfaces instead of grading anything. Read-only and self-sufficient — it
+  needs neither the manifest nor the evidence nor the grading build, just
+  the two files. Rows are matched by `(tier, id, partition)`, so reordered
+  rows alone — or a verdict-only/build-only change — compare as unchanged.
+  Exits `0` for any completed comparison, movement included; `1` for an
+  unreadable file, a non-tier report, or an ambiguous duplicate row key.
+  Mutually exclusive with `<file>...`/`--manifest`/`--fleet`/`--check` and
+  every grading flag. See "Comparing two saved reports: `--diff-reports`"
+  below.
 - `--describe-grader` — print which T1 item ids this build has grading rules
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
+- `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `8`, `9` or `10`: produce the attestation envelope for
+  that T1 item from `--inventory` (issues #2844, #4311). `2`: attest a committed layout
+  stream from `--input` instead of an inventory (issue #4188) — **the item-2 form first
+  ships in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse `--attest 2` as an invalid
+  choice (exit `2`). Any other value is a usage error
+  (exit `2`). Mutually exclusive with
+  `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
+  With `--check <committed-envelope>`, re-attests and diffs instead of
+  writing. See "Attesting items 1, 8, 9 and 10" below.
+- `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
+  file inside a git repository, not `-`). Refused without `--attest`.
+- `-o`/`--output` — with `--attest`: also write the envelope to this path,
+  only when it passes and only if its bytes changed. With `--manifest`/
+  `--fleet` (issue #5867): also write the rendered report's JSON envelope
+  to this path — the file always receives JSON, whatever `--format` says,
+  since it is a machine record — after a successful render only (exit `0`
+  or `3`) and only if its bytes changed, so re-rendering an unchanged tree
+  leaves the committed record untouched and a failed render can never
+  truncate a previous good one. The write is atomic (temp file +
+  rename). The bytes are always plain JSON, whatever the file's suffix:
+  unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
+  compressed. `--check` accepts both plain JSON and reports compressed by
+  the caller, detecting gzip by contents rather than suffix. Refused without
+  `--attest`/`--manifest`/`--fleet`, and together with `--check` or `--repin`.
+- `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
+  commands; carry their committed outcome from the existing `-o` envelope
+  and recompute everything else (issue #5209). See "Refreshing on a host
+  lacking the toolchain" below. Refused without `--attest`/`-o`, and with
+  `--check`.
+- `--require-build-match` — with `--attest` and `--check` (issue #5875): exit
+  `3` with `status: "drifted"` (a `provenance.klt_version` entry in `drift[]`)
+  when the committed envelope was produced by a different `klt` build. See
+  "Build drift". Refused without `--attest` and `--check`.
+- `--require-grading-ruleset` — with `--manifest`/`--fleet` (render or
+  `--check`; issue #5847): refuse (exit `1`, error envelope on stderr,
+  nothing on stdout, no evidence command run) unless the running build's
+  `grading_ruleset_id` equals the given `sha256:<hex>` id — checked before
+  the manifest is read. Print the id with `--describe-grader` or
+  `klt version --format json`. Refused with `--attest`,
+  `--describe-grader` and plain envelope aggregation. See "Pinning the
+  grading build" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -165,11 +243,17 @@ two steps:
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
    (`klt drc`/`klt extract`, `klt lvs`, and `klt pex`, which pins its own
-   extracted layout the same way — see [`pex.md`](pex.md)) must
+   extracted layout the same way — see [`pex.md`](pex.md) — plus `klt erc`,
+   `klt power`, `klt lef-abstract`, `klt place-and-route`, `klt sim`,
+   `klt sta`, `klt synthesize` and `klt functional-verification`, the full
+   set the "Provenance consistency" table below lists) must
    agree on `input.content_hash` **with the other checks declaring the same
    `input.role`** (issue #2027 — a `klt lvs` run given a pre-extracted
    netlist hashes a SPICE file, not a layout stream, so its digest is never
-   compared against a layout digest); any two
+   compared against a layout digest; the roles the code records are
+   `layout`, `netlist` and `source`, and digests are compared only within
+   one role, so a netlist and a layout describing the same design
+   legitimately carry different hashes); any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
    produce a pass/fail verdict at all (`status: "refused"`) — a "clean" DRC
@@ -195,8 +279,10 @@ two steps:
    at least one passing test and no failures (skips are allowed —
    [`functional-verification.md`](functional-verification.md)), `klt sta` on
    its *reported timing* rather than a `status` field (that verb's `status`
-   is always `"ok"`: every corner it reports must be `timing_status:
-   "constrained"` with non-negative setup and hold slack — see "Digital-flow
+   is always `"ok"`, and a present non-`"ok"` one fails: every corner it
+   reports must be `timing_status: "constrained"` with non-negative setup and
+   hold slack; `geometry_source` is disclosed but not graded unless the entry
+   opts in with `require_routed_geometry` — see "Digital-flow
    evidence: `klt sta` and `klt functional-verification`" below), and a
    **generic**
    evidence envelope on its own `status: "pass"` (see "Generic evidence
@@ -252,6 +338,51 @@ numbers that overflow to infinity, including envelope files/stdin,
 manifest/fleet files/stdin, nested fleet manifests, and command evidence.
 Malformed top-level JSON produces exit code 1 with the usual error envelope;
 malformed evidence leaves its tier item unmet with `unreadable_evidence`.
+
+**Gzip-compressed evidence files (issue #5452).** Every one of those *file*
+readers also accepts a gzip-compressed document — a positional envelope, a
+manifest or fleet file, and a file-backed evidence citation alike. `klt sim
+--report-out report.json.gz` writes the compact form recommended for a report
+committed as evidence (see [`sim.md`](sim.md)), and it is cited exactly as the
+plain `.json` twin is: same `status`, same `reason`, same citation fields.
+Detection is by the gzip magic bytes, **not** the `.gz` suffix — the same rule
+`klt yield` already applies, so one rule covers both verbs and a renamed file
+still reads. A *truncated* or *damaged* gzip stream is a read failure like any
+other: `unmet`/`unreadable_evidence`, never a traceback. Stdin (`"-"`) is
+text-only.
+
+Hashing is unchanged by the encoding. A citation's `content_hash` is compared
+against `provenance.input.content_hash` from *inside* the envelope, which is
+identical for both encodings. The one place `klt signoff` hashes an evidence
+file's own bytes — a pinned `functional-verification` citation, reported as
+`content_hash_basis: "evidence_file"` (issue #4893) — keeps hashing the file
+**as committed**, so a pin taken over a `.json.gz` binds those compressed
+bytes and a pin taken over the decompressed copy binds those; the two are not
+interchangeable for that one basis. A stale pin's `detail.compared_against`
+names the cited file, and its hint directs you to use that file's own sha256.
+
+**Pin-basis change for `functional-verification` (issue #5550).** A
+`functional-verification` envelope from a `klt` that records the shared
+`provenance` block pins its **RTL digest**
+(`provenance.input.content_hash`, role `source` — the same scheme `klt
+synthesize`/`klt equiv` record), not the report's own bytes: the
+`evidence_file` re-hash basis now applies only where the envelope has no
+`provenance.input` to compare: a **legacy** envelope with no `provenance` key
+(a report committed by an older `klt`), and an `options.from_synthesize`
+report, whose block records `input: null` because its design input is the
+synthesized netlist (pinned by `from_synthesize.netlist_sha256`, which a
+manifest cannot pin) — such a report keeps the #4893 file-bytes binding it
+always had, and a command-backed pin of one stays `unverifiable_provenance`
+with a note naming that cause. A block whose `input` is present but whose
+`content_hash` is `null` (a source that could not be hashed) never falls back
+to the file's bytes. A manifest
+pin authored under #4893 (the report's byte hash) therefore grades
+`stale_evidence` against a provenance-bearing report — re-pin it against the
+report's `provenance.input.content_hash`. In exchange, a pin now detects an
+RTL edit the moment the report is re-run, a command-backed pinned citation
+grades instead of rendering `unverifiable_provenance`, and the report joins
+the provenance-consistency cross-check against `synthesize` citations over the
+same sources.
 
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
@@ -328,8 +459,41 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt erc` (role `layout`), `klt power` (role `layout`), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt place-and-route` and `klt sim` (role `netlist`), `klt sta` (role `layout` when driven by a DEF request, `netlist` when driven by a Verilog netlist), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
+
+**Verilog-top functional-verification citations (issue #6488).** On the
+`testbench.verilog_top` path the Verilog bench is itself a `request.sources`
+entry, so the report's `input.content_hash` digests the bench together with
+the DUT sources — it can never agree with a `klt synthesize` citation over the
+DUT alone, and bundling both in one `klt signoff` run renders
+`provenance_consistency.ok: false` and `status: "refused"` for the whole run.
+That disagreement is structural, not a staleness signal: no re-run or re-pin
+makes the bundle grade. Cite the cocotb-path functional-verification report
+instead (its digest covers the DUT sources only), or keep the Verilog-top
+citation out of any bundle that also cites a `source`-role `synthesize`
+report.
+
+**Layout-free `klt lef-abstract` citations (issue #6671).** With
+`--no-layout` there is no layout to pin, so the report's `input.content_hash`
+digests the socket descriptor under role `source` — the same comparison bucket
+as the RTL digest of a `klt synthesize` or provenance-bearing
+`klt functional-verification` report, but a different file. Even fresh reports
+for the same design therefore disagree, and bundling a layout-free
+`lef-abstract` report with either renders `provenance_consistency.ok: false`
+and `status: "refused"` for the whole run. As with the Verilog-top case that is
+structural, not a staleness signal: no re-run or re-pin makes the bundle grade.
+Cite the layout-free `lef-abstract` report and the RTL-digest reports in
+separate `klt signoff` bundles. A layout-bearing `lef-abstract` report pins its
+layout under role `layout` and is compared only against other `layout`-role
+checks.
+
+**`klt equiv` is not a signoff evidence kind.** It records the same
+role-`source` RTL digest as `klt synthesize`, but `klt signoff` has no `equiv`
+recognizer: an `equiv` report is rejected as an unrecognized envelope
+(envelope-aggregation mode exits `1`; `--manifest` grading renders the citing
+item `"unmet"` with `reason: "unrecognized_envelope"`) before any hash
+comparison, so it never joins this cross-check.
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
 envelope — which carries no `provenance` block at all as of its current
@@ -348,6 +512,35 @@ which fields each verb populates and why some are `null` by design (e.g.
 `environment.layout_sha256`/`reference_sha256`, which this generic gate cannot
 read — and now carries the layout side's `sha256:`-prefixed hash like every
 other populating verb.
+
+### Build drift: a verdict from a different `klt` build (issue #4223)
+
+Every `checks[]` entry carries a `build_drift` object comparing the cited
+envelope's `provenance.klt_version` with the running build's identity
+(`klt --version`):
+
+```json
+"build_drift": {"state": "stale", "cited_klt_version": "0.5.0+gabc123", "running_klt_version": "0.5.1+gdef456"}
+```
+
+| `state` | Meaning |
+| --- | --- |
+| `current` | `provenance.klt_version` equals the running build |
+| `stale` | Both are known and differ: the verdict was produced by another build, so a rule added since was never applied to it. Re-run the verb and re-cite the result |
+| `unverifiable` | The envelope records no `klt_version` (no `provenance` block: `yield`, `power`, `error`, many `generic` envelopes) or either side is a `+unknown` build. Absence of evidence is never reported as `stale` |
+
+The marker is **report-only**: it never changes a check's `passed`, the
+overall `status`, or the exit code, so existing green pipelines do not flip.
+Gate on it by reading `checks[].build_drift.state` from the JSON. It is an
+additive field; no existing field changes.
+
+`klt signoff --attest N --inventory F --check ENV` carries the same object as
+a top-level `build_drift` (computed from ENV's `provenance.klt_version`) and
+prints a `build_drift: <state>` line in text mode. It is report-only unless
+`--require-build-match` is passed, which turns `stale` (only `stale`;
+`current` and `unverifiable` never fail) into `status: "drifted"` and exit
+`3`, naming `provenance.klt_version` in `drift[]`. Content drift is still
+reported alongside.
 
 ### What this does not do yet
 
@@ -407,6 +600,52 @@ should mean the same thing `klt lvs` itself and `docs/cli/lvs.md` already
 tell callers it means, and a default that stays silently weaker than the
 evidence it aggregates would perpetuate exactly the gap this issue closes.
 
+### Foundry-cell DRC exceptions
+
+T1 item 3 normally needs `status: "clean"`. An item 3 evidence entry may also
+carry `foundry_cell_exceptions` (issue #4530, operator ruling 2026-10-28; see
+`docs/design-evidence-tiers.md` item 3). Each record is:
+
+```json
+{"cell": "sky130_ef_io__analog_noesd_pad",
+ "cell_hash": "sha256:...",
+ "rules": {"met4.2": 120, "met5.1": 366},
+ "bare_cell_layout": "pdk/analog_noesd_pad.gds",
+ "bare_cell_report": "verification/bare-pad-drc.json",
+ "layout": "block.gds"}
+```
+
+To obtain `cell_hash`, run `klt cell-hash --cell PAD bare-pad.gds` and copy
+the printed digest into the exception. Running the command on the containing
+block yields the same digest when the cell and its descendants have matching
+geometry. [Cell-hash command](cell-hash.md)
+
+`layout` is optional (default: the DRC envelope's `file`). `cell_hash` is
+`klayout_tools._provenance.cell_geometry_digest` of the cell and everything
+beneath it. A `violations` report is graded `met` only if, for every
+exception, the cell hashes to `cell_hash` in the block layout **and** in
+`bare_cell_layout`; `bare_cell_report` is a `klt drc` report of
+`bare_cell_layout` whose input hash is current and whose `rule_counts` equal
+`rules`; and the block's own `rule_counts` equal the sum of all exceptions'
+`rules`. Any other violation, a count that moves, or a changed hash leaves
+item 3 `unmet` (`check_failed`), with
+`detail.foundry_cell_exceptions = {"applied": false, "lapsed": [...]}`.
+A `--rules` subset report never qualifies. Paths resolve against the working
+directory.
+
+**Attribution.** Violations that carry a `source_cell` -- the curated
+engine, and (since the `klayout` engine's per-instance attribution) RDB
+markers that fall inside a placed instance (`drc.md`) -- must be an excepted
+cell or lie beneath one (an excepted cell appears in its `source_path`).
+Markers with `source_cell: null` (e.g. top-level geometry) are graded by
+per-rule counts alone. A clean report grades as before and ignores the list.
+
+Applied exceptions appear in item 3's `citation.foundry_cell_exceptions`
+(JSON; each with `cell`, `cell_hash`, `rules`, `bare_cell_report`) and as
+`foundry-cell exception:` lines under `cite:` in `--format text`. The key is
+additive and present only when an exception was applied, so no
+`schema_version` bump.
+
 ### DRC coverage is reported, not graded
 
 [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a
@@ -446,16 +685,74 @@ $ klt signoff --manifest manifest.json --format text
 entries by name — under the `cite:` line they qualify, and (in `--fleet`)
 beside a block whose deck actually left a gap.
 
-**No verdict changes.** A `drc` check still passes on `status: "clean"`
-alone: a deck with twenty rule-free drawn layers and sixteen skipped rules
-grades exactly like a fully-covering one, and no claim that was `met` before
-this change becomes `unmet` because of it. This is deliberate — surfacing
-the gaps is not enforcing their disclosure. `klt signoff` still cannot tell
-a *disclosed* gap from an *undisclosed* one, because a claim states its
-disclosure in a block README/manifest this command has no field to compare
-against, so **item 3's disclosure requirement remains claimant-enforced**: a
-`met` verdict is not evidence that the gaps were disclosed, only that they
-are now printed next to the claim that has to disclose them.
+**No verdict changes by default.** A `drc` check still passes on `status:
+"clean"` alone: a deck with twenty rule-free drawn layers and sixteen skipped
+rules grades exactly like a fully-covering one, and no claim that was `met`
+before this change becomes `unmet` because of it. This is deliberate —
+surfacing the gaps is not enforcing their disclosure. Without the opt-in
+below, `klt signoff` still cannot tell a *disclosed* gap from an
+*undisclosed* one, because a claim states its disclosure in a block
+README/manifest this command has no field to compare against, so **item 3's
+disclosure requirement is claimant-enforced by default**: a `met` verdict is
+not evidence that the gaps were disclosed, only that they are now printed
+next to the claim that has to disclose them.
+
+**Opt-in: `require_coverage_disclosure` (issue #5789).** A project that
+wants the comparison grades it, not just prints it, with the optional
+top-level manifest boolean `require_coverage_disclosure` (default `false`)
+and a `coverage_disclosed` declaration on item 3's evidence entry — the
+machine-readable place a claim's enumeration lives, which #2002 left open:
+
+```json
+{
+  "require_coverage_disclosure": true,
+  "evidence": {
+    "3": {
+      "file": "drc.json",
+      "coverage_disclosed": {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"]
+      }
+    }
+  }
+}
+```
+
+With it `true`, a would-be-`met` item 3 whose declaration is not
+**set-equal** (order-insensitive, per field) to the coverage its citation
+reports grades `unmet` / `coverage_undisclosed`, with
+`detail.coverage_undisclosed` naming per field the `missing` entries
+(reported by the envelope, absent from the claim) and the `extra` entries
+(claimed, no longer reported — deck drift is a false claim too). Set
+equality, not subset, for exactly that reason: a stale claim listing gaps
+the deck no longer has is as much a false claim as one hiding the gaps it
+has. Entries are compared verbatim as strings, so a `deck_scope` token that
+is not a chapter name (the curated sg13g2 deck's `"x"` placeholder, #5723)
+compares exactly like one. The refused item also carries
+`detail.cited_evidence` — the citation verbatim, in the same shape a `met`
+item's would have carried (`citation` itself stays `null`, as on every
+unmet item) — and `--format text` prints the `cite:`/`coverage:` lines it
+would have printed, then the undisclosed entries under them. A per-cell
+report list is gated per member, the failing member named under
+`detail.failed_citations` as usual.
+
+| Case | Grade |
+| ---- | ----- |
+| Ratchet absent, `null` or `false` | Byte-identical to before the key existed — no new report key, no verdict change. A malformed `coverage_disclosed` is not even read. |
+| Ratchet on, declaration set-equal to the three reported fields | `met`, no new `detail` key. |
+| Ratchet on, any field disagreeing | `unmet` / `coverage_undisclosed`, `detail.coverage_undisclosed` naming per-field `missing` and `extra`. |
+| Ratchet on, `coverage_disclosed` absent while the envelope discloses a non-empty `layers_in_stream_without_rules` or `rules_skipped` | `unmet` / `coverage_undisclosed` — every reported entry is `missing`. |
+| Ratchet on, cited envelope carries no `coverage` block (pre-#2002 evidence) | `unmet` / `coverage_undisclosed`, `detail.coverage_undisclosed.reason: "no_coverage_block"` — evidence that states no gaps cannot satisfy a project asserting every claim states its gaps. |
+| All three fields empty, `coverage_disclosed` absent | `met` — nothing was disclosed because there is nothing to disclose. |
+| `require_coverage_disclosure` non-boolean, or `coverage_disclosed` not an object of string lists (with the ratchet on) | `unmet` / `invalid_evidence` for **item 3 alone**, `detail.problem` naming the key — never raises. |
+
+The ratchet grades **item 3 only**, whatever item carries a
+`coverage_disclosed` entry, and needs no CLI state: a report committed from
+a ratcheted manifest reproduces under `--check` (`status: "match"`), because
+the verdict is a function of the manifest alone. Additive — two optional
+manifest keys, one new `reason` value, one new conditional `detail` key — so
+there is no `schema_version` bump.
 
 Absent entirely — no `coverage` key in the detail/citation, no
 `drc_coverage` row — for DRC evidence committed before `klt drc` reported
@@ -464,8 +761,9 @@ coverage, and for every non-`drc` kind. An absent coverage statement means
 `--fleet` run mixing pre- and post-`coverage` evidence renders both without
 error. `klt lvs`'s own coverage-shaped disclosures (warnings-only
 mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
-for item 4 — that, and whether a non-empty gap should ever change item 3's
-verdict, are open questions #2002 deliberately left unanswered.
+for item 4 — #2002's still-open question. Whether a non-empty gap should
+change item 3's verdict is the question `require_coverage_disclosure`
+above answers: opt-in, never by default.
 
 ### A pinned hash is checked against the artifact, not only against the envelope
 
@@ -494,7 +792,7 @@ the answer to "was that hash checked against the artifact itself?"
 | ----- | ------- |
 | `true` | The input artifact the envelope names was found, re-hashed (`sha256`, the same digest the producing run recorded), and **matches**. The freshness claim is anchored to a file. |
 | `false` | The artifact was found and re-hashed, and it **disagrees** with the hash the envelope recorded — the report describes a revision that is no longer on disk. |
-| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context. |
+| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). A `generic`/`model-run` envelope that *declares* a `content_hash` but names nothing verification can answer (no usable `path`, and no `paths` set that answered through its members) additionally carries `input_verified_note: "declared_hash_unbound"` — see below. |
 
 ```
 $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | .citation | {content_hash, input_verified}'
@@ -509,6 +807,23 @@ $ klt signoff --manifest manifest.json --format text
         input: CHANGED -- the artifact this envelope names no longer matches the content_hash it recorded
 ```
 
+**A declared hash nobody checked (issue #6403).** `input_verified: null`
+also covers the case where a `generic`/`model-run` envelope *declares*
+`provenance.input.content_hash` but names nothing verification can answer:
+no usable `provenance.input.path` (`null` or `scope: "external"`), or a
+`provenance.input.paths` set that never answered — malformed, empty, or on
+a `model-run` envelope, whose set is not verified through its members.
+That declaration is silently never re-hashed — the opt-in is `path`-keyed
+by design — yet it reads as a binding, indistinguishable in the citation
+from an envelope declaring no hash at all. Those citations carry the
+additive `input_verified_note: "declared_hash_unbound"` beside the
+unchanged `input_verified: null` (a single string token, never consulted
+by any grading rule, no `schema_version` bump), and the text report prints
+an `input note:` line under the `input:` one. A well-formed `paths` set
+answers through its members, and a declared `path` that merely fails to
+resolve here was grader-tried — neither is unbound, and both keep the
+plain `null`.
+
 **Which artifact is re-hashed** is the one the producing run pinned into
 `provenance.input`, named by the field that run echoes it back under — never
 a second input the envelope happens to mention:
@@ -519,8 +834,8 @@ a second input the envelope happens to mention:
 | `lvs` | `layout` | The **layout side** of the compare, which is what `provenance.input` pins (issue #1969) — the GDS/OASIS stream of a `layout.file` request, or the SPICE file of a pre-extracted `layout.netlist` one. `reference` is deliberately not re-hashed: it is pinned separately under `environment.reference_sha256`, so comparing it here would report a mismatch that is not one. |
 | `sim` | `netlist` | The SPICE deck it simulated. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
-| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; a schema-1 absolute string verifies only where that exact path exists. |
-| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. |
+| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; an older absolute string can also verify against a same-named file beside the evidence when its content hash matches. |
+| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` when a tracked or non-checkout samples file is hashed. In a functioning checkout the index excludes untracked samples (#6139). Without another source, both fields are then `null`. With a store pin (issue #5963), when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
 
 **`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
 records `testbenches[].{request,netlist,schematic_netlist}_sha256` and/or
@@ -550,7 +865,16 @@ producing run named it (the command entry's `cwd`, else this process's
 working directory, the same convention `klt drc --check`/`klt lvs --check`
 use), and relative to the evidence file's own directory, which is how
 evidence committed beside its inputs resolves (`examples/signoff/`'s
-`lvs.json` names `layout.spice`). A `{path, scope}` input echo (issue #1261,
+`lvs.json` names `layout.spice`). For an **absolute** string path — the
+legacy shape `klt drc`/`klt extract`/`klt erc` record when invoked with a
+`$PWD/...` layout from a checkout that does not exist in the grading one —
+the path's *basename* beside the evidence file is also tried (issue #2340),
+after the as-named candidate, so a layout committed next to its envelope
+under the same name is re-hashed even though the original host path is
+gone. That candidate verifies only on a hash match: a same-named file with
+different bytes reports `input_verified: false` (unless another candidate
+matches), never `true` on its name alone, and if neither the original path
+nor the basename resolves the citation stays `null`. A `{path, scope}` input echo (issue #1261,
 `klt sim`/`klt pex`) resolves against the repo root the evidence lives in
 when `scope` is `"repo"` — concretely, the nearest ancestor of the evidence
 file that holds a `.git` entry — and a `.git` file (a linked worktree)
@@ -565,6 +889,29 @@ and is therefore unverifiable here, with or without the flag. A *match* on
 any candidate always wins over a mismatch on another, so a coincidentally
 same-named file beside the envelope can never turn a genuinely fresh
 citation into a reported one.
+
+**The grading basis is the git index, not the working tree** (issue
+#5857). A candidate that sits inside a functioning git checkout whose
+index does not track it — gitignored scratch output, a never-committed
+leftover — is dropped before anything reads it, so an untracked input
+grades `input_verified: null` **by design**, identically on the host that
+happens to have the file and in a fresh clone; for the artifact-anchored
+generic items (T1 1/2/9/10) that means the `unverifiable_provenance`
+refusal renders the same everywhere too, instead of the block grading T1
+on the producing host and not-T1 in CI. The index also covers *how* the
+candidate is reached (issue #7195, the input side of #6139's yield
+contract): every symlink in the chain and every directory a `dir/..`
+step traverses must itself be tracked by its checkout's index, so a
+purely local link to committed bytes grades exactly like a local copy of
+them, and a name no filesystem call can represent (an embedded NUL byte)
+grades unresolvable instead of aborting the render. The `.git`-less
+fallback: a tree
+with no functioning checkout above the candidate — a
+`/archive/<sha>.tar.gz` unpack, a vendored copy, a `--repo-root` tree
+without VCS metadata — keeps the filesystem-presence behaviour, since
+trackedness cannot be asked of a tree that has no index; repo-scoped
+resolution there works exactly as
+[`--repo-root`](#grading-outside-a-git-checkout---repo-root) describes.
 
 **Cost**: one streamed `sha256` of the named artifact per citation — the
 same read `klt drc --check`/`klt lvs --check` already do, and never an
@@ -616,7 +963,7 @@ identically everywhere — and **refuses the evidence**:
 | Mode | Effect |
 | ---- | ------ |
 | Envelope aggregation | That check's `passed` is `false` whatever its own `status` says, and `checks[].detail.nothing_checked_reasons` names why |
-| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "nothing_checked"` and no citation |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "nothing_checked"` and no citation, carrying `detail.nothing_checked_reasons` and `detail.cited_evidence` |
 | Fleet roll-up (`--fleet`) | Inherited: the block's `blocking_item` reports that item and reason |
 
 ```
@@ -658,6 +1005,92 @@ something to check. Where both apply, the more actionable reason wins:
 `check_failed` (the run did fail) and `wrong_kind` ("cite a different
 artifact") both take precedence over `nothing_checked`.
 
+**The envelope's own status token does not decide this** (issue #5479). A
+producer that has adopted the common rollup rule reports the zero-coverage
+row's fixed token — `status: "not_checked"`, exit 4, see
+[`../coverage-contract.md`](../coverage-contract.md) — for a run that checked
+nothing, rather than its success word. Such a report is not a *passing*
+envelope, so until issue #5479 it was refused one step earlier and rendered
+`check_failed`: "a check ran and failed" for a run that ran nothing, which is
+exactly the conflation above forbids, and which made `nothing_checked`
+unreachable for every current producer (the reason was only reachable for a
+pre-rollup envelope still reporting its success word on an empty run). Both
+tokens now render `nothing_checked`, on the same three conditions — the
+`coverage` block says `nothing_checked: true`, the item accepts the kind, and
+no registered `critical: true` metric failed. The two precedence rules are
+unchanged by it: a `critical_metric_blockers` entry still renders
+`check_failed` whatever the status token, and `wrong_kind` still outranks a
+thin report of an artifact this item does not accept.
+
+**An unmet item names what was read.** `citation` is present only on a
+`"met"` item — that contract is unchanged — so a single-citation unmet item
+carries the same information additively under `detail` instead (issue #5479
+for `nothing_checked`, extended by issue #5692 to every other reason the
+envelope's own verdict produces):
+
+| Key | Carried on | Value |
+| --- | ---------- | ----- |
+| `detail.nothing_checked_reasons` | `nothing_checked` only | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
+| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only), `runset_unrecognised_device` and `runset_inductor_terminal_order` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+
+`cited_evidence` is present on **either** route into `nothing_checked` and on
+a failing or partial run, and neither key is consulted by any grading rule.
+`undersized_sample` is the one reason in that cell whose two routes disclose
+differently, so the qualifier matters: the envelope's own
+`status: "insufficient_evidence"` token (issue #2873) carries `cited_evidence`,
+while the campaign-discipline refusal — a *passing* report whose own
+`sample_size.verdict` says `insufficient` (issue #2467) — carries
+`detail.yield_campaign` instead, never both (see "Campaign discipline on
+item 6" below for that block's shape).
+On a `check_failed` item 7 it carries the `pex` envelope's `body_bias` block,
+so the claimant-enforced disclosure ("was this measured on a properly-biased
+netlist?") has an in-report source on a failing row too; an envelope
+committed before `body_bias` existed simply omits the key. It also lets a
+reader tell a failing extraction from a misfiled artifact — both read
+`check_failed`, but `cited_evidence.kind` names which was cited. Without
+`cited_evidence` the committed record showed a verdict with no artifact behind
+it: a reader could not tell *which* run was cited, or that one had been read
+at all. The multi-citation route's `detail.failed_citations` (bare file
+names) is unchanged.
+
+**A `malformed_coverage` item does the same** (issue #5643). A cited
+envelope's versioned `coverage` block can be present yet structurally
+invalid — hand-edited, mis-trimmed, written against a different schema —
+and a refusal that named neither the artifact nor the defect would relocate
+exactly the silence above. So both routes into the reason — the
+single-envelope item and item 11's compound citation, whose *refusing part*
+is the one named — carry:
+
+| Key | Value |
+| --- | ----- |
+| `detail.cited_evidence` | The same block a `"met"` citation would have carried, naming the artifact whose `coverage` claim failed to validate |
+| `detail.coverage_error` | The validator's own message, e.g. `"checked: work must be an array"` — the same string envelope aggregation reports at `checks[].detail.coverage_error`, so the two modes cannot disagree about *what* was invalid |
+
+Envelope aggregation has always reported this state at
+`checks[].detail.coverage_state`/`coverage_error`; `--manifest` refusing
+with the same message is what makes the two modes agree (issue #5643).
+
+### A sim envelope that applied no bound (`no_limits_checked`)
+
+Issue #3769: `klt sim` counts a produced measurement with no `limits` as a
+deliberate observation, so an all-observation request is not
+`nothing_checked` and rolls up to `status: "pass"`. For T1 item 5 (corner
+verification against the ratified spec) that pass means only "every
+measurement produced a value". A `sim` envelope whose `coverage` block has
+`measurements_declared > 0` and `measurements_with_limits == 0` is therefore
+refused through the same path as `nothing_checked`:
+
+| Entry point | Result |
+|---|---|
+| Envelope aggregation | `passed: false`; `detail.no_limits_checked` carries `measurements_declared` / `measurements_with_limits` |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "no_limits_checked"` |
+
+An envelope with at least one limited measurement, one with no `coverage`
+block (pre-coverage evidence), and a `capture_only` run that declares no
+measurements all grade as before. The `klt sim` output is unchanged; the fix
+is to copy the spec bounds into the request's `measurements[].limits` and
+re-run. The key and reason are additive.
+
 ### Partial coverage is qualified, not inferred
 
 Issue #2109 (Phase 2 of epic #1988) adds the case between the two above: a
@@ -671,7 +1104,7 @@ signoff evidence.
 | Situation | Effect |
 | --------- | ------ |
 | The producer applied the rollup and reported its partial token (`"clean_partial"`, `"pass_partial"`, …) | The check does not pass, and the tier item renders `unmet` with `reason: "partial_coverage"` rather than `check_failed` — *unless* the same envelope also carries a failing registered `critical: true` metric, which outranks the partial token and reports `check_failed` instead (issue #2152, see "Real failures still win" below). Absent such a blocker, the cited run found no defect; it skipped requested work. |
-| The producer has not yet adopted the rollup, so its status is still the unconditional success word on a run whose `coverage` says `partial` | The verdict is unchanged (item 3 still grades on `status` alone, per [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3), and `checks[].detail.coverage_qualification` / `citation.coverage_qualification` name the skipped requested work, so the gap is stated in the report rather than left to be discovered by re-opening the envelope. |
+| The producer has not yet adopted the rollup, so its status is still the unconditional success word on a run whose `coverage` says `partial` | The verdict is unchanged (item 3 grades on `status` alone, per [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3). `checks[].detail.coverage_qualification` and `citation.coverage_qualification` quote up to 20 skipped records. `skipped_total` and `skipped_by_reason` count units across all records when a group represents multiple units or the display is capped. |
 
 ```
 $ klt signoff --manifest manifest.json --format json \
@@ -744,9 +1177,11 @@ aggregation (`checks[].passed: false`) or numbered-citation grading (T1 item
 A `--rules` run that selected **every** registered rule has `omitted: []` and
 `subset: false`, and grades exactly like a full run. A report with no
 `rule_selection` key — every report written before the flag, and every
-default run — grades exactly as before. A `klt drc --list-rules` listing is
-not a DRC report at all (no `status`/`violations`) and is refused as an
-unrecognised envelope. To earn DRC credit, re-run without `--rules`.
+default run — grades exactly as before. A `klt drc --list-rules` or
+`klt drc --engine klayout --list-rule-categories` listing is not a DRC report
+at all (no `status`/`violations`) and is refused as an unrecognised
+envelope — a listing says what a deck *declares*, never what a layout
+passed. To earn DRC credit, re-run without `--rules`.
 
 ### Device-body bias is reported, not graded
 
@@ -851,6 +1286,23 @@ against a caller-supplied **block manifest**:
 }
 ```
 
+**Committing the verdict of record** (issue #5867): add `-o FILE` to write
+the report's JSON envelope to a committed file — no stdout redirect, whose
+truncate-then-write would zero a previous good record on any failed run.
+The file is written only after a successful render (exit `0` for T1, `3`
+below T1 — both are verdicts of record), only if its bytes changed, and
+atomically; it always receives JSON, whatever `--format` says. Those bytes
+are plain JSON whatever the file's suffix — a `.gz` name is not compressed,
+unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041). `--check` also accepts a
+committed report compressed by the caller, detecting gzip by contents. The same
+`-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
+the committed file untouched, so a make-style pipeline can re-run freely:
+
+```console
+$ klt signoff --manifest signoff/manifest.json \
+    --tiers-doc signoff/design-evidence-tiers.md -o signoff/tier-report.json
+```
+
 An entry of either shape may also carry a **`pointer`** — an [RFC
 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON Pointer naming *where
 inside* the resolved document the envelope lives (issue #2342), so an
@@ -886,6 +1338,14 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
 - `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
   what this block's two partitions *denote*. See "The declared partition
   boundary" below.
+- `upstream_source` — optional, any kind (issue #6972): where a block
+  **consumed from another repository at a pinned commit** came from:
+  `{"repository": <locator>, "commit": <full hexadecimal Git commit ID>}`.
+  See "The declared upstream source" below.
+- `require_coverage_disclosure` — optional boolean (default `false`, issue
+  #5789): the item-3 ratchet comparing each cited `klt drc` report's
+  `coverage` block against the `coverage_disclosed` declaration on its
+  evidence entry. See "DRC coverage is reported, not graded" above.
 - `evidence` — optional (default `{}`), a map from item id to an evidence
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
@@ -894,10 +1354,20 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     an artifact-anchored one for items 1, 2, 9 or 10, or `"-"` for
     stdin) or `{"file": ..., "content_hash": ..., "pointer": ...}` to also
     pin the check to an expected input revision, and/or (issue #2342) to
-    name where inside that file the envelope lives. A `klt power` envelope
-    classifies fine here too, but is never graded `"met"` for any item — see
-    "No T1 item accepts `power` evidence" below; cite it in
-    envelope-aggregation mode instead.
+    name where inside that file the envelope lives. The file may be
+    **gzip-compressed** (issue #5452) — a `klt sim --report-out
+    report.json.gz` report is citable as it stands, with no decompressed
+    second copy; see "Gzip-compressed evidence files" above. A `klt power`
+    envelope classifies fine here too, but is never graded `"met"` for any
+    item — see "No T1 item accepts `power` evidence" below; cite it in
+    envelope-aggregation mode instead. Item 3's entry may also carry
+    `coverage_disclosed` (issue #5789) — the claim's own enumeration of the
+    cited report's three coverage fields, graded under
+    `require_coverage_disclosure`; see "DRC coverage is reported, not
+    graded" above. A `yield` entry may also carry `artifact_manifest` +
+    optional `artifact_member` (issue #5963) to pin its samples companion
+    through a committed store manifest offline — see "Citing an object in
+    the artifact store" below.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
     "pointer": ...}`: `klt
@@ -929,6 +1399,48 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   the bare key, so the qualified form never borrows the other partition's
   evidence: `"7.analog"` on a `"digital"` manifest matches nothing and the
   item falls through to `"7"` (and, absent that, to `unmet`/`no_evidence`).
+- `disclosed_evidence` — optional (default absent, issue #6953), a map from
+  item key to a **local file path**, disclosing evidence produced *outside*
+  `klt` that this grader cannot read but the maintainer attests exists:
+
+  ```json
+  {
+    "block": "demo",
+    "kind": "digital",
+    "disclosed_evidence": {
+      "1": "netlist/demo.v",
+      "5.digital": "reports/sta.json"
+    }
+  }
+  ```
+
+  A block whose flow legitimately ran through external scripts — OpenROAD
+  STA results, a synthesized netlist from RTL pinned in another repository —
+  has no `evidence` form for those artifacts (citing a foreign document
+  renders `unreadable_evidence`/`unrecognized_envelope`), so its rows read
+  `unmet`/`no_evidence`: a reason asserting *no evidence exists*, which a
+  fleet reader mistakes for "the work was never done". A disclosure fixes
+  the *record*, not the verdict: the grader's only statement about a
+  disclosed path is that it names a readable local file — the contents are
+  never parsed, classified, executed, or interpreted as a grading envelope —
+  and the row stays `unmet` with `reason: "evidence_not_klt_native"` and the
+  declared path in `detail.disclosed_evidence`. No T1 credit, no
+  `citation`, no exit-code change; a disclosure is identification, never a
+  verdict, so a valid native envelope at a disclosed path still cannot
+  confer credit. Paths resolve against the process working directory, the
+  same convention as a local file-backed `evidence` citation; a path that
+  is missing, a directory, or unreadable renders
+  `unmet`/`unreadable_evidence` instead, still naming the path. Keys use
+  the `evidence` map's grammar (`"<item id>"` or
+  `"<item id>.<analog|digital>"`) and its precedence — the qualifier for
+  the partition being graded first, then the bare key — so a disclosure
+  keyed only to `5.digital` on a mixed-signal block affects only the
+  digital row. A disclosure applies only to a row this build graded whose
+  verdict would otherwise be `unmet`/`no_evidence`; a native pass, a native
+  citation failure, or a spec-row verdict keeps its original status and
+  reason. A malformed declaration (a non-object map, a key that is not an
+  item key, a value that is not a non-empty string path) is a validation
+  error, not a silent no-op.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
@@ -976,10 +1488,10 @@ manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
 regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
-statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way — the one
-bound verb that is not reachable from a published release (see "Item 6's
-evidence needs a from-source toolchain" below). **Phase 2b
+statistical-evidence item, by binding a [`klt yield` campaign report](yield.md)
+(epic #710). For installation instructions, see
+[Item 6's evidence needs the `[yield]` extra (issue #2466)](#item-6s-evidence-needs-the-yield-extra-issue-2466).
+**Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
@@ -1058,6 +1570,116 @@ wrapped, and so the one hardest to cite.
 - **`--check` needs no pointer awareness.** It re-grades the manifest through
   the same resolution path, so a committed report that cites by pointer
   reproduces, and drifts when the *nested* envelope changes.
+- **The citation records the pointer (issue #5815).** A `met` citation for an
+  entry that carried a `pointer` now includes `citation.pointer`, the RFC 6901
+  selector verbatim — so a citation of *part* of a composite document (one
+  side of a cross-check report, say) is distinguishable in the JSON from a
+  whole-envelope citation of the same file. Additive; whole-envelope citations
+  are unchanged.
+
+### Citing a `--engine both` (cross-check) DRC report (issue #5815)
+
+`klt drc --engine both` writes a cross-check envelope (`mode: "crosscheck"`):
+the two engines' own complete reports nested under `reports.curated` /
+`reports.native`, the two-engine verdict at the top level, and the comparison
+block beside them ([`drc.md`](drc.md)'s "Cross-check"). It is the strongest
+DRC evidence the tool can produce, and `klt signoff` reads it directly:
+
+- **Cited whole** (no `pointer`), for item 3 or in envelope-aggregation mode,
+  the envelope is graded on its **own top-level `status`** — which the
+  producer derived conservatively from both sides (`violations` if either
+  engine found any, `clean_partial` if either side is partial, `not_checked`
+  when a side reached no verdict, `clean` only when both are clean). `clean`
+  renders `met`; every other verdict renders the ordinary `unmet` reasons
+  (`check_failed`, `partial_coverage`, `nothing_checked`), never
+  `unrecognized_envelope`.
+- **A cross-check run never gets credit a single-engine run would be
+  refused.** A `--rules` subset declared by *either* embedded side withholds
+  full-deck credit (`partial_coverage`), and `coverage.nothing_checked: true`
+  on either side refuses the citation (`nothing_checked`) — the projection
+  the grader applies reads those per-engine inputs per engine, not from the
+  top level where a cross-check envelope does not carry them.
+- **A `met` citation discloses what was actually graded**, in
+  `citation.drc_crosscheck`: each engine's own `status`, the
+  `comparison.state`, and each side's three item-3 `coverage` fields
+  (`layers_in_stream_without_rules`, `rules_skipped`, `deck_scope` — the same
+  fields the single-engine `citation.coverage` quotes, per engine). The
+  ordinary `citation.coverage` quotes the curated side's, as before.
+  Disclosure only, never graded on.
+- **Envelope aggregation discloses the same block** (issue #6123): a
+  cross-check envelope read through `checks[]` carries the identical
+  `drc_crosscheck` object on `checks[].detail`, so a failing check whose
+  violations came from the native side no longer reads as
+  `violation_count: 0` with nothing naming the engine. `violation_count`
+  itself stays the curated side's — the two sides' `violations[]` are
+  deliberately not unioned (the `agree_violations` groups describe the same
+  geometry from both decks). Absent from a single-engine check's `detail`.
+- **A native side that is absent** (`reports.native: null` — the engine was
+  unavailable or failed) grades `unmet` on the envelope's own
+  `status: "not_checked"` and discloses `engines.native: null`, so neither
+  the citation nor the aggregation-mode `detail` implies a two-engine claim.
+- **`pointer` still selects one side.** `{"file": …, "pointer":
+  "/reports/curated"}` grades the curated side as a standalone `drc`
+  envelope — the long-standing pointer contract — with `citation.pointer`
+  recording that only one side was graded. Citing the whole file is the
+  both-engines verdict; before #5815 the side pointer was the *only* way to
+  cite a cross-check at all, and it reported a curated-side `clean` against
+  a file whose own top-level `status` was `violations`.
+
+Provenance (and the `content_hash` staleness gate) read the curated side's
+`provenance`, which the producer's identity gate guarantees matches the
+native side's for any committed envelope — a cross-check whose two sides
+hashed different layouts or resolved different PDKs is refused at production
+time and never written.
+
+### Citing an object in the artifact store (issue #4063)
+
+Evidence too large for git can live in the fleet artifact store, with only a
+manifest committed ([`artifact.md`](artifact.md)). It is cited through the
+existing command-backed entry, not a new shape: the command is `klt artifact
+get <manifest>#<sha256|name> -o -`, which writes the bytes to stdout only after
+they re-hash to the manifest's digest, and `pointer` works on it as above.
+A missing or mismatched object leaves stdout empty and exits non-zero, so the
+item renders `unmet` with `command_failed`.
+
+**The offline form for a `yield` samples companion (issue #5963).** Running
+a broker fetch at grade time makes every grade a network operation, so a
+freshness gate that must re-grade offline (CI runners, air-gapped re-grades)
+cannot use it. For the one companion `klt signoff` itself hashes — a `klt
+yield` report's `samples` document — there is a committed, broker-free
+alternative on the **file-backed** entry:
+
+```json
+{
+  "file": "block/yield/yield.json",
+  "content_hash": "sha256:<recorded sha256 of the samples document>",
+  "artifact_manifest": "manifests/artifacts/bench-20261115-172039-abc.manifest.json",
+  "artifact_member": "bench/20261115-172039-abc/mc-samples.json"
+}
+```
+
+The envelope stays committed and file-backed — the verdict is still read
+from it, never from the store — and only the large samples companion is
+pinned through the store manifest. When (and only when) the samples file
+cannot be hashed from disk, the grader reads the committed
+`*.manifest.json` (the same manifest reader `klt artifact verify` uses),
+finds the named member — `artifact_member`, or by default the entry whose
+`name` matches the report's own `samples` reference (exact, else a single
+basename match) — and takes its recorded `sha256` as the live hash the
+`content_hash` pin compares. The citation discloses this honestly:
+`content_hash_basis: "artifact_manifest"` and `input_verified: null` (the
+bytes were not read). The text report's `input:` line says it used the
+sha256 recorded for the member in the committed store manifest and did not
+read the artifact itself. Use `klt artifact get`/`verify` for a byte-level
+check. Nothing here needs a broker, an environment variable or a network:
+the grade stays a pure function of the git tree. A store manifest that is
+unreadable or invalid, a member that is missing, duplicated by name, or
+ambiguous by basename leaves the hash unresolved with a named
+`content_hash_unresolved["reason"]` — a pinned entry then renders `unmet`
+(`unverifiable_provenance`), never a guess and never an exception. A
+non-string `artifact_manifest`/`artifact_member` or an empty `artifact_manifest`
+fails closed (`invalid_evidence`) for that item. Command-backed entries also render
+`invalid_evidence` if they declare either store-pin key.
 
 ### The declared partition boundary (issue #2278)
 
@@ -1135,6 +1757,90 @@ reduction — tier, counts, and what is blocking — and already directs a
 reader to the block's own `--manifest` report, which carries the
 declaration in full.
 
+### The declared upstream source (issue #6972)
+
+A repo can assemble a design from blocks **consumed from other repositories
+at pinned commits**: the consumer commits the block's evidence reports and
+a small pin record (repo URL + commit), but not the block's design
+sources. Before this field, nothing `klt signoff` read recorded that
+binding — the report said `block:`/`kind:` and nothing distinguished
+"every cited artifact was produced in this repo" from "the block's sources
+live in another repository at a commit only a non-graded local file
+records", and a pin bump staled nothing the grader reads.
+
+`upstream_source` is where that declaration lives:
+
+```json
+{
+  "block": "sky130-bandgap",
+  "kind": "analog",
+  "upstream_source": {
+    "repository": "https://github.com/2AMLogic/example-blocks",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "evidence": {"3": "drc.json", "4": "lvs.json"}
+}
+```
+
+It is **reported, never graded** — the same treatment "The declared
+partition boundary" above describes. `klt signoff` never contacts the
+remote, reads no consumer lockfile, and attests nothing about whether the
+cited evidence was *generated* from the declared commit; it records the
+pin so the report of record names the upstream revision its evidence
+belongs to. Declaring one moves no item's `status` and no block's `tier`,
+and a manifest declaring none renders exactly the report it rendered
+before this field existed.
+
+The object describes the design sources for the **whole block**, so it
+applies to every block kind (unlike `partition_boundary`, which is
+`"mixed-signal"`-only) and echoes **once**, at the top level of the
+report — on no `items[]` row. The fleet roll-up row carries the same
+object under its own `upstream_source`, beside the row's `source` — which
+stays what it always was: the local manifest path, or `null` for an
+inline manifest, the locator for the *pin record*, while
+`upstream_source` is the locator for the *design sources the pin names*.
+
+`--format text` prints it once, under the `block:`/`kind:` header (and as
+an `upstream:` line on the roll-up row, in fleet mode):
+
+```
+$ klt signoff --manifest manifest.json --format text
+block: sky130-bandgap  kind: analog
+upstream source: https://github.com/2AMLogic/example-blocks @ 0123456789abcdef0123456789abcdef01234567
+tier: none
+T1: 2/11 items met
+```
+
+**The staleness story.** The declaration is part of the claim a committed
+report records. When the consumer bumps its pin and lands new evidence, it
+updates the manifest's `upstream_source` too, and `--check` re-grading the
+old report against the updated manifest returns `"drifted"` (exit `3`)
+naming `upstream_source.commit` (or `upstream_source.repository`; on a
+fleet roll-up, `blocks[].upstream_source.commit`) even with the evidence
+files held fixed — which is exactly how a report graded against one
+upstream revision is told apart from one graded against another. A
+pre-feature report still matches a manifest that omits the declaration:
+an absent field is compared as absent on both sides.
+
+Out of scope, deliberately: remote Git access, discovery of
+consumer-specific lockfiles, and attestation that evidence was generated
+from the declared commit. A change solely in a separate pin file is
+invisible until the consumer updates its manifest — the consumer updates
+the declaration when it bumps the pin.
+
+Rules, and why each one is a refusal rather than a silent drop:
+
+| Manifest | Result |
+|---|---|
+| Field omitted, or `null` | Nothing declared. No `upstream_source` key anywhere in the report — an undeclared manifest renders exactly the report it rendered before this field existed, so `--check` reports no drift on an upgrade alone. |
+| A well-formed pair | Accepted. `repository` is any non-empty string locator; `commit` is a full hexadecimal Git commit ID — 40 hex digits, or 64 in a SHA-256 repository — matched case-insensitively and reported lowercase, so two manifests naming the same commit in different case render the same report bytes. |
+| A non-object, an incomplete pair, a blank/non-string `repository`, or a branch/tag/shortened SHA in place of a full commit ID | **Error** (exit `1`), naming `upstream_source.<member>`. A branch or tag is a *moving* reference, not a pin — a report recording one would silently re-point itself on every upstream push. |
+| A member other than `"repository"`/`"commit"` | **Error**. A typo'd member name would otherwise vanish from the report with no signal. |
+
+Additive per [`../json-contract.md`](../json-contract.md): the field is
+present only when the manifest declares a pin, so no `schema_version`
+bump.
+
 ### Items 1, 2, 9, and 10: bind them to an audited artifact
 
 **These four items have no `klt` verb behind them.** Items 3-7 each have a
@@ -1146,8 +1852,9 @@ repository *contains*, not about a check that can be run.
 
 **The evidence the grader can read: an artifact-anchored generic envelope**
 (issue #2718). A `generic` envelope can be cited for one of these four when
-it is bound to the artifact that was audited. All four conditions below
-must hold, or the row is `unmet`:
+it is bound to the artifact that was audited. The first four conditions
+below must hold, or the row is `unmet`. The fifth applies only to an item-1
+or item-2 attestation that makes a regeneration claim:
 
 | Condition | Where | If missing or wrong |
 | --------- | ----- | ------------------- |
@@ -1155,22 +1862,91 @@ must hold, or the row is `unmet`:
 | The envelope names the audited artifact in `provenance.input.path` (a string resolved beside the envelope, or a `{"path", "scope": "repo"}` object) and records its `provenance.input.content_hash` | envelope | `unanchored_evidence` |
 | The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
 | The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` — including a `scope: "repo"` path over a `.git`-less copy of the tree, which [`--repo-root`](#grading-outside-a-git-checkout---repo-root) exists to name a root for |
+| **Items 1 and 2, only when claimed** (issue #2887): `provenance.regeneration.regenerated_hash` equals the hash the artifact re-hashed to | envelope | differs: `stale_artifact`; malformed block: `unanchored_evidence`. See "Items 1 and 2: attesting that the artifact was regenerated" below |
+| **Item 1, attested envelopes only** (issue #5640): the envelope binds the set its own `attestation.checks[]` enumerates — `provenance.input.paths` is present whenever a `present` check names a file | envelope | binds its inventory alone (the pre-0.9.0 shape, no `paths` key): `provenance_narrower_than_attested`, with `detail` naming `attested_members` and `bound_paths` |
+
+**Which condition failed** (issue #5124). An `unanchored_evidence` binding
+refusal carries `detail.missing`, a list drawn from the fixed vocabulary
+`t1_item`, `provenance.input.path`, `manifest content_hash` (every missing
+field, in that order). When `manifest content_hash` is listed, `detail` also
+carries `manifest_entry` — `{"file": "<path>", "content_hash": "sha256:<hex>"}`,
+the entry shape to cite, using the hash of the resolved artifact. Additive:
+`wrong_item` and every other reason keep their detail shape, and a `met` item
+gains no `detail`.
+
+**What a stale pin's `detail` names (issues #4795, #4837, #5837).** A
+citation graded `stale_evidence` over a pin mismatch carries
+`detail.hash_check` — `{field, expected, actual, match}`, `expected` being
+the manifest's pinned `content_hash` and `actual` the resolved hash — plus a `hint` stating which hash `content_hash` must
+be. When the envelope records what was hashed (`provenance.input.path` /
+`paths`, or a yield report's samples document), `compared_against` names
+it. For a store-pinned yield report, it names the manifest and selected member
+as `manifest#member`. An envelope whose `provenance.input` carries only `content_hash`/`role`
+(the shape `klt drc` and the other provenance-backed kinds emit) has
+nothing to name there, so `compared_against` is absent and the hint states
+the pin must be the envelope's recorded input hash; when the pin instead
+equals the cited envelope file's own sha256 — hashing the record, not what
+the record is about — `detail.pin_is_envelope_file_hash` is `true` and the
+hint leads with that.
+
+**Item 1's coverage floor** (issue #5640). `klt signoff --attest 1` binds
+every inventory member (`provenance.input.paths`, below), but a pre-0.9.0
+producer bound the inventory file alone — and the gap is invisible in a
+`met` row, because the inventory is still pinned and its hash still matches.
+The grader therefore reads the breadth off the envelope itself: an item-1
+envelope whose `attestation.checks[]` enumerates at least one `present`
+file while `provenance.input` declares no `paths` key grades
+`unmet`/`provenance_narrower_than_attested`. The envelope proves, in its
+own bytes, that it knew about members it pinned nothing for. `detail`
+carries `missing: ["provenance.input.paths"]`, `attested_members` (how many
+files the envelope enumerated) and `bound_paths` (`0`). The remedy is one
+re-attest with klt ≥ 0.9.0 (`klt signoff --attest 1 --inventory ... -o ...`)
+plus the manifest re-pin. Hand-written envelopes without an `attestation`
+block, and attestations whose `checks[]` list no `present` file, enumerate
+nothing and are not refused; a present-but-malformed `paths` key keeps its
+own `unanchored_evidence` refusal (below); and items 2, 8, 9 and 10 bind a
+single artifact by design, so the floor never applies to them.
+
+`klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
+`manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
+to its JSON result and prints it in text mode; it is not written into the
+`--output` envelope. Paste it into the manifest to pin the attestation, or let
+[`--repin`](#re-pinning-a-stale-hash---repin-issue-5527) write it there for you
+— after an inventory change, re-attesting alone leaves the manifest's old pin
+in place and the item grades `stale_evidence`. **`--attest --check` reporting
+`match` says nothing about the manifest pin**: it compares the committed
+envelope against the inventory and has no manifest in hand, so it can answer
+`match` while the manifest grade is already broken.
 
 What each item binds:
 
 | Item | Bind to (the artifact `provenance.input.path` names) |
 | ---- | ---------------------------------------------------- |
-| **1** Design sources | The design-source inventory: a committed list of the schematic/RTL sources and the derived netlist, or the netlist itself. |
+| **1** Design sources | The schematic/RTL sources **and** the derived netlist, as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) — or, for a single file, the netlist itself or a committed inventory of the sources. |
 | **2** Layout | The committed GDS/OASIS stream. |
-| **9** Testbenches shipped | The testbench inventory: a committed list of every claimed measurement's testbench and its cold-start invocation. |
-| **10** Repo hygiene | The hygiene audit record: the CI workflow file, or a committed checklist covering README, spec table and license. |
+| **9** Testbenches shipped | The testbench files themselves as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) — or, for a single file, a committed inventory of every claimed measurement's testbench and its cold-start invocation. |
+| **10** Repo hygiene | The hygiene files as a [set](#binding-a-set-of-artifacts-provenanceinputpaths) (CI workflow, README, spec table, license) — or, for a single file, the CI workflow or a committed checklist covering them. |
 
-The `status: "pass"` inside the envelope is still the author's own
-assertion; `klt signoff` does not re-audit a testbench list. What the
-binding adds is that the attestation names the exact bytes it was made
-about, that it cannot be cited for any other item, and that any edit to
-those bytes since the attestation turns the row `unmet`. A `--check` re-run
-also reports that as drift.
+For items 1, 9 and 10, produce this envelope with `klt signoff --attest`
+(issue #2844, see "Attesting items 1, 9 and 10" below): its `status` is
+derived from item-specific checks it ran and lists in
+`attestation.checks[]`, and the met citation's `artifact_binding` carries an
+`attestation` block naming the producer and the check counts. A
+hand-written envelope is still graded by the same four conditions, but its
+`status: "pass"` is only its author's assertion, and its binding carries no
+`attestation` block — which is how a reader tells the two apart. For item 2
+the bound artifact is the committed stream itself. In every case the binding
+adds that the attestation names the exact bytes it was made about, that it
+cannot be cited for any other item, and that any edit to those bytes since
+the attestation turns the row `unmet`. For a `--attest` envelope that
+includes the inventory's listed `sources`, `derived` and other `present`
+files (issue #4197): each `attestation.checks[]` `present` entry's recorded
+`content_hash` is re-hashed against the file under the repo root (honouring
+`--repo-root`), so editing one without re-attesting is `stale_evidence`, and
+one that cannot be read from the grading context is `unverifiable_provenance`.
+The `detail.artifact_binding.members` list names each drifted path; an
+untouched tree grades `met` with an unchanged report. A `--check` re-run also
+reports that as drift.
 
 A valid item-9 citation (`tb-inventory.json` written beside
 `testbenches.txt`):
@@ -1211,24 +1987,300 @@ Rejected examples:
   `unmet`/`stale_evidence`.
 - A bare characterization-style `generic` envelope with none of the binding:
   `unmet`/`unanchored_evidence`.
+- An item-1 attested envelope whose `provenance.input` binds only the
+  inventory (the pre-0.9.0 shape, no `paths`) while its
+  `attestation.checks[]` enumerate sources and derived files:
+  `unmet`/`provenance_narrower_than_attested` — re-attest with klt ≥ 0.9.0
+  and re-pin (issue #5640).
 
 Command-backed evidence follows the same rules. The binding is read from
 the command's stdout envelope, and a relative `provenance.input.path` is
 resolved against the entry's `cwd`.
 
-**Native envelopes are still accepted for these four, for compatibility,
-and they carry no information about the item.** Any recognised, passing
-native envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`sta`/
-`functional-verification`) still renders these items `"met"` exactly as
-before, **even when it is topically unrelated to the claim**. Citing the
-same clean `klt drc` report for item 3 and again for item 10 produces two
-`MET` rows. Such a citation has **no `artifact_binding` key**. That absence
-is the machine-readable difference between "a passing envelope was cited"
-and "the item is bound to an audited artifact", and text output says so
-on the row (`topic: not bound -- ...`). (`power`, `erc` and
-`place-and-route` citations are still refused for these items, as before.)
-Do not use a borrowed native pass to make these rows agree with a human
-audit. Bind the audited artifact instead.
+#### Binding a set of artifacts: `provenance.input.paths`
+
+> **Availability.** `provenance.input.paths` is **not** in `klt 0.7.0`; it
+> first ships in `klt 0.8.0`. A build without it ignores
+> `paths`, falls through to the single-`provenance.input.path` rule, and
+> grades a `paths`-only envelope `unanchored_evidence`. That is that build's
+> expected behavior, not a malformed envelope — pin `klt` to a release (or dev
+> build) that has the binding before relying on it.
+
+Item 1's claim is about a *set* — the schematic sources and the netlist
+derived from them — and items 9/10 are about a set of testbench or hygiene
+files. Binding only the derived artifact leaves source edits undetected;
+binding an author-written inventory leaves member edits undetected. Issue
+#3044 adds an optional `provenance.input.paths` for these: a non-empty list
+of members, each `{"path": <string | {"path", "scope": "repo"}>,
+"content_hash": "sha256:..."}`, with `path` resolved exactly as
+`provenance.input.path` is (including `--repo-root`). Members may also include
+an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
+or declared generator input.
+
+```json
+"input": {
+  "content_hash": "sha256:9b2e...",
+  "paths": [
+    {"path": "schematic/ota.sch", "content_hash": "sha256:11aa..."},
+    {"path": "netlist/ota.spice", "content_hash": "sha256:22bb..."}
+  ]
+}
+```
+
+`provenance.input.content_hash` is then the **combined digest** of the set,
+so the manifest pin (unchanged — pin that value) covers every member: the
+sha256 of the lines `<hex>  <path>\n`, one per member, where `<hex>` is the
+member's hash without its `sha256:` prefix and `<path>` is the path string
+as written in the envelope (for a `{path, scope}` member, its `path`),
+sorted bytewise by path. Order in the envelope does not matter. With
+coreutils, from the directory the paths are relative to:
+
+```sh
+printf 'sha256:'; sha256sum $(printf '%s\n' schematic/ota.sch netlist/ota.spice | LC_ALL=C sort) | sha256sum | cut -d' ' -f1
+```
+
+(`input_set_digest` in `klayout_tools.signoff` computes the same value.)
+
+Grading re-hashes every member:
+
+- any member that no longer matches, **or** a recorded combined digest that
+  is not the one the recorded member hashes produce (member hashes rewritten
+  without the digest): `unmet`/`stale_evidence`;
+- otherwise any member that cannot be found or read from the grading context
+  (including a `scope: "repo"` path with no `.git` and no `--repo-root`):
+  `unmet`/`unverifiable_provenance`, never `met`;
+- every member verified: `met`. The citation's `artifact_binding` gains
+  `members: [{"path", "content_hash", "status"}]` (`status` is `verified`,
+  `stale` or `unverifiable`) and its `path` is `null`. An unmet row carries
+  the same list as `detail.artifact_binding.members`, which names the drifted
+  member; text output lists `member <path>: <status>` and `--check` re-runs
+  report the drift.
+
+An empty or non-list `paths`, a member that is not an object, has no usable
+`path` or a non-string/empty `content_hash`, or two members naming the same
+path, render `unanchored_evidence`. A present-but-malformed `paths` never
+falls back to `provenance.input.path`; when both are well-formed, `paths`
+is the binding. A single-path attestation is unaffected and its citation has
+no `members` key.
+
+#### Items 1 and 2: attesting that the artifact was regenerated
+
+**What this checks.** An item-1 netlist or item-2 stream is usually
+generated: by `klt netlist` from a schematic, or by a layout generator. The
+binding above proves the attested bytes have not changed, but not that they
+are what the generator produces *now*. For that, an item-1/2 attestation
+may carry an optional `provenance.regeneration` block (issue #2887):
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `generator` | non-empty string | The command the attester's CI ran to regenerate the artifact. **Echoed, never executed.** |
+| `regenerated_hash` | `"sha256:<64 lowercase hex>"` | The hash of the bytes that run produced (or, with `hash_kind: "geometry"`, the geometry digest of them). |
+| `hash_kind` | `"bytes"` (default) \| `"geometry"` | What `regenerated_hash` is a hash *of*. Optional; absent means `"bytes"`, and existing envelopes grade identically (issue #3743). |
+
+The workflow: your CI regenerates the artifact into a scratch directory,
+hashes the result, and writes that hash into the attestation beside the
+committed artifact's own hash. `klt signoff` then compares the two:
+
+| Claim | Result |
+| ----- | ------ |
+| Absent, or `null` | Unchanged from the binding above. The row is `met`, and text output adds `regeneration: not claimed`. |
+| `regenerated_hash` equals the hash the bound artifact re-hashes to | `met`. The citation's `artifact_binding` gains `regeneration: {"generator", "regenerated_hash", "executed_by_klt": false}`. |
+| `regenerated_hash` differs | `unmet`/`stale_artifact`. The committed artifact is not what its generator produces. Regenerate it, commit it, and re-attest. |
+| Not an object, `generator` missing/empty/not a string, `regenerated_hash` not a `sha256:` digest, or `hash_kind` not `"bytes"`/`"geometry"` | `unmet`/`unanchored_evidence`. A claim that cannot be read is refused, so a typo can never pass as "not claimed". |
+
+The binding's own checks run first. If the committed artifact was edited
+after the attestation, the row is `stale_evidence` whatever the claim says.
+Items 9 and 10 bind inventories that have no generator, so their rows
+neither grade nor echo the block.
+
+When the item binds a set (`provenance.input.paths`, above), the bound hash
+is the set's combined digest, so `regenerated_hash` must equal that digest;
+the CI step should hash the regenerated set the same way.
+
+**Streams that embed a write time (`hash_kind: "geometry"`, issue #3743).**
+GDS/OASIS headers carry modification dates, so two regenerations of one
+layout differ byte-for-byte while their geometry is identical, and a byte
+hash can never be claimed. With `"hash_kind": "geometry"`, `regenerated_hash`
+is compared to the timestamp- and order-independent geometry digest
+(`layout_geometry_digest`: database unit, cells, shapes, instances) of the
+bound artifact instead. The bytes binding (`stale_evidence` for an edited
+artifact) still runs first. A bound artifact that is not a readable
+GDS/OASIS stream, or a set binding (`provenance.input.paths`; geometry is
+single-artifact only), is `unanchored_evidence` — a geometry claim never
+silently passes. The disclosure echoes `hash_kind: "geometry"` (the key is
+absent for byte claims). A geometry claim is never run by the opt-in
+generator execution, which compares bytes; it stays `executed_by_klt: false`.
+
+**Producing the value (issue #5551).** `klt stats --format json` reports the
+same digest as `klt stats --geometry-digest`'s `geometry_digest`, so the supported way to fill
+`--regenerated-hash` for a geometry claim is to run it on the **regenerated**
+stream:
+
+```bash
+klt stats --geometry-digest --format json /tmp/scratch/top.gds | jq -r .geometry_digest
+```
+
+See [`docs/cli/stats.md`](stats.md) → "Geometry digest". Two values that look
+like this one are **not** it: the envelope's own
+`provenance.input.content_hash` (a raw-byte SHA-256, which is what
+`hash_kind: "bytes"` compares) and `klt diff`'s `canonical_hash` (a separate
+geometry-level digest with a separate value — substituting it grades
+`stale_artifact`).
+
+**What this does not check.** By default `klt signoff` **never runs**
+`generator`. That holds for file-backed and command-backed evidence alike, and
+it is why `executed_by_klt` is `false`. The regeneration is the attester's own
+assertion, at the same honesty level as the envelope's `status: "pass"`.
+What `klt` adds is that the claim is pinned to the exact bytes it was made
+about and that the two hashes agree. It does not judge whether the generator
+is the right one, whether it is correct, or whether the artifact is
+topically relevant to the item. A nondeterministic generator (a timestamp in
+its output, for example) reads as `stale_artifact` on every run, and this
+check cannot tell that apart from a stale artifact, so make the generator
+deterministic before claiming regeneration.
+
+Without the opt-in below, that is the whole behaviour. `klt signoff` can also
+run an *operator-approved* generator itself; see the next section.
+
+##### Executing approved generators (opt-in, issue #3289)
+
+`klt signoff --manifest M --allow-generator-exec --generator-approvals FILE`
+(default **off**) runs the claimed `generator` on the existing Spot batch
+lifecycle (the same submit, launch, poll and collect path as
+`klt sim --backend batch` and `klt netlist --backend batch`) and byte-compares
+the collected output with the committed artifact. `$KLT_SIGNOFF_GENERATOR_APPROVALS`
+may name the approvals file instead of the flag. Opting in without approvals is
+an error, and approvals without the opt-in are refused.
+
+**Trust boundary.** This is a *trusted-code* policy, not isolation. The job
+harness runs the approved command as root, with outbound network and the job's
+S3 role; a Spot VM does not make untrusted code safe. Only code the operator
+approved, by content hash, outside the manifest, ever runs. Arbitrary
+untrusted generators are out of scope. There is no local fallback: `klt` never
+runs the generator on the grading host. No fleet, forge, LLM or submitter
+credential is placed in `job.json`.
+
+**How approval is established.** The manifest and the attestation only
+*request* a generator by its `regeneration.generator` string; they cannot add,
+widen or approve anything. The approvals file is operator configuration kept
+outside the submitted manifest:
+
+```json
+{
+  "schema_version": 1,
+  "approvals": [
+    {
+      "id": "ota-netlist",
+      "interpreter": "python3",
+      "script": "scripts/gen.py",
+      "script_sha256": "sha256:<64 hex of the script bytes>",
+      "allowed_arguments": [["--seed", "1"]],
+      "artifact": "netlist/ota.spice",
+      "output": "build/ota.spice",
+      "pdk": "sky130A",
+      "timeout_s": 600,
+      "include": ["scripts/**", "src/**"]
+    }
+  ]
+}
+```
+
+The requested command runs only if its whole argv equals
+`[interpreter, script, *one allowed argument list]` and the bound artifact
+equals `artifact`. An interpreter name alone (`python3`, `bash -c ...`), an
+unapproved script, an unapproved or extra argument, or a different artifact
+matches nothing. `script_sha256` is checked against the script as shipped in
+the git-tracked input tree, so a script edited since approval is refused before
+anything is submitted. Only git-tracked files (narrowed by `include`) are
+uploaded.
+
+**Grading.** With the opt-in absent, or no approval matching, nothing is
+submitted and the row is exactly the nonexecuting attestation above
+(`executed_by_klt: false`).
+
+| Outcome of the approved run | Row |
+|---|---|
+| Clean exit, collected output byte-identical to the committed artifact | `met`; `regeneration` gains `executed_by_klt: true` and an `execution` block |
+| Output differs | `unmet` / `stale_artifact`, with `detail.generator_execution` |
+| Generator failure, timeout, missing or incomplete output, incompatible runner, failed collection, submit failure, unconfigured batch backend, script changed since approval | `unmet` / `check_errored`, `detail.generator_execution.failure` naming the cause; never `met`, `executed_by_klt: false` |
+
+`execution` records the recipe id, the command, the script path and hash, the
+artifact path and committed hash, the output hash, an input-tree digest and
+the remote job (`job_id`, instance, lifecycle). It also states that generator
+correctness and the artifact's topical relevance are not checked. A
+nondeterministic generator reads as `stale_artifact`.
+
+**`--check` of an executed report.** Re-grading submits a new Spot job, so the
+`remote` block (`job_id`, instance, lifecycle, `elapsed_seconds`, ...) differs
+on every run. `--check` therefore ignores the whole `execution.remote` block
+(and `detail.generator_execution.remote` on a failed row); it is neither drift
+nor `doc_drift`. Everything else stays compared, so a changed `output_hash`,
+`script_sha256`, `input_tree` or `command` still reports `drifted`. Pass the
+same `--allow-generator-exec --generator-approvals` to `--check` as to the
+render: without them the check re-grades the nonexecuting attestation, so
+`executed_by_klt` flips from `true` to `false` and the check reports
+`drifted`.
+
+**Limitations.** Published-image tool compatibility, fleet capacity and live
+execution and collection receipts have not been established. Fixtures and a
+fake transport exercise this code; it does not claim deployed generator
+support. Those remain a separate execution hold.
+
+A valid item-1 attestation (`design-sources.json` beside
+`netlist/ota.spice`), produced by a CI step that ran the generator and
+hashed its output:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "generic",
+  "status": "pass",
+  "t1_item": 1,
+  "summary": "netlist regenerated from schematic/ota.sch; byte-identical",
+  "source": "netlist/ota.spice",
+  "provenance": {
+    "klt_version": "0.5.0",
+    "klayout_version": "0.30.10",
+    "pdk": "sky130A",
+    "deck": null,
+    "input": {"content_hash": "sha256:9b2e...", "path": "netlist/ota.spice"},
+    "regeneration": {
+      "generator": "klt netlist schematic/ota.sch -o netlist/ota.spice",
+      "regenerated_hash": "sha256:9b2e..."
+    }
+  }
+}
+```
+
+This renders `MET`, and the text output reads:
+
+```text
+        bound: T1 item #1 -> netlist/ota.spice (content_hash=sha256:9b2e...)
+        regeneration: sha256:9b2e... matches the bound artifact; generator `klt netlist schematic/ota.sch -o netlist/ota.spice` was attested, not run by klt (generator correctness and topical relevance not checked)
+```
+
+Rejected example: the schematic was edited and CI regenerated the netlist,
+but the new netlist was not committed. CI records `"regenerated_hash":
+"sha256:51d0..."` while `netlist/ota.spice` still hashes to `sha256:9b2e...`,
+so the row is `unmet`/`stale_artifact`. A `--check` re-run of a committed
+report reports that change as drift (the item's `status`/`reason` and the
+citation move), exactly as it does for the binding above.
+
+**Native envelopes: still accepted for item 2, no longer for items 1, 9
+and 10** (issue #2844). A passing native envelope carries no information
+about any of these four items. For item 2 any recognised, passing native
+kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`sta`/
+`functional-verification`) still renders the row `"met"` exactly as before,
+**even when it is topically unrelated**. Such a citation has **no
+`artifact_binding` key**, which is the machine-readable difference between
+"a passing envelope was cited" and "the item is bound to an audited
+artifact", and text output says so on the row (`topic: not bound -- ...`).
+For items 1, 9 and 10, which now have a producer (`--attest`), a native
+citation renders `unmet`/`wrong_kind`: an unrelated clean `klt drc` report
+can no longer turn "Repo hygiene" green. (`power`, `erc` and
+`place-and-route` citations are refused for all four, as before.) Manifests
+that relied on a borrowed native pass for items 1, 9 or 10 must switch to an
+attested envelope, or leave the row uncited.
 
 **Leaving them uncited is still honest.** An `UNMET`/`no_evidence` row is
 an accurate statement that no check backs the claim, which is exactly the
@@ -1247,6 +2299,1294 @@ names"](#which-unmet-item-the-blocker-names-issues-2178-2203).
 Nothing about how the four are *graded* changes: they are still `unmet` when
 uncited, and a block still reaches `tier: "T1"` only once every T1 item —
 these four included — is `"met"`.
+
+### Attesting items 1, 8, 9 and 10 (`--attest`, issues #2844, #4311)
+
+Item 2 is attested from a layout stream rather than an inventory — see
+"Item 2: attest a committed layout stream" below.
+
+> **Availability:** `--attest` and `--inventory` first ship in `klt` **0.8.0**
+> (PyPI). Release-pinned installs of 0.7.0 and earlier fail with
+> `unrecognized arguments`.
+
+`klt signoff --attest {1,8,9,10} --inventory FILE` is the producer for the
+artifact-anchored envelope above. It reads a versioned **attestation
+inventory**, runs the mechanical checks that inventory declares for the
+item, and emits a `generic` envelope whose `status` is `"pass"` only when
+every check passed. Items 8, 9 and 10 pin the inventory itself
+(`provenance.input.path` = `{"path": "<repo-relative>", "scope": "repo"}`,
+`provenance.input.content_hash` = its raw-byte SHA-256), so `--manifest`
+grades them through the existing binding rules with no special path.
+
+**Item 1 pins its whole input set** (issue #4764): `provenance.input.paths`
+holds one `{"path": {"path": "<repo-relative>", "scope": "repo"},
+"content_hash"}` member per inventory `sources` entry, per `derived` entry,
+and the inventory file itself, sorted by path; `provenance.input.content_hash`
+is the combined set digest (see "Set binding" above), and
+`provenance.input.path` is not emitted. A source, derived or inventory edit
+therefore renders the manifest row `unmet` / `stale_evidence` (the changed
+member is named in `detail.artifact_binding.members`) without running
+`--attest --check`. A member that cannot be read is left out of the set; its
+`present` check already fails the attestation. A `{"glob": ...}` source
+entry contributes its **expanded** members to `provenance.input.paths` and
+the combined set digest: adding a matching file changes
+`provenance.input.content_hash`, so a manifest citing the envelope must be
+re-pinned after every such addition (the behaviour the "Pin change" note
+below describes).
+
+> **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
+> evidence `content_hash` to the new `provenance.input.content_hash`; the old
+> inventory-only hash now grades `stale_evidence`.
+>
+> **Pre-0.9.0 envelopes.** An item-1 envelope produced before this change
+> (klt < 0.9.0) binds its inventory alone while still enumerating the same
+> members in its `attestation.checks[]`; `--manifest` grades it
+> `unmet`/`provenance_narrower_than_attested` (issue #5640). The remedy is
+> the same re-attest the pin change above calls for.
+
+#### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
+
+Every `hygiene` path is hashed as raw bytes (`sha256-raw-bytes`) and bound
+into the envelope, so any byte change to a listed file turns the committed
+envelope stale (`stale_evidence`, or a `--check` diff) — unless the entry
+declares `attest: "yaml"` (two paragraphs down), which binds the file's
+canonical parse instead.
+
+**List only repo-owned evidence:** the README, the spec table, the LICENSE,
+and a CI workflow whose content the repo owner wrote. **Do not list paths
+that a Loom or Repo-Skills resync rewrites**: `.gitignore`, anything under
+`.loom/` or `.claude/`, and `CLAUDE.md` (its managed marker blocks are
+rewritten on every resync). Those files are tooling, not hygiene evidence,
+and listing one makes `signoff` go red after each resync with no design
+change. The rule is about resync-managed *content*: a repo-owned workflow
+that a resync does not touch may still be listed even if Loom also installs
+other workflows. `--attest` does not hash "the file minus managed blocks".
+If the file's *presence* is what you want to attest and its content churns
+independently, list it presence-only instead (next paragraph); if it is a
+YAML workflow whose *behaviour* you want to pin while comments and
+reformatting churn, list it `attest: "yaml"` (the paragraph after next);
+otherwise list fewer files.
+
+**Presence-only entries (issue #5615).** A `hygiene` entry may be the object
+form `{"path": "<repo-relative>", "attest": "presence"}` alongside a bare
+string (mixing is fine). `"attest": "content"` is the explicit default, and a
+bare string keeps hashing the file. A presence-only entry's `present` check
+carries `"attest": "presence"` and **omits** `content_hash` (the key is absent,
+never `null` -- `null` marks a missing file), so editing the file leaves
+`--attest --check` at `match` and its `--manifest` row `met` rather than
+`stale_evidence`. The check still fails if the file is missing. Flipping an
+existing entry between `content` and `presence` changes the envelope, so it is
+drift until re-attested once. The option is accepted only on item 10
+`hygiene`: item 1 `sources` are re-hashed into the input binding regardless,
+and an item 9 bench *is* the attested file, so `attest` there is refused
+(exit `1`), as is an unknown key, an unknown value, or an entry without `path`.
+
+**Canonical-YAML entries (issue #5862).** A `hygiene` entry may declare
+`{"path": "<repo-relative>", "attest": "yaml", "select"?: "<dotted path>"}`.
+The entry's `present` check binds the file by its **canonical parse** under
+the named algorithm `sha256-canonical-yaml-v1` (parsed with `yaml.safe_load`,
+mapping keys type-tagged so a workflow's YAML-1.1 boolean `on:` key sorts
+beside string keys, then serialised with sorted keys and compact separators):
+a comment-only, whitespace-only, key-reorder or anchor/alias refactor of the
+file is not drift; drift is a change to the canonical representation of the
+selected YAML content. In v1, date/datetime values normalize to ISO strings
+and `!!binary` values to `"bytes:<hex>"` strings of the decoded bytes; equal
+canonical representations share a digest, so a date scalar `2026-11-15`
+and the string `"2026-11-15"` are not distinguished, nor are
+`!!binary "YWI="` and the string `"bytes:6162"`. That is the right pin for
+`.github/workflows/ci.yml` — the file that *runs* the
+attestation, where `presence` could not catch a `continue-on-error: true`
+added to the signoff job, a removed step or a changed command. `select`
+(optional) hashes only the named subtree (`jobs.signoff`, say), so edits to
+unrelated jobs are not drift either; a segment that is absent, or an
+intermediate that is not a mapping, is an error at attest time (exit `1`),
+never a silently empty hash. A `yaml` check records `attest`, `select`
+(when given) and its own `hash_algorithm` beside `content_hash`, plus the
+raw bytes as an informational `raw_content_hash`: when the raw bytes differ
+but the canonical hash matches, `--attest --check` still reports `match`
+(exit `0`) and adds a live `notes` entry (text: a `[NOTE]` line) — the note
+is not drift, and `raw_content_hash` is excluded from the diff. The
+`--manifest` re-hash (issue #4197) re-hashes the canonical form too, so the
+row stays `met` for a comment edit and `stale_evidence` for a semantic one.
+An unparseable or multi-document file is an attest-time error (exit `1`)
+naming the path — never a fallback to byte-hashing — and a build that does
+not read `attest: "yaml"` refuses it explicitly (exit `1`, naming the
+accepted values) rather than byte-hashing it. As with `presence`, the option
+is accepted only on item 10 `hygiene` (items 1/9 refuse it, exit `1`),
+`select` is accepted only with `attest: "yaml"`, and flipping an entry's
+mode or `select` is drift until re-attested once. A dotted `select` cannot
+name a key containing a `.` or the boolean `on:` key, and PyYAML keeps the
+last duplicate key, so an edit to a shadowed duplicate can be invisible to
+the canonical hash — accepted limitations of a parse-based pin.
+
+**Listed files must be stable by construction (issue #5603).** A `hygiene`
+path is bound by its full bytes, so a listed file must change only when the
+owner means to change the evidence. A file that is also a living status
+surface — a README carrying a status paragraph, current counts, or "what's
+new" notes — churns on routine documentation passes, and each such edit
+re-renders the envelope stale with no agent able to discharge it (the
+re-attest rule below). Keep that content in an uninventoried file (for
+example `STATUS.md`) and link to it; the inventoried README carries only the
+durable evidence — what the block is, the spec table, how to reproduce
+results — which is exactly what item 10 grades
+(`docs/design-evidence-tiers.md`).
+
+**No durable-portion binding (issue #5603).** `--attest` cannot pin part of
+a file. Marker-region hashing and a companion-checklist inventory were both
+considered and rejected: a region hash reintroduces exactly the partial
+drift `--check` exists to catch, and a companion checklist would displace
+the README as the pinned artifact item 10 names. The answer to a churning
+file is the same as for resync-managed paths above — list fewer files: move
+the churn out and list a stable file instead, or list the file presence-only
+when its existence is all you attest.
+
+**Globs make the resync rule easier to violate by accident (issue #5614).**
+A `{"glob": ...}` hygiene entry expands to every tracked file matching it at
+attest time — including files added later — so a pattern wide enough to
+reach resync-managed content (`.loom/`, `.claude/`, `.gitignore`,
+`CLAUDE.md`) will start binding tooling files the moment a resync adds one,
+and the envelope goes red on every resync. Keep hygiene patterns scoped to
+repo-owned directories (`records/*.md`, not `**/*.md`), and re-check a
+glob's expansion (`git ls-files` with the same pattern) when the covered
+directory gains kinds of files, not just more of them. The expansion itself
+is deterministic — tracked files only — so the drift an added file causes is
+the intended signal: re-attest (owner action, below) or narrow the pattern.
+
+**Migration for existing item 10 inventories:** remove resync-managed paths
+from `hygiene`, then re-attest once and commit the new envelope
+(`klt signoff --attest 10 --inventory <inv> -o <envelope>`). That re-attest
+is the owner's action (next paragraph).
+
+**Provenance is the PR record.** The envelope deliberately carries no actor
+or timestamp field (`provenance` records only `klt_version`,
+`klayout_version`, `pdk` and `deck`): a self-reported name is unverifiable,
+and a timestamp would break the byte-deterministic `--check` re-diff. Who
+attested and when is the git/PR record of the commit that changed
+`manifests/envelopes/item*.attest.json`. Re-attesting is a sign-off action
+for the repo owner. An agent must not regenerate an envelope to clear a red
+`signoff` or CI check, and an envelope diff inside an unrelated PR is a
+review red flag. If a stale envelope is blocking CI, escalate it to the
+owner instead. The rule bars exactly those two things (issue #5603):
+regenerating an envelope to clear a red check, and an envelope diff inside
+an *unrelated* PR. A PR whose declared subject **is** the hygiene-evidence
+edit may carry the re-attested envelope: an agent may open such a PR, but
+the owner must review and approve it, the PR body must name the hygiene
+files changed, and an agent must not merge it itself.
+
+#### Item 2: attest a committed layout stream (`--input`, issue #4188)
+
+**`--attest 2`, `--input`, `--generator`, `--regenerated-hash` and
+`--hash-kind` first ship in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse
+`--attest 2` as an invalid choice (exit `2`), so a release pinned that far
+back cannot mint or re-check an item-2 envelope — see
+[Minting above the grading pin](#minting-above-the-grading-pin) below.
+
+Item 2 (Layout) needs no inventory — the committed stream is the artifact
+(an optional inventory of declared checks is described
+[below](#item-2-declared-checks-optional---inventory-issue-4767); it is
+also the only way an item-2 envelope can carry a scope `description`):
+
+```bash
+klt signoff --attest 2 --input layout/top.gds -o evidence/item2.json \
+    [--generator "python gen.py -o layout/top.gds" \
+     --regenerated-hash sha256:<64 hex> [--hash-kind {bytes,geometry}]]
+```
+
+The stream must be a regular file (not a symlink) inside a git repository.
+The envelope pins it as `provenance.input` (`{"path": ..., "scope": "repo"}`
+plus the raw-byte SHA-256) and records the producing KLayout version in
+`provenance.klayout_version`. `attestation.checks[]` lists, in order:
+
+| Check | Passes when |
+| ----- | ----------- |
+| `stream_readable` | the stream loads in `pya` |
+| `top_cell_non_empty` | there is at least one top cell and every top cell has a non-empty bounding box |
+| `dbu_on_grid` | the database unit is positive and divides one micron into a whole number of units (e.g. `0.001`) |
+
+`status` is `pass` iff all three pass; otherwise the command exits `3` and
+writes no `--output`. `--generator` and `--regenerated-hash` must be given
+together and populate `provenance.regeneration` (`--hash-kind geometry`
+compares the timestamp-independent geometry digest instead of raw bytes;
+produce that value with `klt stats --geometry-digest --format json <regenerated stream> | jq -r
+.geometry_digest` — **not** `klt diff`'s `canonical_hash`, a different digest,
+see [`docs/cli/stats.md`](stats.md) → "Geometry digest").
+The generator is echoed, never run; the grader reports a hash that differs
+from the committed stream as `stale_artifact`. `--check COMMITTED` re-attests
+and diffs as for items 1/9/10. `--input` is refused with items 1/9/10.
+A cited item-2 envelope carries the same `artifact_binding.attestation`
+disclosure (`inventory_schema_version` is `null` unless a declared-checks
+inventory was given; when one was, it reports the inventory's schema version
+whichever shape the envelope recorded it in -- the flat
+`attestation.inventory_schema_version` key or the nested
+`attestation.inventory.schema_version` block, issue #5571 -- and
+`description` is present only when that inventory declared one, issue #5573).
+
+`provenance.regeneration` is part of what `--check` compares, so how a
+regeneration claim is re-checked depends on whether you pass the flags again
+(issue #5572):
+
+| `--check` invocation | What the claim is compared against |
+| -------------------- | ---------------------------------- |
+| None of `--generator` / `--regenerated-hash` / `--hash-kind` | The committed claim is **re-checked as recorded** — read back out of the envelope, so it never contributes drift on its own. A committed item-2 envelope is therefore verifiable from the repo alone. |
+| Any of the three given | An **explicit cross-check**: the fresh envelope is built from the flags alone, so a value that differs from the committed claim (or flags passed against an envelope that carries no claim) is reported as drift on `provenance.regeneration`. |
+
+So the CI step that runs the check does not have to carry a second copy of the
+hash literal:
+
+```bash
+# Re-checks the committed claim as attested; no flags to keep in sync.
+klt signoff --attest 2 --input layout/top.gds --check evidence/item2.json
+```
+
+Adopting the claim is **not** a verification of it. Whether
+`regenerated_hash` actually matches the stream is decided by the grader, which
+reports a mismatch as `stale_artifact` (see
+[Items 1 and 2: attesting that the artifact was regenerated](#items-1-and-2-attesting-that-the-artifact-was-regenerated)
+above) — `--check` never runs the generator, so its own comparison of this
+block could only ever echo what the caller typed. A committed claim too
+malformed to re-attest from (not an object, or a non-string `generator`,
+`regenerated_hash` or `hash_kind`) is a usage error on a flag-less `--check`,
+never a `match`.
+
+##### Item 2 over several streams (repeat `--input`, issue #4935)
+
+A block whose layout evidence is a library of per-cell streams repeats
+`--input`:
+
+```bash
+klt signoff --attest 2 --input layout/a.gds --input layout/b.gds -o evidence/item2.json
+```
+
+With two or more streams the three checks run for each one (every check entry
+carries a `path`), and `provenance.input` binds the whole set through
+`paths` plus the combined `content_hash` — see
+[Binding a set of artifacts](#binding-a-set-of-artifacts-provenanceinputpaths).
+Members are sorted bytewise, so `--input` order does not matter; editing any
+one stream makes the manifest row `stale_evidence`, and `--check` reports
+drift. Any failing stream fails the envelope (exit `3`, nothing written). A
+duplicate `--input`, streams from different repositories, or
+`--generator`/`--regenerated-hash` with more than one `--input` are usage
+errors. A single `--input` produces the same envelope as before.
+
+##### Item 2 declared checks (optional `--inventory`, issue #4767)
+
+The three built-in checks say nothing about *what is drawn*. To have the
+attestation cite your own geometric / net-width / cut-count checker, pass an
+inventory alongside `--input`:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "checks": [
+    {"name": "power-width",
+     "argv": ["python", "tools/check_widths.py", "layout/top.gds"],
+     "timeout_s": 120}
+  ]
+}
+```
+
+```bash
+klt signoff --attest 2 --input layout/top.gds --inventory evidence/item2-inv.json -o evidence/item2.json
+```
+
+`checks` is a non-empty list with the same entry shape as item 10 (`name`,
+`argv` run directly with no shell, optional `cwd`, `timeout_s`, `local_only`).
+Each command runs after the built-in checks and is recorded in
+`attestation.checks[]` as a `role: "audit"` command check (argv, cwd,
+`exit_status`, `passed`); any non-zero exit makes the envelope `fail` (exit
+`3`). The stream is **not** an inventory field and is not injected: write its
+path in each `argv`, relative to `cwd` (default: the repository root). The
+inventory must sit in the same repository as the stream; its pinned path,
+hash and schema version are recorded under `attestation.inventory`. With
+`--check`, `local_only` commands are skipped and their committed outcome is
+carried, as for item 10. Without `--inventory` the envelope is unchanged.
+klt ships no built-in geometry engine for these checks — the declared command
+is the authority.
+
+**Pinning the generator's inputs (`inputs`, issue #5724).** An inventory may
+also declare `inputs`: a non-empty list of repo-relative paths the layout
+generator consumed (generator script, cell library, sub-cell streams,
+configuration).
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "inputs": ["tools/gen.py", "tools/cells.json"]
+}
+```
+
+`inputs` is accepted with or without `checks`; an inventory declaring neither
+is refused (exit `1`), as is an empty list, a path listed twice, an absolute or
+repository-escaping path, a path through a symlink, or a path that is also an
+`--input` stream. Each input yields one `attestation.checks[]` entry
+`{"check": "present", "role": "input", "path", "content_hash", "passed"}`,
+ordered by path, after the built-in checks and before the `role: "audit"`
+commands; a missing input fails its check and the envelope (exit `3`).
+
+Like item 1, an envelope that declares `inputs` pins its whole input set:
+`provenance.input.paths` holds one member per `--input` stream
+(`"role": "stream"`) and per declared input (`"role": "input"`), sorted by
+path, and `provenance.input.content_hash` is the combined set digest (see "Set
+binding" above); `provenance.input.path` is not emitted. Editing a declared
+input while every stream stays byte-identical therefore renders the manifest
+row `unmet` / `stale_evidence` (the changed member is named in
+`detail.artifact_binding.members`), and `--attest 2 --check` reports drift, even
+when every declared command is `local_only` and skipped. A member that cannot
+be read is left out of the set; its `present` check already fails the
+attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
+generator nor verifies that the stream regenerates from the inputs (declare a
+`checks` command for that).
+
+`inputs` composes with repeated `--input`. For a single stream with
+`--generator` and `--regenerated-hash`, use `--hash-kind bytes` (the default)
+with the set digest (`provenance.input.content_hash`). A bare stream hash
+grades `unmet` / `stale_artifact`. `klt signoff --attest 2` refuses
+`--hash-kind geometry` with an inventory declaring `inputs` (exit `1`).
+
+> **Pin change.** An item-2 envelope that declares `inputs` reports
+> `provenance.input.paths` plus a set digest instead of a single
+> `provenance.input.path`, so a manifest citing it must re-pin the evidence
+> `content_hash` to the new `provenance.input.content_hash`. An envelope
+> without `inputs` is byte-for-byte unchanged.
+
+An item-2 **scope disclosure** rides the same inventory: the inventory's
+`description` (issue #5573) is carried into the envelope as
+`attestation.description` exactly as for items 1, 8, 9 and 10 — so a
+claimant with a qualifier to disclose ("planning-level geometry; not
+DRC-clean, not extraction-checked") passes `--inventory` (declaring `checks`
+and/or `inputs` as usual) and writes `description` there. There is deliberately no
+flag for it: the disclosure is pinned by the inventory's hash and reproduced
+by `--check`, which an argv-dependent value could not be. `klt signoff
+--attest 2 --input STREAM` with no `--inventory` has nowhere to put one.
+
+Declared `argv` commands run with the tool virtualenv's `bin` directory
+removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
+`python3` in an `argv` is the repository's interpreter, not klt's. The one
+name that removal must not take is restored: a run-scoped shim directory
+holding a single `klt` symlink to the venv's entry point is prepended to the
+command's `PATH`, so a bare `klt` resolves to the very `klt` running the
+attestation — the venv's when attesting from a venv, the host's when not
+(issue #5565). The shim is prepended and so takes precedence over a `klt`
+the caller placed earlier on `PATH`; no other venv-`bin` name (`python`,
+`python3`, `pip`) is re-exposed, and the per-run shim path never enters the
+envelope. Outside a venv the environment is unchanged. The same applies to
+item 10 commands.
+
+The consequence: **a module installed into the tool virtualenv is not
+importable by a bare `python3` in a declared command.** The documented
+`uvx --with <module> --from "klayout-tools==X.Y.Z" klt signoff --attest …` form
+installs `<module>` into the uvx venv, and that venv's `bin` is exactly the
+directory removed, so `["python3", "-c", "import <module>"]` runs the host
+interpreter and fails:
+
+```text
+[FAIL] audit <name>: python3 -c import <module> (exit 1)
+    | ModuleNotFoundError: No module named '<module>'
+```
+
+This is deliberate (#4192, #5860, #5565), not a bug, and no inventory field
+or flag overrides it. Every name in that directory stays stripped, `python3`
+and `pip` included. Name the
+interpreter that has the module instead — declare an **absolute interpreter
+path** in `argv` (e.g. `["/abs/path/to/venv/bin/python", "tools/check.py",
+"layout/top.gds"]`), or provision the module in an environment the declared
+command's interpreter already sees. Verified 2026-11-17 on klt 0.9.x
+(Linux): with `uvx --with tomli_w --from klayout-tools klt signoff --attest 2 …`,
+`["python3", "-c", "import tomli_w"]` fails as above, and the same check with
+the absolute path of a separate venv that has `tomli_w` passes.
+
+A third option keeps the bare `python3` in `argv`: put an **exec-wrapper**
+`python3` in a directory of your own on `PATH`, mirroring the symlink-dir
+recipe consumer READMEs give for exposing a pinned `klt`. The wrapper is a
+two-line script — `#!/bin/sh`, then
+`exec /abs/path/to/venv/bin/python3 "$@"` — which re-execs the venv
+interpreter by its real path, so venv detection (it looks for `pyvenv.cfg`
+beside the executable as invoked) still finds the venv. A **symlink** to the
+venv's `python3` in that directory does not work: invoked by its symlink
+path, the interpreter finds no `pyvenv.cfg` beside that path and the check
+fails with `ModuleNotFoundError` with or without `-I` (measured 2026-11-18 on
+Linux, CPython 3.12.3: the symlinked `python3 -I -c 'import <module>'` fails,
+the same check through the wrapper passes, and the venv's own `python3 -I`
+passes). The strip stays deliberate (#4192, #5860, #5565): klt removes only
+the tool venv's own `bin` directory from `PATH`, and the wrapper directory is
+the consumer's, so it survives — putting the venv's `bin` itself on `PATH`
+changes nothing, that being the one directory stripped. The absolute
+interpreter path remains the more explicit choice: the wrapper changes what
+every bare `python3` in the inventory means.
+
+##### Minting above the grading pin
+
+The item-2 mint path first ships in `klt` 0.9.0 (PyPI), so a consumer that
+pins an older release for grading — to keep a committed `--manifest` report's
+diff stable — must mint item-2 envelopes with a newer release than it grades
+with. What that cross-version pair does, measured 2026-11-17 by minting a
+single-stream item-2 envelope (a committed GDS, no `--generator` claim) with
+`klt` 0.9.1, citing it in a block manifest, and grading the manifest with
+`klt signoff --manifest` at 0.8.0:
+
+- **It grades.** 0.8.0 accepts the envelope as `kind: "generic"` evidence for
+  item 2, renders `met` with `input_verified: true`, and every item verdict
+  and the `t1_met_count` match what the minting release itself renders for
+  the same manifest. The envelope's `attestation` block is extra surface the
+  older grader does not read.
+- **The rendered report's bytes are not stable across grader versions, and
+  no release promises that.** The `build` block — which names the grading
+  install, including its `grading_ruleset_id` hash — and the embedded
+  checklist wording (`items[].text`, parsed from the tier doc this install
+  ships) both moved between 0.8.0 and 0.9.1, and the two builds'
+  `grading_ruleset_id` hashes differ. The verdict agreement above is one
+  measured pair, not a guarantee: a newer grader may grade differently.
+  Compare reports with `--check` — which excludes exactly these moving
+  surfaces — never bytewise, when the two renders came from different
+  grader builds.
+- **The pin cannot re-check the envelope.** 0.8.0 and earlier refuse
+  `--attest 2` as an invalid choice (exit `2`), so the drift gate for an
+  item-2 envelope (`--attest 2 --input ... --check`) has to run on a release
+  that can mint it. The inventory-minted items' equivalent guard is
+  `--require-build-match` (issue #5875), which needs `--attest` and
+  `--check` too — so it does not reach item 2 at such a pin either.
+- **The envelope records who minted it.** `provenance.klt_version` (with
+  `provenance.klayout_version`) is the version surface a consumer can read
+  from the envelope itself and compare against its grading pin before
+  trusting the citation — there is no per-envelope schema-version table to
+  consult. For envelope-aggregation and `--attest ... --check` grading the
+  same pairing surfaces as the report-only `build_drift` marker (see
+  "Build drift" above); it never changes a verdict, so gate on it by
+  reading the JSON, not the exit code.
+
+
+#### How manifest `file` paths resolve
+
+A relative `evidence.<n>.file` in a `--manifest` is resolved against the
+**working directory `klt` runs in**, not the manifest's own directory (the
+same convention as `klt drc --check`). Run `klt signoff --manifest` from the
+directory the paths were written relative to — normally the repository root —
+or the entry grades `unmet`/`unreadable_evidence`. (The `{path, scope:
+"repo"}` input an envelope names is separate: it resolves against the repo
+root of the evidence file.)
+
+#### Inventory schema (`schema_version: 1` and `2`)
+
+Every inventory is a JSON object with these common fields:
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
+| `kind` | yes | The literal `"t1-attestation-inventory"`. |
+| `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
+| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description` (item 8, which has no `artifact_binding`: `citation.attestation.description`). Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
+
+Plus the item's own fields. Unknown top-level fields are refused (exit `1`),
+because a typo such as `testbench` for `testbenches` would otherwise attest
+an inventory the author did not write.
+
+| Item | Field | Required | Checks run |
+| ---- | ----- | -------- | ---------- |
+| **1** Design sources | `sources`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `source`) |
+| | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
+| **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
+| | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
+| **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
+| | `spec_rows`: list of row ids | yes, non-empty | each row outside `uncited_rows` has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
+| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no citation fails its `citation` check unless it is listed in `uncited_rows` |
+| | `uncited_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `uncited_row` check per entry (role `row`), **passing**: the known, owned gap and the issue that owns closing it are visible to the grader instead of the row being dropped from `spec_rows` — item 8's counterpart of item 9's `unbenched_rows`. The `row` must be declared in `spec_rows` and have no cited paths: a row that is both listed and cited, a row not in `spec_rows`, or a malformed entry is refused (exit `1`). Whether an uncited row should fail T1 item 8 is a grading-policy decision this producer does not make. *First ships in the first release after `v0.9.2`; `v0.9.2` refuses `uncited_rows` as an unknown field.* |
+| | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
+| | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
+| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
+| | `unmeasured_metrics`: list of `{"corner": "<declared corner>", "metric": "area\|"fmax\|"power", "reason": "<non-blank text>"}` | no (digital partitions only) | one `unmeasured_metric` check per entry (role `digital`), **passing**, in the corner/metric position its `metric` check would have held: the gap is disclosed to the grader with its corner, metric and reason instead of failing the attestation or being hidden by dropping the `corners`/`metrics` block (issue #7259). A **declared** gap is a passing disclosure; an *undeclared* missing binding is still a **failed check**. Refused (exit `1`): a non-list value, an entry that is not exactly `{corner, metric, reason}`, a `corner` not in `corners`, a `metric` other than `area`/`fmax`/`power`, a blank or non-string `reason`, the same pair declared twice, a pair that `metrics` also binds (measured and unmeasured is a contradiction), and the field on an inventory with no `corners`/`metrics` block (even an empty list). An empty list on a digital inventory is accepted and adds no check. An invalid bound value and a failed citation or freshness command still fail. *First ships in the first release after `v0.9.2`; earlier builds refuse `unmeasured_metrics` as an unknown field.* See "A declared gap" below. |
+| **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
+| | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
+| | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
+| | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
+| | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
+| | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
+
+A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
+`local_only` is optional (boolean, default `false`; anything else is refused,
+exit `1`). It marks a command that needs a toolchain the `--check` runner may
+not have (xschem, a PDK): see "CI usage" below.
+`documented_argv` is optional and accepted **only** on an item-9 `cold_start`
+(a non-empty list of non-empty strings; anything else, including the key on an
+item-1 `derived[].check`, an item-8 `envelope_checks` entry or an item-2/10
+`checks[]` entry, is refused, exit `1`). It is recorded, never executed: see
+"A cold start that only validates its bench".
+`timeout_s` is optional (positive finite number of seconds, at most `21600`;
+a string, boolean, non-positive, non-finite or larger value is refused, exit
+`1`). It raises or lowers that one command's time limit; omitted, the command
+gets the default `1800` s, the same as command-backed manifest evidence.
+`argv` is run directly, never through a shell, with stdin closed. A failing
+command's merged stdout+stderr is kept as a bounded tail (last 20 lines, at most
+2048 bytes) and emitted as the failing check's additive `output_tail` string in
+the live `--format json` result (issue #4698) -- never in an `--output` file,
+nor in the `--check` diff, so the envelope and its content hash stay
+reproducible across hosts; passing, skipped and unlaunchable checks omit it.
+Every command that actually launched -- passing, failing and timed-out alike
+-- also carries an additive `duration_s` number in that live result: the
+observed wall time in seconds, one decimal (issue #5817), with the same
+live-only lifecycle, so a check drifting toward its declared `timeout_s`
+budget is visible before the timeout fires. A wall-clock value never repeats,
+so a duration inside the envelope would rewrite the committed bytes on every
+run and read as permanent drift; held out of band the envelope stays
+byte-identical however long the commands took. A command that never launched
+(``error: "launch_failed"``), a skipped or carried `local_only` command, and
+a check of a different attestation run omit it, and `--format text` names it
+on the check's line (`... (exit 0) in 99.6s`).
+A failing command that re-verifies a tier-verdict record -- its `argv`
+contains `signoff`, `--manifest` (or `--manifest=...`) and `--check` (or
+`--check=...`), whatever wrapper prefixes it carries -- additionally gets an
+advisory `hint` string (issue #5538), with exactly the same lifecycle as
+`output_tail` and under the same `[FAIL]` line in text output. It is attached
+in generate mode only: `--attest --check` mints nothing, a `local_only`
+command carried under `--skip-local-only` was not run, and a passing or
+differently-shaped check is not advised, so none of them carry it. None
+of these fields is a `schema_version` change: all three are additive and
+live-only; `output_tail` and `hint` are absent unless the check failed in
+this run, while `duration_s` marks every command this run launched. `cwd`
+defaults to the repository root. A command that cannot
+be launched or times out fails its check with `exit_status: null` and
+`error: "launch_failed"`/`"timeout"`.
+
+**Path rules.** Every path, including a command's `cwd`, is
+repository-relative. The repository is the nearest ancestor of the inventory
+holding a `.git` entry, and an inventory outside any repository is refused.
+Paths are normalised (`a/./b` is `a/b`) and refused when they are empty,
+absolute, escape the repository (`..`), traverse a symlink anywhere along
+their length, or appear more than once across the inventory's path lists.
+The inventory file itself must not be a symlink, and must be a file (`-` is
+refused: there is no path to pin).
+
+**Glob members (schema 2, issue #5614).** A `sources` (item 1) or `hygiene`
+(item 10) entry may instead be `{"glob": "<pattern>"}`, expanded at attest
+time to the **git-tracked** files matching the pattern — each expanded member
+then appears in the envelope as its own `present` check with its own
+`content_hash`, exactly as if it had been listed literally, so the envelope
+stays a literal, checkable record of what was bound. Patterns are
+repository-relative and follow `fnmatch` rules: `*` matches any characters
+*including* path separators (so `records/*.md` covers subdirectories too —
+which is the point: an inventory whose intent is "every record under
+`records/`" keeps covering the directory as it grows), `?` matches one
+character, `[...]` a character class; empty and `.` path segments are
+dropped. A pattern is refused when it is not a non-empty string, is
+absolute, or escapes the repository with `..` — the same contract a literal
+path has. Expansion reads `git ls-files`, **never the filesystem**: an
+untracked local file is never a member, so a local `--attest` and CI's
+`--attest --check` expand to the same member set and the envelope stays
+byte-deterministic; git being unusable is an error naming the glob entry,
+with no filesystem fallback. A glob matching **zero** tracked files is
+refused (a glob that attests nothing is the original coverage gap in a new
+shape), and a glob naming a file that is also listed literally — in any
+path list — is the ordinary duplicate refusal. Because the envelope pins the
+expanded set, **a file added to a covered directory after the envelope was
+committed is drift**: `--attest --check` re-expands the glob, sees the extra
+`present` check and changed `check_count`, and exits non-zero. Re-attesting
+is the repo owner's action (the item-10 rule below).
+
+#### Hashing rules
+
+- Every hash is `sha256:<hex>` of the file's **raw bytes**, the same
+  convention the grader re-hashes with. Nothing is normalised: a
+  whitespace-only edit changes the hash. The envelope records this rule as
+  `attestation.hash_algorithm: "sha256-raw-bytes"`.
+- The inventory's hash is computed from the same bytes that are parsed, so
+  the pin and the checks always describe one revision of the inventory.
+- Each `present` check records the inventoried file's own `content_hash`
+  (or `null` when it is missing). For items 8, 9 and 10 the bound artifact is
+  the inventory, so a changed *source* does not change the manifest pin;
+  `--check` catches that drift through these per-file hashes, so run it in
+  CI. Item 1 is different: its pin is the combined digest over sources,
+  derived files and the inventory (sorted by path), so any member edit changes
+  it.
+- Item 9's member binding is shallow (issue #5850): only the `testbenches`
+  members themselves are hashed. A member's own dependencies — the helper it
+  imports, the model card it includes — are neither resolved nor hashed
+  unless the entry declares them in `depends_on`, in which case each declared
+  path gets its own `present` check (role `testbench_dependency`) whose
+  `content_hash` `--check` diffs like any other. The producer records
+  declared edges; it does not discover them. Every member also emits a
+  passing `dependency_binding` disclosure row; because that row is emitted
+  unconditionally, an envelope committed by a build older than `depends_on`
+  no longer reproduces under `--check` even with no file changed and no
+  `depends_on` declared anywhere — the missing row is drift until
+  re-attested once. **Migration for existing item 9 inventories:**
+  re-attest once and commit the new envelope
+  (`klt signoff --attest 9 --inventory <inv> -o <envelope>`).
+
+#### Item 8: characterization report
+
+Item 8 is **not** restricted to attested evidence: a bare hand-written
+generic envelope still grades `met` (compatibility). A met item-8 generic
+citation therefore always carries `citation.attestation`, so a reader can tell
+the two apart: `{"tool_produced": true, "producer": "klt signoff --attest",
+"check_count": N, "passed_count": N}` for an envelope this producer made, and
+`{"tool_produced": false}` for any other. When a tool-produced envelope
+carries a non-empty `attestation.description` (the inventory's scope
+disclosure, issue #5573), the block also carries it verbatim as
+`citation.attestation.description` (issue #6111) — item 8 has no
+`artifact_binding`, so this block is where its disclosure reaches the tier
+record. The key is omitted when the description is absent, empty,
+whitespace-only or not a string, and a `{"tool_produced": false}` block never
+carries one. Additive: the block's four existing keys are unchanged and no
+`schema_version` bumps. Disclosure only; it never changes
+the verdict. The envelope pins the inventory (as for the other items); the
+report and cited envelopes are recorded by hash in their `present` checks, and
+`--check` reports drift in any of them, in the row map, or in a recorded
+metric value. The `field` of each metric binding is chosen by the inventory
+author for the cited envelope's kind (for example `place-and-route` reports
+Fmax as `fmax_mhz`); the producer reads only what is named.
+
+A committed record a klt flow did not run — an OpenROAD/ORFS result collect,
+a vendor tool report, a lab measurement sheet — is citable through
+`external_records` (issue #6939): the listed path's `envelope` check records
+`kind: "external"` and passes on presence, recognition is deliberately
+skipped for it (and only for it: an unlisted non-klt citation still fails,
+#5688), its bytes are content-hashed like any citation, the caller's
+`envelope_checks` command is its freshness proof, and a metric binding may
+declare `{"transform": "reciprocal", "scale": 1000}` so a `min_period_ns`
+record binds `fmax` in MHz. The disclosure is the claimant's, not klt's:
+**klt recorded the record's hash and ran the freshness command; it did not
+produce or verify the numbers** — an external record's content is the
+claimant's word, visible as `kind: "external"` in `attestation.checks[]`.
+
+**A declared gap is not a failed measurement (issue #7259).** The
+`corners`/`metrics` block is all-or-nothing per pair: one `metric` check is
+emitted for every corner × required metric, and a missing binding fails its
+check. A characterization with partial coverage — power analysis not run, an
+area figure living in a log no binding can read — declares each gap in
+`unmeasured_metrics`, so the measured metrics are bound and the unmeasured
+ones are disclosed rather than hidden by dropping the block:
+
+```json
+{
+  "corners": ["tt", "ss"],
+  "metrics": {
+    "tt": {
+      "area": {"envelope": "sim/tt.json", "field": "result.area"},
+      "fmax": {"envelope": "sim/tt.json", "field": "result.fmax"},
+      "power": {"envelope": "sim/tt.json", "field": "result.power"}
+    },
+    "ss": {
+      "area": {"envelope": "sim/ss.json", "field": "result.area"},
+      "power": {"envelope": "sim/ss.json", "field": "result.power"}
+    }
+  },
+  "unmeasured_metrics": [
+    {"corner": "ss", "metric": "fmax", "reason": "Frequency sweep was not run at ss"}
+  ]
+}
+```
+
+`ss/fmax` then holds its usual slot in `attestation.checks[]` with a
+**passing** disclosure in place of the `metric` check that would have
+failed, and the other five `metric` checks record their measured values
+exactly as before. The disclosure carries `corner`, `metric` and `reason`
+and no numeric `value`:
+
+```json
+{"check": "unmeasured_metric", "role": "digital", "corner": "ss", "metric": "fmax",
+ "reason": "Frequency sweep was not run at ss", "passed": true}
+```
+
+`--format text` names the gap and its reason on the check's line:
+
+```text
+[PASS] digital ss area: 5
+[PASS] digital ss fmax: unmeasured (Frequency sweep was not run at ss)
+[PASS] digital ss power: 2
+```
+
+A declaration excuses exactly the pair it names. The same metric missing at
+another corner, a different metric missing at the same corner, a bound field
+that is not a number, and a failed citation or freshness command each still
+**fail** the attestation, and `--check` reports an edited `reason` as drift
+on the `unmeasured_metric` check it names by corner and metric. Declaring a
+pair that `metrics` also binds is refused (exit `1`), as is the list on an
+inventory with no `corners`/`metrics` block. An inventory that declares
+every pair unmeasured passes with nothing measured — each gap visible, with
+its reason, among the checks a reviewer reads. Whether a declared gap should
+fail the tier is a grading-policy decision this producer does not make.
+
+#### Envelope
+
+`attestation.checks[]` is ordered deterministically: `present` checks
+sorted by path (regardless of inventory order; item 9's `present` checks run
+`testbench` first, then `testbench_dependency` bench by sorted bench, then
+`source` sorted by path), then the item's
+command checks (item 1's `freshness` checks sorted by target), then item 9's
+disclosure rows (`unbenched_row`, `dependency_binding`), then item 9's
+`pdk` and `tools` pin checks and, when declared, its `klt` version check.
+Two runs over the same bytes with the same build and outcomes produce
+byte-identical output.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "generic",
+  "status": "pass",
+  "t1_item": 9,
+  "summary": "T1 item 9 (Testbenches shipped): 8/8 attestation checks passed (klt signoff --attest)",
+  "source": "attest/item9.json",
+  "attestation": {
+    "producer": "klt signoff --attest",
+    "inventory_schema_version": 1,
+    "hash_algorithm": "sha256-raw-bytes",
+    "check_count": 8,
+    "passed_count": 8,
+    "checks": [
+      {"check": "present", "role": "testbench", "path": "tb/ota_ac.spice", "passed": true, "content_hash": "sha256:9a1e..."},
+      {"check": "present", "role": "testbench", "path": "tb/ota_tran.spice", "passed": true, "content_hash": "sha256:4c07..."},
+      {"check": "command", "role": "cold_start", "argv": ["make", "sim"], "cwd": ".", "exit_status": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_ac.spice", "declared": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_tran.spice", "declared": 0, "passed": true},
+      {"check": "pin", "role": "pdk", "passed": true, "value": {"name": "sky130A", "revision": "0fe599b2"}},
+      {"check": "pin", "role": "tools", "passed": true, "value": {"klt": "0.9.3", "ngspice": "42"}},
+      {"check": "pin", "role": "tool_version", "tool": "klt", "passed": true, "value": "0.9.3"}
+    ],
+    "description": "testbenches cover tt only; no corner matrix"
+  },
+  "provenance": {
+    "klt_version": "0.9.3",
+    "klayout_version": null,
+    "pdk": null,
+    "deck": null,
+    "input": {
+      "path": {"path": "attest/item9.json", "scope": "repo"},
+      "content_hash": "sha256:3f1c..."
+    }
+  }
+}
+```
+
+The producer runs the envelope through the grader's own recogniser and
+binding check before emitting it, so it cannot drift from what `--manifest`
+accepts. A met citation of it carries
+`artifact_binding.attestation: {producer, inventory_schema_version,
+check_count, passed_count, description?}`.
+
+`attestation.description` (issue #5573) is the inventory's `description`
+verbatim, present only when the inventory declared a non-empty one and
+appended after `checks` so a description-less envelope renders
+byte-identically to pre-#5573 output. It is the claimant's scope
+disclosure — how an artifact narrower than its item title ("planning-level
+geometry; not DRC-clean, not extraction-checked") says so inside the
+evidence chain instead of beside it. Because it rides the inventory, it is
+pinned by the input hash: editing it cannot escape a re-attest, `--check`
+names `attestation.description` in its drift report, and `--attest` text
+output shows it as a `description:` line. It is never graded — adding,
+changing or removing it flips no item's `met`/`status` and no `tier`. For
+item 2 a disclosure requires `--inventory` (the plain `--attest 2 --input`
+envelope carries none).
+
+An earlier producer can omit `attestation.description` even when it used
+the same inventory. If the builds differ and the inventory binding matches,
+`--check` accepts that omission and returns the fresh disclosure. For item 2
+it compares the inventory binding separately from the stream. An edited
+scope, a changed inventory or check, and an omitted disclosure from the
+same build still appear as drift. `--require-build-match` still gates on
+the producing build.
+
+The text rendering is a courtesy, so a character the terminal's encoding
+cannot represent (a free-text disclosure in Japanese on a Windows-1252
+stdout, say) prints as a `\uXXXX` escape — in the `description:` line and in
+a drifted `attestation.description` under `--check` — instead of aborting the
+report after the envelope was written. The exit status is the verdict's, never
+a traceback's; the envelope and `--format json` keep the original string. A
+stdout error handler you chose yourself (`PYTHONIOENCODING=cp1252:replace`)
+is honoured as set. This applies to every verb's `--format text`
+(`cli/output.py`'s `emit_success`).
+
+#### Examples
+
+Item 1: sources plus a netlist whose freshness `klt netlist --check`
+decides (`attest/item1.json`):
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 1,
+  "sources": ["design/ota.sch", "design/bias.sch"],
+  "derived": [
+    {
+      "path": "netlist/ota.spice",
+      "generator": "klt netlist",
+      "check": {"argv": ["klt", "netlist", "design/ota.sch", "-o", "netlist/ota.spice", "--check"]}
+    }
+  ]
+}
+```
+
+A netlist that exists but no longer matches its schematic fails the
+`freshness` check (`klt netlist --check` exits `3`), so the attestation
+fails rather than reporting a present-but-stale artifact as current. If the
+project post-processes the committed netlist (e.g. adds a header comment), add
+`"--block", "--ignore-comments"` to the `argv`; see
+[`klt netlist`](netlist.md) ("Post-processed committed netlists").
+
+For a synthesized or routed gate-level netlist there is no `--check` command
+(re-synthesis is not byte-stable across tool versions). Declare a `recorded`
+freshness record instead of `check`; `klt` re-hashes the files and runs no
+command, so it works under `--check` without `local_only`:
+
+```json
+{"path": "netlist/top.v", "generator": "yosys synth.ys",
+ "recorded": {"derived_sha256": "<64 hex>",
+              "sources": {"rtl/top.v": "<64 hex>", "rtl/alu.v": "<64 hex>"}}}
+```
+
+`recorded.sources` must be non-empty, every key must also appear in the
+inventory's top-level `sources`, and every digest is 64-character **lowercase**
+hex (uppercase is refused). The `recorded_hash` check
+(`{"check": "recorded_hash", "role": "freshness", "target", "generator",
+"passed"}`) fails if the derived file or any recorded source differs or is
+missing, and then carries `mismatches: [{"path", "expected", "actual"}]`
+(`actual` is `null` for a missing file). Digests are of the raw bytes.
+
+Item 9: testbenches, a cold-start invocation and reproducibility pins
+(`attest/item9.json`):
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 9,
+  "testbenches": ["tb/ota_ac.spice", "tb/ota_tran.spice"],
+  "cold_start": {"argv": ["klt", "sim", "sim/request.json", "--format", "json"]},
+  "pins": {
+    "pdk": {"name": "sky130A", "revision": "0fe599b2afb6708d281543108caf8310912f54af"},
+    "tools": {"klt": "0.9.3", "ngspice": "42"}
+  }
+}
+```
+
+A partition whose cold start consumes no PDK (for example a behavioral-RTL
+regression driven by an HDL simulator) pins `pdk` with the explicit no-PDK
+form instead of a placeholder name:
+
+```json
+"pins": {
+  "pdk": {"none": true, "reason": "behavioral RTL regression; no PDK consumed"},
+  "tools": {"iverilog": "12.0"}
+}
+```
+
+Set `pins.tools.klt` to the exact build version you intend to run (the example
+uses `0.9.3`). Both `--attest 9` and `--check` compare the literal or resolved
+version string with the full `provenance.klt_version`, including any development
+suffix. On a mismatch the `tool_version` check records `"passed": false` and
+the running version in `running`. Attestation exits 3 and leaves the
+output file untouched. If the running version contains `+unknown`, the check
+passes with `"unverifiable": true`. A pinned value containing `+unknown` is
+compared literally when the running build is known.
+
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
+
+When upgrading an inventory that already pins klt, update the pin to the
+build you will use and regenerate its committed envelope to include the new
+check. The other tool versions and the PDK name and revision are checked for
+non-empty strings.
+
+**A pin declared by the file that owns it (issue #5563).** Instead of
+hand-copying a value the repo already tracks (a tool commit, a PDK revision),
+each of `pdk.name`, `pdk.revision` and every `tools.<tool>` entry may be a
+reference object that klt resolves from a JSON file in the repo at attest and
+`--check` time:
+
+```json
+"pins": {
+  "pdk": {
+    "name": "sky130A",
+    "revision": {"from": "config/pdk.json", "key": "sky130.revision"}
+  },
+  "tools": {"ngspice": {"from": "config/toolchain.json", "key": "tools.ngspice.commit"}}
+}
+```
+
+`from` is a repo-relative path (absolute paths, `..` escapes and symlinks are
+refused, exactly like every other inventory path); `key` is a dotted path into
+that file's JSON (digit segments index lists, as for item-8 metric bindings).
+The `pdk` or `tools` check's `value` carries the **resolved** strings. When
+that section uses a reference, `resolved_from` records its file and key.
+A reference whose file is missing, is not readable JSON, lacks the key, or
+resolves to anything but a non-empty string grades the pin
+`passed: false` -- a failed check, not a malformed inventory. Because `--check`
+re-resolves from the owning file, a pin bump drifts the committed envelope the
+same way a source edit does: no re-attest can re-legitimize a stale copy.
+
+A multi-bench block can give each bench its own cold start and declare a spec
+row that has no bench yet (a plain-string `testbenches` list with one
+top-level `cold_start` stays valid and produces the same envelope as before):
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/ota_ac.spice", "cold_start": {"argv": ["make", "ac"]}},
+    {"path": "tb/ota_noise.spice", "cold_start": {"argv": ["make", "noise"], "local_only": true, "timeout_s": 7200}}
+  ],
+  "unbenched_rows": [{"row": "psrr_1mhz", "issue": 123}]
+}
+```
+
+Each command run under `--attest 9` prints `attest item 9: running <role> [<name>] [<bench>] ...`
+and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
+`--format`. The `<name>` segment appears only for a member of a `cold_start`
+list. Each launched command also reports its wall time as `duration_s` in
+live JSON and on its text check line (issue #5817). The envelope written by
+`--output` omits timing, keeping the `--check` comparison reproducible.
+
+**Several cold starts over one file: `cold_start` as a list (issue #5641).**
+When several testbenches are implemented by one shared module — invoked with
+different arguments, graded separately — the inventory needs a way to run a
+cold start per bench without repeating the file. An entry's `cold_start`
+therefore also accepts a non-empty list of named commands:
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/shared.py", "cold_start": [
+      {"name": "ac", "argv": ["make", "ac"]},
+      {"name": "tran", "argv": ["make", "tran"], "local_only": true, "timeout_s": 7200}
+    ]}
+  ]
+}
+```
+
+Each member yields its own `command` check (`role: "cold_start"`) carrying
+`testbench: "tb/shared.py"` **and** its `name`, with its own `argv`, `cwd`,
+`exit_status` and `passed` — N independently graded cold starts — while the
+file itself is still inventoried exactly once: one `present` check, one
+attested `content_hash` on the module that implements every graded behaviour.
+This is what replaced the wrapper-file workaround, which attested N hollow
+one-line files and left the shared module (every behaviour, none of the
+hashes) outside the envelope. Every bench still needs a cold start: the list
+satisfies the requirement on its own, and an empty list is refused, exit `1`
+— as is a non-object member, a member without a `name`, an empty or non-string
+`name`, or a duplicate `name` within one entry. Repeating one `path` across
+`testbenches` object entries is still refused, and the refusal now points at
+this list form as the alternative. Text output labels a listed cold start by
+its `name` (`[PASS] cold_start ac: make ac (exit 0)`).
+
+**A bench's implementation modules: `sources` (first ships in 0.9.3).** A
+bench whose behaviour lives across an entry point plus the modules it imports
+declares those modules as `sources`, so they are hashed without being
+declared as benches in their own right:
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/ota_ac.spice", "cold_start": {"argv": ["make", "ac"]},
+     "sources": ["tb/lib/analysers.py", "tb/lib/helpers.py"]}
+  ]
+}
+```
+
+Each unique source yields one `present` check with `role: "source"`, carrying
+`testbenches: [<bench path>, ...]` — the sorted benches that declared it — so
+the bench count stays the number of declared benches and an entry point stays
+distinguishable from a library it pulls in. The same source named by several
+benches is hashed once and lists all of them; a path declared both as a bench
+and as a source is refused (exit `1`): its bytes are already pinned as the
+bench, so listing it twice would say nothing new. Sources are declared by the
+author, never inferred by walking imports. Text output names the bench on a
+source line, e.g. `[PASS] source tb/lib/helpers.py present (bench:
+tb/ota_ac.spice)`.
+
+**Migration:** a repo that today lists its helper modules as extra
+`testbenches` entries and moves them under `sources` changes its inventory, so
+the envelope must be re-attested and re-committed — and any manifest citing
+that envelope re-pinned. That is the inventory actually changing, not a
+regression.
+
+**A cold start that only validates its bench: `documented_argv` (issue
+#5463).** When a bench's claimed numbers come from a large corner grid or a
+Monte Carlo run on a batch fleet, the invocation that truly reproduces them
+costs hours of fleet budget, and `--attest` runs every declared command on
+every regeneration. Producers therefore declare a cheap proxy (typically
+`klt sim <request> --dry-run`) — and the envelope then records a command that
+only *validates* the bench, with nothing to say so. `documented_argv` carries
+that disclosure in the envelope instead of in prose:
+
+```json
+{
+  "path": "tb/ota_mc.spice",
+  "cold_start": {
+    "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+    "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]
+  }
+}
+```
+
+`argv` is unchanged: it still runs, still gates the envelope, and a non-zero
+exit still makes the attestation `fail`. `documented_argv` is **never
+executed** — `klt` does not check that it is runnable, or that it is related to
+`argv`; it is the producer's claim about what reproduces the measurement. The
+emitted `attestation.checks[]` entry gains two fields:
+
+```json
+{"check": "command", "role": "cold_start", "testbench": "tb/ota_mc.spice",
+ "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+ "cwd": ".", "exit_status": 0, "passed": true,
+ "reproduces": "validates",
+ "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]}
+```
+
+so a reader (or a grader) can tell a reproducing cold start from a validating
+one. Text output marks the check
+`(validates only; documented: klt sim sim/mc.json -o evidence/mc.json)`. A
+cold start without `documented_argv` emits exactly the entry it always did —
+no `reproduces` key — so committed envelopes show no `--check` drift.
+
+Item 9's `status` and the T1 grade are **unchanged** by the presence of
+`documented_argv`: today's proxy commands already grade `pass`, and this field
+only makes them visible. Whether a validation-only cold start should grade
+lower is a tier-policy question this producer does not decide.
+
+With `local_only: true`, a carried check (`--attest --check`,
+`--skip-local-only`) takes `reproduces`/`documented_argv` from the **current**
+inventory, not from the committed envelope — what a command reproduces is a
+property of what is declared now, so changing `documented_argv` is drift under
+`--check` and is refreshed into the envelope by `--skip-local-only`. The
+committed check is still matched on role, `argv` and testbench identity.
+
+Item 10: hygiene artifacts and the CI/audit commands that back them
+(`attest/item10.json`). A CI-run check is any command that exits non-zero
+when the run did not succeed, for example a `gh run view` query:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 10,
+  "hygiene": [
+    "README.md",
+    "LICENSE",
+    {"path": ".github/workflows/ci.yml", "attest": "yaml", "select": "jobs.signoff"}
+  ],
+  "checks": [
+    {"name": "lint", "argv": ["uv", "run", "ruff", "check", "."]},
+    {"name": "ci-run", "argv": ["sh", "scripts/ci-run-succeeded.sh"]}
+  ]
+}
+```
+
+Generate, commit and cite:
+
+```bash
+klt signoff --attest 1  --inventory attest/item1.json  -o evidence/item1.json
+klt signoff --attest 9  --inventory attest/item9.json  -o evidence/item9.json
+klt signoff --attest 10 --inventory attest/item10.json -o evidence/item10.json
+```
+
+```json
+{
+  "evidence": {
+    "1":  {"file": "evidence/item1.json",  "content_hash": "<provenance.input.content_hash of item1.json>"},
+    "9":  {"file": "evidence/item9.json",  "content_hash": "<... of item9.json>"},
+    "10": {"file": "evidence/item10.json", "content_hash": "<... of item10.json>"}
+  }
+}
+```
+
+Each renders `MET` for its own item only. Citing `evidence/item9.json` for
+item 1 or 10 renders `unmet`/`wrong_item`. A manifest may also cite the
+producer itself as command-backed evidence (`{"command": ["klt", "signoff",
+"--attest", "9", "--inventory", "attest/item9.json", "--format", "json"],
+"content_hash": ...}`), since `--format json` prints the envelope on stdout.
+
+`-o` writes only a **passing** envelope, and only when its bytes changed: an
+unchanged attestation leaves the committed file untouched (mtime included),
+and a failing one never replaces a committed passing one. Without `-o`
+nothing is written.
+
+#### CI usage: `--check`
+
+```bash
+# Drift gate: 0 = the committed envelope still reproduces and still passes.
+klt signoff --attest 9 --inventory attest/item9.json --check evidence/item9.json
+```
+
+`--check` re-attests (running every declared command again) and diffs the
+result against the committed envelope, writing nothing. Only the producing
+build's version strings (`provenance.klt_version`/`klayout_version`) are
+excluded. Any change to the inventory, to an inventoried file's bytes, to a
+check's outcome, or to the committed envelope itself is drift. The response
+is the shared `--check` drift shape (`schema_version`, `mode: "check"`,
+`report`, `status: "match"|"drifted"`, `drift[]`, `fresh`) plus
+`fresh_status`, the re-attested envelope's own `status`.
+
+**A drift entry names the check, not only its index (issue #5460).** A
+`drift[]` entry that points at one `attestation.checks[]` entry carries an
+additive `check` object identifying it:
+
+```json
+{
+  "field": "attestation.checks.17.content_hash",
+  "committed": "sha256:3bca9b8e95ec…",
+  "fresh": "sha256:aaa8abc15692…",
+  "check": {"role": "testbench", "check": "present", "path": "sim/bin/sim_common.py"}
+}
+```
+
+`check` is the check's `role`, then the check's own kind (its `check` value
+— `present`, `command`, `stream_readable`, …) when it carries one, then
+whichever identity keys its kind carries — `path` for a file-presence check,
+`target` / `name` / `testbench` for a command or `recorded_hash` check,
+`row` for a citation check, `corner` + `metric` for an item-8 metric check.
+The kind comes before those keys so checks of one role with no other
+identity key stay pairwise distinct (the three `layout` stream checks of
+item 2). A check with no identity key beyond its kind (the `pdk` / `tools`
+pins, a top-level `cold_start`) stops there — `{"role": …, "check": "pin"}`,
+`{"role": "cold_start", "check": "command"}`. `--format text` prints it as a
+bracketed label after the pointer:
+
+```
+drift:
+  attestation.checks.17.content_hash  [testbench present sim/bin/sim_common.py]:
+      committed: 'sha256:3bca9b8e95ec…'
+      fresh:     'sha256:aaa8abc15692…'
+```
+
+This matters most where the report is the only artifact a reader has — a CI
+job log, or a reviewer on a PR they did not write. The index alone is not
+even a stable identifier: file-presence checks are sorted by path, so
+inventorying one new file renumbers every entry after it.
+
+`field`, `committed` and `fresh` are unchanged (`field` is the dotted
+positional pointer, shared contract surface with `klt drc`/`extract`/`lvs`),
+so the key is additive with no `schema_version` bump. It is **absent** on an
+entry that names no single check: a `status` entry, and the single whole-list
+`attestation.checks` entry an inventory that *gained or lost* a file produces
+— equal-length lists are diffed index by index, a length mismatch is one
+whole-list diff. Matching committed to fresh checks by identity rather than
+position, so that case too became per-check, is not done here.
+
+**Toolchain-free runners: `local_only` commands (issue #3743).** A command
+declared `"local_only": true` (an item-1 `derived[].check`, an item-9
+`cold_start`, or an item-10 `checks[]` entry) runs under `--attest` as usual,
+and its outcome is committed in the envelope (the check carries
+`"local_only": true`). Under `--attest --check` it is **not run**: the check
+is carried through with its committed outcome and listed in the response's
+`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed",
+"reproduces"?, "documented_argv"?}]`,
+`passed` being the *committed* outcome, never a result of this run). Text
+output prints each as `[SKIP]`. Every file-presence and content-hash check
+still runs, so drift in an inventoried file is still drift, and a committed
+failing outcome still gives `fresh_status: "fail"` (exit `3`). The skip is
+visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
+Run a plain `--attest --check` (no `local_only` commands) on a runner that
+has the toolchain to re-verify them.
+
+**`--attest` runs every `local_only` command unless you opt out.** By
+default minting runs each `local_only` command — `--check` is the only mode
+that skips one on its own — so a `cold_start` marked `local_only` still runs
+for its full duration on the first attest. There is no `status: "partial"`
+envelope: an attested item-9 `cold_start` that did not run is not evidence,
+and T1 item 9 depends on it. The sole opt-out is `--skip-local-only` (below),
+and it only refreshes an envelope that already committed that outcome — it
+never substitutes for a first run. A host that cannot run the toolchain (for
+example, one blocked by a `batch_runner_version_mismatch` when a `local_only`
+check submits a `klt sim --backend batch` request) should be unblocked where
+possible. See "When the client is newer than the runner" in
+[`sim.md`](sim.md) for the two existing paths: rebuilding the runner image at
+the client's minor, and `request.batch.runner_version_check: "warn"`.
+
+**Refreshing on a host lacking the toolchain: `--skip-local-only` (issue
+#5209).** With `--attest ITEM --inventory FILE -o OUT --skip-local-only`, no
+`local_only` command is run. Their outcomes are carried from the existing
+`OUT` envelope (the one being refreshed), matched by role, `argv` and
+testbench identity, exactly as `--check` carries them; every other check (file
+presence, content hashes, non-`local_only` commands, pins) is recomputed. The
+written envelope has no marker for the skip, so a later `--attest --check`
+reports no drift. The live result lists the carried checks under
+`skipped_checks` (same shape as `--check`) and text output prints `[SKIP]`
+lines. A committed failing `local_only` check keeps the envelope `fail`
+(exit `3`, nothing written), and a `local_only` command with no counterpart in
+`OUT` fails. The flag is refused (exit `1`) without `--attest`, without `-o`,
+together with `--check`, or when `OUT` is missing or unparseable. **Trade-off:**
+the carried outcome is vouched for by the committed envelope, not by this run.
+Use it only when the change cannot affect that command's result; it never
+mints a first outcome.
+
+**Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
+`checks[]` command runs under `--attest` against the working tree as it is at
+that moment, and any failure gives `status: "fail"`, exit `3`, and no envelope
+(see "Exit codes"). `local_only` does not exempt a check from this: it skips
+the command under `--attest --check`, and under `--attest -o OUT
+--skip-local-only` it carries the outcome `OUT` already committed; on any
+other `--attest` the command runs, and gates, at mint time.
+
+This makes one case circular. A check that also verifies committed evidence
+*downstream* of the item-10 envelope (a lint for record freshness, or for
+envelope-to-manifest pins) fails whenever a record citing that envelope is
+stale, and such a record cannot be re-minted until the envelope exists. There
+are three ways out:
+
+1. Keep the downstream-verifying lint out of the item-10 `checks[]` inventory
+   and run it in CI instead.
+2. Keep it in the inventory and follow the required order: mint item 10 first,
+   on a tree whose baseline still holds, then re-mint the downstream records
+   that cite the new envelope.
+3. When no such tree is left, run the record → envelope → record sequence
+   below.
+
+**Editing an inventoried file leaves no tree for way out no. 2 (issue
+#5538).** Way out no. 2 needs a moment at which the committed record still
+holds. An edit to an inventoried file (or to the inventory itself, which is
+what adding one means) removes it: the envelope must be re-minted and the
+record that cites it goes stale in the same moment. `--attest` then refuses
+to write, because the record it checks is stale, and the record cannot be
+regraded to a correct value, because it grades an envelope that has not been
+rewritten yet. Break the cycle by running the two producers in this order,
+from the deadlocked tree:
+
+1. **Regenerate the record.** It grades the item `unmet` with
+   `reason: "stale_evidence"` — the honest verdict for an envelope that has
+   not been rewritten yet.
+2. **Re-run `klt signoff --attest ITEM --inventory INV -o OUT`.** The record
+   check passes against that record, so the envelope is written (exit `0`).
+3. **Regenerate the record again.** It grades the item `met` against the
+   envelope step 2 wrote.
+
+**It has converged when `klt signoff --attest ITEM --inventory INV --check
+OUT` and the record's own `klt signoff --manifest M --check R` both exit
+`0`.** Run both. **A pair committed after step 1 or step 2 is
+half-converged** — the record still says `stale_evidence` while the envelope
+is fresh — and neither producer stops you committing it; both `--check` runs
+reject such a pair with exit `3`, so CI running them is the backstop. (The
+step-3 record is not in general byte-identical to the pre-edit one, so a
+byte-comparison against the old record is not the convergence signal; the two
+`--check` runs are.)
+
+Exit `3` on this shape otherwise reads like any other failing check, so a
+**failing `command` check whose `argv` runs a `signoff … --manifest …
+--check …`** carries a live-only `hint` naming the cycle and this sequence
+(see "A **command** is …" above for the field's lifecycle). The hint is
+worded conditionally — *if* that record cites this envelope — because the
+manifest named in `argv` is deliberately not parsed; an unrelated failing
+record check therefore gets advice that is still accurate.
+
+#### Exit codes
+
+| Mode | `0` | `1` | `2` | `3` |
+| ---- | --- | --- | --- | --- |
+| `--attest` | `status: "pass"` (written to `-o` if given and changed) | malformed/unreadable inventory, inventory outside a repository, or a flag conflict; error envelope, nothing on stdout | usage error (e.g. `--attest 2`) from argparse | `status: "fail"`: a check failed; the envelope is printed, nothing is written |
+| `--attest --check` | `status: "match"` and `fresh_status: "pass"` | as above, plus a missing/unparseable committed envelope or one without `"kind": "generic"` and an `attestation` block | as above | `status: "drifted"`, or a faithfully reproduced `fresh_status: "fail"` |
 
 ### Where the tier doc comes from
 
@@ -1268,6 +3608,17 @@ these two modes work identically from a packaged install with no repo
 checkout anywhere on disk. Only an override (1 or 2) changes `source_doc` in
 the report; the shipped doc always reports as
 `"docs/design-evidence-tiers.md"` regardless of install layout.
+
+**Fleet convention (issue #5041).** Chip repos should not vendor
+`design-evidence-tiers.md`: rely on the bundled copy and record the
+exact-pinned `klt` version as the source of the doc. Vendor a copy (and pass
+`--tiers-doc`) only to deliberately grade against a *different* doc. A
+byte-identical override and the bundled copy produce the same report in both
+`--manifest` and `--fleet` modes, differing only in `source_doc` (pinned by
+`test_cli_bundled_doc_and_identical_override_differ_only_in_source_doc`), so
+dropping a vendored copy does not change any verdict. Committed sign-off
+records are append-only and unaffected: a record graded with an override keeps
+its original `source_doc`.
 
 Both override forms expand a leading `~`, so a quoted
 `--tiers-doc '~/vendored-tiers.md'` (which the shell leaves unexpanded)
@@ -1304,10 +3655,14 @@ $ klt signoff --manifest manifest.json --repo-root /tmp/archive-copy
 
 Every `scope: "repo"` input in the manifest's evidence then resolves
 against `<dir>` instead of a `.git` walk, and a manifest that grades `met`
-inside its checkout grades `met` over the copy. The flag applies to both
-doc-parsing modes (`--manifest` and `--fleet`, including their `--check`
-re-grades); envelope aggregation re-hashes no input artifacts, so the flag
-is refused there, as `--tiers-doc`/`--check` are. Rules:
+inside its checkout grades `met` over the copy. The git-index
+trackedness filter (issue #5857) does not apply over such a root: a tree
+without functioning VCS metadata has no index to ask, so candidates there
+keep the filesystem-presence behaviour — committed artifacts verify in
+both places, which is the parity #2878 bought and #5857 keeps. The flag
+applies to both doc-parsing modes (`--manifest` and `--fleet`, including
+their `--check` re-grades); envelope aggregation re-hashes no input
+artifacts, so the flag is refused there, as `--tiers-doc`/`--check` are. Rules:
 
 - The explicit root **replaces** the `.git`-ancestor discovery — it is the
   repo root, full stop. No fallback to a discovered checkout: a caller that
@@ -1324,6 +3679,35 @@ A relative `--repo-root` resolves against this process's working directory,
 like any other path argument. Evidence files need not live under the root —
 only the `scope: "repo"` echoes are joined against it — but naming the tree
 the evidence was actually produced from is the intended use.
+
+### Citing stored evidence: `--artifact-manifest`
+
+A manifest-forward repo keeps only artifact-store manifests (`klt artifact`,
+[`artifact.md`](artifact.md)) in git; the evidence bytes live in the store.
+`--artifact-manifest PATH` (repeatable; issue #5882; only with
+`--manifest`/`--fleet`) lets two citation shapes name such bytes by their
+`artifact:<key>` URI:
+
+- a file-backed evidence entry, `{"file": "artifact:<key>", "content_hash": ...}`
+  or the bare string form;
+- a cited envelope's own input path, e.g. a `generic` envelope's
+  `provenance.input.path` of `{"path": "artifact:<key>", "scope": "repo"}`.
+
+The URI is looked up by key in the given manifest(s), fetched through the
+broker (`$KLT_ARTIFACT_BROKER`) into a temporary file that is deleted when
+the run ends, and read exactly like a file on disk — so
+`citation.input_verified` keeps its meaning (`true` means the fetched bytes
+were really re-hashed). The fetch verifies sha256, key and size against the
+manifest entry before anything is written; gzip bytes are read directly.
+The citation's `file` stays the URI.
+
+Anything that stops the bytes being obtained — no `--artifact-manifest`, no
+entry for the key, no broker configured or reachable, a hash/size mismatch —
+grades `unmet` with reason `artifact_unavailable` and
+`detail: {"artifact": "<uri>", "problem": "<code>: <message>"}`; it never
+falls back to a literal path and is never `met`. There is no broker-free
+mode: a manifest's pinned hash is not the bytes. Without the flag, and with no
+`artifact:` path cited, behaviour is unchanged.
 
 ### An overridden doc can outrun the build: `graded_by_build`
 
@@ -1342,7 +3726,7 @@ Every T1 item therefore reports `graded_by_build` (see the
 
 | `graded_by_build` | When | Effect on grading |
 | --- | --- | --- |
-| `true` | A grading rule names the item's id, **or** this build's own shipped doc lists it — every item of `docs/design-evidence-tiers.md`, including 1, 2, 9 and 10, whose documented rule is "any recognised, passing envelope satisfies this" | None. Graded exactly as documented above. |
+| `true` | A grading rule names the item's id, **or** this build's own shipped doc lists it — every item of `docs/design-evidence-tiers.md`, including 1, 2, 9 and 10, whose documented rules (anchored `generic` evidence for 1, 9 and 10; any recognised passing envelope or anchored `generic` for 2) carry no table entry | None. Graded exactly as documented above. |
 | `false` | Only the overriding doc knows this item id | An *uncited* item renders `unmet`/`no_evidence` as before, now visibly unchecked rather than indistinguishable from a graded row. A *cited* item renders `unmet`/`ungradeable_by_build` — never the unrestricted fall-through, under which any passing envelope would have produced a `met` from rules that do not exist here. |
 
 A `false` row is refused *before* its evidence is resolved, so a
@@ -1502,6 +3886,14 @@ and the byte-canonical *provisioning route* for reproducing the rest is a
 only route that records the commit at all. Removing `build` removes the
 evidence #2176 exists to carry, so prefer `--check`, which keeps it.
 
+The same `git+…@<sha>` pin can also differ by installer cache state (a dev
+`0.8.0.devN+g<sha>`, `is_release: false` build from one cache, the release
+`0.8.0`, `is_release: true` from another — see
+[`version.md`](version.md)), so a raw byte diff of a regenerated report can
+fail in CI with no evidence change. Verify with `klt signoff --check`; if a
+raw diff is unavoidable, the `build` block is the field to normalise (as of
+2026-11-06).
+
 ### Verifying a committed report: `--check` (issue #2249)
 
 `klt signoff --manifest M --check REPORT` (and the `--fleet` form) answers
@@ -1532,6 +3924,12 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
+  "build_skew": {
+    "state": "ruleset",
+    "fields": [
+      { "field": "build.grading_ruleset_id", "committed": "sha256:…", "fresh": "sha256:…" }
+    ]
+  },
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```
@@ -1543,6 +3941,30 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
+- **`build_skew` names build-block skew without grading it** (issues
+  #5868, #5852). `--check` is the version-tolerant freshness gate; a raw
+  diff of two `--format json` renders is not, because the `build` block
+  differs whenever the rendering klt differs. `build_skew.state` is
+  `"same"`, `"build_only"` (some `build.*` field moved, the grading
+  ruleset did not), `"ruleset"` (`build.grading_ruleset_id` moved: graded
+  under different rules, not just rendered by a different build),
+  `"unverifiable"` (at least one side's identity cannot be resolved
+  honestly — no `version`, or a `+unknown` one from a source-tarball
+  install — so neither `"same"` nor a difference state is an assertion the
+  evidence supports; two `+unknown` builds that agree on every recorded
+  field would otherwise read as `"same"`) or `"unknown"` (the committed
+  report has no `build` block). `"unverifiable"` takes precedence over
+  `"build_only"` and `"ruleset"`: a `+unknown` side that also moved
+  `build.grading_ruleset_id` reads `"unverifiable"`, so a consumer that
+  alarms specifically on a ruleset move must also look for
+  `build.grading_ruleset_id` in `fields`. `fields` lists each differing
+  field, kept even under `"unverifiable"` — there it is what the recorded
+  values say, not a claim. It never changes `status` or the exit code, and `--format
+  text` prints one `build_skew:` line when the state is `build_only`,
+  `ruleset` or `unverifiable`. This one field is the whole report-only
+  story of the excluded `build` block: gate on `.build_skew.state` — a
+  consumer that wants to warn (or fail) on "committed by a different
+  build" reads it; nothing else carries that fact.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
@@ -1554,11 +3976,11 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   drift" below.
 - **Everything else is compared**: every `items[]` `status`/`reason`/
   `citation` (including each citation's `content_hash`/`input_verified`),
-  every `id`/`tier`/`partition`/`partition_boundary`, `t1_item_count`,
-  `build_t1_item_count`, `t1_met_count`, `graded_by_build`, and
-  `source_doc` (*where* the doc came from — grading against a `--tiers-doc`
-  override instead of the bundled copy is a different grading run, not a
-  reworded one).
+  every `id`/`tier`/`partition`/`partition_boundary`, `upstream_source`,
+  `t1_item_count`, `build_t1_item_count`, `t1_met_count`,
+  `graded_by_build`, and `source_doc` (*where* the doc came from — grading
+  against a `--tiers-doc` override instead of the bundled copy is a
+  different grading run, not a reworded one).
 - **A report predating the `build` block verifies normally.** An excluded
   path is skipped whether or not either side carries it, so a report
   committed before issue #2176 still verifies on its graded content instead
@@ -1588,6 +4010,7 @@ produced the same red.
 | `items[].title`, `items[].text`, `items[].notes` | No — `doc_drift` | The report's verbatim quotation of the doc, parsed straight out of it and echoed on unmodified. No grading rule reads any of them. |
 | `source_doc_content_hash` (top level, and per block in `--fleet`) | No — `doc_drift` | Hashes the doc's whole bytes, so it moves on a typo fix in a section this report does not even render. It cannot distinguish "the checklist changed what it requires" from "the checklist was reworded". |
 | `blocks[].blocking_item.title`, `blocks[].ungraded_items[].title` (`--fleet`) | No — `doc_drift` | The same doc-sourced prose, in the roll-up's reduced item views. Their `id`/`reason` — what actually names the blocker — stay in the verdict. |
+| `unmet_reason_counts` (issue #5903) | No — neither verdict nor `doc_drift` | A pure function of `items[]`' `status`/`reason`, which stay compared, so it cannot hide a change; excluding it keeps a report committed before the field existed from reading `drifted` on an upgrade alone. |
 | `items[].id` / `status` / `reason` / `citation` / `tier` / `partition` | **Yes** | The verdict itself. |
 | `t1_item_count`, `build_t1_item_count`, `t1_met_count` | **Yes** | A checklist that *gained, lost or renumbered* an item — as opposed to being reworded — moves these. That is a real change to the yardstick and still fails. |
 
@@ -1608,7 +4031,9 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report and from `--describe-grader`.
+  embedded `fresh` report, named (with the rest of the build identity) in
+  the response's `build_skew.fields` when it moved, and reported by
+  `--describe-grader`.
 
 ```bash
 # Fail on evidence drift; warn on a reworded checklist.
@@ -1648,6 +4073,182 @@ not pin the grading build (that is what `grading_ruleset_id` is for, below),
 and `--check` excludes the whole `build` block from its verdict precisely
 because two legitimate installs of the same commit disagree about it.
 
+### Comparing two saved reports: `--diff-reports` (issue #6850)
+
+`--check` answers "does this committed report still reproduce" by
+**re-grading its manifest** — so it needs the manifest, the evidence that
+manifest cites, and a working grading build. An evidence reviewer holding
+two *saved* tier reports and none of that (the manifest was never
+committed, the evidence was archived, the build was upgraded) still has one
+question to answer: *what changed in the checklist between these two
+snapshots?* `--diff-reports` answers it from the two files alone:
+
+```bash
+# What moved in the checklist between two committed tier reports.
+# Always exits 0 on a completed comparison -- read the JSON for the movement.
+klt signoff --diff-reports reports/block.signoff.v1.json \
+  reports/block.signoff.v2.json --format json
+```
+
+```json
+{
+  "schema_version": 1,
+  "mode": "diff-reports",
+  "old_report": "reports/block.signoff.v1.json",
+  "new_report": "reports/block.signoff.v2.json",
+  "changed": true,
+  "source": [
+    { "field": "source_doc_content_hash",
+      "old": "sha256:…", "new": "sha256:…" }
+  ],
+  "items": {
+    "changed": [
+      { "tier": "T1", "id": 7, "partition": null, "field": "text",
+        "old": "…", "new": "… (reworded)" }
+    ],
+    "added": [
+      { "tier": "T1", "id": 12, "partition": null,
+        "title": "…", "text": "…", "notes": [] }
+    ],
+    "removed": []
+  }
+}
+```
+
+- **The comparison covers exactly the checklist-describing surfaces**: the
+  top-level `source_doc`/`source_doc_content_hash` (which checklist doc the
+  report quotes, and the hash of what it said) and each matched row's
+  `title`/`text`/`notes` — the same three item fields `--check` excludes
+  from its verdict as `doc_drift` (issue #2526). Everything else — every
+  `status`/`reason`/`citation`, the `t1_*` counts, the `build` block — is
+  grading output or install identity, and a report pair differing *only*
+  there compares as unchanged. The mode is the read-only complement of
+  `--check`: it reports the movement `--check` deliberately ignores,
+  without needing anything the grading touched.
+- **Rows are matched by `(tier, id, partition)`** — the row identity the
+  report itself carries. Reordering `items[]` alone therefore compares as
+  unchanged; the analog and digital rows of a mixed-signal pair that share
+  a numeric id stay distinct; and the T2–T4 ladder rows (`id: null`) are
+  distinguished by their tier. Each row present on only one side is
+  identified **once**, in `added`/`removed`, with its full checklist
+  content (`title`/`text`/`notes`).
+- **`changed` is the boolean summary; the lists are the answer.** `source[]`
+  and `items.changed[]` entries carry both values as `old`/`new`.
+- **Exit `0` for any completed comparison, movement included** — reporting
+  movement is this mode's answer, not a failure. Exit `1` is a failure to
+  run: an unreadable/non-JSON file, a report that is not a tier report (a
+  fleet roll-up, an unrelated JSON object), or a report carrying two rows
+  with the same `(tier, id, partition)` key, which could not be matched
+  unambiguously.
+- Fleet roll-ups and attestation envelopes are out of scope: point the mode
+  at reports `--manifest` produced.
+
+### Re-pinning a stale hash: `--repin` (issue #5527)
+
+When an attestation inventory changes, `klt signoff --attest` regenerates the
+envelope correctly — but the manifest's pinned `content_hash` still names the
+**old** input hash, so the next `--manifest` run grades the item
+`unmet`/`stale_evidence`. Re-pinning was a hand edit of JSON, and forgetting
+it is a silent downgrade of a signoff verdict.
+
+`--repin` is the mechanical half of that step:
+
+```bash
+klt signoff --attest 9 --inventory attestation/item9-inventory.json \
+  -o attestation/item9-envelope.json
+klt signoff --repin --manifest manifest.json      # <- this
+klt signoff --manifest manifest.json              # item 9 is met again
+```
+
+It rewrites, in place, the `content_hash` of every evidence entry whose pin
+is stale **and** whose live hash this grader re-derived from the artifact
+itself. It renders no tier verdict: exit `0` means the pass ran, not that the
+block is T1. Re-grade with `--manifest` afterwards.
+
+**What it refuses to touch** is the point of the command, not a limitation:
+
+| Entry | What `--repin` does | Why |
+| ----- | ------------------- | --- |
+| Stale pin, `input_verified: true` | **Rewritten**, and reported | The new value is a hash this run computed from the artifact on disk, not a claim copied out of the evidence |
+| Stale pin, `input_verified` `false`/`null` | Left alone, reported as skipped (`input_not_verified`) | For `drc`/`lvs`/`extract`/`sim` the pin is the manifest author's *independent* claim about which revision was checked; copying the report's own say-so into the manifest would defeat the staleness gate the pin exists to be |
+| Pin cannot be compared for this kind | Left alone, skipped (`unverifiable_pin`) | There is no live hash to re-pin to |
+| Pinned entry whose evidence will not resolve | Left alone, skipped (`unresolved_evidence` / `invalid_evidence`) | Nothing was read, so nothing is known |
+| Entry that pins nothing (bare-string form, or no `content_hash`) | Left alone, **never given a pin**, not reported | `--repin` updates an existing claim; it does not manufacture one |
+
+A **store-pinned `yield` samples companion** (issue #6584; see "Citing an
+object in the artifact store" above) is that second row's `null` case, not
+an exception to it. The live hash the grader compared was the `sha256` a
+committed `*.manifest.json` records for the member —
+`content_hash_basis: "artifact_manifest"`, `input_verified: null` — so no
+bytes were read and there is nothing this run re-derived to repin *from*.
+When such a pin goes stale (the object rotated in the store, so the
+committed manifest now records a new digest), `--repin` skips the entry as
+`input_not_verified` and writes nothing: copying the manifest's recorded
+digest into the manifest being repinned would be offline manifest
+comparison, not verification, and the bytes are in the store, not the tree.
+Updating a store-only pin stays an explicit author-reviewed edit of the
+evidence entry's `content_hash`, made after a byte-level check of the
+object itself with `klt artifact get`/`verify`, followed by re-grading
+with `--manifest`. A fresh store pin is a plain no-op — `unchanged`, not
+reported as skipped — the same as any other verified-fresh pin.
+
+A manifest with nothing to re-pin is **not written at all** — its bytes and
+mtime are untouched, so a no-op `--repin` cannot show up in a diff. A
+rewritten manifest is serialized as 2-space-indented JSON with a trailing
+newline, the shape every manifest in this repo already uses, so the diff is
+the changed `content_hash` lines and nothing else. A manifest stored in some
+other layout is normalized to that shape.
+
+`--repin` requires `--manifest FILE` and refuses `--manifest -`: stdin cannot
+be written back. It is mutually exclusive with the envelope `<file>`
+arguments and with `--fleet`, `--attest`, `--check` and `--describe-grader` —
+each a mode that renders or checks something, where `--repin` writes. All of
+those are usage errors (exit `2`). So is `-o`/`--output` (#6147): `--repin`
+renders no report to put in a file, and exiting `0` with the file never
+written would silently discard output you asked for. The envelope goes to
+stdout; redirect it if you want it in a file. `--repo-root` applies as it
+does to `--manifest`, since the same input-artifact resolution decides
+`input_verified`.
+
+#### `--repin` JSON
+
+```bash
+$ klt signoff --repin --manifest manifest.json --format json
+{
+  "schema_version": 1,
+  "status": "repinned",
+  "manifest": "manifest.json",
+  "block": "example-current-mirror",
+  "changed_count": 1,
+  "skipped_count": 0,
+  "changed": [
+    {
+      "item": "9",
+      "index": null,
+      "file": "attestation/item9-envelope.json",
+      "old_content_hash": "sha256:e613d0…",
+      "new_content_hash": "sha256:334575…"
+    }
+  ],
+  "skipped": []
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `status` | `"repinned"` if any pin was rewritten, `"unchanged"` otherwise (the file was then not written) |
+| `manifest` | The manifest path, as given |
+| `block` | The manifest's `block`, echoed, or `null` |
+| `changed[]` | One record per rewritten pin: `item` (the evidence key verbatim, e.g. `"9"` or `"9.analog"`), `index` (position within a multi-citation list entry, else `null`), `file`, `old_content_hash`, `new_content_hash` |
+| `skipped[]` | One record per pinned entry that could not be confirmed fresh and was not rewritten: `item`, `index`, `file`, `reason` (`input_not_verified`, `unverifiable_pin`, `unresolved_evidence`, `invalid_evidence`) |
+
+For grouped item 11 citations, each record also includes `group_index`.
+Both positions are zero-based, with `index` locating the citation within
+that group.
+
+`--format text` prints the same outcome as a courtesy; the JSON is the
+contract.
+
 ### Identifying the grading build
 
 **A `klt` version string alone does not identify the grading build.** Three
@@ -1656,9 +4257,9 @@ tier-verdict report by different rules:
 
 | Install | What `git_commit`/`git_tag` say | What actually grades the report |
 | --- | --- | --- |
-| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | `signoff.py` as it stood at `abc123` |
-| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff.py` — but installed with no shared `.git` history against the wheel to compare |
-| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | `signoff.py` as it stands on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
+| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | the `signoff*.py` grading modules as they stood at `abc123` |
+| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff*.py` modules — but installed with no shared `.git` history against the wheel to compare |
+| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | the `signoff*.py` modules as they stand on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
 
 `git_commit`/`git_tag` (in `klt version --format json`, and in every tier /
 fleet report's `build` block) identify the **source checkout** each install
@@ -1670,16 +4271,27 @@ grading rules produced it.
 Two mechanisms close that gap, both driven by the same content hash:
 
 1. **`grading_ruleset_id`** — a `sha256:`-prefixed content hash of the
-   shipped `signoff.py` grading module, reported by `klt version --format
+   shipped `signoff*.py` grading modules (issue #7434: every module in the
+   package directory whose filename matches, not just `signoff.py` — the
+   per-item grading rules and the `reason` vocabulary they emit live across
+   the whole leaf family, and a named subset would silently lose coverage
+   again with every future leaf split; each file's basename is mixed into
+   the digest before its bytes, so a rename or a content move between two
+   leaves changes the id too), reported by `klt version --format
    json` (see [`version.md`](version.md)) and echoed into every tier / fleet
    report's own `build` block (above), so a committed report names the
    grading rules that produced it, not just the source checkout. It is
    **identical** between two installs of byte-identical grading code
    (the wheel and the `git+...` snapshot in the table above both report the
    same id, with no shared git history required to prove it) and **changes**
-   whenever `signoff.py`'s grading logic changes (the `main` checkout in the
-   table reports a different id from the tag it moved past). `null` only if
-   this install's `signoff.py` cannot be read at all — never fabricated.
+   whenever any grading module's logic changes — including an edit confined
+   to a leaf such as `signoff_power_delivery.py` (the `main` checkout in the
+   table reports a different id from the tag it moved past). Modules outside
+   the `signoff*.py` family (`design_evidence_tiers.py`, `coverage.py`,
+   `metrics.py`, ...) are deliberately not covered; the checklist doc itself
+   is covered separately by the report's `source_doc_content_hash`.
+   `null` only if this install's `signoff*.py` grading modules cannot be
+   read at all — never fabricated.
 2. **`klt signoff --describe-grader`** — enumerates, at runtime and without
    reading source, which T1 checklist item ids this build has grading rules
    for at all, alongside the same `grading_ruleset_id`:
@@ -1717,8 +4329,8 @@ Two mechanisms close that gap, both driven by the same content hash:
    drift from it:
 
    ```json
-   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11]},
-   "opt_in_kinds_by_item": {"1": ["generic"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
+   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11], "synthesize": [1], "model-run": [5]},
+   "opt_in_kinds_by_item": {"1": ["generic", "synthesize"], "2": ["generic"], "8": ["generic"], "5": ["model-run"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
    ```
 
    `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
@@ -1729,6 +4341,22 @@ Two mechanisms close that gap, both driven by the same content hash:
    mapping is printed in the epilog of `klt signoff --help`. Values reflect
    the running build and have changed across releases; read them at runtime
    rather than hardcoding.
+
+   An additive field (issue #4309), `"pinned_runsets"`, maps each accepted
+   PDK-runset `sha256:` digest to its `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by` (`signoff_runset.PINNED_RUNSETS`), so a block can
+   check its runset is pinned before running `klt lvs --engine
+   klayout-runset`.
+
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
+
+   A further additive field (issue #2865), `"not_applicable_items": {"6":
+   ["digital"]}`, maps each item that accepts a recorded `not_applicable`
+   outcome to the partitions that may use it (see "Item 6 `not_applicable`").
 
    Always reports **this build's own shipped** grading rules — deliberately
    unaffected by `--tiers-doc`/`$KLT_TIERS_DOC` (which override the item
@@ -1753,11 +4381,61 @@ bump" rule under which `build`/`graded_by_build`/`build_t1_item_count`
 themselves landed (issues #2176, #2202) — see
 [`../json-contract.md`](../json-contract.md).
 
+### Pinning the grading build: `--require-grading-ruleset` (issue #5847)
+
+**A `--manifest`/`--fleet` render — or a `--check` re-grade — can be told
+which grading build it must be.** Passing
+`--require-grading-ruleset sha256:<grading_ruleset_id>` makes the command
+refuse — exit `1`, the error envelope on stderr, **zero bytes on stdout** —
+unless the running build's own `grading_ruleset_id` equals the given id. The
+check runs before the manifest is read and before any evidence command
+executes, so a refused render costs nothing and touches nothing. On a match,
+the output is byte-identical to the same run without the flag.
+
+The id to pin is what `--describe-grader` prints (above), or
+`klt version --format json`'s `grading_ruleset_id` field:
+
+```bash
+$ klt signoff --manifest manifest.json \
+    --require-grading-ruleset "$(klt version --format json | jq -r .grading_ruleset_id)"
+```
+
+The flag is refused (exit `1`) with `--attest`, `--describe-grader` and
+plain envelope aggregation — those modes produce no grade to pin. The value
+must be `sha256:` + 64 hex digits; case is normalised, anything else is
+refused naming that shape, as is a build that cannot compute its own id at
+all (`grading_ruleset_id: null` — never fabricated, see above).
+
+Why the id and not a version string: `klt_version` differs by provisioning
+route (wheel vs `git+…` vs editable — see "`build` describes the *install*"
+above), while two installs of byte-identical grading code report the *same*
+`grading_ruleset_id`. A version pin would refuse legitimate installs and
+accept illegitimate ones; the id does neither.
+
+**The redirect-truncation hazard is the caller's to close, not the tool's.**
+The typical verdict-of-record invocation redirects stdout
+(`klt signoff … > report.json`), and the shell truncates that target before
+`klt` starts — so even a refusing render cannot protect the file. Render to
+a temp file and move it into place only on success, or write with
+`-o FILE` (issue #5867, above), which writes only after a successful render
+and atomically:
+
+```bash
+klt signoff --manifest manifest.json \
+  --require-grading-ruleset "$(klt version --format json | jq -r .grading_ruleset_id)" \
+  --format json > report.tmp && mv report.tmp report.json
+```
+
+Under `--check` the flag means the same thing — the committed report is only
+re-graded by the pinned grading build (`--check` itself still never writes;
+exit `0` match, `3` drifted, unchanged).
+
 ### Item 7 is kind-restricted, per block kind
 
-T1 items 1, 2, 9 and 10 accept *any* recognised, *native*
-envelope kind — a `klt drc` report can satisfy item 1 just as well as a `klt
-lvs` one, since Phase
+T1 item 2 accepts *any* recognised, *native* envelope kind — a `klt drc`
+report can satisfy it just as well as a `klt lvs` one (items 1, 9 and 10
+did too until issue #2844 restricted them to attested `generic` evidence;
+see "Attesting items 1, 9 and 10" above), since Phase
 0/1 (issues #722/#825) graded each item purely on whether *some* passing
 check was cited, not on whether that check was the *right kind* of check.
 (This is unchanged by issue #1152's `generic` kind below — that issue adds a
@@ -1810,6 +4488,48 @@ unannotated (but passing) regression cited for item 7 renders `"unmet"` with
 `"wrong_kind"`, per issue #826's rule that the report must say precisely
 what is missing: `"wrong_kind"` means "cite a different artifact",
 `"not_post_layout"` means "re-run *this* artifact against the layout".
+
+**`nothing_checked` vs. both of them** (issue #5479). The third thing that
+can be wrong with an item-7 citation is that the cited `klt pex` report
+measured nothing. `klt pex --extract-only` (issue #3739) exists precisely to
+produce one: it runs the extraction leg and does not attempt the measurement
+leg, so `delta` is `[]`, `measurement.mode` is `"extract-only"`, and the
+common rollup reports `status: "not_checked"` (exit 4). Cited for item 7 that
+renders `"unmet"` with `reason: "nothing_checked"` — a *third* distinct
+remedy, completing the set issue #826's rule asks for: `"wrong_kind"` means
+"cite a different artifact", `"not_post_layout"` means "re-run *this*
+artifact against the layout", and `"nothing_checked"` means "run a
+measurement leg". It is deliberately not `check_failed`: no `delta[]` row
+missed its tolerance, because no row was compared. The item carries
+`detail.cited_evidence` naming the extraction that *was* read — its file,
+`content_hash` and `body_bias` statement — so a committed record of an
+honestly-empty item 7 still says which extraction backs it. An
+extraction-only report can never render item 7 `"met"`; see "A check that
+checked nothing is refused, not reported" above for the shared rule and both
+routes into it.
+
+**`no_parasitics` vs. all of them** (issue #6606, AC 4). A fourth thing can
+be wrong with an item-7 citation: the cited `klt pex` report's own
+extraction disclosure states the extracted leg carried **no parasitics**
+(`extraction.parasitics_carried: false` — a plain
+`--engine klayout-runset` leg, issue #6559). Item 7 is parasitic
+verification, and such a leg's `delta[]` rows are device-representation
+deltas, so the verdict does not establish the item no matter that every row
+met tolerance: it renders `"unmet"` with `reason: "no_parasitics"`, whose
+remedy is "re-run *this* artifact with parasitics attached"
+(`klt pex --engine klayout-runset --deck <curated>`, which joins the curated
+deck's parasitics onto the runset devices by geometric net correspondence —
+[`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)).
+A merged leg that attached cards discloses
+`extraction.parasitics_carried: true` and grades exactly as a curated one;
+an envelope with no engine statement (every curated-deck run, and every
+record predating the route) carries parasitics by construction and is never
+refused here. The gate applies only to item 7. The check keeps its own
+`passed` status in aggregation mode. A merged citation also quotes the
+ground capacitors’ `substrate_return` when present. A null `runset` identifies
+a separate DC-tied return whose connection to a runset device body is
+unverified. Item 7 grades the simulated leg with that disclosed return.
+Item 2 (Layout) keeps its existing treatment of either leg.
 
 Only the literal JSON boolean `true` in `environment.sdf.annotated` grants
 annotation credit. False, null, missing fields, strings (including `"true"`
@@ -1928,7 +4648,8 @@ newer `klt`"* versus *"this citation points at the wrong artifact"*.
 Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
 its own** — `status` is always `"ok"` (the verb reports timing, it does not
 judge it). So `klt signoff` derives a verdict from the reported timing
-instead. Every corner the run reported must satisfy both of:
+instead (a `status` other than `"ok"` still fails, see below). Every corner
+the run reported must satisfy both of:
 
 1. `timing_status == "constrained"`. OpenSTA's unconstrained-design sentinel
    is `1e+39` — a *positive* number, so a naive `worst_slack_ns >= 0` rule
@@ -1941,6 +4662,101 @@ instead. Every corner the run reported must satisfy both of:
 
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
+
+**The envelope's own `status` is graded (issue #7711).** `klt sta` always
+emits `status: "ok"` and a failed run never emits the envelope
+([`sta.md`](sta.md)). In manifest mode, a present top-level `status` with
+any other value grades `unmet` with reason `check_failed`. The value appears in
+`detail.sta_status`, including JSON `null`. An absent `status` still gives
+`unrecognized_envelope`. In envelope-aggregation mode, a non-ok string fails
+the check and a missing or non-string status fails envelope validation.
+Per-corner entries carry no `status`.
+
+**`geometry_source` is *not* part of the default predicate (issue #7711).** It
+is a caller-supplied label — `"routed"`, `"placement_estimate"` or
+`"netlist_estimate"` ([`sta.md`](sta.md)) — and item 5 is the pre-layout
+corner-timing item (item 7 is the post-layout one and does not accept `sta`),
+so a pre-route estimate with closed timing is deliberately still `met`. It is
+surfaced on every `sta` citation as `detail.geometry_source`, so a reader can
+see what a `met` rested on; require routed geometry with the opt-in below.
+
+**Opt-in: `require_routed_geometry` (issue #7711).** An evidence entry citing
+a `klt sta` envelope may add `"require_routed_geometry": true` (same
+entry-level shape as `require_annotation_complete`). Then the envelope's
+top-level `geometry_source` must be the literal string `"routed"`; otherwise
+the item is `unmet` with reason `check_failed` and
+`detail.sta_geometry_not_routed` is `{geometry_source: <value>}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `"placement_estimate"`, `"netlist_estimate"` and any other string → unmet.
+  The check is an exact string match, with no case folding.
+- An otherwise valid STA timing citation with a missing, `null` or non-string
+  `geometry_source` gives `check_failed` under this option. The diagnostic
+  carries the original JSON value, or `null` for an absent key. The default
+  still reports `unrecognized_envelope` for these shapes.
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- It composes with the two opt-ins below on one entry; when several fail,
+  the first of annotation, constraints, geometry is the one reported.
+
+It does not re-derive routedness from the DEF: the label is the caller's
+claim (see [`sta.md`](sta.md)), and the option only requires that the claim
+be `"routed"`.
+
+The key, `detail.sta_status`, `detail.sta_geometry_not_routed` and the
+citation's `detail.geometry_source` are additive: no existing field changes
+meaning, so `schema_version` is unchanged. The `status` guard changes the
+verdict only for an envelope `klt sta` cannot have produced.
+
+**Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
+say whether a SPEF was actually applied to the timing. An evidence entry
+citing a `klt sta` envelope may add `"require_annotation_complete": true`
+(e.g. `{"file": "sta.json", "require_annotation_complete": true}`; file- or
+command-backed). Then, for **every** reported corner (or the flat envelope)
+that carries a `spef_annotation` block, `annotation_complete` must be
+literal `true`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_annotation_incomplete` lists each offending corner as
+`{corner, annotation_complete, annotation_warning}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `spef_annotation` absent or `null` (no SPEF supplied) → no effect; the
+  option cannot turn a no-SPEF run into a parasitics claim.
+- `annotation_complete` missing, `null` or non-boolean on a present block →
+  unmet (fail-closed).
+- A non-boolean `require_annotation_complete` value makes the entry
+  malformed (`invalid_evidence`) rather than silently reading as off.
+
+The key is an additive manifest input and an additive `detail` field; no
+existing field changes meaning, so `schema_version` is unchanged.
+
+**Opt-in: `require_complete_constraints` (issue #5234).** `klt sta` reports
+`constraint_completeness` per corner ([`sta.md`](sta.md)), separate from
+`timing_status`: a design can have finite slack and still carry unconstrained
+endpoints or unclocked registers. An evidence entry citing a `klt sta`
+envelope may add `"require_complete_constraints": true` (same entry-level
+shape as `require_annotation_complete`). Then, for **every** graded corner
+(or the flat envelope), `constraint_completeness.status` must be literal
+`"complete"`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_constraints_incomplete` lists each offending corner as
+`{corner, status, unconstrained_endpoints, unclocked_registers}` (counts
+only; `null` when that check was `unavailable`, never `0`). Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `incomplete`, `unknown`, missing, `null` or malformed → unmet (fail-closed).
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- Independently of the opt-in, the `sta` citation excerpt additively carries
+  `constraint_completeness_status` of the worst corner.
+
+Both are additive; `schema_version` is unchanged.
+
+When a cited STA run reports multicycle exceptions, its check and item 5
+citation carry `detail.applied_exceptions`. The block identifies the STA
+request by `request_sha256` and lists each reporting corner with the
+`index`, `from`, `through`, `to`, `setup` and `hold` of its applied paths.
+A missing digest or malformed path list appears as `null`. Corners without
+entries contribute no row. Item 5 also carries this detail when exactly one
+of its passing STA citations reports exceptions. Each citation retains its
+own detail when several report exceptions. The completeness and annotation
+requirements grade each corner as before. See [SDC drift check](sta.md#sdc-drift-check-sdc_check-issue-5236).
 
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
@@ -2014,7 +4830,7 @@ envelope graded all three `met`. Issue #2044 closes that:
 | Item | Partition graded | Accepted kinds | The artifact the doc names |
 |---|---|---|---|
 | **5** — Full corner verification vs a ratified spec | `analog` | `sim` | "PVT corner-matrix simulation results covering every spec row at its bound corners" |
-| **5** | `digital` | `sta`, `functional-verification`, **or** `sim` | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
+| **5** | `digital` | `sta` **and** `functional-verification`, **or** `sim` alone | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
 | **6** — Statistical claims carry Monte Carlo evidence | both | `yield` | "A `klt yield` JSON report … is the machine-checkable evidence for this item" (kind-independent — item 6 applies to whichever spec rows are statistical, regardless of block kind) |
 | **8** — Characterization report | both | `generic` | The purpose-built generic evidence envelope (issue #1152): "`klt signoff --manifest` grades it via an opt-in generic evidence envelope" — the doc's substitute for the `klt` verb this item does not have |
 
@@ -2022,6 +4838,121 @@ A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
 exactly as it already did for items 3, 4 and 7 — the cited check did not
 fail on its own terms, it simply does not prove what the item requires.
 
+### Item 6 `not_applicable` (issue #2865)
+
+A block whose ratified spec has no statistical row discharges item 6 by a
+recorded "not applicable", not by a grant-time waiver. Item 6's manifest
+entry (`"6"`, or `"6.digital"` for a mixed-signal block) takes this form
+instead of a `klt yield` citation:
+
+```json
+"6": {"not_applicable": {
+  "spec":      {"file": "spec.json",      "content_hash": "sha256:..."},
+  "statement": {"file": "na-statement.json", "content_hash": "sha256:..."}
+}}
+```
+
+For a mixed-signal block with one ratified spec, declare the rows assigned to
+each partition under the manifest's top-level `spec_rows`:
+
+```json
+{"spec_rows": {"6.digital": [{"id": "interface"}], "6.analog": [{"id": "period_r1"}]}}
+```
+
+With an explicit `6.digital` declaration, the digital statement accounts for
+exactly those IDs, and the statistical scan checks those rows. Each ID in the
+full pinned spec must appear in at least one partition, and every declared ID
+must exist in the spec. A row assigned to both partitions is checked on both.
+The digital declaration requires ratified rows without gap or structural
+dispositions. The analog partition retains its independent yield grade, and
+the digital citation's `spec.row_count` counts the full pinned document.
+Without a partition assignment, the statement and scan cover the entire spec.
+
+- `spec` is the block's ratified target spec: a JSON object with
+  `"status": "ratified"` and `"rows": [{"id": ...}, ...]` (no shipped spec
+  schema exists yet; only `status` and the row `id`s are required).
+- `statement` is the committed claim, `{"rows": [{"id", "class", "reason"}]}`,
+  with exactly one entry per spec row giving why that row class is not
+  statistical (for example "timing rows are corner-bounded by STA").
+- Both documents must carry a `content_hash`; editing either renders the item
+  `unmet`/`stale_evidence` (`detail.document` names which). An unreadable
+  file is `unreadable_evidence`; a malformed form is `invalid_evidence`.
+- Digital partition only. Analog (and the analog half of a mixed-signal
+  block) is refused with `not_applicable_wrong_partition`.
+- Any statistical-looking spec row is refused with
+  `not_applicable_statistical_row` naming the row; see the `reason` table.
+- Rows are keyed by `id` so a later partial-coverage outcome (issue #2908)
+  can extend this block; that outcome is not implemented here.
+
+**Release note.** The `not_applicable` form was introduced in **0.8.0**
+(issue #2865). A grader older than that (for example the still-common 0.7.0
+pin) does not know the form and grades a `not_applicable` entry
+`unmet`/`unreadable_evidence`, indistinguishable from a corrupt file; that
+cannot be changed in an already-released grader, so pin `klayout-tools>=0.8.0`
+before using it.
+
+**Markdown spec source (issue #4793).** A block whose ratified spec is a
+markdown document cites it directly, with no JSON projection:
+
+```json
+"spec": {"file": "SPEC.md", "content_hash": "sha256:...",
+         "format": "markdown-table", "id_column": "Param"}
+```
+
+- `format` is `"json"` (default; the keys may be omitted) or
+  `"markdown-table"`, which requires a string `id_column`. `id_column` is
+  invalid with `"json"`.
+- Ratification comes from the first `Status: <value>` line (case-insensitive;
+  `**Status:** ratified` and list-item forms also match); it must be
+  `ratified`, else `not_applicable_spec_unratified`.
+- Rows come from the first pipe table whose header has an `id_column` cell
+  (followed by an alignment row such as `|---|:--:|`). Row ids are that
+  column's cells (whitespace trimmed); each row is scanned like a JSON row
+  with the header names as keys, so a non-empty `Offset`/`Sigma`/`Yield`
+  column, or `3σ` in a cell, is `not_applicable_statistical_row`. `\|` is a
+  literal pipe; CRLF files are handled.
+- A missing status line, missing table or `id_column`, an empty or duplicate
+  id is `invalid_evidence` (`detail.problem`); a table with no rows is
+  `not_applicable_statement_incomplete`. Only the first table is read.
+- The granted `not_applicable.spec` block additionally carries `format` and
+  `id_column` (additive; JSON-form output is unchanged).
+
+**Reviewed assertion (issue #4793).** The text-pattern scan also fires on a
+negated mention ("no sigma or yield bound applies"). A statement row may set
+`"reviewed_not_statistical": true` to record the author's acknowledgement; for
+that row id it suppresses only the *string-value* pattern hits, in the
+statement `class` and in the matching spec row's values. It never suppresses
+a statistical *key* or a truthy `statistical` key. The flag is echoed on the
+granted statement row, so the waiver is auditable.
+
+**What the scan flags (issue #5057).** Every string value of a spec row --
+the `id` value included -- is matched case-insensitively against:
+`σ`, `sigma`, `cpk`, `ppk`, `yield`, `monte-carlo` (also `monte carlo` /
+`monte_carlo`), `mismatch`, `matching`, `offset`, `accuracy` (whole words,
+except `σ`). Keys are matched against `sigma`, `σ`, `yield`, `cpk`, `ppk`,
+`offset`, `mismatch`, `monte-carlo`, `std-dev` (hit on any non-empty value),
+and a truthy `statistical` key always hits. So a row whose `id` is
+`monte-carlo` (meant to say "there is no statistical row") is refused with
+`detail: {"row": "monte-carlo", "field": "id", "document": "spec"}` plus a
+`detail.hint`. Fix it by renaming the id, or by adding
+`"reviewed_not_statistical": true` to that row's statement row (the waiver
+above); a key hit such as `offset_mv_3sigma` is never waived. `detail.hint`
+is present only for text-pattern hits.
+
+A granted item renders `status: "not_applicable"`, `reason: null`,
+`citation: null`, and a `not_applicable` object
+(`{"spec": {"file", "content_hash", "status", "row_count"}, "statement":
+{"file", "content_hash", "rows"}}`). It is never rendered as `met`: the text
+report marks it `N/A`, counts stay separate (`t1_met_count` is `met` only;
+`t1_not_applicable_count` is new), and `tier: "T1"` needs
+`met + not_applicable == t1_item_count`. `--describe-grader` lists it under
+`not_applicable_items` (`{"6": ["digital"]}`).
+
+**`schema_version`: no bump.** The change is additive per
+[`../json-contract.md`](../json-contract.md): new optional fields, a new
+`status` value reachable only through a new manifest form, and new `reason`
+values. A consumer that treats every non-`met` status as unmet stays correct;
+a strict `status` enum consumer must add `not_applicable`.
 #### Item 5 with several citations and declared spec rows (issue #2959)
 
 One `klt sim` request is one netlist and one analysis, so a spec needing
@@ -2054,40 +4985,771 @@ new. Outcomes:
 
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
-  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
+  failing `klt sim` citation still credits the rows its tagged, **passing**
+  measurements carrying a recognised, non-null `min`/`max` bound grade (issue
+  #6027): those rows leave
+  `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
+  bench with one known-failing row can claim the rows its envelope genuinely
+  carries. A row whose tagged measurement fails — or that the failing
+  envelope does not tag — stays in `failed_rows`, and a failing envelope of a
+  kind that carries no `spec_row` tags (or one refused on a stale pin,
+  binding, provenance or `no_limits_checked`) credits nothing. The credit is
+  stricter than a passing envelope's, because a failing envelope's aggregate
+  `status: "pass"` also covers a bound `klt sim` skipped: a measurement
+  credits its row only when it carries a recognised, non-null `min`/`max`
+  and, where the envelope has the producer's `coverage` record, that bound
+  was checked and never skipped at any corner (an unrecognised key, a `null`
+  bound, or a corner `not_reached` withholds the row). A limited measurement
+  tagged with the same row that fails or goes unchecked also keeps the row in
+  `failed_rows`;
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
-  covered;
+  covered, and it keeps blocking `tier: "T1"` (issue #5858, operator ruling
+  2026-11-17). A gap is not a permanent state: it records work not yet done, so
+  it should name the open issue for the klayout-tools feature or EDA project
+  that would close it, and a gap with no such link is a signoff finding. A row
+  no tool could ever evidence is a different case (closer to `not_applicable`)
+  and goes back to the operator;
+- `spec_rows` declared but **no evidence entry** for the item (issue #4190)
+  -> graded as a zero-citation set: `unmet` / `partial_coverage` with the same
+  `detail` keys (every non-gap row in `uncovered_rows`, gaps in
+  `declared_gaps`, `failed_rows: []`) and no `citation`; it is never `met`,
+  even when every row is a declared gap. No `spec_rows` and no evidence is
+  still `unmet` / `no_evidence`, and malformed `spec_rows` still
+  `invalid_evidence`;
 - otherwise `met`; `citation` is the first citation, `citations` lists all,
   and `row_coverage` is present when `spec_rows` was declared;
 - a malformed list, an empty list, malformed `spec_rows`, duplicate row ids,
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+#### Declared gaps: the free-text and justified forms (issue #5599)
+
+A declared gap is **pending work, never permanent** (operator ruling on
+#5858, 2026-11-17): what is owed is the feature, tool or data that would let
+the row be graded, so the justified form records the open issue that would
+close it. Both forms keep the item `unmet` / `partial_coverage` -- a gap is
+never covered and never grades `met`, even when every row is one. Whether a
+justified gap should ever stop blocking was #5858, and that ruling settled
+it: gaps keep blocking T1.
+
+The free-text form is unchanged and keeps its exact `detail.declared_gaps`
+shape (`[{id, gap}]`):
+
+```json
+{"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+```
+
+The justified form is an object carrying a human **reason**, a **rationale
+artifact** pinned by content hash (the same `{file, content_hash}` binding
+the item-6 `not_applicable` form uses -- checked like any cited artifact),
+and the **issue** that would close the gap:
+
+```json
+{
+  "id": "pvt_ss_125c",
+  "gap": {
+    "reason": "no liberty file ships for this PVT point",
+    "rationale": {"file": "gaps/pvt_ss_125c.md", "content_hash": "sha256:..."},
+    "issue": "#1234"
+  }
+}
+```
+
+Outcomes:
+
+- a justified gap is listed under `detail.justified_gaps`
+  (`[{id, reason, rationale, issue}]`, `issue` `null` when absent -- never
+  mixed into `declared_gaps`) and counted at the top level as
+  `t1_justified_gap_count`, omitted when zero exactly like
+  `t1_not_applicable_count`, so a report declaring none is byte-identical
+  to this build's previous rendering (`--check` sees no drift);
+  `--format text` appends ", N justified gaps" to the T1 line and lists each
+  gap's reason, rationale file + hash and issue beside the item;
+- a justified gap whose rationale file is missing or unreadable grades
+  `unmet` / `justified_gap_rationale_unreadable`; one whose content hash
+  does not match grades `unmet` / `justified_gap_rationale_stale` (`detail`
+  names the row, the file, and both hashes). A broken declaration is never
+  silently demoted to the free-text form;
+- an object `gap` without a `reason`, without a `rationale`, with a
+  malformed rationale reference, or with a non-string `issue` is
+  `invalid_evidence`, as is a citation naming a justified-gap row (a gap
+  row cannot be covered, either form);
+- a justified gap that names **no issue** is accepted but reported as a
+  top-level **finding** (`findings[]`: `finding` =
+  `justified_gap_without_issue_link` with the item, partition when present,
+  and row); `--format text` prints the finding beside the gap. New
+  manifests should prefer the justified form and name the issue that would
+  close each gap.
+
+Item 6 rows accept the same two forms with the same outcomes. The rationale
+path resolves as given (like a `not_applicable` document), so a relative
+path is read against the process working directory. `schema_version`: no
+bump; every new report field is omitted when unused.
+
+#### Structural rows: the `structural` disposition (issue #6985)
+
+Some ratified spec rows are not measured quantities at all: a row that
+states a **design constant** the bench itself wires in (measuring the node
+the bench drives would grade the bench's own source, not the design — a
+tautology), or a row whose claim is a **structural property** (device
+sizing, array population, geometry legality) checked by inspecting the
+deck or layout. For such rows no producible envelope can ever carry a
+covering measurement, so before this form they could only be asserted
+through some envelope's `rows` (a false claim) or declared a gap — and a
+gap reads identically whether the row is unevidenced or evidenced by a
+real structural check the grader cannot see.
+
+The `structural` disposition makes such a row representable and distinct.
+It is an object on the row (mutually exclusive with `gap`, either form)
+carrying a human **claim** and the inspected **artifact**, pinned by
+content hash — the same `{file, content_hash}` binding the `not_applicable`
+and justified-gap forms use:
+
+```json
+{
+  "id": "vref_const",
+  "structural": {
+    "claim": "reference is the 0.9 V source `Vref` wired in tb_ota.spice, not a measured node",
+    "artifact": {"file": "sim/tb_ota.spice", "content_hash": "sha256:..."}
+  }
+}
+```
+
+The hash pin proves the artifact is **unchanged**, not that the property
+holds: `klt signoff` records and freshness-pins the artifact, it does not
+execute any check (mirroring `executed_by_klt: false` for `model-run`
+evidence). Outcomes:
+
+- a structural row is listed under `detail.structural_rows`
+  (`[{id, claim, artifact}]`) — never in `declared_gaps`,
+  `justified_gaps`, `uncovered_rows` or `row_sources`, so it is distinct
+  from both a gap and an (impossible) coverage. The key is omitted when
+  no structural row is declared, so a disposition-free report is
+  byte-identical to this build's previous rendering (`--check` sees no
+  drift); `--format text` lists each row's claim and its artifact + hash
+  beside the item;
+- a declared structural row forces the item `unmet` / `partial_coverage`
+  exactly as a justified gap does — the roll-up is deliberately
+  unchanged (that a gap keeps blocking `tier: "T1"` is the operator
+  ruling on #5858; whether a structural disposition may ever *satisfy*
+  item 5 is a separate operator-level ruling in the same family, not
+  decided here);
+- the artifact is hash-checked at grading time like any cited artifact:
+  missing or unreadable grades `unmet` / `structural_artifact_unreadable`,
+  a mismatched content hash `unmet` / `structural_artifact_stale`
+  (`detail` names the row, the file, and both hashes);
+- a malformed `structural` object — a missing or empty `claim`, a
+  missing or malformed `artifact`, an unknown key, a non-object, or
+  `structural` together with `gap` (either form) — is
+  `invalid_evidence` for that item alone, never a raise and never a
+  silent demotion to an undispositioned or gap row;
+- a citation naming a structural row in its `rows` is
+  `invalid_evidence` (a structural row is never covered by a
+  measurement), and the `spec_rows[]` table renders the row in the
+  `structural` state beside `gap` / `no_evidence` (see "The per-spec-row
+  table" below).
+
+Item 6 rows share the reader and grading branch, so they accept the same
+form with the same outcomes. The artifact path resolves as given (like a
+`not_applicable` document or a justified gap's rationale). Additive:
+`schema_version` is not bumped, and every new report field is omitted
+when unused.
+
+**Derived coverage (issue #3778).** A `klt sim` measurement may declare the
+spec row it grades (`measurements[].spec_row`, echoed on the report's
+`measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
+its envelope has at least one `spec_row`-tagged measurement, a named row counts
+as covered only if the envelope has a *passing* measurement tagged with it that
+carries a recognised, non-null `min`/`max` bound; a named row with no such
+measurement is uncovered
+(`partial_coverage`, listed in `detail.uncovered_rows`). A tag for a row the
+citation does not name is ignored. A citation whose envelope has no tags keeps
+the manifest-asserted `rows`, so existing manifests grade identically.
+`row_coverage.row_sources` maps each covered row to `"derived"` (checked
+against the envelope) or `"asserted"` (the manifest's word only). The same
+derivation credits a row from a *failing* `klt sim` citation when the envelope
+tags a passing, limited measurement with it whose bound `klt sim` actually
+applied at every corner (issue #6027; the stricter rule is in the
+`failed_rows` bullet above) — visible in `detail.row_sources`, since
+`row_coverage` itself is only emitted on `met`. The change is
+additive: `schema_version` is not bumped.
+
+The same rule reads a `klt yield` envelope's `spec_row`-tagged
+`measurements[]` for item 6, with one additional covering case — see "Item 6
+with several statistical rows" below.
+
+**Configuration slices for items 5 and 6 (issue #7006).** A specification
+row can require evidence at several configurations. Give the row an
+`extent` containing the slice labels it requires. Each citation can then
+declare which slices it covers for each row it names.
+
+```json
+{
+  "kind": "analog",
+  "spec_rows": {
+    "5": [{"id": "ratio", "extent": ["N=4", "N=33", "N=64"]}],
+    "6": [{"id": "startup_yield", "extent": ["mode A", "mode B"]}]
+  },
+  "evidence": {
+    "5": [
+      {"file": "sim/divider-33.json", "rows": ["ratio"], "covers": {"ratio": ["N=33"]}}
+    ],
+    "6": [
+      {"file": "yield/mode-a.json", "rows": ["startup_yield"], "covers": {"startup_yield": ["mode A"]}},
+      {"file": "yield/mode-b.json", "rows": ["startup_yield"], "covers": {"startup_yield": ["mode B"]}}
+    ]
+  }
+}
+```
+
+With passing reports credited to their named rows, item 5 grades
+`unmet` / `partial_coverage`. Its `detail.partial_rows` lists `ratio`
+with `covered: ["N=33"]` and `missing: ["N=4", "N=64"]`.
+Item 6 grades `met` because its two citations cover the whole extent.
+For both items, `row_coverage.row_slices` records each extent row's
+covered and missing labels in declaration order. Naming a row without
+`covers` contributes zero slices. Repeated claims count once. A failing
+citation contributes zero slices and keeps its own failure reason.
+
+**The manifest author asserts the slice labels.** A passing measurement's
+`spec_row` tag authenticates the row it evaluates. The envelope does not
+attest which divider or mode the simulation exercised. When item 5 sets
+`require_derived_rows`, every required slice needs a citation with derived
+credit for the row. The configuration label still comes from that citation's
+manifest entry.
+
+An `extent` must be a non-empty list of non-empty strings. Labels are
+opaque, so a label such as `N=4..64` denotes one slice. `covers` maps
+row ids to lists of labels. Each key must be in the citation's `rows` and
+refer to a row with an extent. Unknown slices and malformed declarations
+grade the affected item `invalid_evidence`. Rows without an extent keep
+their existing coverage rules.
+
+**Requiring derived coverage (issue #5462).** `row_sources` is report-only by
+itself: an item whose coverage is entirely `"asserted"` grades exactly like a
+fully tagged one. A project that has finished tagging its envelopes can ratchet
+with the optional top-level manifest boolean `require_derived_rows` (default
+`false`):
+
+```json
+{
+  "require_derived_rows": true,
+  "evidence": {"5": [{"file": "sim/decision_time.json", "rows": ["t_dec"]}]},
+  "spec_rows": {"5": [{"id": "t_dec"}]}
+}
+```
+
+With it `true`, an item 5 whose citations all pass but whose coverage includes
+at least one `"asserted"` row grades `unmet` / `partial_coverage` (the existing
+reason), with those row ids sorted under `detail.asserted_rows` alongside the
+usual `uncovered_rows` / `declared_gaps` / `row_sources`. A row covered by both
+a tagged and an untagged citation is `"derived"` and passes. A failing citation
+still reports its own reason first, and the timing-margin rule below is decided
+before this one. The missing-kinds rule below is decided *after* it, so a
+digital item 5 whose coverage includes an asserted row reports
+`detail.asserted_rows` and no `detail.missing_kinds`.
+
+The key is manifest-level but grades **item 5 only**; item 6's row sources are
+unaffected. Note that `spec_row` tags are read from a `klt sim` envelope's
+`measurements[]`, so a row cited only from an envelope kind that carries no
+such tags (`sta`, `functional-verification`, `generic`) is always `"asserted"`
+and therefore fails under this option — cite those rows from a tagged `klt sim`
+envelope as well, or leave the option off. Absent, `null` or `false` grades
+exactly as before and emits no new keys; a non-boolean value is `unmet` /
+`invalid_evidence` for item 5 alone, with `detail.problem` naming the key —
+whatever shape item 5's evidence has, including a single citation object or no
+item 5 evidence at all.
+Additive: no `schema_version` bump.
+
+**Joint grid coverage across benches (issue #6969).** Derived coverage reads
+one cited envelope's tags. A coverage-style row — "every implemented bench
+exercised the full ratified PVT grid, with the supply and temperature verified
+as applied" — is a property of a **set** of envelopes, one per bench: citing
+any one envelope with `rows: [...]` for it would assert the joint property on
+one bench's evidence, and a `gap` understates benches that each prove their
+half. A `spec_rows` row may instead carry `joint_grid` (item 5 only; a
+partition-qualified `"5.analog"` key works too):
+
+```json
+{"id": "pvt_grid_all_benches",
+ "joint_grid": {
+   "members": ["sim/bench_a.json", "sim/bench_b.json"],
+   "process": ["tt", "ss", "ff"],
+   "supply_v": {"vdd": [1.62, 1.8, 1.98]},
+   "temperature_c": [-40, 27, 125]}}
+```
+
+- `members` names citations of the same item-5 evidence list, matched by the
+  citation's `file` (or its joined `command`). The list is explicit, so
+  dropping a bench from the evidence cannot silently shrink the joint claim:
+  a name no citation carries is `invalid_evidence`.
+- The grid uses the same shape as a `klt sim` request's `corners` block —
+  supply rails sweep **zipped** by index, as a set — and the required points
+  are its product (process x supply x temperature). An absent axis takes the
+  request-side default (`process` null, no supply rail, 27 C). Supply values
+  compare as numbers (`27` and `27.0` are one point; no tolerance).
+- The row is `covered` — and `row_sources` reads it `"derived"`, never
+  `"asserted"`, so `require_derived_rows` passes it — only when **every**
+  named member graded `met` and its envelope's `corners[]` contains every
+  required grid point with every corner at that point `pass` (a point swept
+  twice — a `params` axis — must pass at *every* corner), **and** it carries
+  at least one condition probe. A probe is a passing `measurements[]` entry
+  tagged `spec_row: "<row id>"` (the #3778 tag) with a recognised, non-null
+  `min` or `max` bound in `limits`. Zero counts as a bound. The rolled-up
+  `status` is `pass` only when the measurement passed at every corner that
+  reported it.
+- Otherwise the row is uncovered — `unmet` / `partial_coverage`, listed in
+  `detail.uncovered_rows` like any uncovered row — and `detail.joint_rows`
+  names, per member with a shortfall, its `missing_points` (labels in the
+  envelope's own `corner_id` PVT spelling, e.g. `ff/1.980V/-40C`) and whether
+  its condition probe is `missing`. A member that graded anything but `met`
+  misses every point: a failed envelope is not evidence for the joint
+  property, even when its per-row truth was captured (#6027).
+- A citation naming a joint row in its own `rows` is `invalid_evidence` — the
+  same refusal as naming an undeclared or `gap` row; that is exactly the
+  one-bench false claim this form exists to prevent.
+- A `joint_grid` row cannot also declare `extent`, `structural`, or `gap` (either form). A malformed
+  `joint_grid` — not an object, an unknown key, an empty, shorter-than-two or
+  duplicate-bearing `members`, a non-string member, an empty axis, a
+  non-numeric axis value, supply rails of differing lengths — degrades item 5
+  alone to `invalid_evidence`, never raises. A `joint_grid` on item 6's rows
+  is likewise `invalid_evidence` (item 6 shares the reader, not the form).
+- A **Monte Carlo member** is stated unsupported, not guessed at
+  (`invalid_evidence` naming the member): sampled corners echo their base
+  point's `process`/`supply_v`/`temperature_c`, but "a grid point counts only
+  when every sample drawn at it passed" is not a traced `klt sim` contract.
+
+The per-spec-row table renders a joint row as one `state: "joint"` record —
+no single measurement is quotable — carrying `joint` = `{covered, members:
+[{member, missing_points, missing_probe}]}` from a static re-read of the same
+citations (a command-backed, unreadable or Monte Carlo member reads `null`/
+`null`, "not evaluable from the report alone"). `joint.covered` is
+**tri-state** (issue #7701), reducing the members the same way: `false` when
+any member the projection *can* read has a shortfall (definitely not covered,
+whatever the unreadable members would show); `null` when none does but at
+least one member is unevaluable (unknown — the item axis, which re-runs
+command-backed members, may still derive the row); `true` only when every
+member is readable and clean. A consumer must not read `null` as "not
+covered". `--format text` prints `[JOINT]` with `covered`, `shortfall` or
+`not evaluable from the report alone` (the `null` case), then one indented line
+per member shortfall or unevaluable member. A manifest declaring no
+`joint_grid` row omits every new key and renders byte-identically; additive, no
+`schema_version` bump.
+
+**Binding a citation to the complete run: `requires` (issue #7807).** An item-5
+citation pins its run's *request netlist* (`content_hash`), and that artifact is
+the same for a 2-coordinate smoke probe and the 45-coordinate matrix minted from
+one request — and for a sensitivity companion run at tighter solver
+tolerances. Each is `met` in the others' place. An item-5 evidence member (a
+list member or a lone citation object) may carry an optional `requires` object;
+the grader checks it against the cited envelope itself, with no `klt sim`
+change:
+
+```json
+{"file": "sim/bench_a.json", "rows": ["gain"],
+ "requires": {
+   "grid": {"process": ["tt", "ss", "ff"],
+            "supply_v": {"vdd": [1.62, 1.8, 1.98]},
+            "temperature_c": [-40, 27, 125]},
+   "ngspice_options": {"reltol": 0.001}}}
+```
+
+- `requires.grid` is the `joint_grid` axis shape without `members` — the same
+  validator and the same reader, so supply rails sweep **zipped**, an absent
+  axis takes the request-side default, `27` and `27.0` are one point, and a
+  point swept twice must pass at *every* corner. The envelope's `corners[]`
+  must carry every required point with every corner at it `pass`.
+- `requires.ngspice_options` is a literal **subset** check against the
+  envelope's `environment.ngspice_options`: each named option must be present
+  and equal (numbers compare as numbers, so `0.001` and `1e-3` match; a boolean
+  never equals a number). `klt sim` echoes that field only when the run
+  declared options, so an envelope with **no** echo cannot prove a profile and
+  is unmet, never credited. The request echo is not what every corner solved
+  with, though: a `corners.options` point writes its own `.options` card ahead
+  of the request's (ngspice honors the first card that sets a name) and
+  reports it as `corners[].options`. So **every corner** is checked as well,
+  and one whose `options` sets a *required* option to another value fails the
+  assertion whatever the request echo reads. An override that agrees with the
+  requirement, or of an option the member does not require, is fine.
+- A shortfall grades the item `unmet` / `partial_coverage` with
+  `detail.requires_unmet`, one entry per failing member: `{"member": <citation
+  label>, "missing_points": [...]}` (labels in the envelope's own `corner_id`
+  PVT spelling, e.g. `ff/1.980V/-40C`) when the grid fell short, and
+  `"ngspice_options": {"required": {...}, "observed": {...} | null}` when the
+  solver profile did (`observed` is `null` for an absent echo), plus
+  `"corner_overrides": [{"corner_id", "option", "observed"}, ...]` — one entry
+  per conflicting corner option, in envelope order — only when a corner
+  overrode a required option. Either or both keys appear, only for the facet
+  that failed.
+- It is an *additional* refusal: it is checked once every member has graded
+  `met`, so a member's own failure keeps its own reason, and the `rows` a member
+  credits are unchanged. A member with no `requires` is untouched, and a
+  manifest using none renders byte-identically.
+- `invalid_evidence`, with `detail.problem` naming the member, never a raise:
+  a `requires` that is not an object, is empty, or carries an unknown key
+  (only `grid` and `ngspice_options` exist); a `grid` with no axis, an unknown
+  axis, an empty axis, a non-numeric or **non-finite** axis value (NaN, an
+  infinity, or an integer too large for a float — `joint_grid` shares the
+  validator and refuses the same) or supply rails of differing lengths; an
+  `ngspice_options` that is empty or whose value is not a finite number, a
+  boolean or a non-empty string; a **Monte Carlo** member under
+  `requires.grid` (the same unsupported case `joint_grid` states); and
+  `requires` on any other item, in any entry shape — a lone citation object, a
+  list, or item 11's grouped lists (`'requires' is supported on item 5 only` —
+  item 6 and item 7 keep their own mechanisms). The refusal is never a silent
+  drop: an assertion the grader will not check cannot grade `met`. A malformed
+  or misplaced `requires` is refused before any citation is read or run.
+- The grid binds the PVT axes only. A run whose coordinates vary a `params`
+  axis is not told apart by it.
+
+Additive: no `schema_version` bump.
+
+**Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
+reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
+digital partition a passing citation set that includes `sta` or
+`functional-verification` must include both: a set missing one grades `unmet` /
+`partial_coverage` with `detail.missing_kinds` (e.g.
+`["functional-verification"]`). This applies to a single string/dict entry
+too, which is aggregated like a one-member list. A failing member still reports
+its own reason first. A `sim`-only entry (the full-custom digital sub-case) is
+exempt from the pair (but see the timing-margin rule below), and analog item 5 is unchanged. `detail.missing_kinds` is additive, so
+there is no `schema_version` bump; note that a digital manifest citing only
+`sta` (or only `functional-verification`) for item 5 now grades `unmet`.
+
+**Full-custom digital needs a measured timing margin (issue #4314).** The
+`sim`-only sub-case must also carry "an explicit per-corner timing-margin
+metric measured in that same sweep". A digital item 5 whose passing citations
+are all `klt sim` grades `met` only when the manifest declares at least one
+`spec_rows` row with `"timing_margin": true` (boolean, default `false`) **and**
+each such row is evidenced by a cited `klt sim` envelope: a passing
+`measurements[]` entry with a recognised, non-null `min`/`max` bound, tagged
+`spec_row: "<row>"`, whose name has a passing measurement in **every**
+`corners[]` entry. A manifest-asserted
+`rows` list is not enough; the tag must be in the envelope. Otherwise the item is
+`unmet` / `timing_margin_missing`, with
+`detail.missing_timing_margin: [{"row": "<id>", "corners": [...]}]` (`row` is
+`null` when no `timing_margin` row is declared; `corners` lists the corner ids
+lacking the measurement, `["*"]` when no tagged measurement exists). A margin
+measurement that fails is the ordinary `check_failed`. Judging margin adequacy
+is the author's `limits`; the rule only requires it be measured. A `timing_margin`
+flag on analog item 5, or on a digital set that includes `sta` /
+`functional-verification`, is accepted (non-boolean is `invalid_evidence`) and
+ignored. Additive reason, no `schema_version` bump; a digital manifest citing
+only `sim` for item 5 and declaring no margin row now grades `unmet`.
+
 Every list-form item also carries `citations_graded` (per-citation status).
+Each entry includes the cited member's `content_hash` and `input_verified`.
+The hash is the recorded input digest when available. Verification is `true`
+for a matching re-hash, `false` for a mismatch, and `null` when the input
+was not re-hashed. An unmet member retains the values from its disclosed
+evidence. Both fields are `null` when no resolved citation is available.
+For grouped item 11, these fields describe the first part named in that
+manifest group. The full compound citation carries the other parts.
+
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
-exactly as before. The list form is item 5 only; the same `spec_rows`
-schema is meant to be reused by item 6 (#2908).
+exactly as before. The `spec_rows` list form applies to items 5 and 6 (item 6:
+#2908, below). Since issue #5786, an entry whose member graded `met` off a
+`klt yield` citation also carries that citation's own `yield_campaign`
+block, copied verbatim (never re-derived), so a multi-citation item 6
+discloses each cited campaign exactly as the single-citation form does; the
+key is absent for every other kind, for a report with no measurements, and
+for an unmet member — see "Campaign discipline on item 6" below.
 
-#### Item 6's evidence needs a from-source toolchain (issue #2466)
+Item 4 (LVS clean) also accepts a list (issue #4354): one `klt lvs` report per
+cell of an analog partition. It grades `met` only if every member is `match`
+with `power_connectivity.status` not `"mismatch"`; a failing member makes it
+`unmet` with that member's reason and `detail.failed_citations` naming it, a
+non-`lvs` member is `wrong_kind`, and a malformed member or empty list is
+`invalid_evidence`. `spec_rows` has no meaning for LVS and is ignored for
+item 4. The manifest is the record of which cells were cited; `klt signoff`
+does not check they cover the partition.
+
+Item 3 (DRC clean) accepts a list the same way (issue #5031): one `klt drc`
+report per cell of a multi-cell library, graded exactly like item 4's list
+(every member must pass; `detail.failed_citations` names failing members). For
+items 2, 3 and 4, a list-form entry also carries `members_total` (members cited)
+and `members_covered` (members that individually graded `met`); both are
+additive and absent for a single-entry citation, whose output is unchanged.
+The manifest author enumerates the cells; `klt signoff` does not check the
+list is the library's complete cell set.
+
+Item 2 (Layout) accepts a list of native envelopes the same way (issue #5044):
+one per independently laid-out cell. It grades `met` only if every member is a
+recognised, passing native envelope; a failing or unrecognised member makes it
+`unmet` and is named in `detail.failed_citations`, and a malformed member or
+empty list is `invalid_evidence`. A single-envelope item 2 entry is unchanged.
+
+Item 7 (post-layout verification) accepts a list the same way (issue #4562):
+one `klt pex` report per cell of a hierarchical design (objects or bare
+paths). It grades `met` only if every member is `pass`, of an accepted kind
+for the partition (see "Item 7 is kind-restricted, per block kind") and fresh;
+a failing or stale member makes it `unmet` with that member's reason and
+`detail.failed_citations` naming it, a wrong-kind member is `wrong_kind`, an
+unannotated digital `functional-verification` member is `not_post_layout`, and
+a malformed member or empty list is `invalid_evidence`. `spec_rows` is ignored
+for item 7. The manifest is the record of which cells were cited; `klt
+signoff` does not check they cover the hierarchy. A single string/object
+entry renders exactly as before.
+
+To require a particular set of PVT corners for item 7, declare the corner
+IDs in the manifest. For example, a two-corner analog box looks like this.
+
+```json
+{"corner_box": {"7.analog": ["tt/1.800V/27C", "ss/1.620V/125C"]}}
+```
+
+The bare key `"7"` applies to either partition. A qualified key overrides
+it for that partition. On a `mixed-signal` block that means a bare `"7"` box
+also reaches the digital partition, where only a PEX report with `delta[]`
+corner rows can satisfy it: an SDF-annotated `functional-verification`
+report is refused as `wrong_kind`, with a `detail.problem` that names the
+box. Declare the box under `"7.analog"` to scope it to the analog partition
+and leave the digital citation as it was. Each list must contain at least
+one ID, and its IDs must be unique, non-empty strings. Signoff compares them
+literally. The manifest supplies the required box even if a cited report ran
+only one corner. Monte Carlo sample IDs have no special handling and do not
+count toward a base corner.
+
+Each declared corner needs a passing PEX `delta[]` row for every distinct
+`(testbench, measurement)` in the cited reports. A command-mode row has a
+null testbench. Schematic-only `skipped` rows contribute no requirements
+or credit. Extra corners need no coverage. A report with an aggregate
+`error` caused only by row errors can contribute its passing measurements.
+A second report can supply the missing comparisons. Any limit failure
+still fails the item, and every citation must pass the usual freshness,
+post-layout and coverage checks. Reports predating the row identity fields
+need a fresh run to contribute to a declared box.
+
+The JSON item retains each report's own verdict in `citations_graded`.
+Its `detail.corner_box` gives the declared and covered corner counts. When
+coverage is incomplete, the reason is `partial_coverage` and each entry in
+`missing` names the `corner_id` and the remaining measurement keys. Text
+output prints the count and names the missing corners. A declared box with
+no item 7 citation at all (the `evidence` entry is absent or `null`) is
+`no_evidence`, as it is without a box; its `detail.corner_box` lists every
+declared corner as missing, with an empty `keys`.
+
+`invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
+`detail.problem` string naming the cause, e.g. `member 2 is not a string or
+an object with 'file'/'command'`.
+
+#### Partition-qualified `spec_rows` keys (issue #3768)
+
+On a `mixed-signal` block the bare key `"5"` (or `"6"`) imposes one row set on
+**both** partitions. Use `"<item>.analog"` / `"<item>.digital"` to scope a
+declaration to one partition, the same spelling `evidence` uses. Each
+partition resolves its rows by the qualified key first, then the bare item
+id, so declaring analog rows does not change the digital verdict:
+
+```json
+{
+  "evidence": {
+    "5.analog": [{"file": "sim/decision_time.json", "rows": ["t_dec"]}],
+    "5.digital": {"file": "sta/envelope.json"}
+  },
+  "spec_rows": {"5.analog": [{"id": "t_dec"}]}
+}
+```
+
+A bare-only manifest behaves exactly as before. A suffix other than `analog` /
+`digital`, or malformed rows under a qualified key, degrades to
+`invalid_evidence` (a bad suffix for the item; malformed rows for that
+partition only), never the whole report. Items 5 and 6 share the reader.
+`schema_version`: no bump.
+
+#### The per-spec-row table in the report (issue #5691)
+
+Grading a declared row set answers one question per *item*. The report also
+answers the reader's question per *row*: each spec row's limit, worst value,
+binding corner, verdict and yield estimate, and the cited file behind each
+number. When the manifest declares a top-level `spec_rows` map, the tier
+report gains one additive top-level `spec_rows[]` block — one record per
+declared row, in declaration order (a `"<item>.<partition>"` declaration
+renders its own records, marked with a `"partition"` field; a bare
+declaration carries `"item"` and no `"partition"`):
+
+```json
+{
+  "id": "t_dec",
+  "item": 5,
+  "state": "graded",
+  "gap": null,
+  "limits": {"min": null, "max": 1.2e-6},
+  "unit": "s",
+  "worst": {"value": 1.18e-6, "corner_id": "ss/1.620V/-40C",
+            "margin": 2.0e-8, "relative_margin": 0.0167},
+  "verdict": "pass",
+  "yield": {"method": "clopper-pearson", "estimate": 0.9993, "confidence": 0.9,
+            "confidence_interval": {"low": 0.9961, "high": 0.9999}},
+  "sources": [{"file": "sim/decision_time.json", "measurement": "t_dec@1v8"}]
+}
+```
+
+The block is a **projection of the same evidence grading already read**, not a
+second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
+because of it. Its rules:
+
+- **States.** Every declared row gets a record, in one of six states.
+  `graded` — at least one cited, file-backed envelope carries a
+  `spec_row`-tagged measurement naming the row. `gap` — the row declares a
+  free-text or justified gap. The record quotes the free text or the
+  justified gap's `reason` in `gap` and has no measured values, even if a
+  citation names it. `structural` — the row carries the `structural`
+  disposition (#6985): the record has no measured values and instead
+  carries the disposition's `claim` and `artifact` (with its content
+  hash); grading refuses citations naming the row, exactly as for a gap.
+  `joint` — the row declares a `joint_grid` (issue #6969): no single
+  measurement is quotable, so the record carries the per-member projection
+  under `joint` (`{covered, members: [{member, missing_points,
+  missing_probe}]}`, `null`/`null` for a member the projection cannot read —
+  command-backed, unreadable, or Monte Carlo; `covered` is `true`/`false`/
+  `null` — `null` is unknown, see "Joint grid coverage across benches").
+  `no_evidence` — no citation
+  names the row. `unattributable` — a citation names the row but its envelope
+  carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
+  envelope's measurements cannot be attributed to a row, and guessing is the
+  bug this verb exists to prevent. `limits`/`unit`/`worst`/`verdict`/`yield`
+  are `null` wherever the state has nothing to quote.
+- **Row matching is exact string equality** between a declared row `id` and a
+  `measurements[].spec_row` tag. No prefix is stripped: the auto-prefixed
+  `<bench>.<row>` spelling is a `klt pex` labelling scheme, while `klt sim` and
+  `klt yield` tags are author-declared verbatim (see
+  [`sim.md`](sim.md) and [`yield.md`](yield.md)). A citation that does not name
+  the row, or whose tags name only other rows, contributes nothing.
+- **Quote, never re-derive.** `worst` quotes the binding measurement's own
+  `worst_case` byte-equal (plus the one new quotient below) and `yield` quotes
+  the measurement's `yield.empirical` verbatim — a `klt sim` envelope carries
+  neither, a `klt yield` envelope usually carries only the latter, and one row
+  may cite both (the sim side binds the worst value and corner, the yield side
+  fills in `yield`).
+- **The reduce.** Several tagged measurements may cover one row across several
+  citations. The binding one is picked by **minimum relative margin** —
+  `margin / |active bound|`, recorded as `worst.relative_margin` — because
+  absolute margin is wrong when instance limits scale with the supply (a 1 V
+  rail's 1 mV headroom is proportionally tighter than a 1.8 V rail's 20 mV).
+  When the active bound is `0`, or the measurement declares no `limits`, the
+  relative margin is undefined: the pick falls back to the absolute `margin`
+  and `relative_margin` is `null`. A non-`pass` measurement outranks any
+  `pass` one regardless of margin, by the house `error > inconclusive > fail >
+  pass` precedence extended monotonic for `klt yield`'s two extra tokens
+  (`fail > insufficient_evidence > pass > reported` — see
+  [`yield.md`](yield.md)'s "Status precedence"). Ties keep citation order.
+- **Disagreeing limits stay renderable, unreconciled.** When the tagged
+  measurements for one row do not all declare the same `limits`, the record
+  quotes the binding measurement's set as `limits` and lists every other
+  divergent declared set under an additive `limit_disagreement[]`
+  (`[{file, measurement, limits}]`). It does not refuse and does not pick a
+  "true" limit — the grader has no basis to.
+- **`verdict` is the binding measurement's own `status`** — `null` when that
+  measurement declares no `limits` (an unlimited measurement's `worst_case` is
+  not an extreme, so there is no graded bound to carry a verdict about — see
+  [`sim.md`](sim.md)'s `measurements[]` rollup) — and never re-graded here.
+- **Static projection only.** File-backed citations are re-read; command-backed
+  citations would have to be re-executed to render, so they contribute nothing
+  here, as does an unreadable, malformed or unresolvable citation. Grading
+  reports those on the item axis; the block never contradicts it.
+
+Every number is traceable: `sources[]` names the cited file and the
+measurement name behind each quoted value, in citation order. `--format text`
+renders the same records as a table after the item rows it qualifies; a report
+without the block renders byte-identically to before. The block is additive:
+no `schema_version` bump, and a manifest that declares no `spec_rows` omits the
+key entirely — so `--check` reports no drift on an upgrade alone (the same
+back-compat rule `partition_boundary` follows, above).
+
+#### Item 6 with several statistical rows (issue #2908)
+
+Item 6 reuses the item-5 list form and `spec_rows` schema above, with
+`klt yield` citations and an optional per-row `ratified` flag (default
+`true`):
+
+```json
+{
+  "evidence": {
+    "6": [{"file": "mc/offset.json", "rows": ["offset"]}]
+  },
+  "spec_rows": {
+    "6": [
+      {"id": "offset"},
+      {"id": "gain_err", "gap": "function not implemented yet"},
+      {"id": "inl", "ratified": false}
+    ]
+  }
+}
+```
+
+- every declared row covered by a passing citation and all rows ratified ->
+  `met` (`row_coverage` present);
+- otherwise, with no failing citation -> `unmet` / `partial_coverage` (a
+  declared gap blocks `tier: "T1"` here as for item 5, issue #5858); the
+  `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
+  `unratified_rows` (every `ratified: false` row, covered or not -- evidence
+  against a proposed limit is provisional) separately; item 6's rows also
+  accept the justified object form of `gap` (issue #5599, listed under
+  `detail.justified_gaps` with the same outcomes as item 5's -- see
+  "Declared gaps" above) and the `structural` disposition (issue #6985,
+  listed under `detail.structural_rows`, same outcomes as item 5's -- see
+  "Structural rows" above);
+- a failing citation keeps its own `reason` (e.g. `check_failed`) with
+  `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
+  campaign-discipline gate applies per citation, unchanged;
+- a malformed declaration, an undeclared or `gap` row named by a citation, a
+  non-boolean `ratified`, or a `not_applicable` entry alongside a declared
+  row set (zero rows vs. some rows -- they contradict) -> `invalid_evidence`.
+
+A manifest with no `spec_rows."6"` grades exactly as before. `ratified` is
+additive and also parsed for item 5 rows, where it likewise blocks `met`.
+`schema_version`: no bump; `detail.unratified_rows` is a new optional field
+and `partial_coverage` is an existing reason.
+
+**Derived coverage on a `klt yield` envelope, and `reported` measurements
+(issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
+written: when a citation carries `rows` **and** its envelope has at least one
+`spec_row`-tagged measurement, only the rows a tagged measurement with a
+recognised, non-null `min`/`max` bound grades are covered. One case is added on
+top of it, for `klt
+yield` envelopes only:
+
+- a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
+  the token `klt yield` gives a measurement that declares no `target_yield`,
+  so nothing could fail ([`yield.md`](yield.md)) — covers its row **when that
+  row is declared `ratified: false`**, and `row_sources` records it
+  `"derived"` like any other derived row;
+- the same measurement does **not** cover a **ratified** row: that row still
+  needs a measurement graded against a declared target, exactly as before.
+
+The restriction to unratified rows is what keeps every item verdict
+unchanged. An item with an unratified row is already `unmet` /
+`partial_coverage` through `unratified_rows`, so only the `detail` lists
+move; nothing here can turn an `unmet` item `met`. A `fail` or
+`insufficient_evidence` measurement, and a tag with no `limits`, still cover
+nothing — ratified or not — and a citation the #2467 campaign-discipline
+gates refuse never reaches the crediting step at all.
+
+The case this closes: a row whose spec states a method rather than a number
+has no yield claim to make, so declaring a `target_yield` for it would invent
+one — the number-invention `ratified: false` exists to let a manifest avoid.
+Before this, such a row came back in `uncovered_rows` as if no campaign had
+been run, and the only workaround was to declare a `target_yield` the
+campaign was known to clear. No new field, no `schema_version` bump.
+
+#### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension — published as the prebuilt
-`klt-yield-native` wheel (Linux x86_64, macOS arm64) and reached by
-`pip install 'klayout-tools[yield]'`. A bare `pip install klayout-tools`
-and the git-pinned (`@git+…`) form do not include it, and a release that
-predates the first `klt-yield-native` publication (or another platform)
-needs a full repo checkout with a Rust toolchain (see
+`klt_yield_native` Rust extension. Install it with
+`pip install 'klayout-tools[yield]'`: as of 2026-11-06 the prebuilt
+`klt-yield-native` 0.1.0 wheel (Linux x86_64, macOS arm64) is on PyPI and the
+extra resolves for klayout-tools 0.9.1 and later; other platforms need a repo
+checkout with a Rust toolchain. A bare
+`pip install klayout-tools` and the git-pinned (`@git+…`) form do not
+include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
-callout for the full statement and the build steps). Every *other* T1
-item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
-`functional-verification`, `erc`, `place-and-route` — is reachable from a
-published release, so item 6 is the one row that additionally needs the
-`[yield]` extra (or a from-source build) to produce evidence for, or to
-re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
-campaign around it.
+callout for the full statement and the build steps). Install the yield extension on the host that will produce or
+re-derive item 6 evidence before scheduling the campaign.
 
 This changes nothing about how the item grades: a `klt yield` report cites,
 hashes, and grades exactly as described here and in "Worked example:
@@ -2110,12 +5772,65 @@ so a generic characterization citation passes both gates and a native-kind
 citation is refused by the second — no item is doubly restricted into
 accepting nothing.
 
-**Items 1, 2, 9 and 10 are deliberately left alone**, including for
-`extract` — see "Items 1, 2, 9, and 10: bind them to an audited artifact"
-above. They name no `klt` verb, so there is no native kind to restrict them
-*to*, and singling out one irrelevant kind while every other irrelevant
-kind still counts would be arbitrary. Issue #2718 later gave them an
-artifact-anchored `generic` form instead, without restricting native kinds.
+**Items 1, 2, 9 and 10 were deliberately left alone** by issue #2044,
+including for `extract` — see "Items 1, 2, 9, and 10: bind them to an
+audited artifact" above. They name no `klt` verb, so there was no native
+kind to restrict them *to*, and singling out one irrelevant kind while
+every other irrelevant kind still counted would have been arbitrary. Issue
+#2718 later gave them an artifact-anchored `generic` form, and issue #2844
+added a producer for items 1, 9 and 10 (`--attest`) and restricted those
+three to it. Item 2 still accepts any passing native kind.
+
+### Model-run evidence (item 5, opt-in, file-only)
+
+A spec row defined by an analytical or linear-model run (not a SPICE
+testbench) has no `klt sim` envelope to cite. Issue #4859 adds the envelope
+`"kind": "model-run"`, recognised — like `generic` — only by that explicit
+self-declaration, and accepted by **T1 item 5 only** (analog and digital);
+every other item grades it `wrong_kind`. It reuses `klt sim`'s
+`measurements[]` rollup so the multi-citation and derived-coverage rules
+("Derived coverage (issue #3778)") apply unchanged.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "model-run",
+  "status": "pass",
+  "method": "linear small-signal model of the OTA, ideal supplies",
+  "measurements": [
+    {"name": "dc_gain_db", "spec_row": "gain", "status": "pass",
+     "limits": {"min": 60.0}}
+  ],
+  "corners": [
+    {"corner_id": "tt/1.8V/27C", "status": "pass",
+     "measurements": [{"name": "dc_gain_db", "status": "pass"}]}
+  ],
+  "provenance": {"input": {"path": "model/ota.md", "content_hash": "sha256:..."}}
+}
+```
+
+- `kind`, `status` (`"pass"` is the passing token), `method` and
+  `measurements[]` are required. `method` is a disclosure echoed on the
+  citation (`citation.method`); it is never graded.
+- A row is covered only by a passing measurement with a recognised, non-null
+  `min`/`max` bound, tagged `spec_row: <row>`, and the citation passes only
+  if `status` is `pass` and
+  every `corners[]` point entry (the per-point list, optional) passes.
+  Otherwise `partial_coverage` with `detail.uncovered_rows`, or
+  `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
+- An envelope with no measurement carrying a recognised, non-null `min`/`max`
+  bound is refused `no_limits_checked`.
+- `provenance.input` (`path` + `content_hash`) names the committed model
+  record; it is re-hashed like `generic`'s (`citation.input_verified`), and
+  a manifest-pinned `content_hash` that no longer matches renders
+  `stale_evidence`.
+- `klt` never executes the model: the citation carries
+  `executed_by_klt: false`.
+- **Digital partitions:** a `model-run` is treated like `sim` — it does not
+  satisfy the STA + functional-verification pair, and on its own it needs
+  the same `timing_margin` row as a `sim`-only citation
+  (`timing_margin_missing`).
+- A row declared with a `gap` keeps the existing gap/coverage precedence.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
@@ -2172,6 +5887,20 @@ misclassify it as a native kind instead:
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
   is unaffected either way — no staleness claim was made to check.
 
+**What a generic citation's `content_hash` hashes.** A manifest entry's
+pinned `content_hash` is compared against the envelope's own
+`provenance.input.content_hash`, which covers the **input artifact**
+`provenance.input.path` names (the committed record the envelope attests) —
+**not** the bytes of the evidence envelope file itself. That is the same
+convention every native kind uses, and the grader says so verbatim in the
+`stale_evidence` hint ("`content_hash` must be the sha256 of the input
+artifact … not the hash of the evidence envelope file"); pinning the envelope
+file's own sha256 is common enough that `klt` names it, setting
+`pin_is_envelope_file_hash: true` in the stale-pin detail. Only
+`functional-verification` pins the evidence file's bytes (issue #4893);
+`generic` deliberately gets no such fallback, so with no `provenance.input`
+there is no live hash and the pin can only render `"unverifiable"`.
+
 **`provenance.input.path` (issue #2403) — optional, opt-in — the artifact
 `input_verified` re-hashes.** Even when `provenance` is given, a generic
 envelope's `content_hash` was, until this field existed, structurally
@@ -2202,9 +5931,20 @@ object (resolved against the repo root the evidence lives in — the nearest
 `.git` ancestor, or the directory [`--repo-root`](#grading-outside-a-git-checkout---repo-root)
 names when the evidence sits outside any checkout — mirroring `klt
 sim`'s `netlist`) — never a raw absolute host path, for the same reason
-`repo_relative_path` never emits one for `scope: "external"`. Omitting
+`repo_relative_path` never emits one for `scope: "external"`. (A legacy
+envelope that does carry an absolute string gets the same basename-beside-
+the-evidence fallback every native kind does — see "Path resolution is
+best-effort" above, issue #2340 — but new envelopes should not rely on it.) Omitting
 `provenance.input.path` is unaffected either way: `input_verified` stays
-`null`, exactly as it always has for `generic`. This is purely additive —
+`null`, exactly as it always has for `generic` — and since issue #6403 a
+citation whose envelope declared a `content_hash` but names nothing
+verification can answer (`null` and `scope: "external"` count as no usable
+`path`; an empty string declares nothing; a `paths` set counts as answered
+only when its members were verified — a malformed, empty, or `model-run`
+set never is) also carries the additive
+`input_verified_note: "declared_hash_unbound"`, so a declared-but-never-
+checked hash is visible in the rendered report instead of reading as
+absent. This is purely additive —
 no `schema_version` bump, and it changes no item's `met`/`unmet` verdict
 (see "No verdict changes" below); it only makes `input_verified: true`/
 `false` *reachable* for item 8's characterization-report evidence, the one
@@ -2271,6 +6011,55 @@ provisional port-accessibility half, issue #2839 — `socket-check` and
 renders the whole item `invalid_evidence` rather than being silently dropped
 from the cited set, and a part of any other kind renders `wrong_kind`.
 
+**Two parts of the same kind are `invalid_evidence`** (issue #5597). The
+grading resolves its compound citation into one entry per kind, and it used
+to let a later part of the same kind replace an earlier one ("the last one
+named wins") — but that reduction was order-dependent: a stream whose ERC
+run reports a well with no connected tap, cited *first* beside a clean
+stream, was resolved, kind-checked, hash-checked, and then dropped before
+the item's own rules ran, grading the whole partition `met` on the clean
+stream alone. Nothing correct depended on the old shape, so it is now the
+authoring mistake it always looked like: `invalid_evidence`.
+
+**A partition built from several independently signed-off streams cites one
+group per stream** (issue #5597): a JSON array whose every element is
+itself a compound citation — today's whole flat array, per group. Nesting
+is all-or-nothing: an outer list mixing a group with a bare entry, or
+carrying an empty inner list, is `invalid_evidence` (one malformed part
+fails the whole item; it is never dropped):
+
+```json
+{
+  "evidence": {
+    "11": [
+      [{"file": "a/erc-supply.json", "content_hash": "sha256:…"}, "a/lvs.json"],
+      [{"file": "b/erc-supply.json", "content_hash": "sha256:…"}, "b/lvs.json"]
+    ]
+  }
+}
+```
+
+Each group is graded independently by exactly the rules in the table below
+— a group may carry any subset of the accepted kinds, and the item is `met`
+only when **every** group grades `met`; a failing group renders `unmet`
+with that group's reason, named under `detail.failed_citations` alongside
+every other failing group. A multi-group citation also carries, at the item
+level, the same per-member keys items 2/3/4's list form emits:
+`citations_graded` (one entry per group — `{"citation": <the group's
+leading part path>, "status", "reason"}` — on `met` and `unmet` alike),
+`members_covered` / `members_total` (groups that individually graded `met`,
+out of groups cited), and `citations` (one compound citation per group, in
+manifest order, each with its own `parts` and — for a group that graded
+`met` — its own `power_delivery` block; a failing group carries only its
+resolved `parts`, since `power_delivery` states facts about a proven grid).
+The item-level `citation` stays the **leading group's** compound citation,
+so a consumer written before groups existed still reads a well-formed
+item-11 citation. A one-group citation — flat or nested — produces a report
+identical to a pre-#5597 build's, with none of these keys. The text
+rendering states the group coverage for a multi-group citation
+(`groups: <covered>/<total> cited groups graded met`); a single group
+renders exactly as before.
+
 **What the cited set must prove**, per `docs/design-evidence-tiers.md`'s own
 item text:
 
@@ -2278,8 +6067,10 @@ item text:
 | --------- | --------- | ------------ |
 | The ERC spec declares at least one `"kind": "supply"` net, at least one `ties[]` entry (or, issues #2234/#2247, a top-level `ties_disclosure` explaining why it declares none, and which obstacle it hit — see below), and (with a PDN citation) a stackup covering every `power.straps[].layer` | the spec document `klt erc`'s envelope names — see below | `supply_spec_incomplete`, or one of `supply_spec_disclosed_unexpressible` / `supply_spec_disclosed_tool_limitation` for the disclosed-empty case — one reason per disclosed obstacle (`ties_disclosure.kind`) |
 | No declared tie was reported as *degenerate* by the ERC run itself — an `erc_coverage.skipped[]` record for `erc.missing_tie` (issue #2199), i.e. a tap region `klt erc` could not tell apart from an ordinary source/drain contact | the `erc` citation's `erc_coverage` | `supply_spec_incomplete` |
+| Every `ties[]` class the (hash-pinned) spec declares has its exact `erc.missing_tie:["<name>"]` work identity in `erc_coverage.checked` (issue #6987) — a class neither checked nor reported skipped supplied no verdict for a required rule, and a zero finding count cannot tell "the rule ran and found nothing" from "the rule never ran". Nothing weaker stands in: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string. An envelope that omits the entire `erc_coverage` block (every report before #2179) is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class | the `erc` citation's `erc_coverage.checked` | `tie_coverage_incomplete` (`detail.ties_unchecked` names the verdictless classes) |
 | No `erc.unconnected_net`/`erc.supply_short` on a declared supply, no `erc.expected_short_missing` on a declared supply (issue #2463 — a declared `nets[].same_net_as` tie the layout does not draw), no `erc.unlabelled_conductor` on a declared supply (issue #2524 — conductor on a supply's declared owned roles reachable from no label, the severed single-label rail `erc.unconnected_net` structurally cannot see), and no `erc.missing_tie` | the `erc` citation's `erc_findings[]` | `supply_not_continuous` |
-| **With a `place-and-route` citation** (RTL-flow digital): `power.pdn: true` with a `power.tapcell_master` named | the `place-and-route` citation | `no_pdn` |
+| **With a `place-and-route` citation** (RTL-flow digital): `power.pdn: true` | the `place-and-route` citation | `no_pdn` |
+| ...and a `power.tapcell_master` named, or `power.tapless: true` (library documented tapless, issue #4199) | the `place-and-route` citation | `no_tapcell_master` |
 | **With a `place-and-route` citation**: `power_connectivity.status == "match"` — `"unchecked"` satisfies item 4 but **not** item 11 | the `lvs` citation | `lvs_supply_unproven` |
 | **Without one** (analog, or the doc's full-custom digital sub-case): every declared supply net paired to a reference-side net in `net_correspondence`, i.e. the reference netlist carried the supplies | the `lvs` citation | `lvs_supply_unproven` |
 | The cited LVS report passes on its own terms (`status: "match"`, `power_connectivity` not `"mismatch"`) | the `lvs` citation | `lvs_did_not_pass` when the ERC rows above all hold, `check_failed` when they do not (issue #2495) |
@@ -2335,6 +6126,15 @@ LVS citation renders:
 - `check_failed` — the ERC half proves nothing about power delivery either
   (no declared supply, no computed tie, or a supply-side finding), so
   neither half is established.
+
+A cited set that lacks the `erc` and/or the `lvs` part altogether renders
+`power_delivery_parts_missing` (issue #4193), not `wrong_kind`: what is cited
+is right, the set is incomplete. `detail.power_delivery` carries
+`missing_parts` (subset of `erc`, `lvs`), `cited_parts`, and — when the
+`erc` part's supply spec resolved — the `supply_nets` it proved. An `erc`
+part whose spec does not resolve reports its own reason
+(`supply_spec_incomplete`, `supply_not_continuous`, …) first; a part of an
+unrelated kind is still `wrong_kind`, and an uncited item `no_evidence`.
 
 Both are `unmet`: an unavailable half is not a proven one, and no citation
 reaches `met` on an LVS report that did not pass. The split exists because
@@ -2505,6 +6305,33 @@ supply names, not separately to the LVS reference's.
 **`socket-check` and `lef-abstract` are accepted by item 11 alone**, like
 `erc`/`place-and-route`: any other item renders `wrong_kind` for them.
 
+### Item 1 (digital) accepts `synthesize` evidence
+
+A [`klt synthesize`](synthesize.md) response (issue #4015) is recognised by
+its top-level `structural` object plus `netlist_sha256` and `netlist_path`,
+and may satisfy **T1 item 1 of a digital partition** alone — it is the
+netlist-evidence half of "Design sources" for an RTL-flow block. Cite it
+under `evidence["1.digital"]`; an analog partition, and every item other
+than 1, renders `wrong_kind`.
+
+It grades `met` when `status` is `"ok"` **and** `structural.unexpected_latches`,
+`structural.comb_loops` and `structural.multi_driven` are all `0`. (`status`
+is only ever `"ok"` — a failed run raises instead of emitting a response —
+so the structural counts are the real verdict.) A non-zero count renders
+`check_failed`; synthesis warnings alone do not fail it. Freshness uses the
+usual `content_hash` pin against `provenance.input.content_hash`.
+
+**`input_verified` stays `null`.** `synthesize` is not in the input-artifact
+re-hash table because multi-source HDL has no single input path, so the
+pinned hash is compared to the envelope's recorded one but never re-hashed
+against the sources on disk. The RTL sources' committedness remains
+ungraded.
+
+```json
+{"block": "spi_slave", "kind": "digital",
+ "evidence": {"1.digital": {"file": "build/synth.json", "content_hash": "sha256:…"}}}
+```
+
 ### No T1 item accepts `power` evidence
 
 `klt power`'s IR-drop/EM verdict (issue #1321, Phase 2 of epic #712 —
@@ -2609,6 +6436,17 @@ both for the citation and for the `content_hash` staleness pin. A future
 picked up automatically and takes precedence, with no manifest change
 required.
 
+**A stale yield pin identifies the source of the digest (issues #5392 and
+#5963).** When signoff hashes a samples file, `detail.compared_against`
+names its path and `detail.hash_check.field` is `samples (sha256 of the named
+samples document)`. When the committed store manifest supplies the hash,
+`compared_against` names the selected `manifest#member`,
+`hash_check.field` is `artifact_manifest.entries[].sha256`, and the hint
+says to pin that member's recorded digest with the `sha256:` prefix.
+If the pin equals the yield report file's own digest,
+`detail.pin_is_envelope_file_hash` is `true`. If neither source supplies a
+digest, the pin is unverifiable and the detail omits `compared_against`.
+
 **The named samples document is resolved relative to the report, not to
 `klt signoff`'s own cwd (issue #2197).** `klt yield` records `samples`
 exactly as it was invoked — a normal `klt yield mc-samples.json` run made
@@ -2624,15 +6462,101 @@ never affected by this: its `samples` path is already resolved relative to
 the entry's own `cwd`, the same directory the subprocess that produced it
 ran in.
 
-If the named samples document cannot be found in *either* place, the
-citation's `content_hash` is `null` — exactly as it always was for a
-missing document — but the citation also carries a `content_hash_unresolved`
-object naming what was named and where this looked, so that case stays
-distinguishable from "no samples document was ever named" (see
-"`citation` fields" below). An unpinned manifest entry still renders
-`"met"` either way; a pinned one already renders `"unmet"`/
-`unverifiable_provenance` when the actual hash is `null`, per the
-`content_hash` mismatch rule above.
+In a functioning git checkout, samples candidates must be tracked by that
+checkout's index, just like other input artifacts (issue #6139). Untracked
+samples are excluded before hashing and from `content_hash_unresolved.searched`
+so both disclosures use the same index basis, whether the file is present or
+absent. Each symlink in the lookup must be tracked. For paths such as
+`scratch/../samples.json`, the index must also contain an entry under
+`scratch/` so a fresh checkout creates that directory. Trees without `.git`,
+including copies graded with `--repo-root`, keep filesystem-presence resolution.
+
+When the disk lookup fails, a file-backed entry can still resolve the
+samples digest through its declared store manifest. If lookup fails across
+all available sources, `content_hash` is `null` and
+`content_hash_unresolved` records the attempted locations. A passing yield
+report can still render `met` without a pin. A pinned entry with no
+resolved hash renders `unmet`/`unverifiable_provenance`.
+
+### Composed (parent) manifests (`composed_of`, issue #6927)
+
+A design assembled from independently signed-off sub-blocks — a parent
+whose DRC/LVS evidence *is* its sub-blocks' evidence — can now state that
+honestly, with one optional manifest key:
+
+```json
+{
+  "block": "my-assembly",
+  "kind": "analog",
+  "evidence": {"1": "…", "5": "…"},
+  "composed_of": [
+    "manifests/sub-block-a.json",
+    "manifests/sub-block-b.json"
+  ]
+}
+```
+
+`composed_of` takes the **same entry shapes `--fleet`'s `blocks` take** (a
+path, `"-"`, or an inline manifest object). Each entry resolves to a
+sub-block manifest with a **required non-empty `block` name** and the
+**same `kind` as the parent**; a sub-block may not declare its own
+`composed_of` (no nesting in v1). A malformed key (anything but a non-empty array — an
+explicit `null` and `[]` included; only an *absent* key means "not
+composed"), a bad entry, a missing
+`block` name, a `kind` mismatch, or a nested declaration aborts the report
+with an error naming the entry — a composition authoring mistake, not a
+"no evidence yet" grading outcome.
+
+**Composition is visible evidence, never T1.** The evidence tiers doc
+scopes a T1 claim to the named block's *own boundary*: two sub-blocks that
+each pass LVS say nothing about whether the parent wires them together
+correctly. So a composed row renders `status: "met_by_composition"` —
+deliberately outside the statuses that satisfy T1, counted in neither
+`t1_met_count` nor `t1_not_applicable_count` — and the parent is
+`tier: null` until it cites its **own** item 3/4 evidence for the assembled
+layout (top-level DRC/LVS). That own evidence always wins: a parent that
+cites its own item 3 or 4 is graded from that citation, passing or
+failing — a failing own LVS is never masked by its sub-blocks' passes.
+The count of composed rows is disclosed as top-level `t1_composed_count`
+(omitted when zero, like `t1_not_applicable_count`), and in the fleet
+roll-up as `t1_composed_count` on the `blocks[]` row. In `--format text`,
+composed rows render as `[COMP ]` (never `MET`), each naming its
+sub-blocks (`composed from:` lines), and the tier line states
+`, N composed (parent boundary uncovered)`.
+
+v1 rules, deliberately narrow:
+
+- **Only items 3 ("DRC clean") and 4 ("LVS clean") compose.** Every other
+  item is graded from the parent's own evidence alone, even if every
+  sub-block has it met.
+- A parent row becomes `met_by_composition` **only when the parent has no
+  own evidence for it** (it would grade `unmet`/`no_evidence`) **and every
+  sub-block's own report has `met` at the same `(id, partition)`** — for a
+  `mixed-signal` block, each partition row composes independently.
+- If any sub-block is not `met` there, the row stays `unmet`/`no_evidence`
+  and gains `detail.composition` naming each sub-block and its status
+  there. In `--format text`, each entry appears under the unmet row as
+  `sub-block: <block> (source=<source>, status=<status>)`. A sub-block
+  with an evidence hash adds `, content_hash=<hash>` before the closing
+  parenthesis. An inline manifest uses `<inline>` for the source.
+- A composed row carries `reason: "composed_from_sub_blocks_only"` (so the
+  fleet roll-up's `blocking_item` says *why* the parent is not T1 — a
+  composed row is a valid blocker candidate) and, in place of
+  `citation`, `composed_from: [{"block", "source", "status",
+  "content_hash"?}, …]` — per sub-block, its manifest path (`null` for an
+  inline entry) and the content hash of the evidence its own report item
+  cited, so staleness stays visible.
+- `unmet_reason_counts` counts only `status == "unmet"` rows, so a
+  `met_by_composition` row is deliberately absent from it — decided and
+  intended: the rollup answers "why is this still unmet", and a composed
+  row is not unmet, it is *not yet the parent's own*.
+- `--check` re-grades the parent and re-reads every sub-block manifest, so
+  editing a sub-block's evidence after committing a composed report flips
+  the check to `drifted` with no new mechanism.
+
+If the operator ever wants composition to qualify for parent T1, that is a
+separate, explicit checklist change (defining what evidence covers the
+interconnect between sub-blocks) — not something `composed_of` decides.
 
 ### Tier-report JSON schema
 
@@ -2715,10 +6639,16 @@ distinguishable from "no samples document was ever named" (see
 | `block`         | string \| null       | Echoed from the manifest's `block` field.                                                |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
 | `partition_boundary` | object          | **Present only when a `"mixed-signal"` manifest declared one** (issue #2278): `{"analog": <string>, "digital": <string>}` — what each partition denotes (which nets/pins/cells belong to which side), echoed verbatim from the manifest, with only the partitions it actually declared. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `drc_coverage` and `body_bias`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#2278 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared partition boundary" above. |
-| `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
+| `upstream_source` | object          | **Present only when the manifest declared one** (issue #6972): `{"repository": <string>, "commit": <string>}` — where a block **consumed from another repository at a pinned commit** came from, echoed from the manifest (the commit lowercased). One object for the whole block, on no `items[]` row. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `partition_boundary`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#6972 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared upstream source" above. |
+| `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"` (or, item 6 only, a guarded `"not_applicable"`); otherwise `null` — no partial credit. |
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
-| `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
+| `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
+| `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `t1_composed_count` | integer | **Present only when at least one item is `met_by_composition`** (issue #6927; absent means `0`, so a report with none — every report whose manifest declares no `composed_of` included — is byte-identical to a pre-#6927 one): the number of T1 rows whose verdict was composed from the parent's sub-block reports. **Never part of `t1_met_count` or `t1_not_applicable_count`, so it can never move `tier`** — composition is visible evidence, never T1; a parent with composed rows is `tier: null` until it cites its own item 3/4 evidence. `--format text` states it as `, N composed (parent boundary uncovered)` on the tier line. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "Composed (parent) manifests" above. |
+| `t1_justified_gap_count` | integer     | **Present only when at least one justified gap is declared** (issue #5599; absent means `0`, byte-identical when none): the count of `spec_rows` rows declared with the justified object form of `gap`, across all items and partitions. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17); it never counts as coverage and never moves an item off `unmet`. See "Declared gaps" above. |
+| `findings`      | array\<object\>      | **Present only when at least one finding exists** (issue #5599): one entry per justified gap that names no issue — `{"finding": "justified_gap_without_issue_link", "item", "partition" (when the block is mixed-signal), "row"}`. A declared gap is pending work, so the open issue that would close it should be recorded; its absence is reported here, never refused. |
+| `unmet_reason_counts` | object\<string, integer\> | **Present only when at least one T1 item is `unmet`** (issue #5903; a report with none is byte-identical to a pre-#5903 one). Maps each `reason` token to how many unmet T1 items carry it, e.g. `{"no_evidence": 3, "stale_evidence": 1}`; values sum to the number of unmet T1 items. `not_applicable` items and T2–T4 ladder rows (`tier_not_supported`) are not counted. Separates a block that is mid-progress from one whose pin went stale without changing the exit code (still `3`): `jq -e '(.unmet_reason_counts.stale_evidence // 0) == 0' report.json`. Additive: no `schema_version` bump. Derived from `items[]`, so `--check` leaves it out of the comparison. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
 | `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). **Route-dependent** (issue #2249): it describes the install, not only the commit, so two byte-legitimate installs of the same pinned commit can carry different blocks — never byte-compare a report across installs; use `--check`, which excludes exactly this block. |
@@ -2735,10 +6665,11 @@ distinguishable from "no samples document was ever named" (see
 | `partition_boundary` | string     | **Present only on a row whose partition the manifest declared a boundary for** (issue #2278) — the top-level `partition_boundary` entry for this row's `partition`, repeated here so a row selected out of `items[]` carries the definition of the silicon it covers, not just the partition's name. Absent on every row of an undeclared partition, and on every T2-T4 ladder row (a ladder row belongs to no partition). Never graded. |
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
-| `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
-| `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
+| `status`    | string               | `"met"`, `"unmet"`, (item 6 only, issue #2865) `"not_applicable"`, or (items 3 and 4 of a `composed_of` parent only, issue #6927) `"met_by_composition"` — see above, "Item 6 `not_applicable`" below, and "Composed (parent) manifests" above. **`"met_by_composition"` is not `"met"`**: it is outside the statuses that satisfy T1 and is counted in neither `t1_met_count` nor `t1_not_applicable_count`, so a consumer must handle it as a status of its own — never as a pass, and never as an unmet row either. |
+| `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826); a `"met_by_composition"` row (issue #6927) always carries `"composed_from_sub_blocks_only"` — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples digest could not be resolved from disk or a declared store manifest (issues #2197 and #5963), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), `pointer` when the evidence entry carried one (issue #5815), `drc_crosscheck` for a cross-check (`--engine both`) `drc` citation (issue #5815), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `composed_from` | array\<object\> | **Present only on a `status: "met_by_composition"` row** (issue #6927; absent on every other row, so a report with no composed row is byte-identical to a pre-#6927 one): one `{"block", "source", "status", "content_hash"?}` entry per sub-block of the parent's `composed_of`, in manifest order — the sub-block's name, its manifest path (`null` for an inline entry), its own verdict at this row's `(id, partition)` (always `"met"` on a composed row), and, when its own citation carried one, the `content_hash` of the evidence it cited, so a sub-block's later staleness stays visible. Takes the place of `citation`, which is `null` on a composed row. Disclosure of what the row rests on, never a T1 satisfier. See "Composed (parent) manifests" above. |
 
 #### `citation` fields
 
@@ -2746,19 +6677,22 @@ distinguishable from "no samples document was ever named" (see
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"synthesize"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
-| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
-| `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
+| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design, including a local yield samples file since #6139). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
+| `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
+| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. Paths excluded by the git index are omitted, so the list can be empty (#6139). If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document — an absent key never means "the input was verified", only that this particular failure mode did not occur; the byte-verification verdict lives in `input_verified`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own when no digest resolves, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
-| `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
-| `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. **Absent** for every other item. |
-| `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `disclosed_undeclared_tie_classes` when present, plus `power_ports` (issue #2839) only when the provisional port-accessibility half was graded (see "Item 11 port accessibility") — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. |
+| `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. `status: "not_assessed"` (issue #6559: a `klt pex --engine klayout-runset` leg, which never runs the check) carries `null` for both `unbiased_device_count` and `unbiased_nets` — not `0` / `[]` — and the text rendering prints no count for it; the same citation then also carries `pex_extraction` (`{"engine", "parasitics_carried", "params_not_carried"}` plus `substrate_return` when present, quoted from the cited envelope's `extraction`; absent for a curated-deck run), rendered as a `pex extraction:` text line beside `body bias:`. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
+| `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. For a **grouped** citation (issue #5597) these are the *leading group's* parts, and every group's own parts live in the item-level `citations` array (one compound citation per group, in manifest order) beside `citations_graded` and `members_covered`/`members_total` — see "Item 11 is compound" above. **Absent** for every other item. |
+| `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `tapless: true` (issue #4199) only when the cited P&R response states a tapless library (`tapcell_master` is then null by design), plus `disclosed_undeclared_tie_classes` when present, plus `power_ports` (issue #2839) only when the provisional port-accessibility half was graded (see "Item 11 port accessibility") — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. These are **per-stream facts** (issue #5597): on a grouped citation every group's `citations` entry carries its own `power_delivery` block, and the values are never merged across groups — each stream proves its own grid. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
-| `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The three name-lists are in the report's own measurement order. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
-| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "summary"?, "source"?}`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. **Absent** on every other citation, including a native-kind citation of items 1, 2, 9 or 10. On those four items an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
-| `coverage_qualification` | object | **Any kind**, and only when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109): `{"reason": "partial_coverage", "skipped": [{"id", "reason"}, …]}` — the requested work the cited run did not check. **Absent** for complete, zero, unknown, malformed and pre-contract coverage alike; an absent key means "this artifact made no partial-coverage claim", never "nothing was skipped". Legacy verb-specific gap fields (`coverage.rules_skipped`) are **not** re-read into it. Quoted, never graded on — see "Partial coverage is qualified, not inferred" above. |
+| `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls", "not_applicable_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The first two name-lists are in the report's own measurement order. `not_applicable_negative_controls` (issue #4523) lists `{"name", "reason"}` for each measurement whose control verdict is `"not_applicable"` with a non-empty reason: such a measurement is excluded from the other two lists and never makes `negative_control` `"detected"` (a campaign where every control is N/A rolls up to `"not_declared"`); one without a reason fails closed and counts as undetected. Signoff discloses the reason; it does not judge it. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
+| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "members"?, "summary"?, "source"?}`. `members` (issue #3044) is present only for a set binding (`provenance.input.paths`) — `[{"path", "content_hash", "status"}]` with `status` of `verified`/`stale`/`unverifiable`, `content_hash` then being the set's combined digest and `path` `null`; an unmet set citation carries the same list as the item's `detail.artifact_binding.members`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. `attestation` (issue #2844) — `{"producer", "inventory_schema_version", "check_count", "passed_count", "description"?}` — is echoed when the envelope carries an `attestation` block naming a `producer` (every `klt signoff --attest` envelope does), and is never graded; its `description` (issue #5573) is the envelope's claimant scope disclosure, echoed verbatim under the same never-graded rule when the envelope carries a non-empty one and omitted otherwise. **Items 1 and 2 only** (issue #2887): a `regeneration` object `{"generator", "regenerated_hash", "executed_by_klt"}` is added when the attestation carries a matching `provenance.regeneration` claim; `executed_by_klt` is `false` unless the opt-in generator execution above ran an approved generator successfully (then `true`, with an `execution` block). It is absent when no claim was made. **Absent** on every other citation, including a native-kind citation of item 2 (items 1, 9 and 10 no longer accept native citations). On item 2 an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `coverage_qualification` | object | Present when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109). Contains `reason: "partial_coverage"` and up to the first 20 `skipped` records in producer order (issue #4286). When any record represents multiple units or the list exceeds 20 records, `skipped_total` and `skipped_by_reason` sum `count` across the full list, using one for each omitted count. `truncated: true` indicates that some records were left out of the display. The complete list stays in the cited envelope identified by `file` and `content_hash`. This disclosure comes from the common coverage block and is independent of signoff's grading. A malformed block omits this qualification. Its refusal identifies the evidence and validator error in `detail.cited_evidence` and `detail.coverage_error`. |
+| `pointer`     | string          | **Present only when the evidence entry carried a `pointer`** (issue #5815): the RFC 6901 selector, verbatim, naming where inside the cited document the graded envelope lives — so a citation of *part* of a composite document (one side of a cross-check report, say) is distinguishable in the JSON from a whole-envelope citation of the same file. **Absent** when the entry named none (including the empty pointer `""`, which denotes the whole document). Never consulted by any grading rule — see "Citing an envelope nested inside a composite report" above. |
+| `drc_crosscheck` | object      | **Cross-check (`--engine both`) `drc` citations only** (issue #5815): `{"mode": "crosscheck", "engines": {"curated": …, "native": …}, "comparison_state"}` — what the citation actually graded. Each engine's entry is `{"status", "coverage"}` (its own status token and its three item-3 `coverage` fields, present only when that side carries a coverage block), or `null` for a native side that is absent (`reports.native: null` — the engine was unavailable or failed; the envelope then grades `unmet` on its own `not_checked`, so this appears on a `met` citation only for a hand-shaped artifact). `comparison_state` is the comparison block's own state token. **Absent** for every single-engine citation, and for a side-selected cross-check citation (a `pointer` citation grades the selected side as a standalone envelope). Disclosure only, never graded on — see "Citing a `--engine both` (cross-check) DRC report" above. |
 
 #### `reason` values
 
@@ -2771,29 +6705,46 @@ actually ran and failed):
 
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
-| `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
-| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). |
-| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
+| `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. **Items 3 and 4 of a `composed_of` parent** (issue #6927): when the parent's sub-blocks were consulted and not every one was `met` at this row's `(id, partition)`, the row stays here and gains `detail.composition` — the same `{"block", "source", "status", "content_hash"?}` list `composed_from` carries, naming each sub-block and its status there. When every sub-block was `met` the row is `met_by_composition` instead (see `"composed_from_sub_blocks_only"` below). |
+| `"evidence_not_klt_native"` | yes | **(issue #6953)** The item has no `evidence` entry, but the manifest's `disclosed_evidence` map named a local artifact for it that this grader cannot read — evidence produced outside `klt` (an OpenROAD STA report, a netlist synthesized from foreign RTL) which no T1 item accepts as a citation. The grader's only claim is that the disclosed path names a readable file (`detail.disclosed_evidence`); its contents are never parsed or interpreted as a grading envelope, and the item still grades `unmet` with no `citation` and no credit — a disclosure is identification, never a verdict. Distinct from `"no_evidence"` (whose meaning, "the manifest has no entry for the item", would otherwise read as "the work was never done"); an unreadable disclosed path renders `"unreadable_evidence"` instead. See the `disclosed_evidence` manifest field above. |
+| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
+| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
+| `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
 | `"ungradeable_by_build"`  | yes | **(issue #2176)** The manifest cited evidence for an item this build has no grading rules for at all (`graded_by_build: false` — an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists). Not a statement about the cited artifact, which is never even resolved: the *build* is the gap, so the fix is a newer `klt` (or grading against the doc this one ships), not a different citation. Without it, such a citation fell through to the unrestricted grading path and could render `met` from rules that do not exist in the running build. See "An overridden doc can outrun the build" above. |
-| `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
+| `"command_timeout"`       | yes | **(issue #5763)** A command-backed entry's subprocess ran but was killed by the fixed evidence-timeout cap (`_COMMAND_EVIDENCE_TIMEOUT_S`, 1800 s) — the bound, not the check, produced the `unmet` grade, so a hung gate is distinguishable in the record from a failing one. |
+| `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, or exited nonzero — a timeout is `"command_timeout"` above. Distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
-| `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
+| `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). A single citation carries `detail.cited_evidence` naming the artifact read, including a `pex` report's `body_bias` (issue #5692); `citation` itself stays `null`. For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation of a **legacy** report (from a `klt` predating the `provenance` block, issue #5550) or an `options.from_synthesize` one (`provenance.input` is `null` by design), where a command's stdout is not a stable file to re-hash (a *file-backed* one of either is re-hashed by the grader, issue #4893), or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. (A cited item-11 *set* that is merely missing the `erc` or `lvs` part renders `"power_delivery_parts_missing"` instead, issue #4193.) The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `"coverage_undisclosed"`  | no  | **(issue #5789)** **Item 3 only, and only under `require_coverage_disclosure`.** The cited `klt drc` report graded `met` on `status: "clean"`, but the claim's `coverage_disclosed` declaration is not set-equal to the coverage the report itself states: `detail.coverage_undisclosed` names per field the `missing` entries (reported, not claimed) and `extra` entries (claimed, no longer reported — deck drift), or carries `reason: "no_coverage_block"` for pre-#2002 evidence that states no coverage at all. The item also carries `detail.cited_evidence` (the citation a `met` item would have had). Fix the declaration, or regenerate against the deck the claim describes. See "DRC coverage is reported, not graded" above. |
+| `"stale_artifact"`        | no  | **(issue #2887)** **Items 1 and 2 only.** An artifact-anchored `generic` attestation carries a `provenance.regeneration` claim whose `regenerated_hash` (the hash the attester's own CI got by re-running the generator) differs from the hash the bound artifact re-hashes to. The attested bytes are intact, but they are not what the generator produces: the committed netlist or stream is out of date with its sources, or the generator is nondeterministic. Distinct from `"stale_evidence"`, which means the artifact changed *after* it was attested. `klt signoff` never runs the generator. Regenerate and commit the artifact, then re-attest. See "Items 1 and 2: attesting that the artifact was regenerated" above. |
 | `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
-| `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
+| `"not_applicable_wrong_partition"` | yes | **(issue #2865)** **Item 6 only.** The `not_applicable` form was used on an analog partition (or a pure `analog` block); only a digital partition may. |
+| `"not_applicable_spec_unratified"` | yes | **(issue #2865)** The cited spec's `status` is not `"ratified"`. `detail.spec_status` echoes it. |
+| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path (`id` when the row id itself matched); `detail.hint` (text-pattern hits only) names the waiver; the full token lists are in the item-6 section. The scan is a conservative backstop: a false positive refuses; a statement row's `reviewed_not_statistical: true` waives the string-value hits (not key hits) for that row (issue #4793). |
+| `"not_applicable_statement_incomplete"` | yes | **(issue #2865)** The statement does not account for exactly the spec's rows: `detail.uncovered_row_ids` (spec rows with no statement row), `detail.unknown_row_ids` (statement rows naming no spec row), a row missing `class`/`reason`, or a spec with no rows at all. |
+| `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`. Re-run P&R with a `request.power` block. |
+| `"no_tapcell_master"`     | no  | **Item 11 only** (issue #4199). The grid was built (`power.pdn: true`) but `power.tapcell_master` is null and the response does not state `power.tapless: true` (a tapped library whose tap step did not run, or a pre-#4199 envelope). Re-run P&R; a library documented tapless (`sg13g2_stdcell`) states `tapless: true` and grades. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
 | `"supply_spec_disclosed_tool_limitation"` | yes | **Item 11 only** (issue #2247). The same disclosed zero-`ties[]` state as `"supply_spec_disclosed_unexpressible"` above, naming the other obstacle (`ties_disclosure.kind: "tool_limitation"`): the tap *is* expressible, but the `klt` build this evidence had to be produced on cannot grade a declared tie safely — the reported instance being issue #2169, where a declared tie joins the well/tap regions into the primary connectivity graph and reports a false `erc.supply_short` on any routed design. Still unmet on exactly the same principle: a disclosure is the caller's word about their toolchain, never a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from both "nobody declared ties at all" and "this stream has no tap to name". Kept distinct from the reason above because the remedy differs: re-run against a `klt` build whose tie extraction is isolated (issue #2169) and declare the tie, rather than go looking for a tap that is already drawn — a different *build*, not a redrawn layout. The report's own `provenance.klt_version` is what shows whether the disclosed limitation applies to the run in front of you. |
+| `"tie_coverage_incomplete"` | yes | **Item 11 only** (issue #6987). The cited `klt erc` run's (hash-pinned) spec declares its `ties[]`, the run reported no explicit skip and no finding, but one or more declared classes have **no verdict in the envelope at all**: their exact `erc.missing_tie:["<name>"]` work identity is absent from `erc_coverage.checked`. `erc_coverage` exists to distinguish "the rule ran and found nothing" from "the rule never ran" — a zero finding count is produced identically by both — so a class neither checked nor reported skipped supplied no positive evidence, and the item must not read its silence as a clean tie. Nothing weaker stands in for the missing identity: a duplicate of another class's ID, a different class's ID, an assertion-list entry alone, the `missing_tie_checked` summary flag, or the class moved verbatim into `skipped` as a bare string each leave the class verdictless. `detail.ties_unchecked` names which declared classes went verdictless. An explicit producer-format skip record (`{id, reason}`) still renders `"supply_spec_incomplete"` above (issue #2199, checked first), and an envelope that omits the entire `erc_coverage` block — every report before #2179 — is graded exactly as it always was; a block whose `checked` is not a list supplies no positive evidence for any class. Fix: re-run `klt erc` so every declared tie class is actually computed. |
 | `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), a declared supply's intentional tie to another name (`nets[].same_net_as`, issue #2463) is not drawn (`erc.expected_short_missing` — graded under the same declared-name filter `erc.unconnected_net` uses, since that rule can also name two signal nets), or a well/tub has no connected tap (`erc.missing_tie`). |
+| `"substrate_isolation_undecidable"` | yes | **Item 11 only** (issue #5346). The cited `klt erc` run disclosed `erc.supply_short` as `inapplicable` with reason `substrate_isolation_undecidable` — it could not decide whether two supplies share a substrate body — and listed what was `missing`. An undecided question is not a clean answer, so the item is unmet; the list is in `detail.power_delivery.substrate_isolation_missing`. A substrate-path `erc.supply_short` finding (`via: "substrate"`) is a `supply_not_continuous` blocker like a metal one. When the run instead evaluated the substrate path (`erc.supply_short.substrate` in `erc_coverage.checked`) a met citation carries `power_delivery.substrate_continuity: {"checked": true, "by_assertion": <bool>}`. Declare the missing isolation (`ties[].isolation_boxes`) and re-run `klt erc`. |
 | `"lvs_supply_unproven"`   | no  | **Item 11 only** (issue #2025). The LVS half of the item is unproven: with a PDN citation, the same report's `power_connectivity.status` is not `"match"` (`"unchecked"` satisfies item 4, but not this item, which *is* the question); without one, its `net_correspondence` does not pair every declared supply net to a reference-side net, so the supplies were not part of the compare. Rendered only for a cited LVS report that *passed* — one that did not renders `"lvs_did_not_pass"`/`"check_failed"` below instead. |
+| `"power_delivery_parts_missing"` | no | **Item 11 only** (issue #4193). The cited set resolved cleanly but lacks the `erc` and/or `lvs` part. `detail.power_delivery` lists `missing_parts`, `cited_parts`, and (ERC spec resolved) `supply_nets`. Previously rendered `"wrong_kind"`. |
 | `"lvs_did_not_pass"`      | no  | **Item 11 only** (issue #2495). The ERC half of the item **is** complete — every declared supply resolved to its declared island count, every declared tie was computed and found, no supply-side finding — and the cited LVS report did not pass on its own terms, so the LVS half is *unavailable* rather than answered. Still unmet: no citation reaches `met` on a failing compare, and `net_correspondence` (matched-nets-only) cannot say the supplies took part in a mismatched one even when the defect is a restated device parameter that has no bearing on any rail. Kept distinct from the plain `"check_failed"` below because the remedy differs and the record would otherwise read as "power delivery unverified" for a block whose rails *are* proven continuous and tied: fix the LVS defect (item 4 is blocked on it too), never the ERC spec, which already asked and answered. `detail.power_delivery` names the supply nets the ERC half proved, plus the LVS report's `status` and `power_connectivity.status`. See "Item 11 is compound" above. |
+| `"runset_not_pinned"`     | no  | **Items 4 and 11** (issue #2870). The cited `lvs` report is `"engine": "klayout-runset"` but its `provenance.runset.content_hash` is not in the signoff-side allowlist of PDK-published runsets (`signoff_runset.PINNED_RUNSETS`). Cite a report produced with the PDK's own runset at a pinned revision, or a curated-deck report. |
+| `"runset_hash_mismatch"`  | no  | **Items 4 and 11** (issue #2870). A `klayout-runset` report whose runset file (`deck_file`) no longer hashes to the recorded `provenance.runset.content_hash`: the runset changed since the run. Re-run `klt lvs`. |
+| `"runset_unrecognised_device"` | no | **Item 4 and item 11's LVS half** (issues #2870, #6902). A `klayout-runset` report read `status: "match"` but cannot prove every device was recognised: `device_census` per-class layout/reference counts differ (compared case-insensitively — SPICE names are case-insensitive and the sides arrive in different case), a census is malformed (each class needs a non-negative integer count), or the report carries no `device_census.reference_source` evidence (a pre-#6902 report fails closed — re-run `klt lvs` with a klt that emits it), or a source class has too few converted devices even when all class totals add up. The pinned SKY130 reader renames `sky130_fd_pr__special_nfet_01v8` subcircuit calls when `convert_subckts=true`. The grader credits only calls counted in `reference_source_subcircuits`. `coverage.declared_not_recognized` is disclosure only — a PDK runset declares classes no real block instantiates. `detail.runset_device_gaps` names each gap. |
+| `"runset_inductor_terminal_order"` | no | **Item 4 and item 11's LVS half** (issue #6903). The cited `klayout-runset` report failed while carrying the `topology.known_limitation` entry naming the pinned IHP sg13g2 runset's mirrored-`inductor2` terminal-order limitation (`details.limitation: "mirrored-inductor2-terminal-order"`): the runset orders an inductor2's two winding terminals by port-polygon x position and compares the order, so a mirrored spiral extracts terminal-reversed however it is wired, and its `LA`/`LB` port texts (which the runset uses as net names) surface the reversal as `port.name_mismatch` strict-port findings. The report's `status` stays exactly what the runset reported (the entry is a warning; the error beside it is what failed) — this reason *names* the known defect instead of rendering a bare `check_failed` (item 11: instead of `lvs_did_not_pass`/`check_failed`, with `detail.inductor_terminal_order` carrying the three net names). Never `met`: whether a report produced through a normalisation step may grade items 4/11 is the operator decision routed in #6914. |
 | `"power_port_unproven"`   | no  | **Item 11 only** (issue #2839, provisional). The port-accessibility half is in force (manifest `power_ports.required`, or port evidence cited) but no `klt socket-check` envelope carrying `power_ports` facts is cited — none at all, or one produced before #2839. See "Item 11 port accessibility" above. |
 | `"no_edge_power_port"`    | no  | **Item 11 only** (issue #2839). A declared supply has no port: no `POWER`/`GROUND` socket pin of that name, its label not where the descriptor says, or no drawn conductor under it. |
 | `"power_port_interior_only"` | no | **Item 11 only** (issue #2839). The supply has drawn port(s), but none lies within the policy's edge band of a counted outline edge with a clear approach channel. |
@@ -2801,12 +6752,14 @@ actually ran and failed):
 | `"lef_power_pin_missing"` | no  | **Item 11 only** (issue #2839). No `klt lef-abstract` envelope is cited, or its abstract has no `PIN` named for the supply. |
 | `"lef_power_pin_mismatch"` | no | **Item 11 only** (issue #2839). The LEF pin disagrees with the GDS port: its `USE` is not `POWER`/`GROUND` or differs, its `PORT` is not drawn geometry, it came from another GDS layer, its rectangles do not touch the port, or the macro `SIZE` differs from the socket outline. `detail.power_ports.findings[].aspect` says which. |
 | `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
-| `"nothing_checked"`       | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row. The cited check did not fail on its own terms; it measured nothing, so its passing `status` says nothing about the design. See "A check that checked nothing is refused, not reported" above. |
+| `"nothing_checked"`       | yes | The evidence resolved to a recognised envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row (including a `klt pex --extract-only` report, issue #3739). Rendered whether the envelope's own `status` is the kind's success token or the common rollup's zero-coverage token `"not_checked"` (issue #5479) — the two differ only in what the producer called the run, and a run that measured nothing is not a run that failed. The cited check did not fail on its own terms; it measured nothing, so its `status` says nothing about the design. The item carries `detail.nothing_checked_reasons` (the envelope's own reason codes) and `detail.cited_evidence` (which artifact was read, in the same shape a `met` `citation` has); `citation` itself stays `null`, as on every unmet item. See "A check that checked nothing is refused, not reported" above. |
 | `"undersized_sample"`     | yes | **(issue #2467)** **Item 6 only** today. The evidence resolved to a recognised, *passing* `klt yield` envelope, but at least one of its own measurements reports `sample_size.verdict: "insufficient"` — the report stating, about itself, that the draw it published is not sized for the claim (`required_n`/`required_n_for_target` above the `n` actually drawn; see [`yield.md`](yield.md)'s "Sample-size verdict"). No contradiction with its `status`: that token answers only "did every *declared* `target_yield` hold at the stated confidence", and `"reported"` means none was declared at all, so it can never fail. The cited check did not fail on its own terms — draw the `required_n` the report names and re-run *this* campaign, do not go looking for a design defect. The item's `detail.yield_campaign` names which measurements are undersized. See "Campaign discipline on item 6" below. |
 | `"negative_control_not_detected"` | yes | **(issue #2467)** **Item 6 only** today. The cited `klt yield` campaign *did* declare a `negative_control` — a seeded, known-bad variant's own samples — and that self-check **failed**: `negative_control.verdict` is `"not_detected"`, i.e. the deliberate defect did not show up as a statistically distinguishable degradation ([`yield.md`](yield.md)'s "Negative control"). The campaign has demonstrated that its statistics cannot detect a degraded design, which is the opposite of what item 6's "deterministic negative control" requirement asks the citation to establish. Deliberately **not** rendered for a campaign that declared no control at all — that state is *disclosed* on the `"met"` citation instead (`citation.yield_campaign.negative_control: "not_declared"`), never refused. See "Campaign discipline on item 6" below. |
 | `"coverage_unknown"`      | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its coverage cannot be classified: either its `coverage` block explicitly declares `known: false`, or (the legacy path) it is a KLayout-engine DRC result carrying a raw `violations` list with no `coverage` block at all to consult. The cited check did not fail on its own terms; it just does not establish whether the requested work was covered. |
-| `"malformed_coverage"`    | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its `coverage` block is present and structurally invalid — it is not an object, or it fails the schema/consistency checks a v1 block must satisfy. The cited check did not fail on its own terms; its own coverage claim simply cannot be trusted. |
+| `"malformed_coverage"`    | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its `coverage` block is present and structurally invalid — it is not an object, or it fails the schema/consistency checks a v1 block must satisfy. The cited check did not fail on its own terms; its own coverage claim simply cannot be trusted. **Item 11's compound citation applies this gate per resolved part** (issue #5643): any cited part whose `coverage` block does not validate — `erc`, `lvs`, `place-and-route`, `socket-check` or `lef-abstract` alike, and identically whether or not a valid `erc_coverage` scope stands beside the ERC part's antenna block — renders the item `unmet` with this reason. A part that failed is reported as the failure it is first; the coverage complaint is ordered after every failure verdict. The refusal names what was read: `detail.cited_evidence` (the refusing part, in the shape a `"met"` citation would have carried) and `detail.coverage_error` (the validator's own message) — see "An unmet item names what was read" above. |
 | `"partial_coverage"`      | no  | The evidence resolved to a recognised envelope whose producer applied the common rollup rule and reported its **partial** status token — `"clean_partial"`, `"pass_partial"`, the per-kind spelling of `f"{success}_partial"` (issue #2109, [coverage-contract.md](../coverage-contract.md)). Every check it ran passed, *and* it skipped requested work, so its result is real but not unconditional. The cited check did not fail on its own terms — re-run it over the work it skipped, do not go looking for a violation. Ordered like `"check_failed"` rather than like the three coverage reasons above it: it is decided from the envelope's own verdict, so it is reported even for a kind the item does not accept (exactly as a *failing* report of that kind reports `check_failed`, not `wrong_kind`). |
+| `"timing_margin_missing"` | no  | **(issue #4314)** Digital item 5 cites only passing `klt sim` envelopes (the full-custom sub-case) but no `spec_rows` row with `timing_margin: true` is evidenced by a passing, limited, `spec_row`-tagged measurement at every corner. `detail.missing_timing_margin` names the rows and corners. |
+| `"composed_from_sub_blocks_only"` | yes | **(issue #6927)** **Items 3 and 4 of a `composed_of` parent only — and the one reason in this table carried by a row whose `status` is not `"unmet"`** (it is `"met_by_composition"`). The parent cites no evidence of its own for the item (it would otherwise grade `unmet`/`no_evidence`) and every sub-block's own report is `met` at the same `(id, partition)`; the row names those verdicts in `composed_from` and holds no `citation`. The parent has no check of its own on the item — the sub-blocks' checks ran and passed, but say nothing about how the parent wires them together — so the row is outside the statuses that satisfy T1, and the block stays `tier: null` until it cites its own item 3/4 evidence. It is the `reason` a fleet `blocking_item` carries when a composed row is the block's blocker, and it is deliberately absent from `unmet_reason_counts`, which counts `unmet` rows only. See "Composed (parent) manifests" above. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -2835,6 +6788,15 @@ never disagree about *why* it isn't T1 yet.
   above). Every resolved manifest's `block` field is **required** here
   (unlike single-block tier-report mode, where it is optional) — it is how
   a roll-up row is identified.
+
+A block manifest listed here may itself declare `composed_of`
+(["Composed (parent) manifests"](#composed-parent-manifests-composed_of-issue-6927)
+above): the parent row composes its eligible rows from its sub-blocks
+exactly as in single-block mode, carries `t1_composed_count` when any
+composed, and its `blocking_item` names the first composed row with
+`reason: "composed_from_sub_blocks_only"` when nothing else blocks it. The
+sub-block manifests are *not* separate roll-up rows — list the parent, not
+its children (or list both, if you also want each sub-block's own row).
 
 A block whose manifest is structurally invalid (missing/invalid `kind`, a
 malformed `evidence` map, or no `block` name) aborts the whole roll-up with
@@ -3021,10 +6983,15 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `block`         | string               | The block's name, from its manifest's `block` field.                                     |
 | `source`        | string \| null       | The fleet manifest entry's file path, or `null` for an inline block manifest.             |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the block's manifest.           |
+| `upstream_source` | object             | **Present only when this block's manifest declared one** (issue #6972): the declared upstream pin `{"repository", "commit"}`, echoed verbatim from the block's tier report — where the block's design sources live, as opposed to `source` above (the local manifest path, the locator for the *pin record*). The text roll-up prints an `upstream: <repository> @ <commit>` line on the row. Never graded. |
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
-| `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
+| `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
+| `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
+| `t1_composed_count` | integer | Present only when non-zero (issue #6927): this block's `"met_by_composition"` T1 item count — rows composed from the block's `composed_of` sub-blocks. Never part of `t1_met_count`, so it cannot make a block `tier: "T1"`; when nothing else blocks the block, its `blocking_item` names the first composed row with `reason: "composed_from_sub_blocks_only"`. See "Composed (parent) manifests" above. |
+| `t1_justified_gap_count` | integer     | Present only when non-zero (issue #5599): this block's justified declared-gap count — `spec_rows` rows declared with the justified object form of `gap`. The text roll-up prints `, N justified gaps` beside the count. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17). |
+| `findings`      | array\<object\>      | Present only when non-empty (issue #5599): this block's tier report findings, carried verbatim — today, one entry per justified gap that names no issue (`finding: "justified_gap_without_issue_link"`). |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |
@@ -3078,7 +7045,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "status": "clean",
       "passed": true,
       "detail": {
-        "file": "design.gds", "deck": "sky130", "violation_count": 0,
+        "file": {"path": "design.gds", "scope": "repo"}, "deck": "sky130",
+        "violation_count": 0,
         "coverage": {
           "layers_in_stream_without_rules": ["70/20"],
           "rules_skipped": ["met5.4"],
@@ -3093,7 +7061,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "status": "match",
       "passed": true,
       "detail": {
-        "layout": "design.spice", "reference": "golden.spice",
+        "layout": {"path": "design.spice", "scope": "repo"},
+        "reference": "golden.spice",
         "mismatch_count": 0,
         "counts": {"nets": {"...": "..."}, "devices": {"...": "..."}, "pins": {"...": "..."}}
       },
@@ -3134,17 +7103,15 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"generic"`, or `"error"` — see "What it does" above. A `socket-check` check passes on `status: "pass"`; a `lef-abstract` check (which has no top-level `status`) on `self_check.status: "pass"` (issue #2839). |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Values are quoted verbatim from the cited envelope, so a field's shape follows that envelope's own `schema_version` (e.g. `file`/`layout` are `{path, scope}` objects once the source envelope carries them that way); retyping a source field therefore does not by itself bump `klt signoff`'s `schema_version`. Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. A `drc`-kind check whose source is a cross-check (`--engine both`) envelope also gains a `drc_crosscheck` key (issue #6123) — the same `{"mode", "engines", "comparison_state"}` block `citation.drc_crosscheck` carries (issue #5815): each engine's own `status` and coverage fields, naming which engine found what beside a `violation_count` that stays the curated side's. Absent for every single-engine check; disclosure only (`passed` is untouched) — see "Citing a `--engine both` (cross-check) DRC report" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. For a malformed versioned coverage block, `coverage_error` gives the validator’s message about the cited report. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Regenerating signoff evidence in a consumer repo
 
-A consumer repo that commits its signoff evidence needs a small script to
-re-run the graders. This is the canonical shape (issue #2874). Two properties
-matter: the grader is **always the pinned registry wheel** (`klayout-tools==$KLT_VERSION`),
-never whatever `klt` happens to be on `PATH`; and a host that can run neither
-`uv` nor `python3 -m venv` fails loudly instead of silently grading with
-something else.
+A consumer repo that commits signoff evidence should regenerate it with the
+same producer its CI uses. Choose the recipe that matches the pin in CI.
+
+### Registry release pin
 
 Order of preference: `uvx` (needs no `python3-venv`/`ensurepip`), then a
 throwaway `python3 -m venv` + `pip`, then a clear stderr message and a
@@ -3187,6 +7154,56 @@ Notes:
   not fall back to a different `klt`.
 - Verify the committed record with `--check` (see
   [Verifying a committed report](#verifying-a-committed-report---check-issue-2249)).
+
+### Git commit pin without `uvx`
+
+If CI uses `uvx --from "git+…@<sha>"` and that environment hangs, install
+the commit in a throwaway venv with pip. Copy the full commit SHA from CI.
+You can also read `git_commit` and `reinstall_spec` from the producing
+environment's `klt version --format json`, or `provenance.klt_reinstall_spec`
+from a report that records it. For an annotated tag, use the
+[peeled commit](version.md#pinning-a-release-tag-use-the-peeled-commit).
+
+Run this script from the consumer repo with `KLT_COMMIT` set. It requires
+Git, Python with venv and pip support, and GNU `timeout`. On macOS with GNU
+coreutils, set `TIMEOUT_CMD=gtimeout`. Provisioning needs access to the Git
+repository and package dependencies.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! ${KLT_COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Set KLT_COMMIT to the full commit SHA pinned in CI." >&2
+  exit 2
+fi
+deadline=${TIMEOUT_CMD:-timeout}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+venv="$work/venv"
+
+"$deadline" -k 5s 60s python3 -m venv "$venv"
+"$deadline" -k 5s 5m "$venv/bin/python" -m pip install \
+  "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_COMMIT}"
+"$deadline" -k 5s 30s "$venv/bin/klt" --version
+"$venv/bin/klt" signoff --attest 10 --inventory attest/item10.json -o evidence/item10.json
+```
+
+Exit 124 means provisioning or startup timed out (137 if `timeout` had to
+kill it after the five-second grace period). Treat the environment as unusable
+and stop. The absolute path keeps the host's `klt` out of the run. If CI also
+pins the KLayout engine, add its `klayout==<version>` requirement to the same
+pip install.
+
+The producer writes `provenance.klt_version` and `provenance.klayout_version`
+from the running build. A newer host build would record its own provenance and
+may generate different checks or envelope fields.
+[See `signoff_attest.py`.](https://github.com/2AMLogic/klayout-tools/blob/94950eeee19e4219d938b81cf742065bd333d750/src/klayout_tools/signoff_attest.py#L1042-L1045)
+
+Tag visibility in the installer's cache can also affect the version string
+for the same commit. Verify the evidence with CI's pinned producer using
+`klt signoff --attest 10 --inventory attest/item10.json --check evidence/item10.json`.
+The drift check ignores the version strings.
 
 ## Exit codes and errors
 
@@ -3234,6 +7251,23 @@ Fleet roll-up mode (`--fleet`):
 | `0`       | Always, once argument validation passes — purely informational, cannot fail. |
 | `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`/`--repo-root`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
+
+`--diff-reports` mode (issue #6850):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | Any completed comparison, movement included — the movement is the answer, not a failure. Gate on `.changed`, not the exit code. |
+| `1`       | `--diff-reports` was combined with another mode's flag (`<file>...`/`--manifest`/`--fleet`/`--check`/`--attest`/`--describe-grader`/`--repin`/a grading flag/`-o`); or either report was missing/unreadable/not valid JSON/not a JSON object, was not a tier report (no `items` array — a fleet roll-up, an attestation envelope, an unrelated file), or carried two rows with the same `(tier, id, partition)` key. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
+
+`--attest` mode (issue #2844):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | `status: "pass"` — every declared check passed. Under `--check`: `status: "match"` **and** `fresh_status: "pass"`. |
+| `1`       | The inventory was missing/unreadable/not valid JSON/not a JSON object, declared an unsupported `schema_version`, the wrong `kind` or `t1_item`, an unknown field, an empty or duplicate path list, a path outside the repository or through a symlink; the inventory is not inside a git repository; `--attest` was combined with `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`, or `--check` with `-o`; `--inventory`/`-o` was given without `--attest`. Under `--check`, also a missing/unparseable committed envelope or one that is not an attestation. |
+| `2`       | Usage error (bad `--format` value, or `--attest` other than `1`/`9`/`10`) — from argparse. |
+| `3`       | `status: "fail"` — at least one check failed (nothing written). Under `--check`: `status: "drifted"`, or `fresh_status: "fail"`. |
 
 **Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode
 above.** These codes are additive — a future release may add a new one
@@ -3381,10 +7415,12 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 The citation's `file` is `null` (no static file backs a command-backed
 entry) and its `command` names exactly what ran; `exit_status: 0` here is
 the subprocess's actually-observed return code, not inferred from a
-readable file the way a file-backed citation's `exit_status: 0` is. A
-broken or hanging gate command renders `"unmet"` with `reason:
-"command_failed"` (a launch failure, a timeout, or a nonzero exit) instead
-of silently reading like a skipped check or a fabricated pass.
+readable file the way a file-backed citation's `exit_status: 0` is. A broken
+or hanging gate command renders `"unmet"` — `reason: "command_timeout"`
+when the subprocess was killed by the fixed evidence-timeout cap, `reason:
+"command_failed"` when it could not be launched or exited nonzero (issue
+#5763) — instead of silently reading like a skipped check or a fabricated
+pass.
 
 ## Worked example: binding the statistical-evidence item to `klt yield`
 
@@ -3419,7 +7455,8 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
       "undersized_measurements": [],
       "negative_control": "not_declared",
       "measurements_without_negative_control": ["vref"],
-      "undetected_negative_controls": []
+      "undetected_negative_controls": [],
+      "not_applicable_negative_controls": []
     }
   }
 }
@@ -3460,6 +7497,81 @@ Three states, three treatments, decided by what the *report* itself claims:
 | Any measurement's `sample_size.verdict` is `"insufficient"` | `"unmet"`, `reason: "undersized_sample"`, no citation |
 | Any declared `negative_control` has `verdict: "not_detected"` | `"unmet"`, `reason: "negative_control_not_detected"`, no citation |
 | **No** measurement declared a `negative_control` | `"met"`, with `citation.yield_campaign.negative_control: "not_declared"` |
+
+**A multi-citation item 6 discloses each campaign beside its grade (issue
+#5786).** The `citations_graded` entry of a member that graded `met` off a
+`klt yield` citation carries that citation's own `yield_campaign` block —
+the same `{"sample_size", "negative_control", …}` shape the table row above
+names — copied verbatim off the member citation, never re-derived from the
+envelope. A reader of a multi-citation report can therefore tell which cited
+populations declared a negative control without leaving the graded artifact,
+exactly as the single-citation form allows. The key is absent on an entry
+whose member cited another kind, whose report carried no measurements, or
+which graded `unmet` (no citation is retained for it; the two
+campaign-discipline refusals above already carry the member's state as the
+item's `detail.yield_campaign`).
+Disclosure only: no grading rule reads it.
+
+**A stale pin is disclosed beside either refusal (issue #3063).** When the
+entry pins `content_hash`, the two refusals above also carry
+`detail.content_hash_pin` — `"verified"` (the live hash of the samples
+document the report names equals the pin), `"stale"` (it differs), or
+`"unverifiable"` (the samples document could not be found, so there is no
+live hash to compare). It is disclosure only: `status` and `reason` stay
+`unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
+pin is visible now rather than only after the sample size is raised. The key
+is absent when the entry pins no `content_hash` and on `met` items; since
+issue #5598 a non-passing envelope's own refusal carries it too (see "A
+non-passing envelope discloses its pin too" below).
+
+**An unverifiable pin explains itself (issue #3747).** When the entry pins
+`content_hash` and the resolved envelope carries no input hash at all (a
+legacy `functional-verification` envelope from a `klt` predating the
+`provenance` block, an `options.from_synthesize` one, or an unprovenanced
+`generic` one), the
+`unmet` / `unverifiable_provenance` item carries
+`detail.content_hash_pin: "unverifiable"` plus `detail.content_hash_pin_note`
+(the envelope kind and the missing `provenance.input.content_hash`), so the
+pin itself is visible as the cause. Disclosure only: `status` and `reason` are
+unchanged, and the keys are absent when the entry pins nothing or the pin is
+`stale`.
+
+**A non-passing envelope discloses its pin too (issue #5598).** An envelope
+whose own `status` is not passing is refused *before* the staleness gate is
+reached, so that refusal used to publish nothing at all about the manifest's
+pin: a `content_hash` that matched, one that was comparable and genuinely
+**stale**, and one that could never be compared all rendered the same `unmet`
+/ `check_failed` with no `detail`. For every citation kind, that refusal now
+carries `detail.content_hash_pin` (`"verified"` / `"stale"` /
+`"unverifiable"`), with `detail.content_hash_pin_note` on an unverifiable pin
+and, on a stale one, the same `hash_check` / `compared_against` / `hint`
+payload the `stale_evidence` verdict carries. Disclosure only: `status` and
+`reason` are unchanged for every manifest, so a drifted pin is visible on the
+first commit rather than only on the day the item first passes — which is what
+a repo byte-comparing this command's `--format json` output against a
+committed record needs. The keys are absent when the entry pins no
+`content_hash`, and when disclosed foundry-cell exceptions cover every
+violation (the item proceeds, so there is no refusal to sit beside). An
+unprovenanced `generic` envelope has no live hash, so its pin renders
+`"unverifiable"` whatever value it holds — uncomparable, not mismatched;
+anchor the citation with `provenance.input.path` to make it enforceable.
+
+**A `functional-verification` pin binds the evidence file (issue #4893).**
+A `klt functional-verification` report with no `provenance.input` to compare —
+one from a `klt` predating the block, or an `options.from_synthesize` run (issue
+#5550) — records no input hash, so for a **file-backed**
+citation that pins `content_hash`, the grader re-hashes the cited file itself
+(`sha256:<hex>`, the same form every `klt` re-hash produces). An equal pin
+grades on the normal verdict; a differing one renders `unmet` /
+`stale_evidence`. The `met` citation carries `content_hash` plus the additive
+field `content_hash_basis: "evidence_file"`. The text format prints the basis
+verbatim after the hash on the `cite:` line (issue #6861). For this basis,
+the `input:` line reads `re-hashed the evidence file itself -- matches`.
+For a stale pin, `detail.compared_against` names that file and `detail.hint`
+directs you to pin the sha256 of its committed bytes. A command-backed citation
+stays `unverifiable` (its stdout is not a stable file) and the note says so.
+With no pin in the manifest the output is unchanged and no new key appears.
+Unprovenanced `generic` envelopes have the same gap and are not covered here.
 
 **Why the third is a disclosure rather than a refusal.** `klt yield` itself
 draws that line: an undeclared control is a run-level warning with "no
@@ -3613,7 +7725,8 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 `klt signoff` never lets a hand-rolled "yep, it's fine" record stand in for
 a check it never actually ran. Only item 8 accepts a bare `"generic"`
 envelope, and items 1, 2, 9 and 10 accept only an artifact-anchored one
-(issue #2718). Items 3-7 still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
+(issue #2718; for 1, 9 and 10, `klt signoff --attest` produces it, issue
+#2844). Items 3-7 still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
 evidence, unloosened by this feature.
 
 ## Worked example: a full-custom digital partition, graded like the analog column (no RTL/synthesis evidence)
@@ -3623,8 +7736,9 @@ Issue #1190: [`../design-evidence-tiers.md`](../design-evidence-tiers.md)'s
 as a schematic and verified via SPICE + PVT sweep — no RTL, no synthesis
 step, e.g. because no compatible open standard-cell library exists for the
 PDK/voltage combination — as a **sub-case of the Digital column**, not a new
-column or a new manifest `kind`. Grading needs no code change either: items
-1 and 2 accept *any* recognised evidence kind, and every kind-restricted
+column or a new manifest `kind`. Grading needs no code change either: item
+1 takes the same `klt signoff --attest 1` envelope any block uses (issue
+#2844), item 2 accepts *any* recognised evidence kind, and every kind-restricted
 item names the full-custom partition's own artifact for a `kind: "digital"`
 manifest — item 5 accepts `sim` (the doc's own full-custom substitute, "PVT
 corner-matrix SPICE simulation") alongside the RTL flow's `sta`/
@@ -3640,7 +7754,7 @@ same `kind: "digital"` manifest:
   "block": "my-full-custom-divider",
   "kind": "digital",
   "evidence": {
-    "1": "lvs.json",
+    "1": {"file": "evidence/item1.json", "content_hash": "sha256:5d0e..."},
     "2": "drc.json",
     "5": "sim.json",
     "7": "pex.json"
@@ -3650,14 +7764,15 @@ same `kind: "digital"` manifest:
 
 ```
 $ klt signoff --manifest manifest.json --format json | jq -c '.items[] | select(.id == 1 or .id == 2 or .id == 5 or .id == 7) | {id, status, reason, citation: {kind: .citation.kind, check_status: .citation.check_status}}'
-{"id":1,"status":"met","reason":null,"citation":{"kind":"lvs","check_status":"match"}}
+{"id":1,"status":"met","reason":null,"citation":{"kind":"generic","check_status":"pass"}}
 {"id":2,"status":"met","reason":null,"citation":{"kind":"drc","check_status":"clean"}}
 {"id":5,"status":"met","reason":null,"citation":{"kind":"sim","check_status":"pass"}}
 {"id":7,"status":"met","reason":null,"citation":{"kind":"pex","check_status":"pass"}}
 ```
 
-Every item resolves to `"met"` from ordinary `klt` evidence: an LVS report
-proving the regenerated netlist matches the hand-drawn layout (item 1), a
+Every item resolves to `"met"` from ordinary `klt` evidence: a `klt signoff
+--attest 1` envelope proving the schematic sources exist and the netlist
+derived from them passes its freshness check (item 1), a
 clean DRC report proving the drawn layout exists (item 2), a PVT
 corner-matrix `klt sim` run standing in for the STA-based digital
 requirement while also carrying the per-corner timing-margin metric the
@@ -3674,12 +7789,13 @@ text there — see "Full-custom digital sub-case" in
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md)), since its
 grading already does not depend on which flow produced the evidence.
 
-Items 1 and 2 here are native citations, so their citations carry no
-`artifact_binding`: the grader accepted a passing LVS/DRC report but did
-not check that it is about the design sources or the committed layout. To
-make those rows mean what they say, bind them with artifact-anchored
-`generic` envelopes (issue #2718) instead. See "Items 1, 2, 9, and 10: bind
-them to an audited artifact" above.
+Item 2 here is a native citation, so its citation carries no
+`artifact_binding`: the grader accepted a passing DRC report but did not
+check that it is about the committed layout. To make that row mean what it
+says, bind it with an artifact-anchored `generic` envelope (issue #2718)
+instead. Item 1 could not be cited this way any more: since issue #2844 a
+native LVS report for it renders `wrong_kind`. See "Items 1, 2, 9, and 10:
+bind them to an audited artifact" above.
 
 ## Worked example: fleet roll-up across four canaries
 

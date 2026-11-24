@@ -46,6 +46,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._unionfind import UnionFind
+
 #: Cross-net short-candidate threshold (ohms). An injected parasitic
 #: resistor whose two endpoints resolve to *different* original nets at or
 #: below this value is reported as a short candidate. The comparison is
@@ -375,22 +377,12 @@ def _union_find_connectivity(
     tracked (an edge touching an unlisted uid is ignored -- callers pass
     the node set of one net, and edges are pre-filtered to it).
     """
-    parent = {uid: uid for uid in uids}
-
-    def find(uid: int) -> int:
-        root = uid
-        while parent[root] != root:
-            root = parent[root]
-        while parent[uid] != root:
-            parent[uid], uid = root, parent[uid]
-        return root
-
+    known = set(uids)
+    groups = UnionFind(uids)
     for a, b in edges:
-        if a in parent and b in parent:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-    return {uid: find(uid) for uid in uids}
+        if a in known and b in known:
+            groups.union(a, b)
+    return {uid: groups.find(uid) for uid in uids}
 
 
 @dataclass
@@ -506,18 +498,18 @@ def _check_open(
     terminals through its emitted segment resistors (``reps`` -- the net's
     connectivity from :func:`_net_connectivity`, computed once per net).
 
-    ``distributed`` nets get the real check. ``lumped`` nets report
+    ``distributed`` nets, and ``reduced`` nets (issue #6899: terminals
+    joined *only* by the emitted pair resistors, so connectivity is not
+    true by construction), get the real check. ``lumped`` nets report
     ``not_applicable``: the star/Gamma-shunt topology hangs every terminal
     leg off the hub with its own dedicated resistor *by construction*, so
     the emitted model carries no measurable terminal-to-terminal evidence
-    for a union-find to evaluate (and a missing-leg bug there is out of
-    this model's contract -- see ``docs/cli/extract.md``'s model-limits
-    note). Zero required terminals cannot support the check either
-    (nothing to connect); a single required terminal is vacuously
-    connected (``pass`` -- there is no other terminal to be disconnected
-    from).
+    for a union-find to evaluate (a missing-leg bug there is out of this
+    model's contract -- see ``docs/cli/extract.md``'s model-limits note).
+    Zero required terminals cannot support the check either (nothing to
+    connect); one required terminal is vacuously connected (``pass``).
     """
-    if net.rc_model != "distributed":
+    if net.rc_model not in ("distributed", "reduced"):
         return {
             "status": "not_applicable",
             "reason": "lumped model: terminal legs attach to the hub by "

@@ -8,6 +8,10 @@ strip's *end edge* (a zero-width box). Expected values are the analytic ones
 from 3.D4, not captured from the builder. This increment builds the graph only;
 the effective-resistance solve is increment 2, so the single-path checks here
 sum edge resistances along the one path through the graph.
+
+The solve tests (issue #2981, increment 2) moved to
+``tests/test_resistance_graph_solve.py`` (issue #6917); the deck-resolved
+per-landing cut-resistance tests (issue #6917) live below.
 """
 
 from __future__ import annotations
@@ -126,7 +130,7 @@ def _f5(pieces: int) -> ResistanceGraph:
     )
 
 
-def _f4() -> ResistanceGraph:
+def _f4(r_cut: float = 0.0) -> ResistanceGraph:
     return build_resistance_graph(
         [
             RoleInput("M1", RS, (_strip(0, 0, S_LEN),)),
@@ -137,8 +141,8 @@ def _f4() -> ResistanceGraph:
             PortInput("B", (("M1", _end(S_LEN, 0)),)),
         ],
         [
-            LandingInput("M1", "M2", _end(0, 0), 0.04, 0.0),
-            LandingInput("M1", "M2", _end(S_LEN, 0), 0.04, 0.0),
+            LandingInput("M1", "M2", _end(0, 0), 0.04, r_cut),
+            LandingInput("M1", "M2", _end(S_LEN, 0), 0.04, r_cut),
         ],
         DBU,
     )
@@ -196,13 +200,13 @@ def test_f4_two_level_parallel_has_ideal_via_edges_at_both_ends():
     graph = _f4()
     assert graph.status == "ok"
     assert graph.diagnostics == ()
-    # 2 pieces, 2 terminals, 4 landing ports.
-    assert len(graph.nodes) == 8
+    # 2 pieces, 2 terminals that double as the M1 landing ports, 2 M2 ports.
+    assert len(graph.nodes) == 6
     vias = [e for e in graph.edges if e.kind == "via"]
     assert len(vias) == 2
     assert all(e.resistance_ohm == 0.0 for e in vias)
-    # 8 edges: 2 terminal + 4 landing attachments + 2 vias.
-    assert len(graph.edges) == 8
+    # 6 edges: 2 terminal + 2 M2 landing attachments + 2 vias.
+    assert len(graph.edges) == 6
     assert _components(graph) == 1
 
 
@@ -438,3 +442,145 @@ def test_unknown_role_and_bad_cut_area_are_caller_errors():
         build_resistance_graph(
             roles, [], [LandingInput("M1", "M1", _end(0, 0), 0.0, 1.0)], DBU
         )
+
+
+# -- Deck-resolved per-landing cut resistance (issue #6917) -------------------
+#
+# `klt extract --resistance-graph` resolves each landing's per-cut resistance
+# from the deck when `--resistance-graph-r-cut` is not given: poly->metal0
+# from `ParasiticsDeck.poly_contact` (sky130: 152 ohm nominal), metal{i}->
+# metal{i+1} from `cuts` (sky130 mcon: 9.3 ohm), and a landing type the deck
+# does not curate keeps `via_resistance_unknown` / `unsupported`.
+
+_SKY130_POLY_RS = 48.2  # sky130 PARASITICS poly sheet resistance
+_SKY130_LI1_RS = 12.8
+_SKY130_MET1_RS = 0.125
+_LICON_OHM = 152.0  # sky130 PARASITICS poly_contact, nominal
+_MCON_OHM = 9.3  # sky130 PARASITICS cuts, lower_metal_index 0
+
+
+def _mixed_graph(tmp_path, r_cut):
+    from helpers.resistance_graph_fixtures import make_sky130_mixed_contact_layout
+    from test_extract import _write_gds, run_extract
+
+    path = _write_gds(make_sky130_mixed_contact_layout(), tmp_path / "mixed.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "mixed.spice"),
+        parasitics=True,
+        resistance_graph=True,
+        resistance_graph_r_cut_ohm=r_cut,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    return entry, entry["resistance_graph"]
+
+
+def test_mixed_contact_net_resolves_each_landing_from_the_deck(tmp_path):
+    """poly->li1 (licon) and li1->met1 (mcon) landings in one net resolve to
+    their own deck nominals: the pair resistance is the hand-computed series
+    sum of the three strips plus 152 ohm and 9.3 ohm for the two cuts (one
+    cut each: every cut box is 0.17 x 0.17 um, one cut area)."""
+    entry, graph = _mixed_graph(tmp_path, None)
+    assert graph["status"] == "ok"
+    assert graph["terminals"] == sorted(graph["terminals"])
+    assert len(graph["terminals"]) == 2
+    assert graph["diagnostics"] == []
+    expected = (
+        _SKY130_POLY_RS * 4000 / 170  # poly strip, 4 um x 0.17 um
+        + _LICON_OHM
+        + _SKY130_LI1_RS * 3700 / 170  # li1 strip, 3.7 um
+        + _MCON_OHM
+        + _SKY130_MET1_RS * 1700 / 170  # met1 strip, 1.7 um
+    )
+    assert graph["pair_resistance_ohm"][0][1] == pytest.approx(expected, rel=1e-6)
+    assert graph["resistance_source"] == "graph"
+    assert graph["resistance_source_reason"] == "two_terminal_graph"
+    assert graph["selected_resistance_ohm"] == pytest.approx(expected, rel=1e-6)
+    assert graph["legacy_resistance_ohm"] == entry["resistance_ohm"]
+
+
+@pytest.mark.parametrize(("r_cut", "cuts_ohm"), [(1.0, 2.0), (0.0, 0.0)])
+def test_r_cut_override_applies_to_both_landing_types(tmp_path, r_cut, cuts_ohm):
+    """`--resistance-graph-r-cut` overrides every landing uniformly: 1 ohm on
+    both the licon and the mcon landing (the deck values are not mixed in),
+    and 0 stays an ideal via on both."""
+    _, graph = _mixed_graph(tmp_path, r_cut)
+    assert graph["status"] == "ok"
+    strips = (
+        _SKY130_POLY_RS * 4000 / 170
+        + _SKY130_LI1_RS * 3700 / 170
+        + _SKY130_MET1_RS * 1700 / 170
+    )
+    assert graph["pair_resistance_ohm"][0][1] == pytest.approx(
+        strips + cuts_ohm, rel=1e-6
+    )
+
+
+def test_mixed_contact_report_is_byte_identical_across_runs(tmp_path):
+    first, _ = _mixed_graph(tmp_path, None)
+    second, _ = _mixed_graph(tmp_path, None)
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def _uncurated_report(tmp_path, builder, deck):
+    from test_extract import _write_gds, run_extract
+
+    path = _write_gds(builder(), tmp_path / "uncurated.gds")
+    report = run_extract(
+        path,
+        deck,
+        output=str(tmp_path / "uncurated.spice"),
+        parasitics=True,
+        resistance_graph=True,
+    )
+    (entry,) = report["parasitics"]["nets"]
+    return entry, entry["resistance_graph"]
+
+
+def test_uncurated_poly_contact_keeps_the_unknown_via_diagnostic(tmp_path):
+    """gf180mcu curates `cuts` but no `poly_contact`: the poly->metal0
+    landing stays unknown and the net `unsupported`, never an ideal via."""
+    from helpers.resistance_graph_fixtures import make_gf180mcu_poly_contact_layout
+
+    entry, graph = _uncurated_report(
+        tmp_path, make_gf180mcu_poly_contact_layout, "gf180mcu"
+    )
+    assert graph["status"] == "unsupported"
+    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"]
+    assert graph["terminals"] == [] and graph["pair_resistance_ohm"] == []
+    assert graph["resistance_source"] == "legacy"
+    assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
+
+
+def test_uncurated_inter_metal_cut_keeps_the_unknown_via_diagnostic(tmp_path):
+    """sg13g2 publishes no `cuts` at all: the metal0->metal1 landing stays
+    unknown and the net `unsupported`."""
+    from helpers.resistance_graph_fixtures import make_sg13g2_two_level_layout
+
+    _, graph = _uncurated_report(tmp_path, make_sg13g2_two_level_layout, "sg13g2")
+    assert graph["status"] == "unsupported"
+    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"]
+
+
+def test_cut_resistance_resolver_order_and_coverage():
+    """Unit level: the override wins uniformly (0 included); a deck value is
+    returned per landing type; everything uncurated resolves to None."""
+    from klayout_tools.decks import CutRC, ParasiticsDeck
+    from klayout_tools.extract_cut_resistance import cut_resistance_resolver
+
+    deck = ParasiticsDeck(
+        poly_contact=CutRC("pc", 0, nominal_ohm=152.0, high_ohm=252.0, low_ohm=52.0),
+        cuts=(CutRC("mcon", 0, nominal_ohm=9.3),),
+    )
+    resolve = cut_resistance_resolver(None, deck)
+    assert resolve("poly", "metal0") == 152.0
+    assert resolve("metal0", "metal1") == 9.3
+    assert resolve("metal1", "metal2") is None  # no cuts row for that pair
+    assert resolve("diffusion", "metal0") is None  # never a curated landing
+    assert resolve("poly", "metal1") is None  # not a join the decks model
+    for override in (0.0, 1.0):
+        uniform = cut_resistance_resolver(override, deck)
+        assert uniform("poly", "metal0") == override
+        assert uniform("metal9", "metal10") == override  # even unmodelled
+    assert cut_resistance_resolver(None, None)("poly", "metal0") is None

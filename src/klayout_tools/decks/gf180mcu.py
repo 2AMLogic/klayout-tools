@@ -103,7 +103,8 @@ which is also where the ``_LV``/``_MV`` rule-id suffixes come from. Their
 other ``DF.*``-family entries cite.
 
 Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
-``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed: each conditions a
+``Vn.4b``/``Vn.4c``) are deliberately **not** transcribed (disclosed in
+``coverage.unmodeled_rules``, issue #3968): each conditions a
 0.06um margin on a narrow-metal (< 0.34um) end-of-line predicate, expressed
 in the PDK deck via ``first_edges``/``second_edges``/``extended_in``
 edge-set operations that :class:`~klayout_tools.decks.DrcRule`'s
@@ -249,12 +250,15 @@ are always the real, unmodified DRM values:
   ``v5_xtor`` (112/1) half, which this deck's curated layer set does not
   draw -- so ``Comp`` marked only by ``v5_xtor`` is checked here against the
   3.3V column, exactly as it was before the ``Dualgate`` split.
-- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` additionally excludes the
-  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39), which this
-  deck's curated layer set does not draw -- so a 5V LDMOS drift region is
-  checked here where the official rule would not check it (conservative: a
-  false positive on a device this deck cannot recognise, never a missed
-  violation).
+- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` excludes the
+  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39) by boolean
+  clip (``comp_56v.not(mvsd.or(mvpsd))``). Both markers are curated
+  layers (issue #4569, ``MDN.1``/``MDN.14``/``MDP.6``); since issue
+  #5719 the exclusion is modelled with ``DerivedLayer``'s whole-polygon
+  context stage, which matches the official clip wherever the PDK's own
+  LDMOS PCells draw (marked drain COMP lies fully under the marker) but
+  drops a marker-straddling polygon whole where the official rule would
+  check its clipped remainder.
 - ``poly2.space.1``: the official ``PL.3a`` splits into "space on COMP" vs.
   "space on field" sub-cases (context our engine can't distinguish without
   a boolean layer expression); both sub-cases share the same 3.3V value
@@ -366,6 +370,33 @@ are always the real, unmodified DRM values:
   a layout drawing neither anywhere skips the whole rule rather than
   misapplying it, while a layout drawing either keeps the approximations
   above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
+- ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
+  mode) on merged regions, as the upstream ``comp.rb`` expression
+  ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
+  polygon that touches or overlaps a Schottky-diode marker (241/0) anywhere
+  is exempted whole, exactly as upstream; an absent implant or marker layer
+  is an empty region, so unimplanted COMP is reported rather than skipped.
+  The well/voltage partitions of ``DF.13``/``DF.14`` are not involved. The rule
+  is not voltage-split in the DRM, hence ``voltage_independent``.
+- ``comp.tap_distance.nwell.{lv,mv}.1`` / ``comp.tap_distance.psub.{lv,mv}.1``
+  (DRM ``DF.13_LV``/``DF.13_MV`` and ``DF.14_LV``/``DF.14_MV``,
+  ``check="tap_distance"``, issues #3607, #3793): the 3.3 V (20 um) and 5 V/6 V
+  (15 um) columns; the ``latchup_mk`` marker rules are not declared. Evaluated
+  flat on merged regions as a ``klayout.db.Region`` translation of the
+  upstream ``comp.rb`` operation sequence
+  (``docs/design/gf180mcu-comp-checks-spike.md``). Recorded approximations:
+  **D1** selection is of *whole* active polygons that do not interact with the
+  tap reach region, so a long active with one end near a tap is legal, as
+  upstream; **D2** ``DF.13`` clips every growth step with the raw ``Nwell``
+  layer exactly as upstream, not with ``Nwell`` plus ``DNWELL`` -- a
+  DNWELL-only well therefore flags its PCOMP; **D3** the LV selection (touching
+  neither ``v5_xtor`` nor ``dualgate``) and the MV one (overlapping
+  ``dualgate``) are not complements, so active touching ``v5_xtor`` alone is
+  covered by neither; **D7** only upstream's ``flat`` mode was compared, not
+  its ``deep``/tiled modes. ``DF.13`` measures with octagon steps and
+  ``DF.14`` with a Euclidean separation, so the two rules do not share one
+  boundary metric. Checked rules report D1 and D3 in
+  ``coverage.approximated_rules`` (issue #5805), even with zero violations.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -455,9 +486,11 @@ variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
 plate landing on ``Metal4`` for that stack, the same stack the issue's own
 reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
-only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
-set targets a different (3-metal-layer) process variant this deck does not
-model and is not duplicated here.
+only Option B (``MIMTM.*``) is transcribed above, and is the default for
+``klt extract``. Option A's ``MIM.*`` DRC rule set is not duplicated here, but
+its *extraction* is selectable (issue #2920): ``--deck-option mim_option=A``
+recognises the ``Metal2``/``FuseTop``/``Via2``/``Metal3`` stack and the
+``cap_mim_*_m2m3_noshield`` device names (see ``_MIM_OPTION_A_CAPACITORS``).
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
@@ -498,21 +531,30 @@ alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
+    CompCoverageSpec,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
-    LayerRC,
+    MosCapacitorDevice,
     MOSFlavour,
-    ParasiticsDeck,
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
+    TapDistanceSpec,
+    UnsupportedDeviceMarker,
 )
+from .gf180mcu_bond_pad import BOND_PAD_GUIDELINE_UNMODELED_RULES
+from .gf180mcu_parasitics import PARASITICS  # noqa: F401  (size-split re-export, #5742)
+from .gf180mcu_unmodeled import UNMODELED_DUALGATE_RULES
+from .gf180mcu_untranscribed import UNTRANSCRIBED_RULES
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
 # rule's provenance below (issue #747, piloted on this deck's 26 width/space
@@ -616,6 +658,48 @@ def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RulePro
 # docstring).
 NOMINAL_DBU_UM = 0.001
 
+
+def _tap_distance_spec(
+    well_domain: str, voltage: str, max_distance_um: float
+) -> TapDistanceSpec:
+    return TapDistanceSpec(
+        well_domain=well_domain,
+        voltage=voltage,
+        max_distance_um=max_distance_um,
+        nwell=(21, 0),
+        dnwell=(12, 0),
+        lvpwell=(204, 0),
+        nplus=(32, 0),
+        pplus=(31, 0),
+        res_mk=(110, 5),
+        dualgate=(55, 0),
+        v5_xtor=(112, 1),
+    )
+
+
+# D1 and D3 from the module's known approximations, disclosed per checked rule.
+_TAP_DISTANCE_APPROXIMATIONS = (
+    {
+        "class": "whole_polygon_selection",
+        "description": (
+            "D1: selection is of whole active polygons that do not interact "
+            "with the tap reach region, so a long active with one end near a "
+            "tap is legal; the check under-reports monotonically and a "
+            "violation count of 0 does not establish the DRM DF.13/DF.14 "
+            "every-point-within-distance form"
+        ),
+    },
+    {
+        "class": "non_complement_voltage_selection",
+        "description": (
+            "D3: the lv (touching neither v5_xtor nor dualgate) and mv "
+            "(overlapping dualgate) selections are not complements; active "
+            "touching v5_xtor without dualgate is evaluated by neither "
+            "voltage column"
+        ),
+    },
+)
+
 DECK: list[DrcRule] = [
     DrcRule(
         id="poly2.width.1",
@@ -687,22 +771,80 @@ DECK: list[DrcRule] = [
         # column), the `_MV` half of the pair `comp.width.1` above is the
         # `_LV` half of (issue #1110, closing issue #552's DRC gap). The
         # checked region is whole `Comp` polygons that overlap `Dualgate`
-        # (55/0) -- the PDK's own `comp_56v` derivation. Approximation: the
-        # PDK deck's `DF.1a_MV` additionally excludes polygons under the
-        # LDMOS drain markers `mvsd` (210/0) / `mvpsd` (11/39), neither of
-        # which is in this deck's curated layer set, so a 5V LDMOS drift
-        # region drawn on those markers is checked here where the official
-        # rule would not check it (the conservative direction -- a false
-        # positive on a device this deck cannot recognise, never a missed
-        # violation). Threshold value unmodified.
+        # (55/0) -- the PDK's own `comp_56v` derivation -- with the LDMOS
+        # drain markers excluded (issue #5719): the PDK deck checks
+        # `comp_56v.not(mvsd.or(mvpsd))`, a boolean clip against the joined
+        # `mvsd` (210/0) / `mvpsd` (11/39) regions. `DerivedLayer` has no
+        # boolean-subtraction mode, so the exclusion is the whole-polygon
+        # context stage (issue #3484) instead: a `Comp` polygon touching
+        # either marker is dropped entire. Both derivations agree everywhere
+        # the PDK's own LDMOS PCells actually draw -- `nfet_10v0_asym`'s
+        # marked drain polygons lie fully under the marker, where dropping
+        # whole and clipping agree exactly; before #5719 that PCell's
+        # 0.22um drain stripe was a `comp.width.mv.1` false positive the
+        # caller cannot edit. The documented divergence: a polygon
+        # straddling a marker boundary is dropped whole where the official
+        # rule would still check its outside part -- rare geometry (the
+        # PDK draws drift COMP fully under the marker), accepted over the
+        # status quo's false-positive direction on uneditable PCell
+        # geometry. Context layers absent from the stream contribute an
+        # empty region and never skip the rule, so layouts drawing no LDMOS
+        # markers are checked exactly as before. Threshold value unmodified.
         derived_layer=DerivedLayer(
             base=(22, 0),  # Comp
             sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
             intersect_with=(55, 0),  # Dualgate
             mode="overlapping",
+            # The 10V LDMOS drain markers, joined (boolean OR) and matched
+            # whole-polygon -- see the comment above for why "far" is the
+            # faithful shape this engine can give the PDK's `.not(...)` clip.
+            context_layers=((210, 0), (11, 39)),  # MVSD, MVPSD
+            context_sized_by_um=0.0,
+            context="far",
         ),
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1a_MV"),
+    ),
+    DrcRule(
+        id="comp.width.moscap.1",
+        description="minimum COMP width under the MOS-capacitor marker (MOSCAP)",
+        layer=(22, 0),  # Comp
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # DRM 7.5 Comp, rule "DF.1c": "Min. COMP Width for MOSCAP." -> 1.0
+        # (issue #5719 -- before it this rule was neither checked nor
+        # disclosed, so a MOSCAP-marked `Comp` island below 1 um reported
+        # `status: clean` with nothing in the coverage block to warn the
+        # caller, while `MOS_CAP_MK` itself read under
+        # `coverage.layers_in_stream_without_rules`). The checked region is
+        # the boolean AND of `Comp` and the MOS-capacitor marker
+        # `MOS_CAP_MK` (166/5) -- the PDK deck's own
+        # `comp.and(mos_cap_mk)` -- which `DerivedLayer`'s default
+        # `"sized_intersection"` mode expresses exactly: whole marker
+        # polygons touching `Comp`, clipped to `Comp`'s unsized outline.
+        # Unlike the marker-scoped *selection* modes this derivation is
+        # deliberately a clip -- the official rule measures the width of
+        # the clipped shape, marker-cut edges included -- so the
+        # whole-polygon modes would diverge here, not be conservative. A
+        # stream drawing no `MOS_CAP_MK` derives an empty region and skips
+        # the rule like any other missing-layer rule. Not a `DF.1a`-style
+        # `_LV`/`_MV` pair: the PDK deck publishes a single 1 um value,
+        # conditioned on nothing but the marker. `klt gen mos_array`'s own
+        # `w_um` floor (0.42 um) is below this minimum, so the generator
+        # cannot currently emit a MOSCAP-marked device that passes it
+        # (raising the floor is generator work, out of scope for #5719).
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(166, 5),  # MOS_CAP_MK
+        ),
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1c"),
+        # DF.1c publishes a single value (no 3.3V/5V/6V column split), and
+        # the PDK's own executable deck conditions it on nothing but the
+        # MOS-capacitor marker, so it cannot have read the wrong voltage
+        # column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
     ),
     DrcRule(
         id="comp.space.1",
@@ -799,6 +941,7 @@ DECK: list[DrcRule] = [
         layer=(34, 0),  # Metal1 -- the conductor *above* the cut
         other_layer=(33, 0),  # Contact
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal1 only
         threshold_dbu=5,  # 0.005 um
         # DRM 7.12 Contact, rule "CO.6": "Metal1 overlap of contact" ->
         # 0.005um. Re-derived from the PDK's own executable rule deck (see
@@ -810,7 +953,8 @@ DECK: list[DrcRule] = [
         # zero-overlap escape term, see `_run_check`'s `outside_region` in
         # `drc.py`), so this transcription is exact, not an approximation.
         # The end-of-line companions "CO.6a"/"CO.6b" are *not* modeled -- see
-        # the module docstring's end-of-line coverage note (issue #551).
+        # the module docstring's end-of-line coverage note (issue #551) and
+        # `_METAL_EOL_UNMODELED_RULES` (issue #3968).
         provenance=_gf180mcu_klayout_deck_provenance("contact", "CO.6"),
     ),
     DrcRule(
@@ -850,6 +994,7 @@ DECK: list[DrcRule] = [
         layer=(34, 0),  # Metal1
         other_layer=(35, 0),  # Via1
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal1 only
         threshold_dbu=0,  # 0.0 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V1.3a": "metal1 overlap of via1"
         # -> 0.0um, i.e. the cut must land on metal1 but needs no margin.
@@ -868,6 +1013,7 @@ DECK: list[DrcRule] = [
         layer=(36, 0),  # Metal2
         other_layer=(35, 0),  # Via1
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal2 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V1.4a": "metal2 overlap of via1"
         # -> 0.01um. Re-derived from `rule_decks/via1.drc`, whose V1.4a is
@@ -908,6 +1054,7 @@ DECK: list[DrcRule] = [
         layer=(36, 0),  # Metal2
         other_layer=(38, 0),  # Via2
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal2 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.3b": "metal2 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc`, whose V2.3b is
@@ -921,6 +1068,7 @@ DECK: list[DrcRule] = [
         layer=(42, 0),  # Metal3
         other_layer=(38, 0),  # Via2
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal3 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.4a": "metal3 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc` (same
@@ -958,6 +1106,7 @@ DECK: list[DrcRule] = [
         layer=(42, 0),  # Metal3
         other_layer=(40, 0),  # Via3
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal3 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.3b": "metal3 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc` (same
@@ -970,6 +1119,7 @@ DECK: list[DrcRule] = [
         layer=(46, 0),  # Metal4
         other_layer=(40, 0),  # Via3
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal4 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.4a": "metal4 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc`.
@@ -1030,6 +1180,7 @@ DECK: list[DrcRule] = [
         layer=(81, 0),  # Metal5
         other_layer=(41, 0),  # Via4
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal5 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V4.4a": "metal5 overlap of via4"
         # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Scoped, like
@@ -1290,6 +1441,107 @@ DECK: list[DrcRule] = [
         provenance=_gf180mcu_provenance("7.5 Comp", "DF.4d"),
     ),
     DrcRule(
+        id="comp.coverage.1",
+        description=(
+            "COMP not covered by Nplus or Pplus is forbidden "
+            "(except COMP under the Schottky-diode marking)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="comp_coverage",
+        threshold_dbu=0,  # no distance: a coverage rule
+        region_spec=CompCoverageSpec(
+            covered_by_any=((32, 0), (31, 0)),  # Nplus, Pplus
+            exempt_markers=((241, 0),),  # Schottky_diode
+        ),
+        # DRM 7.5 Comp, rule "DF.12": "COMP not covered by Nplus or Pplus is
+        # forbidden (except those COMP under marking)". Re-derived from the
+        # PDK's executable `comp.rb`: `comp.not_interacting(schottky_diode)
+        # .not(nplus).not(pplus)`. See the module docstring's "Known
+        # approximations" note on `comp.coverage.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.12"),
+        # DF.12 publishes no 3.3V/5V column split, so it cannot have read the
+        # wrong voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="comp.tap_distance.nwell.lv.1",
+        description=(
+            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside "
+            "Nwell: 20um (3.3V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=_tap_distance_spec("inside", "lv", 20.0),
+        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
+        # Nwell) from (PCOMP inside Nwell)" (3.3V column, 20 um). Re-derived from
+        # the PDK's executable `comp.rb` (pactive not interacting
+        # v5_xtor/dualgate/the 20um tap reach); see the module docstring's "Known
+        # approximations" note on `comp.tap_distance.nwell.lv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
+    ),
+    DrcRule(
+        id="comp.tap_distance.psub.lv.1",
+        description=(
+            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP "
+            "outside Nwell: 20um (3.3V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=_tap_distance_spec("outside", "lv", 20.0),
+        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
+        # outside Nwell) from (NCOMP outside Nwell)" (3.3V column, 20 um).
+        # Re-derived from the PDK's executable `comp.rb` (nactive minus a diamond
+        # 20um ptap filter, refined by sep(ptap, 20um)); see the module
+        # docstring's "Known approximations" note on `comp.tap_distance.psub.lv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
+    ),
+    DrcRule(
+        id="comp.tap_distance.nwell.mv.1",
+        description=(
+            "Max distance of an Nwell tap (NCOMP inside Nwell) from PCOMP inside "
+            "Nwell: 15um (5V/6V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=_tap_distance_spec("inside", "mv", 15.0),
+        # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
+        # Nwell) from (PCOMP inside Nwell)" (5V/6V column, 15 um). Re-derived
+        # from the PDK's executable `comp.rb` (pactive overlapping dualgate and
+        # not interacting the 15um tap reach); see the module docstring's
+        # "Known approximations" note on `comp.tap_distance.nwell.mv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
+    ),
+    DrcRule(
+        id="comp.tap_distance.psub.mv.1",
+        description=(
+            "Max distance of a substrate tap (PCOMP outside Nwell) from NCOMP "
+            "outside Nwell: 15um (5V/6V)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="tap_distance",
+        threshold_dbu=0,  # no dbu threshold: the distance is in the spec
+        region_spec=_tap_distance_spec("outside", "mv", 15.0),
+        # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
+        # outside Nwell) from (NCOMP outside Nwell)" (5V/6V column, 15 um).
+        # Re-derived from the PDK's executable `comp.rb` (nactive overlapping
+        # dualgate minus a diamond 15um ptap filter, refined by sep(ptap,
+        # 15um)); see the module docstring's "Known approximations" note on
+        # `comp.tap_distance.psub.mv.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
+    ),
+    DrcRule(
         id="nplus.width.1",
         description="minimum Nplus implant width",
         layer=(32, 0),  # Nplus
@@ -1323,6 +1575,31 @@ DECK: list[DrcRule] = [
         # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
         # 3.3V/5V split), so this rule can never have read the wrong
         # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="dualgate.width.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) width",
+        layer=(55, 0),  # Dualgate
+        check="width",
+        threshold_dbu=700,  # 0.7 um
+        # Official `rule_decks/dualgate.drc` rule "DV.5": `dualgate.width(0.7.um,
+        # euclidian)` -- the same primitive/metric `width_check` uses. Not an
+        # approximation (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.5"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="dualgate.space.1",
+        description="minimum Dualgate (5V/6V thick-oxide marker) spacing",
+        layer=(55, 0),  # Dualgate
+        check="space",
+        threshold_dbu=440,  # 0.44 um
+        # Official `rule_decks/dualgate.drc` rule "DV.2": `dualgate.space(0.44.um,
+        # euclidian)` (issue #3791).
+        scope="7.5 Comp",  # no Dualgate DRM table in _GF180MCU_DRM_CSV (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("dualgate", "DV.2"),
         voltage_independent=True,
     ),
     DrcRule(
@@ -1705,6 +1982,602 @@ DECK: list[DrcRule] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# Manufacturing-grid rules -- the PDK runset's own `OFFGRID` group (issue #3001)
+# ---------------------------------------------------------------------------
+#
+# `rule_decks/geom.drc` opens with `if OFFGRID`, and `run_drc.py` turns that
+# group on by default (`--no_offgrid` disables it). Until issue #3001 this
+# curated deck transcribed none of it, so `klt drc --deck gf180mcu` reported
+# `clean` for geometry the PDK's own runset fails (`contact_OFFGRID` on a
+# guard-ring cell from `klt gen mos_array`) -- the gf180mcu twin of sky130's
+# #2642.
+#
+# Unlike sky130's group, gf180mcu's is **grid-only**: `geom.drc` has 100
+# `ongrid(0.005)` calls and no `with_angle` call (its `<layer>_angle` rules are
+# `edges.without_angle(0).without_angle(45)...`, an edge-direction check that
+# no `DrcRule` check kind expresses), so no `"angle"` rule is emitted here.
+# The grid is the same literal `0.005` on every call.
+#
+# One row per curated layer (`LAYER_NAMES` below) that `geom.drc` grid-checks,
+# in the runset's own order. Metal-stack conditionals in the runset: `Via2`/
+# `Metal3` are checked for 3LM+, `Via3`/`Metal4` for 4LM+, `Via4`/`Metal5` for
+# 5LM+ and `MetalTop` for 6LM only; this deck draws one fixed five-metal
+# stack, so all of them are transcribed. A rule is simply skipped, as for any
+# other missing layer, when the stream carries none of it.
+
+#: The manufacturing grid every `ongrid` call in `geom.drc` passes, in
+#: micrometres (`layer.ongrid(0.005)`, one literal on every call site).
+OFFGRID_GRID_UM = 0.005
+
+#: ``(rule-id stem, (layer, datatype), runset layer variable)`` per layer
+#: `geom.drc`'s `if OFFGRID` block grid-checks, in that block's line order.
+_OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], str], ...] = (
+    ("comp", (22, 0), "comp"),
+    ("dnwell", (12, 0), "dnwell"),
+    ("nwell", (21, 0), "nwell"),
+    ("dualgate", (55, 0), "dualgate"),
+    ("poly2", (30, 0), "poly2"),
+    ("nplus", (32, 0), "nplus"),
+    ("pplus", (31, 0), "pplus"),
+    ("sab", (49, 0), "sab"),
+    ("resistor", (62, 0), "resistor"),
+    ("fusetop", (75, 0), "fusetop"),
+    ("plfuse", (125, 5), "plfuse"),
+    ("mvsd", (210, 0), "mvsd"),
+    ("mvpsd", (11, 39), "mvpsd"),
+    ("efuse_mk", (80, 5), "efuse_mk"),
+    ("res_mk", (110, 5), "res_mk"),
+    ("cap_mk", (117, 5), "cap_mk"),
+    ("diode_mk", (115, 5), "diode_mk"),
+    ("drc_bjt", (127, 5), "drc_bjt"),
+    ("mim_l_mk", (117, 10), "mim_l_mk"),
+    ("contact", (33, 0), "contact"),
+    ("metal1", (34, 0), "metal1"),
+    ("via1", (35, 0), "via1"),
+    ("metal2", (36, 0), "metal2"),
+    ("via2", (38, 0), "via2"),
+    ("metal3", (42, 0), "metal3"),
+    ("via3", (40, 0), "via3"),
+    ("metal4", (46, 0), "metal4"),
+    ("via4", (41, 0), "via4"),
+    ("metal5", (81, 0), "metal5"),
+    ("metaltop", (53, 0), "metaltop"),
+    ("pad", (37, 0), "pad"),
+)
+
+#: Runset layers `geom.drc` grid-checks that have no curated GDS number in
+#: `LAYER_NAMES`, so no rule can be emitted for them -- recorded so the
+#: omission is explicit rather than inferred. Keyed by runset layer variable.
+#: Excludes the derived `*_dummy`/`*_label`/`*_blk`/`*_slot`/`*_res` metal
+#: variants, which `geom.drc` also grid-checks and which are likewise
+#: undrawn here.
+OFFGRID_UNCHECKED_LAYERS: dict[str, str] = {
+    "lvpwell": "LVPWELL (204/0) -- not in this deck's curated layer set",
+    "esd": "ESD (24/0) -- drawn for ESD.* rules; no ongrid rule emitted for it",
+    "fhres": "FHRES (227/0) -- not in this deck's curated layer set",
+    "nat": "NAT (5/0) -- not in this deck's curated layer set",
+    "v5_xtor": "V5_XTOR (112/1) -- not in this deck's curated layer set",
+    "via5": "Via5 -- six-metal stack only; this deck has no Via5 layer",
+}
+
+
+def _offgrid_rules() -> list[DrcRule]:
+    """Build one `"ongrid"` `DrcRule` per `_OFFGRID_ROWS` row (issue #3001)."""
+    return [
+        DrcRule(
+            id=f"{stem}.ongrid.1",
+            description=(
+                f"{stem} vertices must be on the {OFFGRID_GRID_UM}um manufacturing grid"
+            ),
+            layer=layer,
+            check="ongrid",
+            threshold_dbu=0,  # unused by "ongrid" -- see grid_um
+            grid_um=OFFGRID_GRID_UM,
+            # geom.drc OFFGRID group: `<layer>.ongrid(0.005)` ->
+            # "<layer>_OFFGRID : OFFGRID vertex on <layer>"
+            scope="OFFGRID",
+            provenance=_gf180mcu_klayout_deck_provenance(
+                "geom", f"{runset_name}_OFFGRID"
+            ),
+            # One grid for every layer and voltage domain: there is no
+            # second column to have misread (#552).
+            voltage_independent=True,
+        )
+        for stem, layer, runset_name in _OFFGRID_ROWS
+    ]
+
+
+DECK += _offgrid_rules()
+
+# ---------------------------------------------------------------------------
+# Salicide-block (`SB.*`) rules -- `rule_decks/sab.drc` (issue #3001)
+# ---------------------------------------------------------------------------
+#
+# `sab.drc` defines `SB.1`-`SB.16` over the SAB layer (49/0), under `if FEOL`
+# (on by default in `run_drc.py`). Until issue #3001 this deck carried SAB as a
+# layer name only, so a poly-resistor cell with SAB too close to a contact
+# (`SB.4`) or a poly that stops short of the SAB edge (`SB.10`) read `clean`.
+#
+# Transcribed (the check kinds that express them exactly):
+#
+# - `SB.1`/`SB.2`: SAB width / space, 0.42um. The runset measures `SB.2` on
+#   `sab.outside(otp_mk)`; `OTP_MK` is not a curated layer, so every SAB shape
+#   is checked (the same set, in a stream with no OTP mark).
+# - `SB.4`: `sab.separation(contact, 0.15, euclidian)`. The runset also ORs in
+#   `sab & contact` (SAB *over* a contact); `Region.separation_check` reports
+#   nothing for overlapping shapes, and that case is `SB.8` ("non-salicided
+#   contacts are forbidden"), which is not transcribed -- see below.
+# - `SB.10`: `sab.enclosed(poly_sab, 0.22, euclidian)` with
+#   `poly_sab = poly2.interacting(sab)`, i.e. poly must extend 0.22um past the
+#   SAB edge. Declared `report_escapes=False`: the DSL statement has no
+#   zero-overlap escape term, and a correct poly resistor's SAB overhangs the
+#   poly sideways, which the default #318 escape term would flag.
+#
+# Not transcribed, with the reason each is out of reach of the existing check
+# kinds (or of this deck's curated layer set):
+#
+# - `SB.3`, `SB.5a`, `SB.5b`, `SB.9`, `SB.15a`, `SB.15b`: scoped to "unrelated"
+#   COMP / Poly2 / Nplus-Pplus (`not_overlapping(sab)`, `interacting` chains).
+#   The only whole-polygon selectors a `DerivedLayer` offers are
+#   `not_interacting`/`overlapping`, which differ from `not_overlapping` on
+#   touching shapes, and a derived-layer `"separation"` against the same drawn
+#   layer is reserved for the MiM construction (`mim.space.1`).
+# - `SB.6`, `SB.7`, `SB.11`: `comp.interacting(sab)` / `enclosed` / `overlap`
+#   with `euclidian` polygon outputs, including a zero-overlap escape term
+#   the default engine would add to the wrong side.
+# - `SB.8`: `contact & sab` is a Boolean AND with no check-kind equivalent.
+# - `SB.12`: needs `ESD_MK`, not a curated layer.
+# - `SB.13`: min area 2um^2 on `sab.outside(otp_mk)`; not yet transcribed
+#   (follow-up -- expressible as an `"area"` rule).
+# - `SB.14a`/`SB.14b`/`SB.16`: need `pgate`/`tgate`/`LVS_IO`, i.e. MOS gate
+#   recognition, which is device-extraction context, not a drawn layer.
+_SAB = (49, 0)  # SAB
+_SB_PROVENANCE_FILE = "sab"
+
+DECK += [
+    DrcRule(
+        id="sab.width.1",
+        description="minimum SAB width",
+        layer=_SAB,
+        check="width",
+        threshold_dbu=420,  # 0.42 um
+        # sab.drc "SB.1": `sab.width(0.42.um, euclidian)`
+        scope="SB",
+        provenance=_gf180mcu_klayout_deck_provenance(_SB_PROVENANCE_FILE, "SB.1"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="sab.space.1",
+        description="minimum SAB spacing",
+        layer=_SAB,
+        check="space",
+        threshold_dbu=420,  # 0.42 um
+        # sab.drc "SB.2": `sab_out_otp.space(0.42.um, euclidian)` -- every SAB
+        # shape here, since OTP_MK is not a curated layer.
+        scope="SB",
+        provenance=_gf180mcu_klayout_deck_provenance(_SB_PROVENANCE_FILE, "SB.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="sab.separation.contact.1",
+        description="minimum SAB spacing to contact",
+        layer=_SAB,
+        other_layer=(33, 0),  # Contact
+        check="separation",
+        threshold_dbu=150,  # 0.15 um
+        # sab.drc "SB.4": `sab_out_otp.separation(contact, 0.15.um,
+        # euclidian)` (plus the `sab & contact` overlap term, see above).
+        scope="SB",
+        provenance=_gf180mcu_klayout_deck_provenance(_SB_PROVENANCE_FILE, "SB.4"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="poly2.enclosing.sab.1",
+        description="minimum Poly2 extension beyond related SAB",
+        layer=(30, 0),  # Poly2
+        other_layer=_SAB,
+        check="enclosing",
+        threshold_dbu=220,  # 0.22 um
+        report_escapes=False,
+        # sab.drc "SB.10": `sab.enclosed(poly_sab, 0.22.um, euclidian)` with
+        # `poly_sab = poly2.interacting(sab)`; `a.enclosed(b)` is
+        # `b.enclosing(a)`, so Poly2 is the enclosing layer here. Edges of
+        # Poly2 that no SAB edge faces produce nothing, which is what the
+        # `interacting` pre-filter achieves in the DSL.
+        scope="SB",
+        provenance=_gf180mcu_klayout_deck_provenance(_SB_PROVENANCE_FILE, "SB.10"),
+        voltage_independent=True,
+    ),
+]
+
+# ---------------------------------------------------------------------------
+# ESD implant (`ESD.*`) and guard-ring marker (`GR.*`) rules -- `esd.rb`,
+# `guard_ring.rb` (issue #3792)
+# ---------------------------------------------------------------------------
+#
+# Until issue #3792 this deck carried neither group, so a grounded-gate NMOS
+# clamp with a sub-0.6um ESD implant, or a COMP closer than 10um to a
+# GUARD_RING_MK marker, read `clean` with those rules never evaluated.
+#
+# Transcribed (the check kinds that express them exactly, from the drawn
+# layers ESD 24/0 and GUARD_RING_MK 167/5):
+#
+# - `ESD.1`/`ESD.2`: ESD width / space, 0.6um.
+# - `ESD.4b`: `esd.overlap(comp, 0.45)`.
+# - `ESD.5a`/`ESD.5b`: min ESD area / min area of a hole in ESD, 0.49um^2.
+# - `ESD.8`: `esd.separation(nplus.or(pplus), 0.3)`, one rule per implant
+#   (a union of two layers has no single-layer spelling; the violating
+#   distances are the same).
+# - `GR.2`: `<layer>.separation(guard_ring_mk, 10)` for COMP, Nwell, Poly2 and
+#   Metal1-5/MetalTop (the runset gates the metal levels on the stack depth;
+#   an absent level is simply inapplicable here).
+#
+# Everything else in the two files is in `UNTRANSCRIBED_RULES` below, with the
+# reason, and `klt drc` lists each in `coverage.unmodeled_rules` so a clean
+# report cannot be read as covering them (informational; `status` is unchanged).
+_ESD = (24, 0)  # ESD
+_GUARD_RING_MK = (167, 5)  # GUARD_RING_MK
+_ESD_PROVENANCE_FILE = "esd"
+_GR_PROVENANCE_FILE = "guard_ring"
+
+DECK += [
+    DrcRule(
+        id="esd.width.1",
+        description="minimum ESD implant width",
+        layer=_ESD,
+        check="width",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.1": `esd.width(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.1"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.space.1",
+        description="minimum ESD implant spacing",
+        layer=_ESD,
+        check="space",
+        threshold_dbu=600,  # 0.6 um
+        # esd.rb "ESD.2": `esd.space(0.6.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.2"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.overlap.comp.1",
+        description="minimum overlap of an ESD implant edge to a COMP",
+        layer=_ESD,
+        other_layer=(22, 0),  # Comp
+        check="overlap",
+        threshold_dbu=450,  # 0.45 um
+        # esd.rb "ESD.4b": `esd.overlap(comp, 0.45.um, euclidian)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.4b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.area.1",
+        description="minimum ESD implant area",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        # esd.rb "ESD.5a": `esd.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5a"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.holes_area.1",
+        description="minimum field area enclosed by ESD implant",
+        layer=_ESD,
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2
+        area_min_dbu2=490_000,  # 0.49 um^2
+        derived_layer=DerivedLayer(
+            base=_ESD,
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # esd.rb "ESD.5b": `esd.holes.with_area(nil, 0.49.um)`
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.5b"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.nplus.1",
+        description="minimum ESD implant spacing to Nplus",
+        layer=_ESD,
+        other_layer=(32, 0),  # Nplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Nplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="esd.separation.pplus.1",
+        description="minimum ESD implant spacing to Pplus",
+        layer=_ESD,
+        other_layer=(31, 0),  # Pplus
+        check="separation",
+        threshold_dbu=300,  # 0.3 um
+        # esd.rb "ESD.8": `esd.separation(nplus.or(pplus), 0.3.um)` (Pplus half)
+        scope="ESD",
+        provenance=_gf180mcu_klayout_deck_provenance(_ESD_PROVENANCE_FILE, "ESD.8"),
+        voltage_independent=True,
+    ),
+]
+
+DECK += [
+    DrcRule(
+        id=f"{stem}.separation.guard_ring_mk.1",
+        description=f"minimum {name} spacing to GUARD_RING_MK",
+        layer=layer,
+        other_layer=_GUARD_RING_MK,
+        check="separation",
+        threshold_dbu=10_000,  # 10 um
+        # guard_ring.rb "GR.2": `<layer>.separation(guard_ring_mk, 10.um)`
+        scope="GR",
+        provenance=_gf180mcu_klayout_deck_provenance(_GR_PROVENANCE_FILE, "GR.2"),
+        voltage_independent=True,
+    )
+    for stem, name, layer in (
+        ("comp", "Comp", (22, 0)),
+        ("nwell", "Nwell", (21, 0)),
+        ("poly2", "Poly2", (30, 0)),
+        ("metal1", "Metal1", (34, 0)),
+        ("metal2", "Metal2", (36, 0)),
+        ("metal3", "Metal3", (42, 0)),
+        ("metal4", "Metal4", (46, 0)),
+        ("metal5", "Metal5", (81, 0)),
+        ("metaltop", "MetalTop", (53, 0)),
+    )
+]
+
+# ---------------------------------------------------------------------------
+# 10V drain-extended LDMOS (`MDN.*` / `MDP.*`) rules -- `rule_decks/ldnmos.rb`,
+# `ldpmos.rb` (issue #4569)
+# ---------------------------------------------------------------------------
+#
+# Until issue #4569 this deck carried none of MVSD (210/0), MVPSD (11/39) or
+# LDMOS_XTOR (226/0), so `klt drc` on a PDK-drawn `nfet_10v0_asym` read
+# `clean` with those layers listed in `layers_in_stream_without_rules` and no
+# LDMOS rule evaluated. `ldnmos.rb` registers 35 rule ids and `ldpmos.rb` 38;
+# almost all run on derived regions (`poly_mdn = poly2 & ldmos_xtor &
+# dualgate & ncomp`, `ldnmos = poly_mdn - mvsd`, `ldnmos_source`,
+# `pcomp_holes`) or are connectivity-aware (`conn_space`, `conn_separation`),
+# which no existing check kind expresses. Only these are transcribed, each
+# exact from the drawn layers:
+#
+# - `MDN.1`: MVSD width, 1um.
+# - `MDN.14`: `mvsd.separation(dnwell, 6um)`. The runset also ORs in
+#   `mvsd.not_outside(dnwell)` (MVSD touching DNWELL); `Region.separation_check`
+#   reports nothing for overlapping shapes, so that term is not covered (the
+#   same gap as `SB.4` above).
+# - `MDP.6`: `mvpsd.not_inside(ldmos_xtor)` -- every MVPSD shape must lie
+#   inside LDMOS_XTOR (an `"enclosing"` rule at margin 0 with required
+#   containment).
+#
+# `MDP.*` is driven by MVPSD (11/39), not MVSD. Every other id in the two
+# files is in `UNTRANSCRIBED_RULES` below with its reason, and `klt drc` lists
+# each in `coverage.unmodeled_rules` so a clean report cannot be read as
+# covering them. `tests/test_drc_gf180mcu_ldmos.py` enforces that no id is in
+# neither set.
+_MVSD = (210, 0)  # MVSD
+_MVPSD = (11, 39)  # MVPSD
+_LDMOS_XTOR = (226, 0)  # LDMOS_XTOR
+_LDNMOS_PROVENANCE_FILE = "ldnmos"
+_LDPMOS_PROVENANCE_FILE = "ldpmos"
+
+DECK += [
+    DrcRule(
+        id="mvsd.width.1",
+        description="minimum MVSD (LDNMOS drain) width",
+        layer=_MVSD,
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # ldnmos.rb "MDN.1": `mvsd.width(1.um, euclidian)`
+        scope="MDN",
+        provenance=_gf180mcu_klayout_deck_provenance(_LDNMOS_PROVENANCE_FILE, "MDN.1"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="mvsd.separation.dnwell.1",
+        description="minimum MVSD (LDNMOS drain) spacing to DNWELL",
+        layer=_MVSD,
+        other_layer=(12, 0),  # DNWELL
+        check="separation",
+        threshold_dbu=6000,  # 6.0 um
+        # ldnmos.rb "MDN.14": `mvsd.separation(dnwell, 6.0.um)` (plus the
+        # `mvsd.not_outside(dnwell)` overlap term, see above).
+        scope="MDN",
+        provenance=_gf180mcu_klayout_deck_provenance(_LDNMOS_PROVENANCE_FILE, "MDN.14"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="ldmos_xtor.enclosing.mvpsd.1",
+        description="LDMOS_XTOR must enclose every MVPSD (LDPMOS drain) shape",
+        layer=_LDMOS_XTOR,
+        other_layer=_MVPSD,
+        check="enclosing",
+        threshold_dbu=0,
+        require_containment=True,
+        # ldpmos.rb "MDP.6": `mvpsd.not_inside(ldmos_xtor)`
+        scope="MDP",
+        provenance=_gf180mcu_klayout_deck_provenance(_LDPMOS_PROVENANCE_FILE, "MDP.6"),
+        voltage_independent=True,
+    ),
+]
+
+# ---------------------------------------------------------------------------
+# eFuse (`EF.*`) rules -- `rule_decks/efuse.rb` (issue #4316)
+# ---------------------------------------------------------------------------
+#
+# `efuse.rb` defines 27 rule ids over EFUSE_MK (80/5), PLFUSE (125/5) and the
+# derived `cathode`/`anode` poly regions. Until issue #4316 this deck carried
+# both marker layers as layer names / off-grid checks only, so drawn eFuse
+# geometry was unevaluated and a `clean` verdict had an undisclosed hole.
+#
+# Transcribed (the rules that need no derived cathode/anode layer):
+#
+# - `EF.14`: `lvs_source.not_outside(efuse_mk).not(efuse_mk)`, i.e. an
+#   LVS_SOURCE (100/8) shape touching EFUSE_MK must lie inside it -- an
+#   `"enclosing"` rule at margin 0 (interaction-scoped, like the runset).
+# - `EF.17`: EFUSE_MK to EFUSE_MK space, 0.26um.
+# - `EF.20`: `plfuse.separation(comp + nplus + esd + sab + resistor, 2.73,
+#   euclidian)`, one rule per layer (a union of five layers has no
+#   single-layer spelling; the violating distances are the same).
+#
+# Everything else is in `_EFUSE_UNMODELED_RULES` below, with the reason.
+_EFUSE_MK = (80, 5)  # EFUSE_MK
+_PLFUSE = (125, 5)  # PLFUSE
+_LVS_SOURCE = (100, 8)  # LVS_SOURCE
+_EF_PROVENANCE_FILE = "efuse"
+
+DECK += [
+    DrcRule(
+        id="efuse_mk.enclosing.lvs_source.1",
+        description="EFUSE_MK must enclose LVS_SOURCE",
+        layer=_EFUSE_MK,
+        other_layer=_LVS_SOURCE,
+        check="enclosing",
+        threshold_dbu=0,
+        # efuse.rb "EF.14": `lvs_source.not_outside(efuse_mk).not(efuse_mk)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.14"),
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="efuse_mk.space.1",
+        description="minimum EFUSE_MK to EFUSE_MK space",
+        layer=_EFUSE_MK,
+        check="space",
+        threshold_dbu=260,  # 0.26 um
+        # efuse.rb "EF.17": `efuse_mk.space(0.26.um, euclidian)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.17"),
+        voltage_independent=True,
+    ),
+]
+
+DECK += [
+    DrcRule(
+        id=f"plfuse.separation.{stem}.1",
+        description=f"minimum PLFUSE space to {name}",
+        layer=_PLFUSE,
+        other_layer=other,
+        check="separation",
+        threshold_dbu=2730,  # 2.73 um
+        # efuse.rb "EF.20": `plfuse.separation(comp + nplus + esd + sab +
+        # resistor, 2.73.um, euclidian)`
+        scope="EF",
+        provenance=_gf180mcu_klayout_deck_provenance(_EF_PROVENANCE_FILE, "EF.20"),
+        voltage_independent=True,
+    )
+    for stem, name, other in (
+        ("comp", "Comp", (22, 0)),
+        ("nplus", "Nplus", (32, 0)),
+        ("esd", "ESD", _ESD),
+        ("sab", "SAB", (49, 0)),
+        ("resistor", "Resistor", (62, 0)),
+    )
+]
+
+#: `efuse.rb` rule ids this deck knowingly does not transcribe (issue #4316),
+#: with the reason each is out of reach of the existing check kinds.
+#: `UNMODELED_RULES` surfaces every key as `coverage.unmodeled_rules`. Remove
+#: an id when its rule is added.
+_EFUSE_UNMODELED_RULES: dict[str, str] = {
+    "EF.01": "needs `efuse_mk_pplus = efuse_mk & pplus`, a derived layer",
+    "EF.02": (
+        "`plfuse.width != 0.18um`: a min/max width on the short side; the "
+        "bbox-based max half would flag the 1.26um length"
+    ),
+    "EF.03": "PLFUSE length via `centers`/edge-length selection",
+    "EF.04a": "`interacting(poly2 - plfuse, 2, 2)` count selector on PLFUSE",
+    "EF.04b": "`non_rectangles`: no check kind",
+    "EF.04c": "`non_rectangles` on the derived `cathode` poly region",
+    "EF.04d": "`non_rectangles` on the derived `anode` poly region",
+    "EF.05": "needs the derived `poly2 & efuse_mk` region and LVS_SOURCE boolean",
+    "EF.06": "edge-length test on the derived `cathode` region",
+    "EF.07": "edge-length test on the derived `cathode` region",
+    "EF.08": "edge-length test on the derived `anode` region",
+    "EF.09": "edge-length test on the derived `anode` region",
+    "EF.10": "needs the derived `cathode` region",
+    "EF.11": "needs the derived `anode` region",
+    "EF.12": "needs `contact & cathode` and a polygon-output separation",
+    "EF.13": "needs `contact & anode` and a polygon-output separation",
+    "EF.15": "`plfuse.interacting(contact)`: no polygon-selector check kind",
+    "EF.16a": "`cathode.not_covering(contact, 4, 4)`: derived region + count",
+    "EF.16b": "`anode.not_covering(contact, 4, 4)`: derived region + count",
+    "EF.18": "`plfuse.outside(...)` polygon selector over a union incl. Metal1/2",
+    "EF.19": "`plfuse.outside(metal1).outside(metal2)` polygon selector",
+    "EF.21": "`extents.edges` / `centers` edge-length test on derived regions",
+    "EF.22a": "edge-length test on the derived `cathode` region",
+    "EF.22b": "edge-length test on the derived `anode` region",
+}
+
+# `UNTRANSCRIBED_RULES` (the esd.rb/guard_ring.rb/MDN./MDP. untranscribed
+# disclosures) lives in :mod:`.gf180mcu_untranscribed` -- data only, split
+# out for the per-file size ratchet; re-exported here, so importers of
+# `klayout_tools.decks.gf180mcu.UNTRANSCRIBED_RULES` are unaffected.
+
+
+#: Official gf180mcu DRM rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3796): the thick-MetalTop (30 kA / "MT30") option, the
+#: wide-metal/die-level MetalTop rules, and the metal-slotting rules
+#: (DRM sections 7.15, 7.16, 14.6.3; the PDK's native
+#: `metaltop_30k.rb`/`mslot.rb`/`density.rb` decks encode them). This deck
+#: models only standard-thickness MetalTop (`metaltop.width.1` = MT.1,
+#: `metaltop.space.1` = MT.2a) and has no PDK-variant selection, so a layout
+#: that is `klt drc --deck gf180mcu` clean can still fail these on a 30K
+#: variant such as `gf180mcuA`. `coverage.unmodeled_rules` (and `klt deck
+#: info`/`klt deck rules`) list them rather than let a clean verdict read as
+#: full coverage. Remove an id here when its rule is added.
+_MT_MSLOT_UNMODELED_RULES: tuple[str, ...] = (
+    "MSLOT.1",
+    "MSLOT.2",
+    "MSLOT.3",
+    "MSLOT.4",
+    "MSLOT.5",
+    "MSLOT.6",
+    "MSLOT.7",
+    "MSLOT.8",
+    "MT.2b",
+    "MT.3",
+    "MT.4",
+    "MT30.1a",
+    "MT30.1b",
+    "MT30.2",
+    "MT30.3",
+    "MT30.4",
+    "MT30.5",
+    "MT30.6",
+    "MT30.7",
+    "MT30.8",
+)
+
+#: Metal1-5 wide-metal spacing and the narrow-line end-of-line companions this
+#: deck does not transcribe (issue #3968). `Mn.2b` ("space to wide Metaln",
+#: length and width > 10um) needs a wide-metal predicate and `CO.6a`/`CO.6b`,
+#: `Vn.3c`/`Vn.3d`, `Vn.4b`/`Vn.4c` an end-of-line (narrow metal < 0.34um)
+#: predicate, neither of which `DrcRule`'s vocabulary can express. Ids are the
+#: native runset's (`M1.2b`...`M5.2b`; via ids are stack-keyed, so no `V5.*`
+#: for this fixed 5LM stack). Remove an id here when its rule is added.
+_METAL_EOL_UNMODELED_RULES: tuple[str, ...] = (
+    "CO.6a",
+    "CO.6b",
+    "M1.2b",
+    "M2.2b",
+    "M3.2b",
+    "M4.2b",
+    "M5.2b",
+    *(f"V{n}.{rule}" for n in (1, 2, 3, 4) for rule in ("3c", "3d", "4b", "4c")),
+)
+
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render
 # violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback --
@@ -1747,9 +2620,33 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (127, 5): "DRC_BJT",
     (117, 5): "CAP_MK",
     (117, 10): "MIM_L_MK",
+    (166, 5): "MOS_CAP_MK",
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
+    (241, 0): "Schottky_diode",
+    (24, 0): "ESD",
+    (167, 5): "GUARD_RING_MK",
+    (100, 8): "LVS_SOURCE",
+    (210, 0): "MVSD",
+    (11, 39): "MVPSD",
+    (226, 0): "LDMOS_XTOR",
 }
+
+#: Everything this deck knowingly does not transcribe (`coverage.unmodeled_rules`):
+#: ESD/guard-ring #3792, 10V LDMOS #4569, MT/MSLOT #3796, Metal1-5 EOL #3968,
+#: Dualgate #3791, DRM 9.2 bond-pad guidelines #4001 (see `decks.get_unmodeled_rules`).
+UNMODELED_RULES: tuple[str, ...] = tuple(
+    sorted(
+        (
+            *UNTRANSCRIBED_RULES,
+            *_EFUSE_UNMODELED_RULES,
+            *_MT_MSLOT_UNMODELED_RULES,
+            *_METAL_EOL_UNMODELED_RULES,
+            *UNMODELED_DUALGATE_RULES,
+            *BOND_PAD_GUIDELINE_UNMODELED_RULES,
+        )
+    )
+)
 
 # Voltage-domain marker layers this deck draws but does not *fully* model the
 # DRC/extraction scoping of (issue #552): `Dualgate` (55/0) selects gf180mcu's
@@ -1789,12 +2686,16 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (55, 0): (
         "Dualgate (55/0) marks gf180mcu's 5V/6V thick-oxide voltage domain. "
         "This curated deck models it for the DF.1a/DF.3a COMP width/space "
-        "rules and (issue #1111) MOS device recognition/model binding "
-        "(nfet_06v0/pfet_06v0 under --pdk) only; every other DRC rule still "
+        "rules, the Dualgate DV.2/DV.5 width/space rules (issue #3791) and "
+        "(issue #1111) MOS device recognition/model binding "
+        "(nfet_06v0/pfet_06v0 under --pdk) only; the other Dualgate DV rules "
+        "and _MV columns are listed in coverage.unmodeled_rules, and every "
+        "other DRC rule still "
         "applies the 3.3V/_LV thresholds regardless of Dualgate's presence "
         "(e.g. DF.6 COMP extend beyond gate 0.24 vs. 0.40, PL.5a/PL.5b field "
         "poly to COMP 0.10 vs. 0.30 -- all in um, and neither transcribed in "
-        "this deck yet)."
+        "this deck yet). The DF.13/DF.14 tap-distance rules read it as the "
+        "MV (15 um) selector (comp.tap_distance.{nwell,psub}.mv.1)."
     ),
 }
 
@@ -1934,12 +2835,10 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #                          poly mark; this is the layer the DRC deck's own
 #                          `hres.drc` rule file keys off)
 #
-# The one resistor device modelled below is `ppolyf_u` -- the DRM's "P+ poly,
-# unsalicided" precision resistor (DRM chapter "10.0 Analog Device Related
-# Rules", and `magic/gf180mcuD.tech`'s device list comment
-# "#  ppolyf_u  resistor (P+ poly, unsalicided)"). The official KLayout LVS
-# deck derives and extracts it (`lvs/rule_decks/res_derivations.lvs` +
-# `res_extraction.lvs`) as:
+# `ppolyf_u` is the DRM's "P+ poly, unsalicided" precision resistor
+# ("10.0 Analog Device Related Rules"; also `magic/gf180mcuD.tech`). KLayout
+# LVS derives and extracts it in `lvs/rule_decks/res_derivations.lvs` and
+# `res_extraction.lvs`:
 #
 #     ppoly_exclude   = comp.join(res_exclude).join(nplus)
 #     ppolyf_u_layer  = pplus.and(poly2).and(sab).and(res_mk)
@@ -1977,10 +2876,10 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #   ldmos_xtor, schottky_diode) is **not** modelled -- none of those layers
 #   are in this curated starter subset. A resistor-marked poly segment also
 #   carrying one of them extracts as `ppolyf_u` rather than being excluded.
-# - The terminal ("C") region is `Poly2` minus the recognised body rather
-#   than upstream's `poly2.not(res_mk).not(plfuse)`; the two agree except on
-#   marked poly this deck does not recognise as a resistor, which stays
-#   ordinary connected poly here rather than being cut out of connectivity.
+# - The terminal ("C") region starts as Poly2 minus the recognised body.
+#   Unrecognised marked poly stays connected. SB.10 (`poly2.enclosing.sab.1`)
+#   requires 220 nm of Poly2 around SAB. Both poly entries declare that
+#   enclosure to keep leads separate (#5889, docs/cli/extract.md).
 #
 # `ppolyf_u_1k` (issue #299): the high-sheet-rho flavour `ppolyf_u`'s own
 # `excludes` above rules out. The official LVS deck's own `res_derivations.lvs`
@@ -2296,6 +3195,102 @@ _GF180MCU_MOS_LVS_SOURCE_PATH = (
     "libs.tech/klayout/tech/lvs/rule_decks/mos_extraction.lvs"
 )
 
+
+# MOS capacitors (issue #2919): `cap_nmos_*`/`cap_pmos_*`, a poly-over-COMP
+# gate whose COMP is covered by `MOS_CAP_MK` (166/5). Transcribed from
+# `rule_decks/moscap_derivations.lvs` / `moscap_extraction.lvs` at the pinned
+# `_GF180MCU_LVS_COMMIT` (read from a real fetched f6eeac7 install):
+#
+# - plain `cap_nmos_<v>` = an NMOS-style gate (Nplus COMP) outside Nwell and
+#   outside DNWELL; `cap_pmos_<v>` = a PMOS-style gate (Pplus COMP) inside
+#   Nwell and outside DNWELL. `_dn` = the same inside DNWELL. (The runset's
+#   `CONSIDER_DN_DW_FEATURES` option, default off, folds a `_dn` gate onto the
+#   plain model name; this deck always reports the `_dn` name -- the model that
+#   geometry really is -- so a `klt lvs` reference using `_dn` matches.)
+# - `_b` (`cap_nmos_<v>_b` = `ngate_*_base.and(nwell)`, `cap_pmos_<v>_b` =
+#   `pgate_*_base.and(ptap)`) is the "same-polarity well" form: an Nplus gate
+#   inside Nwell / a Pplus gate outside it. `_b` is not DNWELL-split.
+# - `<v>`: `03v3` outside `Dualgate` (55/0), `06v0` inside it. The two
+#   `capacitor(...)` area coefficients are 4.4e-15 F/um^2 (03v3) and 2.3e-15
+#   F/um^2 (06v0).
+# - `moscap_exclude` marker set: transcribed below as `_MOS_CAP_EXCLUDES`,
+#   minus `lvs_source` (100/8): this deck reads nothing else on layer 100
+#   besides the eFuse anode marker (#4312) and its `dummy` marker (100/50, see
+#   `test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer`), and an
+#   LVS-source annotation over a MOS capacitor is not modelled.
+#
+# Deliberate approximations: the runset subtracts the excluded markers
+# geometrically from the gate; here an island overlapping any of them at all is
+# not a capacitor (the same island-level policy `MOSFlavour` documents). The
+# well/body terminal the runset names (`P2`) takes no part in the device -- the
+# runset's terminals are the poly (`tA`) and the diffusion (`tB`).
+_MOS_CAP_EXCLUDES: tuple[tuple[int, int], ...] = (
+    (62, 0),  # resistor
+    (24, 0),  # esd
+    (49, 0),  # sab
+    (96, 1),  # fusewindow_d
+    (220, 0),  # polyfuse
+    (110, 5),  # res_mk
+    (115, 5),  # diode_mk
+    (127, 5),  # drc_bjt
+    (5, 0),  # nat
+    (24, 5),  # esd_mk
+    (80, 5),  # efuse_mk
+    (125, 5),  # plfuse
+    (210, 0),  # mvsd
+    (11, 39),  # mvpsd
+    (226, 0),  # ldmos_xtor
+    (241, 0),  # schottky_diode
+)
+
+_NPLUS = (32, 0)
+_PPLUS = (31, 0)
+_DNWELL = (12, 0)
+_DUALGATE = (55, 0)
+
+
+def _mos_cap(
+    name: str, implant: tuple[int, int], in_well: bool, voltage: str, deep: bool | None
+) -> MosCapacitorDevice:
+    """One `MosCapacitorDevice`; `deep` is `True`/`False` for a DNWELL
+    requirement/exclusion, `None` for the `_b` forms that do not split on it."""
+    thick = voltage == "06v0"
+    other = _PPLUS if implant == _NPLUS else _NPLUS
+    requires: tuple[tuple[int, int], ...] = ((_DUALGATE,) if thick else ()) + (
+        (_DNWELL,) if deep else ()
+    )
+    excludes = (
+        (other,)
+        + (() if thick else (_DUALGATE,))
+        + ((_DNWELL,) if deep is False else ())
+        + _MOS_CAP_EXCLUDES
+    )
+    return MosCapacitorDevice(
+        name=name,
+        marker=(166, 5),  # MOS_CAP_MK
+        implant=implant,
+        in_well=in_well,
+        area_cap_f_um2=2.3e-15 if thick else 4.4e-15,
+        requires=requires,
+        excludes=excludes,
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/tech/lvs/rule_decks/moscap_extraction.lvs", name
+        ),
+    )
+
+
+_MOS_CAPACITORS: tuple[MosCapacitorDevice, ...] = tuple(
+    _mos_cap(f"cap_{kind}_{volt}{suffix}", implant, in_well, volt, deep)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, False), ("pmos", _PPLUS, True))
+    for suffix, deep in (("", False), ("_dn", True))
+) + tuple(
+    _mos_cap(f"cap_{kind}_{volt}_b", implant, in_well, volt, None)
+    for volt in ("03v3", "06v0")
+    for kind, implant, in_well in (("nmos", _NPLUS, True), ("pmos", _PPLUS, False))
+)
+
+
 EXTRACTION_DECK = ExtractionDeck(
     active=(22, 0),  # Comp
     poly=(30, 0),  # Poly2
@@ -2319,51 +3314,44 @@ EXTRACTION_DECK = ExtractionDeck(
     # comment and `ExtractionDeck.dummy`'s docstring in `decks/extraction.py`
     # for the extractor-side machinery this field drives, which shipped in
     # #295/#462 and needs no change here). Without it, `klt gen mos_array`/
-    # `res_array`/`bjt_array`'s own `"dummy": N` param drew edge-fill devices
-    # on this family that `klt lvs` could then only report as
-    # `device.unmatched`, with knock-on `topology` conflicts on whichever
-    # supply rail the dummy units tie to.
+    # `res_array`/`bjt_array`'s `"dummy": N` param drew edge-fill devices on
+    # this family that `klt lvs` could only report as `device.unmatched`,
+    # with knock-on `topology` conflicts on the supply rail they tie to.
     #
     # gf180mcu has no *native* per-device dummy-recognition mark either. The
     # only dummy-adjacent purposes in its own layer table are (a) the
     # per-conductor density-fill purposes `<Layer>_Dummy` (datatype 4 on
-    # `COMP`/`Poly2`/`Metal1`..`MetalTop`), which is where generated *fill
-    # shapes themselves* are drawn rather than a marker laid over a real
-    # device, and (b) the fill-*exclusion* region markers `NDMY` (111/5) /
-    # `PMNDMY` (152/5), whose DRM section 10.8 `DE.*` rules ("design rules
-    # for dummy exclude layers") make them a density/DRC concept, not a
-    # device-recognition mark the way `DRC_BJT` (127/5) or `RES_MK` (110/5)
-    # are. That is the identical "no native mark, curated substitute"
+    # `COMP`/`Poly2`/`Metal1`..`MetalTop`), where generated *fill shapes
+    # themselves* are drawn rather than a marker laid over a real device, and
+    # (b) the fill-*exclusion* markers `NDMY` (111/5) / `PMNDMY` (152/5),
+    # whose DRM section 10.8 `DE.*` rules make them a density/DRC concept,
+    # not a device-recognition mark like `DRC_BJT` (127/5) or `RES_MK`
+    # (110/5). That is the identical "no native mark, curated substitute"
     # situation sky130's own `(83, 20)` comment documents.
     #
-    # `(100, 50)` therefore reuses gf180mcu's own *LVS-only annotation*
-    # layer number -- 100, the `LVS_*` family (`LVS_RF` 100/5, `LVS_Drain`
-    # 100/7, `LVS_Source` 100/8): layers that exist purely to annotate
-    # extraction/LVS and that no per-layer design rule keys off, the
-    # structural analogue of the `marker.*` layer number sky130's `(83, 20)`
-    # reuses. Datatype 50 is assigned no purpose at all. Verified against
-    # the same real fetched install this deck's MiM/resistor/diode
-    # provenance already cites (`volare enable gf180mcu
-    # c6d73a35f524070e85faff4a6a9eef49553ebc2b`): across
-    # `libs.tech/klayout/tech/gf180mcu.lyp`,
+    # `(100, 50)` therefore reuses gf180mcu's *LVS-only annotation* layer
+    # number -- 100, the `LVS_*` family (`LVS_RF` 100/5, `LVS_Drain` 100/7,
+    # `LVS_Source` 100/8): layers that exist purely to annotate extraction/LVS
+    # and that no per-layer design rule keys off, the structural analogue of
+    # the `marker.*` number sky130's `(83, 20)` reuses. Datatype 50 is
+    # assigned no purpose at all. Verified against the same real fetched
+    # install this deck's MiM/resistor/diode provenance already cites
+    # (`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+    # across `libs.tech/klayout/tech/gf180mcu.lyp`,
     # `libs.tech/klayout/drc/rule_decks/layers_def.drc` and
     # `libs.tech/klayout/lvs/rule_decks/layers_definitions.lvs`, layer 100
     # carries exactly three assigned datatypes -- 5, 7 and 8 -- and all four
-    # shipped variants (`gf180mcuA`/`B`/`C`/`D`) agree on that set. Datatype
-    # 50 leaves generous headroom above upstream's low, contiguous 5..8
-    # block, so an upstream purpose extension does not immediately collide.
-    # This deck reserves it as an extraction-only, deck-local marker: no
-    # official gf180mcu purpose string, and no rule in this module's own
-    # `DECK` references layer 100 at all, so `klt drc --deck gf180mcu` never
-    # checks it.
+    # shipped variants (`gf180mcuA`/`B`/`C`/`D`) agree. Datatype 50 leaves
+    # headroom above upstream's low, contiguous 5..8 block, so an upstream
+    # purpose extension does not immediately collide. This deck reserves it
+    # as an extraction-only, deck-local marker: no official purpose string,
+    # and no rule in this module's own `DECK` references layer 100, so `klt
+    # drc --deck gf180mcu` never checks it.
     #
-    # Verified non-colliding against every layer this `EXTRACTION_DECK`
-    # otherwise reads (`ExtractionDeck.connectivity_layers` -- the
-    # `active`/`poly`/`nwell`/`contact` core, the `metals`/`vias`/
-    # `metal_labels` stacks, `tap_nplus`/`tap_pplus`/`substrate_isolation`/
-    # `poly_label`, and every `bipolars`/`capacitors`/`resistors`/`diodes`/
-    # `mos_flavours` recognition layer): none of them is on layer 100 at
-    # all. `tests/test_extract.py` asserts that non-collision directly.
+    # Non-colliding with every other layer `EXTRACTION_DECK` reads
+    # (`ExtractionDeck.connectivity_layers`): the only other layer-100 member
+    # is the eFuse anode marker `lvs_source` (100/8, issue #4312), and
+    # `tests/test_extract.py` asserts that directly.
     dummy=(100, 50),
     # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
     # at Metal1, so anything drawn above it was invisible to the connectivity
@@ -2431,10 +3419,8 @@ EXTRACTION_DECK = ExtractionDeck(
         CapacitorDevice(
             name="cap_mim_2f0_m4m5_noshield",  # official LVS deck's own device name
             top_plate=(75, 0),  # FuseTop
-            top_plate_requires=(
-                (117, 5),  # CAP_MK
-                (117, 10),  # MIM_L_MK
-            ),
+            top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+            top_plate_requires_interacting=True,  # runset: .interacting (#3440)
             top_plate_excludes=(
                 (80, 5),  # efuse_mk
                 (125, 5),  # plfuse
@@ -2459,23 +3445,21 @@ EXTRACTION_DECK = ExtractionDeck(
             top_plate_via=(41, 0),  # Via4
             top_plate_via_metal=(81, 0),  # Metal5
             # Caller-selectable MiM density (issue #1151), the capacitor
-            # sibling of `ppolyf_u_1k`'s own `flavour_option="poly_res"`
-            # below -- see the module docstring's note above this entry for
-            # the full derivation of the three `flavours` coefficients and
-            # why one drawn geometry has three PDK-offered density
-            # interpretations here. `klt extract --deck-option
+            # sibling of `ppolyf_u_1k`'s `flavour_option="poly_res"` below --
+            # see the module docstring's note above this entry for the three
+            # `flavours` coefficients and why one drawn geometry has three
+            # PDK-offered interpretations. `klt extract --deck-option
             # mim_cap=cap_mim_1f0_m4m5_noshield` (or `...1f5...`) selects a
-            # sibling density explicitly; omitting `--deck-option` keeps
-            # today's `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
-            # `f6eeac7` (issue #3540): `mimcap_extraction.lvs` no longer branches
-            # on `MIM_OPTION`/`METAL_LEVEL` and names its devices `cap_mim_1f0fF`/
-            # `cap_mim_1f5fF`/`cap_mim_2f0fF` (so `provenance.rule_id` below is
-            # `cap_mim_2f0fF`); `MIM_OPTION` now only selects the virtual bottom
-            # plate in `mimcap_derivations.lvs` (default `'B'`, `topmin1_metal`,
-            # which is what this deck models for its Metal5 top). The
-            # `*_m4m5_noshield` names here are this deck's own extracted-netlist
-            # device names (the previous deck's names, kept for netlist
-            # stability); only the citation moved.
+            # sibling explicitly; no option keeps today's
+            # `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
+            # `f6eeac7` (issue #3540): `mimcap_extraction.lvs` no longer
+            # branches on `MIM_OPTION`/`METAL_LEVEL` and names its devices
+            # `cap_mim_1f0fF`/`cap_mim_1f5fF`/`cap_mim_2f0fF` (so
+            # `provenance.rule_id` below is `cap_mim_2f0fF`); `MIM_OPTION`
+            # now only selects the virtual bottom plate (default `'B'`,
+            # `topmin1_metal`, what this deck models for its Metal5 top).
+            # The `*_m4m5_noshield` names are this deck's own device names
+            # (kept for netlist stability); only the citation moved.
             flavour_option="mim_cap",
             flavours=(
                 CapacitorFlavour(
@@ -2506,10 +3490,9 @@ EXTRACTION_DECK = ExtractionDeck(
     resistors=(
         # `f6eeac7` (issue #3540): `res_derivations.lvs` splits every poly
         # resistor into `*_sub` / `*_nwell` body variants (`W` => `sub` vs.
-        # `nwell_con`; `npolyf_u/s`, `ppolyf_u/s`, ...) under the same device
-        # name and value. This deck keeps ONE entry per device with
-        # `bulk_to_substrate=True`: an acknowledged approximation -- the
-        # resistance value and device name are identical either way, only the
+        # `nwell_con`) under the same device name and value. This deck keeps
+        # ONE entry per device with `bulk_to_substrate=True`: an acknowledged
+        # approximation -- value and name are identical either way; only the
         # bulk terminal of a poly resistor drawn over Nwell differs.
         ResistorDevice(
             name="ppolyf_u",  # gf180mcu_fd_pr__ppolyf_u
@@ -2527,22 +3510,20 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            terminal_enclosure_um=0.22,
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u",
             ),
         ),
-        # High-sheet-rho flavour (issue #299, made caller-selectable by
-        # #595), see the module docstring's `ppolyf_u_1k` note above for the
-        # full derivation. `sheet_rho_ohm_sq`/`name` below are the PDK's own
-        # '1k' default (used whenever a caller passes no `poly_res`
-        # `deck_options` override); `flavours` additionally declares the
-        # `2k`/`3k` siblings selectable via `flavour_option="poly_res"`
-        # (`klt extract --deck-option poly_res=2k`) -- see
-        # `ResistorDevice.flavour_option`'s own docstring for why this is a
-        # deck-option selection rather than a `requires`/`excludes` split:
-        # all three share *identical* drawn geometry, so there is no layer a
-        # deck could key off to tell them apart on its own.
+        # High-sheet-rho flavour (issue #299, made caller-selectable by #595),
+        # see the module docstring's `ppolyf_u_1k` note for the derivation.
+        # `sheet_rho_ohm_sq`/`name` below are the PDK's own '1k' default (used
+        # when a caller passes no `poly_res` `deck_options` override);
+        # `flavours` also declares the `2k`/`3k` siblings selectable via
+        # `flavour_option="poly_res"` (`klt extract --deck-option
+        # poly_res=2k`) -- all three share *identical* drawn geometry, so this
+        # is a deck-option selection, not a `requires`/`excludes` split.
         ResistorDevice(
             name="ppolyf_u_1k",  # gf180mcu_fd_pr__ppolyf_u_1k (POLY_RES='1k' default)
             body=(30, 0),  # Poly2
@@ -2558,6 +3539,7 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            terminal_enclosure_um=0.22,
             flavour_option="poly_res",
             flavours=(
                 ResistorFlavour(
@@ -2575,12 +3557,27 @@ EXTRACTION_DECK = ExtractionDeck(
                 "gf180mcu_fd_pr__ppolyf_u_1k",
             ),
         ),
-        # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring
-        # sky130's `res_generic_m1`..`res_generic_m5`, issue #1621) -- see the
-        # module docstring's derivation note above this section for the full
-        # `res_derivations.lvs`/`res_extraction.lvs` transcription. Each is a
-        # plain 2-terminal `resistor(...)` (no bulk terminal), so
-        # `bulk_to_substrate` stays the default `False`.
+        # eFuse (issue #4312): `efuse_extraction.lvs` extracts anode, link and
+        # cathode from one poly2 bar inside `efuse_mk` (the split-terminal
+        # `anode_marker` form) and `ignore_parameter`s the link's `R`, so `klt
+        # lvs` leaves it out of the compare by default (`ignored_parameters`).
+        ResistorDevice(
+            name="efuse",  # gf180mcu_fd_pr__efuse (subckt "efuse")
+            body=(30, 0),  # Poly2
+            marker=(125, 5),  # plfuse -- the link
+            sheet_rho_ohm_sq=28.5714,  # efuse_extraction.lvs
+            requires=((80, 5),),  # efuse_mk -- the scope
+            anode_marker=(100, 8),  # lvs_source
+            ignored_parameters=("R",),
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/tech/lvs/rule_decks/efuse_extraction.lvs",
+                "gf180mcu_fd_pr__efuse",
+            ),
+        ),
+        # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring sky130's
+        # `res_generic_m1`..`m5`, #1621) -- see the module docstring's derivation
+        # note above. Plain 2-terminal `resistor(...)` each: no bulk terminal, so
+        # `bulk_to_substrate` stays `False`.
         ResistorDevice(
             name="rm1",  # gf180mcu_fd_pr__rm1 (subckt "rm1")
             body=(34, 0),  # Metal1
@@ -2612,14 +3609,12 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
         ),
         # Top-metal thickness flavour set `tm6k`/`tm9k`/`tm11k`/`tm30k`
-        # (issue #1640, mirroring `ppolyf_u_1k`'s own `flavour_option=
-        # "poly_res"` above, issue #595) -- see the module docstring's
-        # derivation note above this section for why this is one
-        # `ResistorDevice` entry with a caller-selectable flavour, not four
-        # always-on entries. `body`/`marker` are this curated deck's own
-        # already-established "top_metal = Metal5" convention (the module
-        # docstring note above explains the 6LM/MetalTop approximation this
-        # makes). Default flavour is `tm9k` (0.04 ohm/sq), matching
+        # (issue #1640, mirroring `ppolyf_u_1k`'s `flavour_option="poly_res"`
+        # above, issue #595) -- see the module docstring's derivation note
+        # for why this is one entry with a caller-selectable flavour, not
+        # four always-on entries. `body`/`marker` follow this deck's
+        # "top_metal = Metal5" convention (see that note for the 6LM/MetalTop
+        # approximation); default flavour `tm9k` (0.04 ohm/sq), matching
         # `gf180mcu.lvs`'s own `METAL_TOP = $metal_top || '9K'` default.
         ResistorDevice(
             name="tm9k",  # gf180mcu_fd_pr__tm9k (subckt "tm9k", METAL_TOP='9K' default)
@@ -2717,120 +3712,123 @@ EXTRACTION_DECK = ExtractionDeck(
     # diode/resistor citations use, e.g. `gf180mcu_fd_io.spice`'s own
     # `X5 n56 IE VSS VSS nfet_06v0 ...` instantiation).
     mos_flavours=(
+        # Drain-extended LDMOS (issue #4570): declared *before* `Dualgate`
+        # because the LDMOS sits inside it, and an island is claimed by the
+        # first flavour that matches. Mirrors `mos_derivations.lvs`'s
+        # `ngate_ldmos`/`ps_ldmos`/`nd_ldmos` (NMOS: `mvsd` 210/0 drain side,
+        # `ldmos_xtor` 226/0) and `pgate_ldmos`/`pd_ldmos` (PMOS: `mvpsd`
+        # 11/39 drain side, inside DNWELL with no Nwell) -- `nfet_10v0_asym` /
+        # `pfet_10v0_asym` with distinct source/drain terminals.
+        MOSFlavour(
+            marker=(210, 0),  # MVSD
+            flavour="10v0_asym_n",
+            description="gf180mcu LDNMOS nfet_10v0_asym (MVSD 210/0, LDMOS_XTOR 226/0)",
+            and_markers=((226, 0),),  # LDMOS_XTOR
+            not_markers=((11, 39),),  # MVPSD (ldnmos_exclude)
+            nfet_only=True,
+            drain_marker=(210, 0),
+        ),
+        MOSFlavour(
+            marker=(11, 39),  # MVPSD
+            flavour="10v0_asym_p",
+            description="gf180mcu LDPMOS pfet_10v0_asym (MVPSD 11/39 + LDMOS_XTOR)",
+            and_markers=((226, 0), (12, 0)),  # LDMOS_XTOR, DNWELL
+            not_markers=((210, 0),),  # MVSD (ldpmos_exclude)
+            pfet_only=True,
+            drain_marker=(11, 39),
+            body=(12, 0),  # DNWELL
+        ),
         MOSFlavour(
             marker=(55, 0),  # Dualgate
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
         ),
     ),
-)
-
-# --------------------------------------------------------------------------- #
-# `klt extract --parasitics` first-order lumped-RC coefficients
-# --------------------------------------------------------------------------- #
-#
-# Sourced, citable values transcribed from the *public* gf180mcu magic
-# technology file `gf180mcu/magic/gf180mcu.tech` in fossi-foundation/open-pdks
-# (GPLv3 -- the same upstream the DRC decks are transcribed from), nominal
-# corner (the `variants ()` block). Sheet resistances come from that file's
-# `resist <layer> <milliohms per square>` entries; area/fringe capacitances
-# from its `defaultareacap` (aF/um^2) and `defaultperimeter` (aF/um) entries.
-# The .tech header credits GlobalFoundries' PDS_035_03; nothing NDA'd. Values
-# remain order-of-magnitude and uncalibrated-to-silicon: calibrating
-# parasitic-extraction accuracy against silicon is an explicit non-goal of
-# this first cut (issue #216 "Non-goals"). `metals` is index-aligned with
-# EXTRACTION_DECK's `metals` stack: index 0 is Metal1. Values expressed as
-# (sheet ohms/square, area cap fF/um^2, fringe cap fF/um).
-PARASITICS = ParasiticsDeck(
-    # No diffusion role (issue #226): the M cards' AS/AD/PS/PD already feed the
-    # device model's junction capacitance, so an area/perimeter cap term on the
-    # Comp source/drain diffusion here would double-count it. gf180mcu.tech
-    # comments its own active-layer cap out for the same reason.
-    diffusion=None,
-    # Poly2 gate/interconnect. sheet from `resist (allpolynonres)/active 7300`
-    # (7300 milliohm/sq = 7.3 ohm/sq); area from `defaultareacap` poly2
-    # (110.67 aF/um^2).
-    poly=LayerRC(sheet_res_ohm_sq=7.3, cap_area_ff_um2=0.11067, cap_perim_ff_um=0.05),
-    metals=(
-        # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
-        LayerRC(sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.03, cap_perim_ff_um=0.039431),
-        # Metal2 (issue #547). sheet from `resist (allm2)/metal2 90`
-        # (unconditional -- M2 is never the top/thick metal in any gf180mcu
-        # stack option); area/perim from `defaultareacap`/`defaultperimeter`
-        # allm2 metal2 (15.016 aF/um^2, 33.298 aF/um).
-        LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.015016, cap_perim_ff_um=0.033298
+    # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
+    # `MOS_CAP_MK` (166/5); see `_MOS_CAPACITORS` above. Marker components the
+    # recogniser could not classify (no gate, mixed implant, an excluded
+    # marker) stay reported here, so they cannot vanish from the netlist with
+    # a clean `extracted` status.
+    mos_capacitors=_MOS_CAPACITORS,
+    unsupported_device_markers=(
+        UnsupportedDeviceMarker(
+            marker=(166, 5),  # MOS_CAP_MK
+            kind="mos_capacitor",
+            description="MOS capacitor (MOS_CAP_MK 166/5)",
         ),
-        # Metal3 (issue #547). sheet from `resist (allm3)/metal3 90`, the
-        # `#ifdef METALS4 || METALS5 || METALS6` row -- this deck's 5-metal
-        # stack (`EXTRACTION_DECK.metals` has 5 entries) means M3 is not the
-        # top metal, so it takes the fixed 90 milliohm/sq row rather than the
-        # THICKMET-dependent one reserved for a 3-metal-only stack. area/perim
-        # from `defaultareacap`/`defaultperimeter` allm3 metal3 (10.094
-        # aF/um^2, 30.021 aF/um) -- unconditional; thickness options only vary
-        # M3's sheet resistance, never its cap coefficients.
-        LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.010094, cap_perim_ff_um=0.030021
-        ),
-        # Metal4 (issue #547). sheet from `resist (allm4)/metal4 90`, the
-        # `#ifdef METALS5 || METALS6` row (same reasoning as Metal3 -- not the
-        # top metal in a 5-level stack). area/perim from
-        # `defaultareacap`/`defaultperimeter` allm4 metal4 (7.602 aF/um^2,
-        # 28.153 aF/um).
-        LayerRC(
-            sheet_res_ohm_sq=0.09, cap_area_ff_um2=0.007602, cap_perim_ff_um=0.028153
-        ),
-        # Metal5 (issue #547, revised by #572 and again by #3540), the top
-        # metal of this 5-level stack. sheet from the resolved, pre-built
-        # `gf180mcuD.tech` for the pinned PDK commit
-        # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (nominal `variants ()`
-        # corner block, line 3347): `resist (allm5)/metal5    40` (40
-        # milliohm/sq = 0.04 ohm/sq). At the earlier pin
-        # c6d73a35f524070e85faff4a6a9eef49553ebc2b that same resolved row read
-        # 60 (the other two corner blocks 70 -> 49 and 50 -> 31), which #572
-        # adopted over #571's 40 taken from the unresolved generic
-        # `gf180mcu.tech`; f6eeac7's resolved file now carries 40, matching
-        # the value #572 rejected, so 0.04 here is a re-pin delta rather than
-        # a return to #571's derivation. No other `resist`/`defaultareacap`/
-        # `defaultperimeter`/`defaultoverlap allm[2-5]` row changed between
-        # the two pins. area/perim from `defaultareacap`/`defaultperimeter`
-        # allm5 metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across
-        # every THICKMET option.
-        LayerRC(
-            sheet_res_ohm_sq=0.04, cap_area_ff_um2=0.005798, cap_perim_ff_um=0.030386
+        # Issue #4568: the 10 V module's drain-extended devices
+        # (`nfet_10v0_asym`/`pfet_10v0_asym`) carry `LDMOS_XTOR` (226/0). The
+        # curated deck has no LDMOS extraction class, so without this entry
+        # they vanish from the netlist with a clean `extracted` status.
+        UnsupportedDeviceMarker(
+            marker=(226, 0),  # LDMOS_XTOR
+            kind="ldmos",
+            description="LDMOS drain-extended transistor (LDMOS_XTOR 226/0)",
         ),
     ),
-    # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
-    # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
-    # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
-    # table has `len(metals) - 1` = 4 entries for this 5-level stack.
-    #
-    # Transcribed from the resolved, pre-built `gf180mcuD.tech` for the
-    # pinned PDK commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (values
-    # re-checked unchanged from c6d73a3, issue #3540), nominal
-    # `variants ()` corner block -- the same source and corner Metal5's
-    # sheet resistance above is cited from (issue #572), chosen over the
-    # generic `gf180mcu.tech` because only the resolved file has the
-    # `#ifdef METALS5` Metal4/Metal5 rows already selected for this deck's
-    # actual 5-level stack. Only `allmN metalN allmM metalM` rows are used
-    # (metal-over-metal); the same blocks' `... nwell well` / `...
-    # allpolynonres active` rows describe metal-over-substrate/poly overlap,
-    # which the existing `cap_area_ff_um2` ground term already covers.
-    #
-    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
-    # `cap_area_ff_um2`'s convention above.
-    metal_overlaps=(
-        # Metal1 (idx0) <-> Metal2 (idx1): `defaultoverlap allm2 metal2
-        # allm1 metal1 59.027`.
-        0.059027,
-        # Metal2 (idx1) <-> Metal3 (idx2): `defaultoverlap allm3 metal3
-        # allm2 metal2 59.027`.
-        0.059027,
-        # Metal3 (idx2) <-> Metal4 (idx3): `defaultoverlap allm4 metal4
-        # allm3 metal3 59.027`.
-        0.059027,
-        # Metal4 (idx3) <-> Metal5 (idx4): `defaultoverlap allm5 metal5
-        # allm4 metal4 39.351`.
-        0.039351,
+)
+
+
+# MIM option A (issue #2920): bottom plate Metal2, top plate FuseTop under
+# Metal3, joined to Metal3 by Via2 *inside* FuseTop. Selected with
+# `--deck-option mim_option=A`; the deck's own `capacitors` above are option B
+# (the default, byte-for-byte unchanged). Recognition mirrors the PDK's
+# `mimcap_derivations.lvs` (`mim_virtual = fusetop.sized(1.06um) &
+# metal2.interacting(fusetop) - (efuse_mk | plfuse)`, `fuse_cap = fusetop
+# interacting cap_mk, mim_l_mk, - (efuse_mk | plfuse)`) and the device names
+# and densities come from `mimcap_extraction.lvs`'s `MIM_OPTION 'A'` branch
+# (`cap_mim_{1f0,1f5,2f0}_m2m3_noshield`); the area/perimeter coefficients are
+# the same `sm141064.ngspice` cards as option B's. The top-plate Via2 is cut
+# from the generic Via2 layer where it overlaps Metal2 by the existing
+# `top_plate_via` machinery, the equivalent of the runset's `via2_n_cap`.
+_MIM_OPTION_A_CAPACITORS = (
+    CapacitorDevice(
+        name="cap_mim_2f0_m2m3_noshield",
+        top_plate=(75, 0),  # FuseTop
+        top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+        top_plate_requires_interacting=True,  # runset: .interacting (#3440)
+        top_plate_excludes=(
+            (80, 5),  # efuse_mk
+            (125, 5),  # plfuse
+        ),
+        bottom_plate=(36, 0),  # Metal2
+        bottom_plate_oversize_um=1.06,
+        area_cap_f_um2=1.99e-15,
+        perim_cap_f_um=2.383e-16,
+        top_plate_via=(38, 0),  # Via2
+        top_plate_via_metal=(42, 0),  # Metal3
+        flavour_option="mim_cap",
+        flavours=(
+            CapacitorFlavour(
+                value="cap_mim_1f0_m2m3_noshield",
+                name="cap_mim_1f0_m2m3_noshield",
+                area_cap_f_um2=9.87e-16,
+                perim_cap_f_um=3.3e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_1f5_m2m3_noshield",
+                name="cap_mim_1f5_m2m3_noshield",
+                area_cap_f_um2=1.47e-15,
+                perim_cap_f_um=3.79e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_2f0_m2m3_noshield",
+                name="cap_mim_2f0_m2m3_noshield",
+                area_cap_f_um2=1.99e-15,
+                perim_cap_f_um=2.383e-16,
+            ),
+        ),
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+            "cap_mim_2f0_m2m3_noshield",
+        ),
+    ),
+)
+
+EXTRACTION_DECK = dataclasses.replace(
+    EXTRACTION_DECK,
+    capacitor_variants=(
+        CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
+        CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
     ),
 )

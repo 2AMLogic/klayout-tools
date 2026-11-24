@@ -15,8 +15,9 @@ Four tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
   one descriptor) is `@_SKIP_NO_NGSPICE`-gated, mirroring `tests/test_sim.py`'s
   own real-`ngspice` integration tier.
 - A **digital-flow tier** (Epic #391 Phase 5, issue #437) exercises the
-  `synthesize`/`place-and-route` checks -- both need a `threshold` (same rule
-  as `layout-metrics`, since neither has gate semantics of its own) and
+  `synthesize`/`place-and-route` checks -- `synthesize` needs a `threshold`
+  (as `layout-metrics` does; `place-and-route` grades its own `status`, see
+  `test_eval_place_and_route_status.py`) and both
   resolve `request` as a path only, never inline JSON/`-` -- plus one
   end-to-end test chaining `synthesize` -> `functional-verification` ->
   `place-and-route` -> `drc`/`layout-metrics` into a single scored verdict,
@@ -30,24 +31,13 @@ Four tiers, mirroring `tests/test_drc.py`/`tests/test_lvs.py`:
 from __future__ import annotations
 
 import json
-import os
-import shutil
 
 import klayout.db as kdb
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools.cli import main
 from klayout_tools.eval import EvalError, run_eval
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -1095,31 +1085,6 @@ def test_synthesize_gate_exceeding_threshold_is_invalid(tmp_path, monkeypatch):
     (gate,) = report["gates"]
     assert gate["status"] == "fail"
     assert gate["count"] == 2010
-
-
-def test_place_and_route_gate_requires_threshold(tmp_path, monkeypatch):
-    import klayout_tools.eval as eval_module
-
-    monkeypatch.setattr(
-        eval_module,
-        "run_place_and_route",
-        lambda request_path: dict(_PLACE_AND_ROUTE_REPORT, gds_path=None),
-    )
-    (tmp_path / "pnr_request.json").write_text("{}")
-    descriptor = {
-        "gates": [
-            {"check": "place-and-route", "args": {"request": "pnr_request.json"}}
-        ],
-        "objective": {
-            "check": "place-and-route",
-            "metric": "wirelength_um",
-            "args": {"request": "pnr_request.json"},
-        },
-    }
-    path = _write_descriptor(tmp_path, descriptor)
-
-    with pytest.raises(EvalError, match="threshold"):
-        run_eval(path)
 
 
 def test_place_and_route_gate_with_threshold_on_timing_closure(tmp_path, monkeypatch):

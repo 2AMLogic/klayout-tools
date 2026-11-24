@@ -11,8 +11,11 @@ the antenna + ERC signoff epic
 
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
-                      [--findings-only [--omit-antenna-tables]]
-                      [--format text|json]
+                      [--findings-only] [--omit-antenna-tables]
+                      [--format text|json] [-o PATH]
+klt erc --check <report> [--rerun] [--format text|json]
+klt erc --validate-spec <spec> [--format text|json]
+klt erc --pnr-response <run.json> [--format json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -25,8 +28,11 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
   exactly one root to analyse, unlike `klt layers`, which defaults to
   summing across every top cell).
 - `--pdk` — PDK antenna-ratio limit table each non-gate `stackup` level's
-  `antenna_ratio` is compared against (currently: `sky130`). Optional — see
-  "Antenna-ratio verdict" below for what happens when it's omitted. Not
+  `antenna_ratio` is compared against (currently: `sky130`, `ihp-sg13g2`, `gf180mcu`). Optional — see
+  "Antenna-ratio verdict" below for what happens when it's omitted. Omitted
+  or unsupported-for-antenna (e.g. `sg13cmos5l`) means `status: "not_checked"`
+  and exit 4 **by design**, not a tool failure: gate on `erc_status` instead
+  (see "Two verdicts"). Not
   validated by argparse: an unrecognised name is a clean exit-1 error, like
   `klt drc`'s own `--deck`.
 - `--deck` (issue #2204) — a curated extraction deck (currently: `gf180mcu`,
@@ -44,17 +50,69 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
   finding is identical to a full run; the antenna half reports `null`
   accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
   `--pdk` (exit 1). See "Findings-only runs" below.
-- `--omit-antenna-tables` — valid only with `--findings-only` (otherwise exit
-  1): drop the all-`unchecked` `gates[]` array and collapse the antenna
+- `--omit-antenna-tables` — valid with `--findings-only`, or (issue
+  [#4385](https://github.com/2AMLogic/klayout-tools/issues/4385)) without
+  `--pdk` when no antenna level is graded; with `--pdk` and no
+  `--findings-only`, or when spec `antenna_limits` grade a level, exit 1 (a
+  real verdict is never dropped): drop the all-ungraded `gates[]` array and collapse the antenna
   `coverage` entries to one aggregate entry per category, so the report of a
   dense layout is small enough to commit verbatim (issue
   [#3011](https://github.com/2AMLogic/klayout-tools/issues/3011)). Sets
   `antenna_tables_omitted: true`; every verdict and the exit code are
   unchanged.
+- `--compact` — with `--findings-only`, summarise the per-gate scaffolding
+  as counts instead of listing it (issue
+  [#2965](https://github.com/2AMLogic/klayout-tools/issues/2965)). Requires
+  `--findings-only` (exit 1 otherwise). See "Compact findings-only
+  reports" below.
+- `--check <report>` / `--rerun` (issue
+  [#3060](https://github.com/2AMLogic/klayout-tools/issues/3060)) — verify a
+  previously committed `--format json` report still reproduces, instead of
+  running a fresh check. Mutually exclusive with `<file>`/`<spec>`. See
+  "`--check` / `--rerun`" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `-o PATH` / `--output PATH` also saves the full JSON report on a fresh layout
+  run, including a completed `violations` or `not_checked` verdict. A `.gz`
+  suffix selects deterministic gzip compression. The report is staged as a
+  sibling temporary file and renamed into place once the write completes, so
+  `PATH`'s **parent directory must be writable**; a failed write preserves
+  the previous report. Stdout follows `--format`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
+
+## Generate a supply spec from a routed block
+
+Save the JSON response from a successful Sky130A or Sky130B HD standard-cell
+route with an explicit PDN. Generate and validate an editable spec offline,
+then run ERC on the GDS from that route.
+
+```sh
+klt erc --pnr-response run.json --format json > supply.json
+klt erc --validate-spec supply.json --format json
+klt erc routed.gds supply.json --findings-only -o erc.json
+klt erc --check erc.json --format json
+```
+
+Generation writes the spec itself. It uses the Sky130 extraction deck's
+gate, active, li1–met5, label and cut layers. The n-well check requires
+a dedicated tap connected through a drawn licon1 cut to li1 and the power
+net. The response must identify the HD library, its tap master, a resolved
+Sky130 layer map and supported strap layers. Macro grids are outside this
+profile.
+
+For renamed supplies, `power.library_rail_labels` records which configured
+nets the applied global-connect rules tie to VPWR and VGND. The generator
+declares each renamed pair with `same_net_as`. Older responses work when
+both supplies already have their native names. If the mapping is missing
+for renamed supplies, rerun P&R or write and verify the aliases in your
+spec. A custom pin regex with ambiguous matches requires an explicit spec.
+
+Add any design-specific substrate regions, fill exclusions and exclusive
+layer ownership assertions after inspecting the block. Signal routing can
+share a strap layer. The generated n-well declaration does not cover the
+substrate. Read the layout run's `erc_findings` and `erc_coverage` to see
+which physical checks ran.
 
 ## Phase scope: what `klt erc` is, and what has shipped so far
 
@@ -206,7 +264,8 @@ filename and the complete field path (for example
 `spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
 no success report on stdout, and does so before the layout is read or any
 analysis/solver runs. This applies to the top level and to every nested object
-(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`).
+(`stackup[]`, `vias[]`, `nets[]`, `keepouts[]`, `ties[]`, `ties_disclosure`, `devices[]`,
+`antenna_limits[]`).
 A key that is valid in a *different* section is still unknown in the section it
 appears in.
 
@@ -235,6 +294,30 @@ field this build predates would otherwise run green and report the older
 semantics, indistinguishable from a spec that never asked for the field. Upgrade
 `klt` to use such a field; do not rely on it being ignored. Optional supported
 fields, their defaults, and the shape of the JSON report are unchanged.
+
+### Conductor keepouts
+
+Use top-level `keepouts` to reserve a rectangular corridor across selected
+stackup roles. Given the fabrication order `poly, met1, met2, met3`, this
+example checks `met1` and `met2` inside a 10 by 20 µm box. The exclusive
+upper bound lets `met3` cross it.
+
+```json
+{"keepouts": [{"box": [0, 0, 10, 20], "roles": ["met1", "met2", "met3"], "below": "met3"}]}
+```
+
+The box takes four finite micrometre coordinates in left, bottom, right, top
+order and must have positive width and height. Both `below` and the distinct
+names in `roles` refer to declared stackup conductors. ERC inspects labelled
+and unlabelled shapes throughout the selected top-cell hierarchy. Positive-area
+overlap produces an `erc.role_keepout` finding with the zero-based
+`keepout_index`, `role`, physical `layer`, and the bounding box of the
+clipped conductor in database units. Edge contact is clear.
+
+In `erc_coverage`, each checked identity names the declaration index and role.
+Geometry drawn solely outside the corridor counts as checked. An undrawn role,
+an empty list, a declaration with no roles below its cutoff, or a corridor
+that rounds to zero width or height in database units records skipped work.
 
 ### Gate area: `poly ∩ diff` vs. raw poly area
 
@@ -287,6 +370,13 @@ denominator from `klt erc`.
   - `between` (array of exactly two distinct `stackup` names, required) —
     which two roles this via connects.
 
+  A contact that is a plain overlap of two drawn layers (no separate via
+  layer, e.g. a local-interconnect strap landing directly on gate poly) is
+  declared as a **same-layer via**: set `layer` to the upper role's own
+  layer, e.g. `{"name": "gate_lig", "layer": "<LIG layer>", "between":
+  ["gate", "lig"]}`. Wherever the two roles overlap the entry bridges them.
+  The via `name` must still be unique across `stackup` and `vias` names.
+
 A `stackup`/`vias` entry naming a layer absent from the given layout is not
 itself an error (a shared spec can list layers a particular fixture doesn't
 use) — matching `klt power`'s own convention. **The inverse direction is
@@ -324,6 +414,26 @@ draws that the spec never declared" below.
     detection are unaffected by the declaration — a declared-multi-domain
     name still shorts against any other name that lands on one of its
     islands.
+  - `extractor_global` (boolean, optional, default `false`, issue #3745) —
+    the net is named by the extractor (a PDK deck's global substrate net),
+    not by GDS label text, so it can never be label-resolved. With `true`
+    it is not graded: no `erc.unconnected_net` for zero matches, no
+    `nets[]` report entry, and it is recorded in
+    `erc_coverage.inapplicable` as `erc.net_connectivity:["<name>"]` with
+    reason `extractor_global_net` (disclosed, never silent). Like every
+    `inapplicable` entry it leaves `erc_status` unchanged. Combining it
+    with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
+    — or naming it from another entry's `same_net_as` — is a spec error.
+    Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
+  - Two or more `kind: "supply"` entries also run the substrate-continuity
+    check, or disclose it as `erc.supply_short` /
+    `substrate_isolation_undecidable` with a `missing` list — see "Substrate
+    continuity between supply nets" below. `erc_status` is unchanged by the
+    disclosure. With `--pdk`-family decks that declare `substrate_isolation`
+    (gf180mcu, and sky130 as of #5344, sg13g2/sg13cmos5l as of #5359) the
+    substrate path is evaluated; for sky130 a `dnwell` island (for the IHP
+    decks an `nBuLay` island) isolates its p-well only when an n-well ring
+    closes its outline, otherwise it stays on the shared substrate.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -396,6 +506,21 @@ draws that the spec never declared" below.
     `roles` on the same entry (there is otherwise no remainder for it to
     narrow, and the declaration would read as honoured while doing
     nothing); `null` or `[]` is the undeclared form.
+  - `unlabelled_allow_device_connected` (boolean, optional, default `false`,
+    issue #4374) — when `true`, unlabelled clusters on the owned `roles`
+    that drive a gate (`kind: "device_connected"`, e.g. an internal signal
+    net named by no pin) do not gate `erc.unlabelled_conductor`;
+    `floating` clusters (stray supply fragments, dead metal) still do. The
+    excused clusters count in `nets[].unlabelled_allowed_islands` and are
+    echoed in `provenance.net_exclusions` (`allow_device_connected: true`,
+    `excluded_device_connected_islands`); the raw `unlabelled_*` values stay
+    raw. "Drives a gate" means the cluster has geometry on the gate role
+    (`stackup[0]`): the ERC connectivity graph registers no extracted
+    devices (`devices[]` only cuts device bodies out of conductors), so it
+    needs no `devices[]` and works identically with it omitted. Requires a
+    non-empty `roles` on the same entry; a non-boolean is a spec error.
+    Composes with `unlabelled_allowed_boxes` (a cluster excused by either
+    is excused).
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
     `erc.supply_short`/`erc.expected_short_missing`/
     `erc.unlabelled_conductor` are never computed.
@@ -452,6 +577,19 @@ draws that the spec never declared" below.
     every other spec layer — but the resulting tie is recorded as skipped
     work rather than a clean pass (`empty_well_region`, issue #2377; see
     "A well layer with no geometry at all" below).
+  - `well_complement_of` (optional `"<layer>/<datatype>"` string or non-empty
+    array of them, issue #3750) — the substrate half of a tie for a process
+    whose bulk has no drawn well/tub shape (a p-type bulk with n-wells on a
+    separate layer): the tie's region is the top-cell extent **minus** the
+    merged union of the named layers, derived from the stream, so it follows
+    the layout instead of going stale like a `well_boxes` list. Valid **only**
+    with `well_layer: null` and mutually exclusive with `well_boxes` (either
+    combination, or a drawn `well_layer`, is a spec error naming both keys).
+    Graded like `well_boxes`: listed in `erc_coverage.checked_by_well_assertion`,
+    and skipped as `degenerate_well_assertion` when the named layers draw
+    nothing (the "substrate" would be the whole die) or cover the whole die
+    (nothing left to check). It emits no `well_assertion_coverage` entry, as
+    the region cannot go stale. Additive: no `schema_version` bump.
   - `well_boxes` (optional array of `[left, bottom, right, top]` micrometre
     boxes, default `[]`, issue #2255) — a caller **assertion** of the
     substrate region this tie covers, for a block that draws no well/tub
@@ -470,6 +608,15 @@ draws that the spec never declared" below.
     (see "A block with no drawn well at all" below). Each box's
     `left`/`bottom`/`right`/`top` must satisfy `left < right` and
     `bottom < top`.
+  - `isolation_boxes` (optional array of `[left, bottom, right, top]`
+    micrometre boxes, default `[]`, issue #5343) — a caller **assertion**
+    that substrate tap sites inside a box belong to that box's own isolated
+    body (deep n-well / isolated p-well), for a family whose deck does not
+    declare the isolation layer. Same shape and validation as `tap_boxes` /
+    `well_boxes`; overlapping boxes merge into one body. It applies to every
+    substrate tie's taps, not just this entry's, and has no effect on a tie
+    naming a drawn `well_layer`. Graded `checked_by_assertion` and echoed in
+    `provenance.isolation_assertions`.
   - `well_requires` / `well_excludes` (optional arrays of
     `"<layer>/<datatype>"`, default `[]`, issue #2339) — the **well-side
     class selectors**, for a drawn `well_layer` that carries two
@@ -512,6 +659,25 @@ draws that the spec never declared" below.
     graded. Same falsifiability test, same reason token: a selection keeping
     every drawn shape, or none of them (including boxes matching no shape at
     all), is recorded as skipped work (`degenerate_well_selection`).
+  - `well_requires_cells` / `well_excludes_cells` (optional arrays of cell
+    names, default `[]`, issue #4373) — the same well-side class selection,
+    named by the **cell** a well is drawn in instead of by coordinates, for a
+    hierarchical block that places one cell many times (rotated, mirrored or
+    arrayed) with only some placements on another supply. A merged shape of
+    `well_layer` is kept when it interacts with the union of `well_layer`
+    geometry drawn **directly** in instances of the `well_requires_cells`
+    cells and with none of the `well_excludes_cells` geometry, evaluated in
+    each instance's transformed frame, so no per-placement input goes stale.
+    Whole drawn shapes are selected, as for the box and marker forms; it
+    composes with the other four selectors and the degeneracy verdict
+    (`degenerate_well_selection`) is measured on the combined result. A cell
+    name absent from the layout is a spec error, not an empty selection.
+    Limits: well geometry in a named cell's *child* cells belongs to the child
+    and is not matched, and abutting wells of different classes merge into one
+    shape before selection, so the selector cannot split it. The cell name
+    comes from the stream hierarchy, not asserted coordinates, so (like the
+    marker form) a tie selected this way is **not** listed in
+    `erc_coverage.checked_by_well_assertion`.
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -525,6 +691,18 @@ draws that the spec never declared" below.
     matters). Same "second plain layer field, intersected at use time"
     shape as `stackup[0].active_layer`, generalised to a list; omitted ->
     `tap_layer` alone, unchanged.
+  - `tap_excludes` (optional array of `"<layer>/<datatype>"`, default
+    `[]`, issue #4194) — layers *subtracted* from the tap, the mirror of
+    `tap_requires`, for a tap defined by the **absence** of a marker. On a
+    process whose standard cells draw no n+ implant (n+ is the default
+    doping), an n-well tap is "active inside NWell with no p+ implant over
+    it": `{"tap_layer": "<active>", "tap_requires": ["<nwell-ish>"],
+    "tap_excludes": ["<pplus>"]}`. Composes with `tap_requires` and
+    `tap_boxes`; the result is layer-derived, so a non-degenerate tie is
+    graded `checked`, not `checked_by_assertion`. An exclusion that removes
+    nothing from the drawn `tap_layer` inside the well (including an
+    excluded layer absent from the stream) is `degenerate_tap_declaration`,
+    exactly as an ineffective `tap_requires` is. Omitted -> unchanged.
   - `tap_is_dedicated` (optional boolean, default `false`, issue #2199) —
     assert that `tap_layer` already names a **tap-only** layer (sky130's
     own `tap`, a PDK tub-contact marker), so there is nothing for
@@ -552,10 +730,39 @@ draws that the spec never declared" below.
     `left`/`bottom`/`right`/`top` must satisfy `left < right` and
     `bottom < top`.
   - `connect_to` (string, required) — the `stackup` role name the tap is
-    wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
+    wired up to (e.g. `"li1"`) — must name an entry in `stackup`. For a
+    tie with no `through`, the join is plan-view overlap, so the role's
+    conductor region must actually reach the tap sites: a `connect_to`
+    whose role never interacts with any of this tie's tap sites anywhere
+    in the stream is skipped as `degenerate_connect_target` (issue #7419)
+    — the tie cannot pass by construction, and the skip says so without
+    hiding the per-well findings. Check the stackup declares the conductor
+    path the PDK uses (e.g. LISD for ASAP7, where a tap reaches M1 only
+    through SDT -> LISD -> V0); a genuinely untied block can legitimately
+    carry both the skip and the findings, so the skip alone is not a
+    verdict of "untied".
+    The skipped record names the missing physical contact in `missing`.
+    A tap qualifier that removes no geometry retains the primary reason
+    `degenerate_tap_declaration`. On the ASAP7 tap cell, that reason applies
+    to both M1 and LISD when layer 12/0 covers the entire well. Only the M1
+    record lists `"tap-site contact with connect_to 'M1'"`.
+  - `through` (optional string) names a `vias[]` entry whose `between`
+    includes `connect_to`. For example, a tie with `"connect_to": "met1"`
+    and `"through": "cont"` reaches Metal1 only through a drawn `cont` cut
+    overlapping both the tap and Metal1. Metal1 may cross the diffusion
+    elsewhere without joining it. With no such cut the tap is electrically
+    untied. Omitting `through` connects this tie to overlapping `connect_to`
+    geometry directly.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
+- `common_native_substrate` (optional boolean, default `false`) — set to
+  `true` to assert that substrate taps outside drawn wells reach the same
+  native body, `vsubs`. Use this when the deck cannot establish substrate
+  isolation and the layout has a common substrate. The pass requires
+  qualifying drawn taps. A drawn well still owns its taps. A deck with an
+  isolation layer uses its measured islands. Declaring both a common native
+  substrate and any non-empty `ties[].isolation_boxes` is a spec error.
 - `ties_disclosure` (optional object, default `null`, issue #2234) — a
   top-level statement that this run declares no tap, and why:
   - `reason` (string, required, non-empty) — free-text explanation, e.g.
@@ -763,6 +970,77 @@ which is which. Once that triage has confirmed the islands are the
 cannot see), the entry can declare the count — `nets[].islands`, issue
 #2400 — so the name grades against it instead of an implicit 1.
 
+**Substrate continuity between supply nets (issues #4384, #5336, #5343).**
+Two `kind: "supply"` nets that are one conductor through a shared p-substrate
+(or well) are reported by `erc.supply_short` with `via: "substrate"` and a
+`body` (`kind`, `id`, `ties`, and since issue #5745 `joins`), found by a
+derived body-merge pass over the `ties[]` graph: only drawn, non-degenerate
+tap geometry joins anything, and the pass only ever *adds* findings. Whether
+it can be trusted depends on
+isolation (deep n-well / isolated p-well), which is **decidable or
+disclosed**: the substrate check is *evaluated* when isolation is derived
+(the deck declares a `substrate_isolation` layer), asserted
+(`ties[].isolation_boxes` or `common_native_substrate: true`), or provably absent; otherwise `erc_coverage.inapplicable` carries
+`{"id": "erc.supply_short", "reason": "substrate_isolation_undecidable",
+"missing": [...]}` and no pass is claimed. The earlier
+`substrate_continuity_not_modelled` reason is retired.
+
+The `body.joins` array names the geometry that performed the merge, so a
+finding can be located without bisecting the asserted boxes: one
+`{net, tie, bbox}` entry (bbox in database units, like the finding's own
+`bbox`) per tap site that welded that `net` to this `body` through `tie` —
+plus `well_box`, the 0-based index into that tie's `ties[].well_boxes`, when
+the site came from an asserted region (lowest index when several boxes
+overlap it). A tap that physically sits inside a *drawn* well taps that well,
+not the substrate, so a substrate assertion (or complement) never claims
+another tie's well taps — an asserted `well_boxes` region reaching over a
+different net's drawn well cannot fabricate a merge (issue #5745). Which
+build graded a given report — and therefore whether it could see this
+attribution at all — is recorded in `provenance.klt_version`.
+
+| PDK family (`--deck`) | Isolation layer | Evaluated when | Otherwise disclosed because |
+|---|---|---|---|
+| gf180mcu | `DNWELL` 12/0 (deck `substrate_isolation`) | always; islands derived (`vsubs_iso<n>`) | — |
+| sky130 | `dnwell` 64/18 (deck `substrate_isolation`, #5344) | always; a `dnwell` island counts only when an n-well ring closes it, otherwise it stays on shared `vsubs` | — |
+| sg13g2 / sg13cmos5l | `nbulay` 32/0 (deck `substrate_isolation`, #5345) | always; an `nbulay` island counts only when an `nwell` (31/0) ring closes it (#5359), otherwise it stays on shared `vsubs` | — |
+| asap7 | none | the spec declares isolation boxes or a common native substrate | the report identifies missing qualifying tap geometry or, when taps are present, missing isolation information |
+| no `--deck` | unknown | the spec declares isolation boxes or a common native substrate | the family is unknown, so isolation cannot be measured |
+
+When the common-substrate assertion enables the check, the report records
+`provenance.common_native_substrate: true` and includes
+`erc.supply_short.substrate` in both `erc_coverage.checked` and
+`erc_coverage.checked_by_assertion`. Omitted, null and empty
+`ties[].isolation_boxes` supply no isolation assertion.
+
+`ties[].isolation_boxes` bodies are reported as `isolation_box[l,b,r,t]` in
+`provenance.substrate_bodies`, the measured effect of each assertion (bodies
+produced; empty when the boxes cover no tap) is echoed in
+`provenance.isolation_assertions`, and the substrate work is also listed in
+`erc_coverage.checked_by_assertion`. A declared `nets[].same_net_as` pair
+suppresses the substrate-path `erc.supply_short` for that pair, and
+`erc.expected_short_missing` is satisfied by a short on the primary graph **or**
+through the substrate; a pair satisfied only through the substrate is listed in
+`provenance.substrate_declared_joins` with `via: "substrate"`. The
+`klt lvs` cross-check (`hints.short_nets`) still applies.
+
+**Isolation layers per deck (issue #5345).** The substrate-continuity
+post-pass and `klt extract`/`klt lvs` split a body only for a layer the
+extraction deck declares as `substrate_isolation`:
+
+| Deck | `substrate_isolation` | Notes |
+|---|---|---|
+| `gf180mcu` | `DNWELL` (12/0) | |
+| `sg13g2` | `nBuLay.drawing` (32/0) | counts only if an NWell (31/0) ring closes it (#5359); layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
+| `sg13cmos5l` | `nBuLay.drawing` (32/0) | same as `sg13g2` |
+| `sky130` | `dnwell` (64/18) | counts only if an `nwell` (64/20) ring closes it (#5344) |
+
+**Ring closure (issues #5344, #5359).** sky130 (DNWELL) and the IHP decks
+(nBuLay) set `substrate_isolation_needs_nwell_ring`: a drawn island isolates
+its body only when an n-well ring closes its outline; an unclosed island stays
+on the shared substrate, so a real short is still reported. gf180mcu's DNWELL
+island is still treated as isolating whether or not a ring closes it. Layouts
+that draw no isolation layer extract exactly as before.
+
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
 setup ends with a name-joining rule (e.g. `connect_implicit('*')`): two
@@ -772,7 +1050,9 @@ drawn geometry actually ties them together. An LVS run built on a deck like
 that does not independently verify this specific property — check what the
 LVS deck's own connectivity setup actually does before trusting its "match"
 verdict as proof that a `klt erc` multi-island finding is a false positive
-rather than a real one.
+rather than a real one. The same limitation applies when a `klt lvs` request explicitly
+sets [`layout.join_same_named_nets`](lvs.md#implicit-connections-by-label).
+The inline extractor follows drawn connections by default.
 
 This is a documented modeling limitation, not a commitment to a fix
 timeline: expressing "this well/tap geometry conducts, scoped only to its
@@ -801,6 +1081,33 @@ much* (declared geometry that is a device rather than a wire, producing a
 false `erc.supply_short`).
 
 ### Well/tap connectivity (`ties[]`, issue #2169)
+
+**Is my tie actually checked?** A `ties[]` entry whose tap region cannot
+be told apart from an ordinary source/drain contact is *skipped*, not
+passed: `erc.missing_tie:["<name>"]` appears in `erc_coverage.skipped`
+(reason `degenerate_tap_declaration`), `erc_status` reads `clean_partial`,
+and the text output prints an `erc_skipped:` block — but `erc_findings` is
+empty and the exit status stays `0` by design. Gate on `erc_status`, not
+the exit code. To make the declaration non-degenerate, affirm
+`tap_is_dedicated`, narrow with `tap_requires`, or assert `tap_boxes`
+(details below).
+
+**A well tied to a non-supply net (issue #4223).** `ties[].net` is not
+restricted to supply nets: it is the net the tap must be connected to, matched
+against the layout's net labels. A PMOS whose well is deliberately tied to its
+source/signal net is declared per well, by naming that net:
+
+```json
+"ties": [
+  {"name": "pmos_in_well", "well_layer": "64/20", "tap_layer": "65/44",
+   "connect_to": "li1", "net": "SRC"}
+]
+```
+
+Declared as `"net": "VDD"` instead, the same layout reports
+`erc.missing_tie` ("not connected to declared net 'VDD'"); declaring `SRC`
+clears it with no finding left recorded. One entry per well class; use
+`tap_boxes` to scope an entry to particular wells.
 
 A `ties[]` entry is evaluated in its own second extraction: the same
 `stackup`/`vias` graph, plus one extra conductor per tie — that tie's
@@ -1729,7 +2036,12 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   this finding. Legitimate unlabelled conductor on an owned role is
   declared away with `nets[].unlabelled_allowed_boxes` — see "Measuring the
   unlabelled remainder" below for the escape hatch and the decision behind
-  gating it at all.
+  gating it at all. Since issue #4374 the finding carries `islands[]`: one
+  entry per surviving (post-carve-out) unlabelled cluster, in the
+  `erc.unconnected_net` entry shape (`bbox`, `layer`, `shape_count`) plus
+  `kind` — `"device_connected"` (the cluster drives a gate) or `"floating"`
+  — so the reporter can locate each island without rebuilding connectivity.
+  `nets[].unlabelled_allow_device_connected` excuses the former.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
   the shapes its class selection keeps —
@@ -2048,6 +2360,70 @@ Both directions are graded, so the one spec can be the report of record:
 the tie can no longer be silently cut (that is a finding), and a correct
 layout is no longer permanently red (that is a pass).
 
+## Recipe: supply-rail continuity and well ties across abutting cells
+
+There is no dedicated rail-check verb: a row or ring of abutting cells is
+checked by composing `nets[]` (`kind: "supply"`) and `ties[]`. Tested by
+`tests/test_erc.py::test_rail_recipe_*` on a three-cell abutted row (each
+cell draws a `li1` rail segment labelled with its rail name, plus an `nwell`
+with a tap strapped to the rail).
+
+```json
+{
+  "stackup": [
+    { "name": "poly", "layer": "1/0", "role": "gate" },
+    { "name": "li1", "layer": "3/0", "label_layer": "3/5" }
+  ],
+  "nets": [{ "name": "VDD", "kind": "supply" }],
+  "ties": [
+    {
+      "name": "nwell_tie",
+      "well_layer": "10/0",
+      "tap_layer": "11/0",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VDD"
+    }
+  ]
+}
+```
+
+```
+klt erc row.gds spec.json --top TOP --format json
+```
+
+Add one `nets[]` entry per rail (`VSS`, ...). `tap_is_dedicated` is
+required whenever `tap_layer` is the only thing marking a tap; without it the
+tie is *skipped* (`degenerate_tap_declaration`) and `erc_status` reads
+`clean_partial` — see "Well/tap connectivity" above.
+
+| Case | `erc_status` | Findings |
+| ---- | ------------ | -------- |
+| (a) clean row | `clean` | none; `nets[].matched_islands == 1` |
+| (b) rail cut at an abutment | `violations` | `erc.unconnected_net` on `VDD`, "2 disconnected electrical islands"; `islands[].bbox` straddle the break |
+| (c) a cell's rail labelled `VSS` but drawn continuous with `VDD` | `violations` | `erc.supply_short` (`net`/`other_net` = the two names), when both are declared `kind: "supply"` |
+| (d) a well with no tap | `violations` | `erc.missing_tie`, "no 'nwell_tie' tap contact drawn" (a tap not reaching `VDD` reports "not connected to declared net") |
+
+Gate on `erc_status`, not the exit code: the CLI exits `3` on any of (b)–(d)
+but `4` on a clean run without `--pdk` (the antenna half is `not_checked`; see
+"Exit codes").
+
+**What this does not see** — do not read a clean row as proof of continuity:
+
+- **Unlabelled cells.** Only *labelled* islands are counted
+  ("`erc.unconnected_net` counts labelled islands, not conductor islands"). A
+  cut that orphans a segment carrying no label reads clean on the rail check
+  (its tap, if any, still trips `erc.missing_tie`). Label the rail in every
+  cell, or declare `nets[].roles: ["li1"]` so the unlabelled remainder fails as
+  `erc.unlabelled_conductor`.
+- **Rails strapped through well body.** Continuity that exists only through
+  diffusion/well is not modelled and shows as a false multi-island finding
+  ("Known false-positive: diffusion/well continuity is not modeled"); declare
+  `nets[].islands` or cross-check with `klt lvs`.
+- **A rail broken on a layer the spec does not declare**, or bridged only by a
+  via missing from `vias[]`.
+- **Spacing** of taps from devices — see [`klt tap-distance`](tap-distance.md).
+
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
 For every non-gate `stackup` level (`stackup[1:]` — the gate role itself,
@@ -2138,9 +2514,151 @@ convention of calling out every deliberately-uncovered rule.
 are `klt erc` *via* roles (the spec's `vias[]` array), not `stackup`
 roles, so they have no `levels[]` entry to attach one to.
 
-An unrecognised `--pdk` name (anything other than `sky130`) is a clean
-exit-1 error, checked eagerly before the layout is even loaded — see "Exit
-codes" below.
+### SG13G2 antenna-ratio limits
+
+`--pdk ihp-sg13g2` uses the IHP-Open-PDK v0.3.0 antenna limit `Ant_b` from
+[`ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json`](https://github.com/IHP-GmbH/IHP-Open-PDK/blob/v0.3.0/ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json)
+(cumulative metal area / gate area, *without* a protection diode; fetched
+2026-10-17). The `stackup` role names are the IHP layer names:
+
+| `stackup` role name | Limit | Source rule id |
+| -------------------- | ----: | --------------- |
+| `Metal1` … `Metal5`   | 200   | `Ant_b` |
+| `TopMetal1`            | 200   | `Ant_b` |
+| `TopMetal2`            | 200   | `Ant_b` |
+
+Scope notes: `Ant.a` (GatPoly over field oxide), `Ant.c` (Cont/gate) and
+`Ant.d` (cumulative via/gate) cannot produce a `levels[]` verdict — the gate
+role is never graded and cont/via are `vias[]` roles. `Ant.e`/`Ant.f` (the
+with-diode limits) are not used because `klt erc` does not model protection
+diodes. A spec that names its layers differently (e.g. `met1`) leaves those
+levels `unchecked` and rolls up to `clean_partial`.
+
+An unrecognised `--pdk` name (anything other than `sky130`, `ihp-sg13g2` or
+`gf180mcu`) is a clean exit-1 error, checked eagerly before the layout is even
+loaded — see "Exit codes" below.
+
+### gf180mcu antenna-ratio limits
+
+`--pdk gf180mcu` uses the metal antenna limits from
+[`libs.tech/klayout/tech/drc/rule_decks/antenna.rb`](https://github.com/google/gf180mcu-pdk/blob/f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7/libs.tech/klayout/tech/drc/rule_decks/antenna.rb)
+of `google/gf180mcu-pdk` at commit `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`
+(the same pin as the curated gf180mcu deck), *without* a protection diode.
+Every metal level has the same limit, so one table covers the 3LM/4LM/5LM/6LM
+stacks; a level is graded only when the spec names it. The `stackup` role names
+are the deck's layer names:
+
+| `stackup` role name | Limit | Source rule id |
+| -------------------- | ----: | --------------- |
+| `Metal1`              | 400   | `ANT.16_i_ANT.2` |
+| `Metal2`              | 400   | `ANT.16_i_ANT.3` |
+| `Metal3`              | 400   | `ANT.16_i_ANT.4` |
+| `Metal4`              | 400   | `ANT.16_i_ANT.5` |
+| `Metal5`              | 400   | `ANT.16_i_ANT.6` |
+| `MetalTop`            | 400   | `ANT.16_i_ANT.7` |
+
+**Approximation, not exact equivalence.** The deck's metal rules measure
+`perimeter(layer) × thickness / gate area` (0.54 µm; the deck's
+`metal_top_thickness` for the topmost metal). `klt erc` computes cumulative
+connected *area* / gate area, the same connectivity-area-only approximation the
+sky130 table carries, so a verdict here can differ from the deck's own check.
+
+**Not graded** (no `levels[]` verdict possible): `ANT.1` (Poly2 perimeter /
+gate, 200), `ANT.8` (Contact / gate, 10), the via ratios `ANT.16_*_ANT.9`
+… `ANT.13` (Via1…Via5 area / gate, 20) — the gate role is never graded and
+contact/via are `vias[]` roles — the MIM-referenced `ANT.16_iii_*` rules, and
+the with-diode credit (`klt erc` does not model protection diodes). A spec that
+names its layers differently (e.g. `met1`) leaves those levels `unchecked` and
+rolls up to `clean_partial`.
+
+On a violating GF180 gate, `gates[].has_contacted_diffusion` records whether
+the completed net's Metal1 reaches COMP outside drawn Poly2 through a Contact.
+A gate contact alone or active underneath an insulated strap yields `false`.
+A missing or incompatible Poly2, COMP, Metal1 or Contact declaration yields
+`null`. The field is present only for a violating GF180 antenna verdict.
+
+The measurement identifies nets for comparison with the foundry deck. The ERC
+area ratio, limit and verdict still describe the uncredited accumulation. The
+amount of diode credit at a particular fabrication stage requires the foundry
+deck's geometry and connectivity rules.
+
+### Caller-supplied antenna limits (`antenna_limits`, issue #4090)
+
+A process with no built-in `--pdk` table (ASAP7 and sg13cmos5l) can still be antenna-graded: the
+spec file takes an optional top-level `antenna_limits` array.
+
+```json
+"antenna_limits": [
+  {"layer": "M1", "max_ratio": 400.0, "source": "<where you got this number>"}
+]
+```
+
+- `layer` names a `stackup[]` entry other than the gate role, at most once.
+  `max_ratio` is a finite number > 0. `source` is a required non-empty
+  citation string, so every limit stays cited like the built-in tables.
+  Unknown keys, unknown or gate layers, duplicates and bad numbers are
+  rejected with the usual path-qualified error (exit 1).
+- **The numbers are the caller's responsibility.** `klt` vendors no ASAP7
+  limits; it grades against what the spec says and echoes the citation.
+- **Precedence:** a spec entry wins over the `--pdk` table for the same
+  layer; layers with no spec entry fall back to the `--pdk` table, and with
+  neither the level stays `unchecked`.
+- **Provenance:** a spec-graded level reports `antenna_ratio_max` = the
+  limit and `antenna_ratio_source` = `"spec antenna_limits[<i>]: <source>"`.
+  Same area-only, no-diode model as the built-in tables.
+- A level graded from a spec limit counts as checked in `coverage`. A level
+  still ungraded with no `--pdk` and no spec `antenna_limits` entry is
+  skipped with `missing_antenna_pdk`. With `--findings-only` the antenna
+  accumulation is still skipped; `antenna_limits` is accepted and ignored.
+
+### ASAP7: `erc.floating_gate` and `erc.unconnected_net` are not meaningful yet (issue #4610)
+
+Measured on a routed two-`INVx1` block (`tests/test_asap7_routed_block.py`)
+with a stackup of `7/0` (gate), `16/0` (LIG), `19/0` (M1), `20/0` (M2) and
+vias `18/0` (V0), `21/0` (V1):
+
+- A spec can only join layers through a `vias[]` layer, and ASAP7 lands LIG on
+  the gate by direct overlap, so every gate poly reads `erc.floating_gate`
+  (6 findings for two inverters, dummy poly included). That is a limit of the
+  spec model, not a layout defect.
+- Declaring the LIG layer itself as a gate-to-LIG "via" clears the finding but
+  the spec cannot subtract the gate-cut (`10/0`): the dummy poly bridges the
+  LIG supply rails, and all gates collapse to one net carrying the supply and
+  signal names.
+- `erc.unconnected_net` counts labelled islands, so it is only as good as the
+  `<metal>/251` text in the stream; a stream with no such text resolves zero
+  islands.
+
+Until the spec can model the gate cut and direct LIG-on-gate contact, do not
+read these two rules on ASAP7 as a layout verdict; use `klt lvs` for
+connectivity.
+
+**Declaring a gate-level carve-out (issue #4820).** A transistor gate wired only
+through local interconnect cannot be expressed as connected, so
+`erc.floating_gate` can be excused per gate with the top-level
+`floating_gate_allowed` spec key:
+
+```json
+"floating_gate_allowed": [
+  {"box": [left, bottom, right, top], "reason": "LIG-only gates, no V0 cut"}
+]
+```
+
+- `box` is a micrometre box (same shape as `nets[].unlabelled_allowed_boxes`);
+  `reason` is required and non-empty; unknown keys, inverted boxes and empty
+  reasons are spec errors. `null` / `[]` / omitted leave the report byte-identical.
+- A floating gate whose whole gate-role region lies **inside** one box raises no
+  `erc.floating_gate` finding; a gate only partly inside, or outside, still does.
+- The excusal is a **disclosure, not a pass**: the gate's
+  `erc.floating_gate:["gateN"]` id moves from `erc_coverage.checked` to
+  `erc_coverage.inapplicable` with reason `floating_gate_disclosed`, and
+  `erc_status` / `erc_finding_count` come from the surviving findings only.
+  With `--compact` the aggregate `checked` id stays only while some gate was
+  really evaluated.
+- `provenance.floating_gate_allowed` (present only when the key is declared)
+  echoes every box with its `reason`, `matched_gates` (0 = stale box) and the
+  excused `gates[]` (`gate_id`, `bbox`, `reason`). Raw `gates[].levels[]` stay raw.
+- `--findings-only` and full runs give identical findings and exclusions.
 
 ## Antenna-violation fix guidance (Phase 3, issue #908)
 
@@ -2194,8 +2712,10 @@ issue #2179 each carries its own roll-up:
 | `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.unlabelled_conductor`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
-**this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
-above); any other PDK name is an exit-1 error, so a non-sky130 design is run
+**this command carries for sky130, ihp-sg13g2 and gf180mcu only** (see "Sky130
+antenna-ratio limits", "SG13G2 antenna-ratio limits" and "gf180mcu
+antenna-ratio limits" above); any other PDK
+name is an exit-1 error, so a design on another PDK is run
 with `--pdk` omitted. Every level then comes back `verdict: "unchecked"`,
 the antenna scope's checked work is known-zero, and the
 [common rollup rule](../coverage-contract.md) correctly refuses to call that
@@ -2213,7 +2733,7 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
 - **`erc_status: "clean_partial"`** — no finding, but some requested
   connectivity work was skipped: today that means a **degenerate `ties[]`
   declaration**, whose `erc.missing_tie` verdict could not be told apart
-  from one that never looked at a tap. Four forms, all under "Well/tap
+  from one that never looked at a tap. Five forms, all under "Well/tap
   connectivity" above: a degenerate *tap* (issue #2199,
   `degenerate_tap_declaration` — the declared tap region is
   indistinguishable from an ordinary source/drain contact reaching the
@@ -2228,8 +2748,13 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   in this stream: a typo'd layer/datatype, a PDK whose tub layer number
   changed, a GDS written without the tub layer; never applicable to an
   asserted `well_boxes` region, which cannot be empty after spec
-  validation). A successful, but not unconditional, result: read
-  `erc_coverage.skipped` for which tie, and which of the four.
+  validation), and a *disjoint connect target* (issue #7419,
+  `degenerate_connect_target` — a through-less tie whose `connect_to`
+  role interacts with none of its tap sites anywhere in the stream, so
+  the join cannot fire: most often a stackup missing the conductor path
+  the PDK uses, e.g. ASAP7 without LISD). A successful, but not
+  unconditional, result: read `erc_coverage.skipped` for which tie, and
+  which of the five.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
   listed for completeness: `erc_coverage` grades at least one gate, or --
   on a passive-only cell with no transistor gate (issue #2896) -- at least
@@ -2344,7 +2869,8 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
   validation, but the per-gate/per-level `skipped` entries become a single
   entry (id `antenna:[]`, reason `findings_only`) and the
   `gate_reference_level` `inapplicable` entries a single entry (id
-  `antenna:["gate_reference_level"]`). A `no_gates` entry is kept as is.
+  `antenna:["gate_reference_level"]`). Each entry's `count` gives the number
+  of units it represents. A `no_gates` entry keeps its unit shape.
   `coverage_state` is unchanged.
 - `status`, `erc_status`, `erc_findings`, `erc_finding_count`,
   `erc_coverage`, `nets`, `provenance` and the exit code are identical to the
@@ -2352,8 +2878,43 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
 - `klt signoff` still recognises the envelope as an ERC report (a `gates`
   list plus `gate_role`) and grades it the same.
 
-Passing `--omit-antenna-tables` without `--findings-only` is a clean exit-1
-error: a full run's `gates[]` carries real measurements.
+Without `--findings-only`, the flag is also accepted on a `--pdk`-less run
+whose spec `antenna_limits` grade no level (issue #4385): the same `gates: []`
+projection applies, the aggregate `skipped` entry carries reason
+`missing_antenna_pdk` instead of `findings_only`, and `status` /
+`erc_status` / the exit code are identical to the run without the flag. With
+`--pdk` (and no `--findings-only`), or when `antenna_limits` grade at least
+one level, it is a clean exit-1 error: `gates[]` then carries real
+verdicts.
+
+### Compact findings-only reports
+
+On a large macro a findings-only envelope is dominated by fields that are
+null by construction (`gates[].levels[]`, one `coverage.skipped` record per
+(gate, level), one `erc.floating_gate` checked id per gate). `--compact`
+(issue #2965) summarises them:
+
+- `gates` stays a **list** but is empty (`klt signoff`'s ERC classifier keys
+  on `gates` being a list); `gate_count` still carries the count.
+- A top-level `compact` object is added:
+  `{gate_count, antenna_levels_skipped, antenna_reference_levels,
+  floating_gate_checked, skipped_reason}` (`skipped_reason` is
+  `"findings_only"`).
+- `coverage.skipped` holds one aggregate record (id `antenna:["levels"]`,
+  reason `findings_only`) when there are skipped levels. With at least one
+  gate, `coverage.inapplicable` holds one reference-level record
+  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`).
+  Each `count` records the units the group represents. A zero-gate cell
+  reports the unit `no_gates` entry.
+- `erc_coverage.checked` carries a single `erc.floating_gate:[]` id in place
+  of one per gate (present iff a gate exists, so the roll-up is unchanged).
+  Every other `erc_coverage` entry — ties, nets, assertions — is untouched.
+
+`nets`, `erc_findings`, `erc_status`, `status` and `provenance` are
+identical to the non-compact findings-only run. `--compact` without
+`--findings-only` is a clean exit-1 error: a full-antenna run's per-gate rows
+carry real verdicts, so there is nothing null to summarise. Default output
+omits the `compact` key.
 
 ## JSON schema (the contract)
 
@@ -2362,8 +2923,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 1,
-  "file": "routed.gds",
+  "schema_version": 2,
+  "file": {"path": "routed.gds", "scope": "repo"},
   "spec": "erc.json",
   "pdk": "sky130",
   "gate_role": "poly",
@@ -2544,11 +3105,13 @@ forward regardless (a `diode_insertion` remedy):
 
 | Field            | Type            | Description                                                                                    |
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------ |
-| `schema_version` | integer         | `1`, unchanged since Phase 1a — Phase 1b's and Phase 1c's fields were both added additively (see "Phase scope" above). |
-| `file`           | string          | The input layout path exactly as provided.                                                       |
+| `schema_version` | integer         | `2` (issue #2703: `file` became a `{path, scope}` envelope; 1 → 2). Every Phase 1b/1c field was added additively (see "Phase scope" above). |
+| `file`           | object          | (issue #2703) The input layout as `{path, scope}`: `scope: "repo"` with a repo-relative `path`, or `scope: "external"` with `path: null` outside any repo (the absolute path is never emitted). `--check`/`--rerun` still accept a schema-1 bare string. |
+| `top`            | string          | Name of the cell ERC analysed, including an automatically selected top. |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
+| `compact`        | object          | (issue #2965) Present **only** with `--findings-only --compact`: counts replacing the omitted per-gate rows — see "Compact findings-only reports" above. Absent otherwise. |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
 | `gate_count`     | integer         | The number of gates; `0` on a passive-only cell (issue #2896). Equals `len(gates)` except under `--omit-antenna-tables`, where `gates` is `[]`.                                                                                     |
 | `antenna_tables_omitted` | boolean | (issue #3011) Whether `--omit-antenna-tables` was passed: `gates` is `[]` and the antenna `coverage` entries are collapsed. `false` for every other run — see "Findings-only runs" above. |
@@ -2562,8 +3125,8 @@ forward regardless (a `diode_insertion` remedy):
 | `levels[].step_area_um2` | number \| null | This net's own merged area on this role's layer, in µm². `null` on a `--findings-only` run (issue #2219) — the accumulation was not performed. |
 | `levels[].cumulative_area_um2` | number \| null | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm². `null` on a `--findings-only` run. |
 | `levels[].antenna_ratio` | number \| null | `cumulative_area_um2 / gate_area_um2` for this level; `null` on a `--findings-only` run. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
-| `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
-| `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
+| `levels[].antenna_ratio_max` | number \| null | The resolved limit for this role (the spec's `antenna_limits` entry if any, else the `--pdk` table), or `null` when unchecked (no limit for the role, or the gate level). |
+| `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), `"spec antenna_limits[<i>]: <source>"` for a caller-supplied limit, or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
 | `levels[].remedy` | object \| null | Fix guidance (issue #908, Phase 3) — `null` unless `verdict == "violate"`. See "Antenna-violation fix guidance" above and below. |
 | `remedy.type`    | string          | `"layer_jumping"` or `"diode_insertion"` — see "Antenna-violation fix guidance" above for the selection rule. |
@@ -2608,14 +3171,25 @@ The [common v1 coverage contract](../coverage-contract.md) is additive to
 this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
 
+With `--pdk`, ERC matches non-gate stackup names to the antenna rule table
+case-insensitively. Reports keep the spelling from the spec, and a spec's
+layer-specific limit takes precedence. If none of the names match, ERC prints
+one warning to stderr listing the stackup names and the PDK table's keys.
+
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
-actually compared against a limit. Missing PDK or level limits are skipped
+actually compared against a limit. Levels with no limit (no `--pdk` and no spec `antenna_limits` entry, or a
+`--pdk` table lacking the role) are skipped
 (`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
 of a `--findings-only` run (`findings_only`, issue #2219 — the caller
 declined the accumulation, the same shape of caller-side skip as omitting
 `--pdk`); the gate reference level is inapplicable. A cell with no gate at all
 (passive-only, issue #2896) records one inapplicable entry, id `antenna:[]`,
 reason `no_gates` -- independent of `--pdk`/`--findings-only`.
+
+When at least one antenna level is graded, `coverage.skipped` groups the
+ungraded gate/level pairs by skip reason and `coverage.inapplicable` groups
+the gate reference levels separately. Each group's `count` gives its units
+of work. Checked IDs and `gates[].levels[]` keep the per-gate results.
 
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
@@ -2645,6 +3219,17 @@ connectivity finding exists; read `erc_status`/`erc_coverage` for the
 connectivity verdict. A run with no gate and no declared `nets[]`/`ties[]`
 asked for nothing gradable and is exit 1, not a zero-coverage report.
 
+**Gating on ties (issue #4915).** `erc_coverage.missing_tie_checked` is an
+always-present boolean: `true` iff at least one `erc.missing_tie:*` identity is
+in `checked`. It is `false` when the spec declares no `ties[]` (with or without
+`ties_disclosure`) and when every declared tie was skipped as degenerate. A gate
+that counts `erc.missing_tie` findings must require `missing_tie_checked ==
+true` before reading zero findings as a pass; `erc_status: clean` alone does
+not imply the tie check ran. For a PDK whose library has no tap/endcap cells,
+declare `ties_disclosure` (`kind: "unexpressible"`) so the inapplicable reason
+is `ties_disclosed_unexpressible` rather than `no_ties_declared`. The field is
+additive and moves no verdict.
+
 A disclosure that names `undeclared_classes` (issue #2541) additionally
 records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
 class, carrying the same reason token, whether or not `ties` is empty —
@@ -2655,7 +3240,7 @@ rather than skipped for the same reason the empty-`ties` disclosure is, so
 it never moves `erc_status`.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**:
-work that was requested and could not be performed. Four reasons today —
+work that was requested and could not be performed. Five reasons today —
 `degenerate_tap_declaration` (issue #2199: the declared tap region is
 indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
@@ -2664,12 +3249,20 @@ is indistinguishable from the whole top-cell extent),
 selection — marker layers, or issue #2540's literal-geometry
 `well_requires_boxes`/`well_excludes_boxes`, one test for all four — kept every
 merged shape of the drawn `well_layer`, or none of
-them), and `empty_well_region` (issue #2377: a *drawn* `well_layer` that
+them), `empty_well_region` (issue #2377: a *drawn* `well_layer` that
 draws no geometry at all in this stream — a typo'd layer/datatype, a PDK
 whose tub layer number changed, a GDS written without the tub layer; never
 applicable to an asserted `well_boxes` region, which cannot be empty after
-spec validation). The well tests are applied first when more than one would
-hold, since the tap narrowing is measured inside the well region. Any of
+spec validation), and `degenerate_connect_target` (issue #7419: a
+through-less tie whose `connect_to` stackup role interacts with none of
+its tap sites anywhere in the stream — no tap site of this tie touches
+`connect_to`, so the tie cannot pass; check the stackup declares the
+conductor path the PDK uses, e.g. LISD for ASAP7. The findings stand: a
+genuinely untied block can legitimately carry both this skip and the
+per-well findings, which is the residual ambiguity the skip exists to
+name). The well tests are applied first when more than one would
+hold, since the tap narrowing is measured inside the well region, and the
+connect-target test last, after the tap test. Any of
 them is a requested skip, so it does make the scope partial — see "A
 degenerate tie is reported as skipped, not as a pass", "A block with no
 drawn well at all", and "One well layer, two bias classes" above.
@@ -2715,7 +3308,9 @@ any other checked, non-degenerate tie:
   declared. Pure disclosure, mirroring `klt drc`'s
   `coverage.layers_in_stream_without_rules`: it is not an input to
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
-  curated deck's conducting layers when `--deck` is given. See "Layers this
+  curated deck's conducting layers when `--deck` is given, except that an
+  undeclared layer carrying text shapes is always named (an undeclared label
+  purpose otherwise reads as absent labels). See "Layers this
   stream draws that the spec never declared" above.
 - `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
   non-degenerate tie that asserted its substrate region (`well_layer: null` +
@@ -2758,6 +3353,128 @@ graded, and nothing could be) alongside a real `erc_status: "clean"` /
 Completed refusal/failure reports remain on stdout; actual invocation errors
 retain exit 1 and the stderr error envelope.
 
+## `--check` / `--rerun`
+
+Same contract as [`klt drc --check`](drc.md) / [`klt lvs --check`](lvs.md)
+(shared core: `klayout_tools/_report_verify.py`): verify that a committed
+`klt erc --format json` report still corresponds to the committed inputs,
+without hand-rolling a hash comparison.
+
+```
+klt erc --check erc-report.json            # cheap: re-hash the recorded inputs
+klt erc --check erc-report.json --rerun    # full: re-run ERC and diff
+```
+
+`--check` is mutually exclusive with the positional `<file>`/`<spec>` (the
+inputs are read from the report's own `file`/`spec` echo; combining them is an
+argparse usage error, exit 2). `--rerun` without `--check`, a missing report,
+or one that is not valid JSON is a clean exit-1 error, never a traceback.
+
+**Cheap mode (default)** re-hashes the report's echoed `file` and `spec` and
+compares them with `provenance.input.content_hash` and
+`provenance.spec.content_hash` (plus `provenance.deck.content_hash` when the
+run used `--deck`), with no ERC engine run. A report that recorded no hash is
+`drifted`, never a false pass. Relative echoed paths resolve against the
+current working directory; an echoed path that names no file carries an
+`input_not_found` block on its `checks[]` entry, the shared diagnostic `klt
+drc --check` and `klt lvs --check` attach: five keys (`path`, `resolved`,
+`found_relative_to_report`, `resolved_against`, `hint`), exactly `klt drc
+--check`'s set. (`klt lvs --check`'s three entries add a sixth,
+`resolved_repo_root`, which ERC does not emit.) Because `--check` is
+mutually exclusive with the positional inputs, `klt erc` offers no
+input-override flag, so the `hint` names only the report's directory to run
+`--check` from -- no "or pass …" clause, as for `klt lvs --check`'s runset
+deck and unlike its layout and reference or `klt drc --check`'s input. The
+deck line (`provenance.deck.content_hash`, `--deck` runs) carries no such
+block; it resolves packaged decks by name.
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "erc-report.json",
+  "status": "match",
+  "checks": [
+    {"field": "provenance.input.content_hash", "expected": "sha256:…", "actual": "sha256:…", "match": true},
+    {"field": "provenance.spec.content_hash", "expected": "sha256:…", "actual": "sha256:…", "match": true}
+  ],
+  "advisories": []
+}
+```
+
+`advisories` lists `provenance.klt_version` / `provenance.klayout_version`
+differences between the report and the running build. It is informational: it
+never affects `status` or the exit code.
+
+**Full mode (`--rerun`)** re-runs ERC from the report's echoed
+`file`/`spec`/`pdk`/`top`/`findings_only`/`antenna_tables_omitted` (and
+`provenance.deck.name`, when there is one) and diffs the fresh report against the committed one, excluding
+`provenance.klt_version`, `provenance.klt_git_commit`,
+`provenance.klt_reinstall_spec`, `provenance.klayout_version` and
+`provenance.pdk.version`. The payload is `{"mode": "rerun", "status", "drift":
+[{"field", "committed", "fresh"}, …], "fresh": {…}}`; every drifted field is
+named.
+
+`erc_coverage.inapplicable` is build-dependent by design and is deliberately
+**not** excluded from the rerun diff: it is verdict-adjacent coverage
+disclosure (a newer build may disclose more, e.g. `erc.supply_short` with
+`substrate_isolation_undecidable`), and excluding it would let a rerun hide a
+coverage regression. Grade a report with the same-or-newer build that produced
+it, or pin the producing version (`uvx --from "klayout-tools==X" klt erc
+--check … --rerun`). A cross-build exit `3` limited to
+`provenance.klt_git_commit`/`klt_reinstall_spec` (an older grader that predates
+their exclusion) or to a new `erc_coverage.inapplicable` entry is a tool-version
+signal, not layout drift.
+
+When rerunning an earlier ERC report with a build that emits counted antenna
+records, the coverage lists may differ in representation. The rerun diff
+reports that change even when the antenna verdicts agree.
+
+Earlier reports without `top` replay using automatic cell selection.
+A single-top stream can still match. Replaying an older report against a
+multi-top stream requires a new report that records the selected cell.
+
+**Exit codes:** `0` — `status: "match"`; `3` — `status: "drifted"`; `1` —
+failed to verify (missing/invalid report, or the rerun itself errored); `2` —
+usage error. These are the `--check` meanings only; a normal run keeps the
+table in "Exit codes" below.
+
+## `--validate-spec` (issue #4034)
+
+Check a spec file on its own, before any layout exists:
+
+```
+klt erc --validate-spec spec.json
+```
+
+It runs exactly the schema and cross-reference checks a normal run performs
+before it opens a layout (the same code path: unknown keys, `stackup`/`vias`/
+`nets`/`ties`/`ties_disclosure`/`devices` shape, and role references such as
+`vias[].between`, `ties[].connect_to`, `nets[].same_net_as` and
+`devices[].on`). It reads no layout, produces no `status`/`erc_status`
+verdict, and emits no label-layer warning. A defect is the same exit-1
+field-path error a normal run gives.
+
+`--validate-spec` is mutually exclusive with the positional `<file>` and with
+`--check` (argparse usage error, exit 2). The layout-only flags `--output`,
+`--top`, `--pdk`, `--deck`, `--findings-only`, `--omit-antenna-tables`,
+`--compact` and `--rerun` are rejected with a clean exit-1 error rather than
+ignored.
+
+```json
+{
+  "schema_version": 1,
+  "mode": "validate_spec",
+  "status": "valid",
+  "spec": "spec.json",
+  "counts": {"stackup": 4, "vias": 3, "nets": 0, "ties": 0, "devices": 0}
+}
+```
+
+`status` is always `"valid"` on success (a spec that fails to validate exits
+`1` with the error envelope instead). **Exit codes:** `0` valid; `1` invalid
+or unreadable spec, or a conflicting flag; `2` usage error.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
@@ -2775,7 +3492,7 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
 
 **The exit code answers the *antenna* question**, because `status` does. On
-a PDK with no antenna-ratio table — every PDK but sky130 today, any run
+a PDK with no antenna-ratio table — every PDK but sky130, ihp-sg13g2 and gf180mcu today, any run
 that omits `--pdk`, and every `--findings-only` run — it is therefore `4`
 for every layout, however clean the design is. That is not a signal that the run failed or that nothing was
 checked: the connectivity rules ran, and their verdict is `erc_status` in
@@ -2847,3 +3564,5 @@ ingestion harness exists is a natural follow-on.
   geometric, whole-cell (not net-aware) approximation of an antenna check
   that predates this connectivity model; `klt erc` is the net-aware
   successor this document's "Coverage" section anticipates.
+
+See also [`klt tap-distance`](tap-distance.md) for a Euclidean distance bound from subject geometry to qualifying taps (latch-up / tie spacing), which `ties[]` does not express.

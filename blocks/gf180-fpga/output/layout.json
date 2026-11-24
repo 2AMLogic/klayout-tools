@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:11.003651+00:00",
+  "slug": "gf180-fpga",
+  "name": "Gf180 Fpga",
+  "description": "eFPGA logic tile on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Logic tile",
+        "fallback": "4\u00d7 LUT4 + 1 FF per LUT, no carry (inherited)",
+        "target": "same",
+        "stretch": "carry chain as a later tile revision"
+      },
+      {
+        "parameter": "Routing",
+        "fallback": "4 tracks/edge, FABulous-style switch matrix (inherited)",
+        "target": "same"
+      },
+      {
+        "parameter": "Demonstration fabric",
+        "fallback": "2\u00d72 tiles",
+        "target": "2\u00d72 to 4\u00d74, single tile type"
+      },
+      {
+        "parameter": "Bitstream",
+        "fallback": "open, documented, FABulous-generated (inherited)",
+        "target": "same"
+      },
+      {
+        "parameter": "Library, supply",
+        "fallback": "`gf180mcu_fd_sc_mcu9t5v0`, 3.3 V flavour",
+        "target": "`gf180mcu_fd_sc_mcu7t5v0`, 5.0 V flavour"
+      },
+      {
+        "parameter": "Metal stack",
+        "fallback": "`gf180mcuD`, Metal5 also allowed for matrix signals",
+        "target": "`gf180mcuD` (5 metals), matrix on Metal2\u2013Metal4",
+        "stretch": "4-metal `gf180mcuB`"
+      },
+      {
+        "parameter": "Tile area / aspect",
+        "fallback": "same tile at lower utilization",
+        "target": "abuts in a grid, aspect 1:2 to 2:1, area reported as measured (no ceiling ratified)"
+      },
+      {
+        "parameter": "Tile physical design",
+        "fallback": "DRC/LVS clean on the tile",
+        "target": "DRC/LVS clean on tile and assembled fabric, routed without congestion overrides",
+        "stretch": "SDF-annotated gate-level re-simulation"
+      },
+      {
+        "parameter": "Timing",
+        "fallback": "setup/hold-clean at all 15 library corners at a relaxed 20 ns clock",
+        "target": "same at a period pre-registered before the run",
+        "stretch": "Fmax from bisected, characterized data"
+      }
+    ],
+    "status_note": "ratified \u2014 see [`spec/target-spec.md`](spec/target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-fpga",
+    "ref": "764df5f6734c8e926b048894892d8d9a82bf0223",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

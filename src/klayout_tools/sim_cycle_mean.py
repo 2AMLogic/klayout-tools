@@ -45,13 +45,13 @@ computed. Every failure is ``status: "error"``, ``value: null`` with a
 
 from __future__ import annotations
 
-import bisect
 import math
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings
+from . import sim_crossings, sim_measurement_kind, sim_window
+from ._jsonnum import is_int
+from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
 #: ambiguous, so it is refused).
@@ -72,15 +72,9 @@ _ALLOWED_KEYS = frozenset({"signal", "align", "level", "edge", "from", "cycles"}
 _VECTOR_PREFIX = "__klt_cmean_"
 
 
-def _error(message: str) -> Exception:
-    from .sim import SimError
-
-    return SimError(message)
-
-
 def is_cycle_mean(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``cycle_mean``."""
-    return spec.get("cycle_mean") is not None
+    return sim_measurement_kind.declares(spec, "cycle_mean")
 
 
 def cycle_mean_measurements(
@@ -100,14 +94,14 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
     """Validate one ``measurements[].cycle_mean`` object, raising
     :class:`~klayout_tools.sim.SimError` with a corrective message."""
     if not isinstance(body, dict):
-        raise _error(
+        raise SimError(
             f"measurement '{name}': 'cycle_mean' must be an object, e.g. "
             '{"signal": "v(out)", "align": "v(clk)", "level": 0.9, '
             '"cycles": 8}'
         )
     unknown = sorted(set(body) - _ALLOWED_KEYS)
     if unknown:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': unknown cycle_mean key(s) {unknown}; "
             f"allowed: {sorted(_ALLOWED_KEYS)}"
         )
@@ -116,21 +110,17 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
     sim_crossings._validate_level(name, body.get("level"))
     edge = body.get("edge", "rise")
     if edge not in CYCLE_EDGES:
-        raise _error(
+        raise SimError(
             f"measurement '{name}': cycle_mean.edge must be one of "
             f"{list(CYCLE_EDGES)} (got {edge!r})"
         )
     cycles = body.get("cycles")
-    if (
-        not isinstance(cycles, int)
-        or isinstance(cycles, bool)
-        or not 1 <= cycles <= MAX_CYCLES
-    ):
-        raise _error(
+    if not is_int(cycles) or not 1 <= cycles <= MAX_CYCLES:
+        raise SimError(
             f"measurement '{name}': cycle_mean.cycles is required and must be "
             f"an integer in [1, {MAX_CYCLES}] (got {cycles!r})"
         )
-    sim_crossings._window_bound(name, body, "from")
+    sim_window.window_bound(name, body, "from", form="cycle_mean")
 
 
 def validate_cycle_mean_context(
@@ -141,13 +131,13 @@ def validate_cycle_mean_context(
     declared = cycle_mean_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise _error(
-            f"measurement '{declared[0]['name']}' declares 'cycle_mean', "
-            "which averages a transient signal over reference cycles and so "
-            f'requires analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="cycle_mean",
+        required="tran",
+        explanation="averages a transient signal over reference cycles",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -155,9 +145,13 @@ def validate_cycle_mean_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each cycle_mean measurement writes per corner.
+_RAWFILE_PREFIX = "cycle_mean"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where cycle_mean measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"cycle_mean_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -194,6 +188,11 @@ class CycleMeanOutcome:
     error: str | None = None
     code: str | None = None
 
+    @property
+    def value(self) -> float | None:
+        """Scalar used to grade this measurement."""
+        return self.mean
+
     def report(self) -> dict[str, Any]:
         """The response's ``cycle_mean`` object for this measurement."""
         return {
@@ -201,21 +200,6 @@ class CycleMeanOutcome:
             "t_end": self.t_end,
             "cycles_used": self.cycles_used,
         }
-
-
-def _value_at(scale: list[float], values: list[float], t: float) -> float:
-    """Linear interpolation of the sampled signal at ``t`` (inside the scale)."""
-    index = bisect.bisect_left(scale, t)
-    if index <= 0:
-        return values[0]
-    if index >= len(scale):
-        return values[-1]
-    t0, t1 = scale[index - 1], scale[index]
-    if t1 == t0:
-        return values[index]
-    return values[index - 1] + (values[index] - values[index - 1]) * (
-        (t - t0) / (t1 - t0)
-    )
 
 
 def time_weighted_mean(
@@ -228,9 +212,9 @@ def time_weighted_mean(
     knots.extend(t for t in scale if t_start < t < t_end)
     knots.append(t_end)
     area = 0.0
-    previous = _value_at(scale, values, knots[0])
+    previous = sim_window.value_at(scale, values, knots[0])
     for left, right in zip(knots, knots[1:], strict=False):
-        current = _value_at(scale, values, right)
+        current = sim_window.value_at(scale, values, right)
         area += 0.5 * (previous + current) * (right - left)
         previous = current
     return area / (t_end - t_start)
@@ -289,51 +273,40 @@ def extract_corner_cycle_means(
     of one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, CycleMeanOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_cycle_mean(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_cycle_mean,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["cycle_mean"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) or "
-                f"align ({body['align']!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch names"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': could not read its cycle_mean rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 3 or not points:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': its signal/align vectors yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=3,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) or "
+            f"align ({body['align']!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch names"
+        ),
+        empty_error=(
+            f"measurement '{name}': its signal/align vectors yielded no samples"
+        ),
+        rawfile_label="cycle_mean rawfile",
+    )
+    if columns is None:
+        return CycleMeanOutcome(code="cycle_mean_vector_missing", error=error)
     outcome = compute_cycle_mean(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
+        *columns,
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
-        start=sim_crossings._window_bound(name, body, "from"),
+        start=sim_window.window_bound(name, body, "from", form="cycle_mean"),
         cycles=body["cycles"],
     )
     if outcome.error is not None:

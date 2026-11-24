@@ -57,7 +57,7 @@ on one tap (`claude/opus`, `claude/fable`) share its availability.
 ## Layers and per-host override
 
 The daemon reads each config tier separately: machine defaults
-(`~/.local/share/loom/config/defaults.json`, where fleet-gitops renders
+(`~/.local/share/loom/config/defaults.json`, where the fleet state store renders
 `config.defaults` plus host-class and host overrides), `.loom/config.json`,
 `.loom-project/project.json`, the per-repo fleet tier
 `.loom-local/fleet-repo.json` (the fleet config's `repos[].config`, written by
@@ -68,14 +68,13 @@ that role (or, for `roleDraw: null`, every role). `excludeProviders` follows the
 ordinary rule: the highest tier that sets it wins.
 
 Inside the machine-defaults file the tiers have already been merged by
-fleet-gitops, whose generic deep merge replaces lists. There, use the
+the fleet state store, whose generic deep merge replaces lists. There, use the
 **object form** to override one attempt: it merges per attempt and per
 candidate (set a candidate to `0` to switch it off on that host).
 
 ## Resolution
 
-1. An operator pin (`LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>`, an explicit
-   per-dispatch runtime) still wins outright; no draw happens.
+1. An operator pin (`LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>`) still wins outright; no draw happens.
 2. If the role has a table for its attempt, the daemon draws a **weighted
    random order** of the drawable candidates and runs the ordinary preference
    walk over it: admission, credential availability, the launch-failure hold
@@ -106,9 +105,19 @@ toolless launch, a non-zero exit and a timeout. A success resets it to 1. A
 pre-spawn skip counts neither way. The count lives in daemon memory, so a
 restart starts every role at attempt 1.
 
-Sweep dispatch and `worker run` phases draw attempt 1. The `/<model>` segment
-is pinned only on role ticks; a sweep uses the drawn runtime and profile with
-its own model resolution.
+Sweep dispatch and `worker run` phases draw attempt 1.
+
+### Which launch paths honor the drawn `/<model>` (#12748)
+
+| Launch path | Drawn model |
+|---|---|
+| Role tick (role runner) | Pinned with `--model`, below only the runner's own override. |
+| Daemon stage step (`begin_step_spawn`): Curator, Judge, Doctor, Champion, **Builder** | Pinned with `--model`: the same draw → reconcile with the admitted runtime → refuse a provable runtime conflict (`model_runtime_mismatch`) path for every role. With no drawn model the role's own resolver (Builder: experiment/default) applies unchanged. |
+| Private Codex containment (step and role tick) | Account selection is made for the drawn candidate's model, and the launch uses that same model. A selection held for a different model is released and re-made, never reused. |
+| Issue sweep (`/loom:sweep` dispatch) | Draws the runtime and profile only; it uses its own model resolution and does not pin `/<model>` (`loom.role_draw.model_pinned` stays `false`). |
+| `worker run --role builder\|doctor` | Takes an explicit tap (runtime + profile) and passes no `--model`; a drawn `/<model>` is not applied. Inspected for #12748 and left unchanged: no current path needs it. |
+
+A native runtime's `/` segment is its profile, so it never becomes a model.
 
 ## Reproducibility and telemetry
 
@@ -140,6 +149,11 @@ What reaches SigNoz (#11726 follow-up):
   `loom.role_draw.model_pinned` (always `false` today, because a sweep does not
   pin the drawn `/model`). Both are absent when no `roleDraw` table decided the
   sweep.
+- **Steps:** the `loom.dispatch.step` span of a spawned step carries
+  `loom.step.model_selected` (the model the draw's pick named) and
+  `loom.step.model_launched` (the `--model` the child was given). Selected is a
+  fact about the draw record only; launched is what ran. Either is absent when
+  there is none.
 
 ## Explain view
 

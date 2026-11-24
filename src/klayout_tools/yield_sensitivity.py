@@ -41,7 +41,9 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._native import _load_native_extension
+from ._paths import _load_request_json
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SENSITIVITY_SCHEMA_VERSION``
 #: -- kept in sync manually, the same convention ``yield_analysis.py`` uses
@@ -66,19 +68,26 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield-sensitivity.md#building-the-native-extension",
+        extra="yield",
     )
 
 
 def _load_json(path: str) -> Any:
+    """Read the sensitivity sample document at ``path``, raising
+    ``SensitivityError`` for every read failure.
+
+    Calls the shared ``_paths._load_request_json`` (issue #5485) rather than
+    opening the file here: the hand-rolled copy this replaced did not catch
+    ``UnicodeDecodeError`` and opened without an explicit encoding, so a
+    non-UTF-8 samples file escaped as a traceback instead of the error
+    envelope ``docs/json-contract.md`` requires. The ``samples file not
+    found`` check stays here -- the shared loader's own message does not
+    name the document, and this verb's only file argument is the samples
+    one.
+    """
     if not os.path.exists(path):
         raise SensitivityError(f"samples file not found: {path}")
-    if os.path.isdir(path):
-        raise SensitivityError(f"not a file: {path}")
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SensitivityError(f"could not read samples '{path}': {exc}") from exc
+    return _load_request_json(path, SensitivityError)
 
 
 def _parameters_from(raw: Any, name: str, index: int) -> dict[str, float]:
@@ -88,7 +97,7 @@ def _parameters_from(raw: Any, name: str, index: int) -> dict[str, float]:
         )
     parameters: dict[str, float] = {}
     for key, value in raw.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise SensitivityError(
                 f"measurement '{name}': sample {index}'s parameter '{key}' is "
                 "not a number"
@@ -130,7 +139,7 @@ def _measurements_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     f"measurement '{name}': sample {i} is not an object"
                 )
             value = sample.get("output")
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise SensitivityError(
                     f"measurement '{name}': sample {i} has no numeric 'output' value"
                 )

@@ -39,14 +39,28 @@ module of its own, so both inputs go through the same sim-report reader
 
 from __future__ import annotations
 
-import gzip
+import csv
 import hashlib
 import json
 import math
 import os
+from collections.abc import Iterator
 from typing import Any
 
-from ._native import _load_native_extension
+from ._jsongz import READ_ERRORS, open_text
+from ._jsonnum import is_finite_number, is_int, is_number
+from ._native import _load_native_extension, native_provenance
+from .yield_csv_reader import draw_csv_rows
+from .yield_provenance import (
+    _attach_spec_rows,
+    _provenance_from,
+    _request_without_spec_rows,
+    _spec_row_from,
+    _spec_rows_for,
+    nominal_provenance,
+    spec_rows_from_limits,
+)
+from .yield_sampling_fields import _analytic_cross_check_from, _sampling_from
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SCHEMA_VERSION`` -- kept in
 #: sync manually, the same convention ``mom.py`` uses for the constants it
@@ -86,6 +100,7 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield.md#building-the-native-extension",
+        extra="yield",
     )
 
 
@@ -95,12 +110,9 @@ def _load_json(path: str, what: str) -> Any:
     if os.path.isdir(path):
         raise YieldError(f"not a file: {path}")
     try:
-        with open(path, "rb") as raw:
-            gzipped = raw.read(2) == b"\x1f\x8b"
-        opener = gzip.open if gzipped else open
-        with opener(path, "rt", encoding="utf-8") as f:
+        with open_text(path) as f:
             return json.load(f)
-    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except READ_ERRORS + (json.JSONDecodeError,) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
@@ -117,10 +129,9 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
         raise YieldError(f"{where}: measurement '{name}' has non-object limits")
     limits: dict[str, Any] = {}
     for key in ("min", "max", "target_yield"):
-        value = raw.get(key)
-        if value is None:
+        if (value := raw.get(key)) is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
@@ -151,14 +162,14 @@ def _read_qualification_keys(
     declares neither is unchanged."""
     k = raw.get("target_sigma")
     if k is not None:
-        if isinstance(k, bool) or not isinstance(k, (int, float)):
+        if not is_number(k):
             raise YieldError(f"{prefix}target_sigma must be a number")
-        if not math.isfinite(k) or k <= 0:
+        if not is_finite_number(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
         out["target_sigma"] = float(k)
     n = raw.get("min_converged_samples")
     if n is not None:
-        if isinstance(n, bool) or not isinstance(n, int):
+        if not is_int(n):
             raise YieldError(
                 f"{prefix}min_converged_samples must be a non-negative integer"
             )
@@ -181,65 +192,61 @@ def _apply_qualification_defaults(
             limits[key] = spec_defaults[key]
 
 
-def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
-    """Normalise a ``failed_unmeasurable`` count -- draws that left the
-    regime a measurement is only defined in and produced no value (issue
-    #1095). Additive to ``errored``: unlike a tooling failure, this **does**
-    enter the empirical yield's numerator/denominator as a failure (see
-    ``native/yield/src/estimate.rs``), while still being excluded from the
-    distribution fit and Cp/Cpk, exactly like ``errored`` is.
+def _count_from(raw: Any, field: str, name: str, where: str) -> int:
+    """Normalise a no-usable-value draw count (``errored``-style category),
+    ``None`` -> 0, else a non-negative ``int``.
+
+    Per-category semantics (denominator treatment is implemented in
+    ``native/yield/src/estimate.rs``, not here):
+
+    - ``failed_unmeasurable`` (issue #1095): draws that left the regime a
+      measurement is defined in and produced no value. Unlike ``errored``,
+      enters the empirical yield's numerator/denominator as a failure; still
+      excluded from the distribution fit and Cp/Cpk.
+    - ``censored`` (issue #2468): draws whose measurement precondition was
+      never satisfied inside the analysis window. Gets ``errored``'s
+      denominator treatment (excluded from numerator and denominator).
+    - ``inconclusive`` (issue #2507): draws whose value exists but is not
+      trustworthy. Caller-supplied on the sample-set path (no per-sample
+      status channel; the sim-report path derives it from ``klt sim``
+      status grading). Gets ``errored``'s denominator treatment.
     """
     if raw is None:
         return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if not is_int(raw) or raw < 0:
         raise YieldError(
-            f"{where}: measurement '{name}' failed_unmeasurable must be a "
-            "non-negative integer"
+            f"{where}: measurement '{name}' {field} must be a non-negative integer"
         )
     return raw
 
 
-def _censored_from(raw: Any, name: str, where: str) -> int:
-    """Normalise a ``censored`` count -- draws whose measurement precondition
-    (a conditioning event, e.g. reaching a settled/converged/acquired state)
-    was never satisfied inside the analysis window, so no value was produced
-    (issue #2468). Unlike ``failed_unmeasurable``, this gets ``errored``'s
-    denominator treatment: excluded from both the numerator and denominator
-    of the empirical yield (see ``native/yield/src/estimate.rs``), while
-    still being excluded from the distribution fit and Cp/Cpk like both
-    existing no-value categories.
+def _not_applicable_control_from(
+    raw: dict[str, Any], name: str, where: str
+) -> dict[str, Any]:
+    """Validate a ``negative_control`` that declares ``not_applicable``.
+
+    Issue #4523: a declared "control not applicable" disposition -- the
+    seeded defect cannot degrade this measurement by construction. It
+    carries a required reason and no samples; it never reaches the native
+    core (see ``run_yield``).
     """
-    if raw is None:
-        return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if raw["not_applicable"] is not True:
         raise YieldError(
-            f"{where}: measurement '{name}' censored must be a non-negative integer"
+            f"{where}: measurement '{name}' negative_control.not_applicable "
+            "must be true"
         )
-    return raw
-
-
-def _inconclusive_from(raw: Any, name: str, where: str) -> int:
-    """Normalise an ``inconclusive`` count -- draws whose value exists but is
-    not trustworthy, so it must not be graded against ``limits`` as if it
-    were a result (issue #2507).
-
-    This is the sample-set path's counterpart of what
-    ``_measurements_from_sim_report`` derives from a `klt sim` report's own
-    ``status`` grading: a plain sample-set document has no per-sample status
-    channel, so the count is caller-supplied, exactly like
-    ``errored``/``failed_unmeasurable``/``censored``. Gets ``errored``'s
-    denominator treatment -- excluded from both the numerator and denominator
-    of the empirical yield (see ``native/yield/src/estimate.rs``) as well as
-    from the distribution fit and Cp/Cpk, because a distrusted number carries
-    no verdict in either direction.
-    """
-    if raw is None:
-        return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
         raise YieldError(
-            f"{where}: measurement '{name}' inconclusive must be a non-negative integer"
+            f"{where}: measurement '{name}' negative_control declares "
+            "not_applicable but no non-empty string 'reason'"
         )
-    return raw
+    if "samples" in raw:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control cannot declare "
+            "both not_applicable and samples"
+        )
+    return {"not_applicable": True, "reason": reason.strip()}
 
 
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
@@ -252,6 +259,8 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         raise YieldError(
             f"{where}: measurement '{name}' has a non-object negative_control"
         )
+    if raw.get("not_applicable") is not None:
+        return _not_applicable_control_from(raw, name, where)
     raw_samples = raw.get("samples")
     if not isinstance(raw_samples, list):
         raise YieldError(
@@ -263,7 +272,7 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         if value is None:
             errored += 1
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' negative_control has a non-numeric "
                 "sample value"
@@ -274,14 +283,14 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
     # empirical yield rather than being excluded, so a deliberate defect
     # that drives every draw out of the regime still shows up as a detected
     # degradation.
-    failed_unmeasurable = _failed_unmeasurable_from(
-        raw.get("failed_unmeasurable"), name, where
+    failed_unmeasurable = _count_from(
+        raw.get("failed_unmeasurable"), "failed_unmeasurable", name, where
     )
     # Issue #2468: the negative control's own `censored` count -- excluded
     # from both the numerator and denominator of its own empirical yield,
     # exactly like `errored` (the opposite polarity from
     # `failed_unmeasurable` above).
-    censored = _censored_from(raw.get("censored"), name, where)
+    censored = _count_from(raw.get("censored"), "censored", name, where)
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         raise YieldError(
@@ -295,120 +304,6 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         "censored": censored,
         "description": description,
     }
-
-
-#: Which fields each `analytic_cross_check.kind` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `AnalyticCrossCheckRequest` variants.
-_ANALYTIC_CROSS_CHECK_FIELDS = {
-    "ktc_noise": {"capacitance_f", "temperature_k", "analytic_mean"},
-    "mismatch_offset": {"sigma", "mean"},
-}
-
-
-def _analytic_cross_check_from(
-    raw: Any, name: str, where: str
-) -> dict[str, Any] | None:
-    """Normalise one measurement's ``analytic_cross_check`` object (issue
-    #817's closed-form cross-check), or ``None`` when absent.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(
-            f"{where}: measurement '{name}' has a non-object analytic_cross_check"
-        )
-    kind = raw.get("kind")
-    if kind not in _ANALYTIC_CROSS_CHECK_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' analytic_cross_check.kind must be one of "
-            f"{sorted(_ANALYTIC_CROSS_CHECK_FIELDS)} (got {kind!r})"
-        )
-    allowed = _ANALYTIC_CROSS_CHECK_FIELDS[kind]
-    out: dict[str, Any] = {"kind": kind}
-    for key, value in raw.items():
-        if key == "kind":
-            continue
-        if key not in allowed:
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} is not "
-                f"valid for kind '{kind}' (allowed: {sorted(allowed)})"
-            )
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} must be "
-                "a number"
-            )
-        out[key] = float(value)
-    return out
-
-
-#: Which fields each `sampling.strategy` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `SamplingRequest` variants (issue #907,
-#: Phase 2b of the statistical/yield epic #710).
-_SAMPLING_STRATEGY_FIELDS = {
-    "plain_random": set(),
-    "latin_hypercube": {"replicates"},
-    "importance": {"weights"},
-}
-
-
-def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
-    """Normalise one measurement's ``sampling`` object (issue #907's
-    variance-reduction sampling strategies), or ``None`` when absent -- in
-    which case the native core treats it as Phase 1's plain random Monte
-    Carlo, unaffected by any of this.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(f"{where}: measurement '{name}' has a non-object sampling")
-    strategy = raw.get("strategy")
-    if strategy not in _SAMPLING_STRATEGY_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' sampling.strategy must be one of "
-            f"{sorted(_SAMPLING_STRATEGY_FIELDS)} (got {strategy!r})"
-        )
-    allowed = _SAMPLING_STRATEGY_FIELDS[strategy]
-    for key in raw:
-        if key not in {"strategy", *allowed}:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.{key} is not valid for "
-                f"strategy '{strategy}' (allowed: {sorted(allowed)})"
-            )
-
-    if strategy == "latin_hypercube":
-        replicates = raw.get("replicates")
-        if (
-            isinstance(replicates, bool)
-            or not isinstance(replicates, int)
-            or replicates < 2
-        ):
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.replicates must be an "
-                f"integer >= 2 (got {replicates!r})"
-            )
-        return {"strategy": strategy, "replicates": replicates}
-
-    if strategy == "importance":
-        raw_weights = raw.get("weights")
-        if not isinstance(raw_weights, list) or not raw_weights:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.weights must be a "
-                "non-empty array"
-            )
-        weights: list[float] = []
-        for value in raw_weights:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise YieldError(
-                    f"{where}: measurement '{name}' sampling.weights entries must "
-                    "be numbers"
-                )
-            weights.append(float(value))
-        return {"strategy": strategy, "weights": weights}
-
-    return {"strategy": strategy}
 
 
 def _draw_from_mc_corners(
@@ -443,7 +338,7 @@ def _draw_from_mc_corners(
             value = m.get("value")
             if value is None:
                 errored += 1
-            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            elif not is_number(value):
                 raise YieldError(
                     f"sim report: measurement '{name}' has a non-numeric value "
                     f"in corner {corner.get('corner_id')!r}"
@@ -480,9 +375,7 @@ def _is_distrusted(corner: dict[str, Any], measurement: dict[str, Any]) -> bool:
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
-    Only corners carrying a non-null ``monte_carlo`` block contribute samples
-    -- a report that mixes a plain PVT matrix with a Monte Carlo request has
-    both, and the deterministic corners are not draws from any distribution.
+    Only corners with a non-null ``monte_carlo`` block contribute draws.
     """
     corners = report.get("corners")
     if not isinstance(corners, list):
@@ -508,6 +401,8 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
     for entry in rollup:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             raise YieldError("sim report has a malformed 'measurements' entry")
+        if "statistic" in entry:  # Grid statistics have no per-draw observations.
+            continue
         name = entry["name"]
         samples, errored, inconclusive, source_corners = _draw_from_mc_corners(
             mc_corners, name
@@ -531,15 +426,20 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 # has no way to distinguish a tooling failure from a design
                 # failure, so the caller supplies the count directly on the
                 # rollup entry.
-                "failed_unmeasurable": _failed_unmeasurable_from(
-                    entry.get("failed_unmeasurable"), name, "sim report"
+                "failed_unmeasurable": _count_from(
+                    entry.get("failed_unmeasurable"),
+                    "failed_unmeasurable",
+                    name,
+                    "sim report",
                 ),
                 # Issue #2468: same provenance story as `failed_unmeasurable`
                 # above -- a sim report's per-corner value has no way to
                 # distinguish an unmet measurement precondition from either
                 # a tooling failure or a design failure, so the caller
                 # supplies the count directly on the rollup entry.
-                "censored": _censored_from(entry.get("censored"), name, "sim report"),
+                "censored": _count_from(
+                    entry.get("censored"), "censored", name, "sim report"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
                 # A sim report's own corners are the nominal draw; a
@@ -557,6 +457,7 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 # way regardless of input shape -- same as the two blocks
                 # above.
                 "sampling": _sampling_from(entry.get("sampling"), name, "sim report"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sim report"),
             }
         )
     return out
@@ -584,7 +485,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
             if value is None:
                 errored += 1
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise YieldError(
                     f"sample set: measurement '{name}' has a non-numeric sample value"
                 )
@@ -606,18 +507,23 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 # sim`'s own corner/measurement `status` grading), so the
                 # count is supplied directly -- the same shape the three
                 # other no-usable-value categories already use.
-                "inconclusive": _inconclusive_from(
-                    entry.get("inconclusive"), name, "sample set"
+                "inconclusive": _count_from(
+                    entry.get("inconclusive"), "inconclusive", name, "sample set"
                 ),
                 # Issue #1095: a draw that failed the limit without producing
                 # a value -- a design failure, not a measurement failure.
-                "failed_unmeasurable": _failed_unmeasurable_from(
-                    entry.get("failed_unmeasurable"), name, "sample set"
+                "failed_unmeasurable": _count_from(
+                    entry.get("failed_unmeasurable"),
+                    "failed_unmeasurable",
+                    name,
+                    "sample set",
                 ),
                 # Issue #2468: a draw whose measurement precondition was
                 # never satisfied -- nothing failed and no value-defining
                 # event was violated, the row is simply undefined.
-                "censored": _censored_from(entry.get("censored"), name, "sample set"),
+                "censored": _count_from(
+                    entry.get("censored"), "censored", name, "sample set"
+                ),
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
                 "negative_control": _negative_control_from(
@@ -627,6 +533,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     entry.get("analytic_cross_check"), name, "sample set"
                 ),
                 "sampling": _sampling_from(entry.get("sampling"), name, "sample set"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sample set"),
             }
         )
     return out
@@ -671,6 +578,7 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
             "kind": "sim-report",
             "netlist": _source_netlist(doc.get("netlist")),
             "monte_carlo": mc,
+            "provenance": _provenance_from(doc.get("provenance"), "sim report"),
         }
         return "sim-report", measurements, source
 
@@ -679,7 +587,12 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
         return (
             "sample-set",
             measurements,
-            {"kind": "sample-set", "netlist": None, "monte_carlo": None},
+            {
+                "kind": "sample-set",
+                "netlist": None,
+                "monte_carlo": None,
+                "provenance": _provenance_from(doc.get("provenance"), "sample set"),
+            },
         )
 
     raise YieldError(
@@ -688,8 +601,10 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
     )
 
 
-def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Read a spec-limits file into ``(per_measurement_limits, run_defaults)``."""
+def _read_spec(
+    path: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, str]]:
+    """Read a spec-limits file into ``(limits, run_defaults, spec_rows)``."""
     doc = _load_json(path, "limits")
     if not isinstance(doc, dict):
         raise YieldError(f"limits '{path}' must be a JSON object")
@@ -715,12 +630,37 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         name: _limits_from(value, name, f"limits '{path}'")
         for name, value in raw.items()
     }
-    return limits, defaults
+    spec_rows = spec_rows_from_limits(raw, f"limits '{path}'")
+    return limits, defaults, spec_rows
 
 
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+
+
+def _strip_not_applicable(
+    entry: dict[str, Any], not_applicable: dict[str, str]
+) -> dict[str, Any]:
+    """Record and drop a ``not_applicable`` negative control (issue #4523) so
+    the native core never sees it; other entries pass through unchanged."""
+    control = entry.get("negative_control")
+    if control is not None and control.get("not_applicable"):
+        not_applicable[entry["name"]] = control["reason"]
+        return {**entry, "negative_control": None}
+    return entry
+
+
+def _patch_not_applicable(
+    response: dict[str, Any], not_applicable: dict[str, str]
+) -> None:
+    """Write the declared ``not_applicable`` verdicts into the core response."""
+    for m in response.get("measurements") or []:
+        if m.get("name") in not_applicable:
+            m["negative_control"] = {
+                "verdict": "not_applicable",
+                "reason": not_applicable[m["name"]],
+            }
 
 
 def run_yield(
@@ -747,8 +687,9 @@ def run_yield(
 
     spec_limits: dict[str, dict[str, Any]] = {}
     spec_defaults: dict[str, Any] = {}
+    spec_rows: dict[str, str] = {}
     if limits_path is not None:
-        spec_limits, spec_defaults = _read_spec(limits_path)
+        spec_limits, spec_defaults, spec_rows = _read_spec(limits_path)
 
     by_name = {e["name"]: e for e in entries}
     if measurements is not None:
@@ -765,6 +706,9 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # Issue #4523: measurements that declared "negative control not
+    # applicable" -- carried around the native core and patched into the report.
+    not_applicable: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -786,6 +730,7 @@ def run_yield(
                 "supply limits via --limits to include it"
             )
             continue
+        entry = _strip_not_applicable(entry, not_applicable)
         request_measurements.append({**entry, "limits": limits})
 
     if not request_measurements:
@@ -793,6 +738,7 @@ def run_yield(
             "no measurement has spec limits to estimate a yield against -- supply "
             "them via --limits (see docs/cli/yield.md)"
         )
+    row_by_name = _spec_rows_for(request_measurements, spec_rows)
 
     request: dict[str, Any] = {
         "confidence": _resolve(
@@ -803,7 +749,7 @@ def run_yield(
             spec_defaults.get("target_ci_halfwidth"),
             DEFAULT_TARGET_CI_HALFWIDTH,
         ),
-        "measurements": request_measurements,
+        "measurements": _request_without_spec_rows(request_measurements),
     }
     resolved_min = _resolve(
         min_samples, spec_defaults.get("min_samples"), ABSOLUTE_MIN_SAMPLES
@@ -816,6 +762,7 @@ def run_yield(
     except ValueError as exc:
         raise YieldError(str(exc)) from exc
     response = json.loads(response_json)
+    _patch_not_applicable(response, not_applicable)
 
     payload: dict[str, Any] = {
         "samples": samples_path,
@@ -824,12 +771,12 @@ def run_yield(
             **source,
             "kind": kind,
             "sample_count": sum(len(m["samples"]) for m in request_measurements),
+            "native": native_provenance("klt_yield_native", "klt-yield-native"),
         },
     }
     payload.update(response)
-    # The native core owns the payload's shape version; this module's
-    # constant mirrors it (and is asserted against it below) so a crate-side
-    # bump that Python never noticed cannot ship silently.
+    _attach_spec_rows(payload, row_by_name)
+    # The native core owns the shape version; assert our mirror of it matches.
     if response.get("schema_version") != SCHEMA_VERSION:
         raise YieldError(
             "klt_yield_native reports schema_version "
@@ -1037,6 +984,8 @@ def _derived_entry(
         "analytic_cross_check": nominal["analytic_cross_check"],
         "sampling": nominal["sampling"],
     }
+    if nominal.get("spec_row") is not None:
+        entry["spec_row"] = nominal["spec_row"]
     disclosure = {
         "name": nominal["name"],
         "negative_control": {
@@ -1112,8 +1061,12 @@ def derive_sample_set(
         out_measurements.append(entry)
         disclosures.append(disclosure)
 
+    prov = nominal_provenance(nominal_report)
+    doc: dict[str, Any] = {"schema_version": SAMPLE_SET_SCHEMA_VERSION}
+    if prov:
+        doc["provenance"] = prov
     return {
-        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        **doc,
         "measurements": out_measurements,
         "derivation": {
             "nominal": {"path": nominal_path, "content_hash": nominal_hash},
@@ -1123,5 +1076,157 @@ def derive_sample_set(
                 "description": description,
             },
             "measurements": disclosures,
+        },
+    }
+
+
+def _read_csv_bytes(csv_path: str) -> tuple[str, str]:
+    """Read the CSV once, as ``(text, content_hash)``; the same bytes are
+    hashed and parsed. A UTF-8 BOM is dropped."""
+    if not os.path.exists(csv_path):
+        raise YieldError(f"CSV not found: {csv_path}")
+    if os.path.isdir(csv_path):
+        raise YieldError(f"CSV is not a file: {csv_path}")
+    try:
+        with open(csv_path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise YieldError(f"could not read CSV '{csv_path}': {exc}") from exc
+    return text, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _csv_reader(text: str, path: str, wanted: list[str]) -> Iterator[dict[str, Any]]:
+    header, reader = draw_csv_rows(text)
+    if not header:
+        raise YieldError(f"CSV '{path}' is empty (no header row)")
+    missing = [c for c in wanted if c not in header]
+    if missing:
+        raise YieldError(
+            f"CSV '{path}' has no column(s) {', '.join(missing)}; "
+            f"header is: {', '.join(header)}"
+        )
+    return reader
+
+
+def _csv_row_group(
+    row: dict[str, Any], where: str, group_by: str, draw_col: str | None, seen: set
+) -> str:
+    """The row's group key; rejects a missing group or a repeated draw."""
+    if None in row:
+        raise YieldError(f"{where} has more cells than the header")
+    group = (row[group_by] or "").strip()
+    if not group:
+        raise YieldError(f"{where}: empty '{group_by}'")
+    if draw_col is not None:
+        key = (group, (row[draw_col] or "").strip())
+        if key in seen:
+            raise YieldError(f"{where}: duplicate draw '{key[1]}' in group '{group}'")
+        seen.add(key)
+    return group
+
+
+def _csv_row_sample(
+    row: dict[str, Any], value: str, status_col: str | None, pass_value: str | None
+) -> float | None:
+    """The row's finite sample, or ``None`` when it counts ``errored``."""
+    if status_col is not None and (row[status_col] or "").strip() != pass_value:
+        return None
+    try:
+        number = float((row[value] or "").strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def derive_sample_set_from_csv(
+    csv_path: str,
+    *,
+    group_by: str,
+    value: str,
+    status_col: str | None = None,
+    pass_value: str | None = None,
+    draw_col: str | None = None,
+    unit: str | None = None,
+    limits: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Derive a sample-set document from a long-format per-draw Monte Carlo
+    CSV (issue #2931): one row per draw, one measurement per distinct
+    ``group_by`` value.
+
+    The result has the same shape as :func:`derive_sample_set`'s -- a
+    sample-set document ``klt yield`` reads unchanged, plus ``schema_version``
+    and an additive ``derivation`` block -- so there is no parallel path into
+    the estimator.
+
+    Rules (see ``docs/cli/yield.md``'s "Deriving a sample set from a
+    per-draw CSV"):
+
+    - The file is read once; the same bytes are hashed and parsed. A UTF-8
+      BOM and CRLF line endings are accepted.
+    - With ``status_col``, a row whose status differs from ``pass_value``
+      is counted ``errored`` and its ``value`` cell is not read.
+    - A passing row whose value cell is empty, non-numeric or non-finite is
+      also counted ``errored`` -- never dropped, never a sample.
+    - Samples keep file order; the grading counts do not depend on it. With
+      ``draw_col``, a repeated (group, draw) pair is rejected.
+    - A group with no usable sample is an error, not an empty measurement.
+    """
+    if (status_col is None) != (pass_value is None):
+        raise YieldError("--status-col and --pass-value must be given together")
+    text, content_hash = _read_csv_bytes(csv_path)
+    wanted = [group_by, value] + [c for c in (status_col, draw_col) if c]
+    reader = _csv_reader(text, csv_path, wanted)
+
+    groups: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[str, str]] = set()
+    rows = 0
+    try:
+        for row in reader:
+            rows += 1
+            where = f"CSV '{csv_path}' row {rows + 1}"
+            group = _csv_row_group(row, where, group_by, draw_col, seen)
+            slot = groups.setdefault(group, {"samples": [], "errored": 0, "rows": 0})
+            slot["rows"] += 1
+            sample = _csv_row_sample(row, value, status_col, pass_value)
+            if sample is None:
+                slot["errored"] += 1
+            else:
+                slot["samples"].append(sample)
+    except csv.Error as exc:
+        raise YieldError(f"could not parse CSV '{csv_path}': {exc}") from exc
+    if not groups:
+        raise YieldError(f"CSV '{csv_path}' has a header but no data rows")
+
+    out_measurements: list[dict[str, Any]] = []
+    for name, slot in groups.items():
+        if not slot["samples"]:
+            raise YieldError(
+                f"group '{name}' in '{csv_path}' has no usable draws "
+                f"({slot['errored']} errored of {slot['rows']} rows)"
+            )
+        out_measurements.append(
+            {
+                "name": name,
+                "unit": unit,
+                "samples": slot["samples"],
+                "errored": slot["errored"],
+                "limits": dict(limits) if limits else None,
+            }
+        )
+    return {
+        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        "measurements": out_measurements,
+        "derivation": {
+            "csv": {
+                "path": csv_path,
+                "content_hash": content_hash,
+                "rows": rows,
+                "group_by": group_by,
+                "value": value,
+                "status_col": status_col,
+                "pass_value": pass_value,
+                "draw_col": draw_col,
+            },
         },
     }

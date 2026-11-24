@@ -37,7 +37,9 @@ discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
-with no flags would -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
+with no flags would (falling back to the first installed variant that ships
+``cell_library`` when the default pick lacks it and no ``--pdk``/``$PDK``
+was given, issue #4204) -- unless the CLI's own ``--pdk``/``--pdk-root`` flags
 (mirroring ``klt extract``'s identical pair) pin a specific installed
 variant/root, threaded straight through to :func:`run_synthesize`'s
 ``pdk_variant``/``pdk_root`` keyword args and from there to ``find_pdk()``.
@@ -195,42 +197,75 @@ from. Both are ``None`` when the resolved liberty reports no
 libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report leakage only via
 per-input-state groups this module deliberately does not average into one
 number). See :func:`_compute_leakage`.
+
+``macros`` (issue #2635, optional) is the shared hard-macro declaration --
+one shape, documented once in :mod:`klayout_tools.macros`, accepted
+identically by ``klt sta`` and (plus its own placement fields) by ``klt
+place-and-route``. Each entry names a pre-characterized block the design
+instantiates but carries no RTL for, and this module's generated ``.ys``
+loads its liberty (``read_liberty -lib``) or a blackbox declaration
+(``read_verilog -lib``, generated from the LEF when the caller supplies
+neither) **before** ``hierarchy``, so the macro survives as one opaque
+instance instead of being implemented out of standard cells. Without it,
+Yosys aborts with ``Module `\\<cell>' referenced in module `\\<top>' in
+cell `\\<inst>' is not part of the design``. The response reports macro
+instances separately (``macros``, ``macro_instance_counts_by_type``,
+``macro_instance_count``) and names every instantiated cell type whose area
+``area_um2`` does *not* account for (``cells_without_area``, plus a
+``warnings`` entry) -- a blackboxed macro contributes ``0`` to ``area_um2``
+by construction, and that used to be silent. See
+:func:`_macro_blackbox_inputs` / :func:`_cells_without_area`.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import functools
 import importlib
 import json
 import os
 import re
 import subprocess
+import tempfile
 import uuid
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, synthesize_abc
+from . import macros as macro_spec
+from . import synthesize_abc_stages as abc_stages
+from . import synthesize_timeout as ytimeout
+from ._digest import netlist_digest_fields
+from ._engine_proc import run_in_group
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
-    _content_hash,
     _yosys_version,
     build_provenance,
+    content_hash,
     sha256_file,
-    wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
+    resolve_committed_path,
     strip_keys,
 )
-from ._verilog_params import chparam_lines, validate_parameters
+from ._sv2v import convert_sources, validate_sv_frontend
+from ._verilog_params import (
+    validate_defines,
+    validate_parameters,
+)
+from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .equiv_verdict import require_equivalence
+from .evidence_canonicalize import rerun_result_for
+from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
+from .request_paths import RequestPaths, resolve_readable_files
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -245,6 +280,13 @@ from .sta import StaError, compute_critical_path
 # `ADDER_ARCHITECTURES`, which moved there with its only callers.
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
+from .synthesize_abc_stages import AbcTimeout, SynthesizeError
+from .synthesize_abc_timing import (
+    AbcStatsCapture,
+    parse_abc_regions,
+    plan_abc_stats_capture,
+    read_abc_stats_timing,
+)
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
     _candidate_measurement,
@@ -260,10 +302,65 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_constrained_timing import (
+    _resolve_clocks as _resolve_clocks,
+)
+from .synthesize_constrained_timing import (
+    _validate_clock_entry as _validate_clock_entry,
+)
+from .synthesize_constrained_timing import (
+    constrained_timing_fields,
+    mapped_sta_constraints,
+    mapped_sta_macros,
+)
+from .synthesize_driving_cell import (
+    ABC_DONT_USE_GLOBS as _ABC_DONT_USE_GLOBS,
+)
+from .synthesize_driving_cell import (
+    DONT_USE_PATTERN_RE as _DONT_USE_PATTERN_RE,
+)
+from .synthesize_driving_cell import (
+    first_matching_glob,
+    resolve_dont_use_globs,
+)
+from .synthesize_driving_cell import (
+    liberty_cell_names as _liberty_cell_names,
+)
+from .synthesize_library_hint import (
+    library_capability_warnings as _library_capability_warnings,
+)
 
 # Issue #2745: same one-directional split as `synthesize_arithmetic.py` --
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
+from .synthesize_netlist_normalize import rewrite_netlist
+
+# Re-exported from `synthesize_script` (issue #7010's split): every name
+# below stays importable from this module for its existing callers -- the
+# lazy `from .synthesize import ...` sites in `synthesize_abc_stages`/
+# `synthesize_memory` and the test suite's `synthesize.<name>` references.
+from .synthesize_script import (
+    _COMMIT_RUNNABLE_HEADER,
+    _COMMIT_SCRIPT_HEADER,
+    _RUN_ABSOLUTE_HEADER,
+    _RUN_SCRIPT_HEADER,
+    PDK_ROOT_TOKEN,
+    _script_liberty_text,
+    _write_script_lines,
+    rehydrate_script_text,
+    run_script_path,
+)
+from .synthesize_script import RUN_SCRIPT_SUFFIX as RUN_SCRIPT_SUFFIX
+from .synthesize_script import (
+    _abc_pass_command as _abc_pass_command,
+)
+from .synthesize_script import (
+    _script_input_text as _script_input_text,
+)
+from .synthesize_script import (
+    _script_path_text as _script_path_text,
+)
+from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -277,7 +374,7 @@ from .synthesize_memory import collect_memory_evidence
 #: sim` (issue #1261) -- a committed evidence record wraps this response
 #: unmodified (`docs/design/sim-evidence-discipline-spike.md`), so an
 #: absolute path here used to leak the author's home directory/worktree
-#: layout into every such record. See `_report_path` below.
+#: layout into every such record. See `env_provenance.repo_relative_path`.
 #: `equivalence.artifacts.{script_path,netlist_path}` is `klt equiv`'s own
 #: response shape (echoed through unmodified) and is deliberately **not**
 #: normalized here -- doing so would be a `klt equiv` contract change,
@@ -306,15 +403,6 @@ _ADDER_MODES = ("auto", DEFAULT_ADDER_LABEL)
 #: measurement is dominated by mapping noise -- the issue's own "sub-16-bit
 #: micro-optimisation" non-goal, with a little headroom.
 DEFAULT_ADDER_MIN_WIDTH = 8
-
-#: ABC's own ``stime -p`` summary line, as it reaches the Yosys log (and,
-#: via ``tee -q -o``, the captured ABC log this module parses):
-#: ``ABC: WireLoad = "none"  Gates = 297 ( 5.7 %)   Cap = 6.2 ff ( 12.4 %)
-#: Area = 1986.91 ( 66.3 %)   Delay = 2485.93 ps  ( 32.3 %)``. Verified live
-#: (Yosys 0.68+48, sky130_fd_sc_hd, issue #807).
-_ABC_STIME_RE = re.compile(
-    r'WireLoad\s*=\s*"(?P<wire_load>[^"]*)".*?Delay\s*=\s*(?P<delay_ps>[\d.]+)\s*ps'
-)
 
 #: Per-cell-library ABC constraint inputs -- ``(set_driving_cell cell,
 #: set_load femtofarads)`` -- written to the ``<top>_abc.constr`` file this
@@ -396,78 +484,6 @@ _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
     "sg13g2_stdcell": ("sg13g2_buf_4", 6.0),
 }
 
-#: Per-cell-library ``abc -dont_use`` glob list: the non-logic cell classes
-#: a real flow keeps out of a mapped netlist. Same sourcing discipline as
-#: :data:`_ABC_CONSTR_INPUTS` above -- each entry is ORFS's own
-#: ``DONT_USE_CELLS`` for that platform, cross-checked against the installed
-#: liberty's actual cell list (read 2026-08-12 from
-#: ``The-OpenROAD-Project/OpenROAD-flow-scripts`` @ ``master``):
-#:
-#: - ``sky130_fd_sc_hd`` -> ``sky130_fd_sc_hd__lpflow_*`` (multi-power-domain
-#:   isolation/level-shifter/decap cells) and ``sky130_fd_sc_hd__probe*``
-#:   (test-probe cells with metal shapes on every layer).
-#:   ``platforms/sky130hd/config.mk`` spells its ``DONT_USE_CELLS`` out as
-#:   36 explicit cell names with exactly that intent (its own comment: "The
-#:   *probe* are for inserting probe points and have metal shapes on all
-#:   layers. *lpflow* cells are for multi-power domains"). Verified against
-#:   the installed ``sky130_fd_sc_hd__tt_025C_1v80.lib``: the two globs
-#:   above match **exactly** those 36 cells -- no cell ORFS excludes is
-#:   missed, and no additional cell is caught (set difference empty in both
-#:   directions). Globs are used rather than the 36 names because
-#:   ``abc -dont_use`` supports them ("supports simple glob patterns in the
-#:   cell name", ``help abc``) and because they stay correct if a future
-#:   open_pdks release adds another ``lpflow_``/``probe`` cell.
-#: - ``gf180mcu_fd_sc_mcu9t5v0`` -> **deliberately absent**, and this is the
-#:   one place this table does not simply mirror ORFS. That platform's
-#:   ``DONT_USE_CELLS = *_1`` (``platforms/gf180/config.mk``) excludes every
-#:   *minimum-drive* cell in the library -- 62 of the installed
-#:   ``gf180mcu_fd_sc_mcu9t5v0__tt_025C_5v00.lib``'s 229 cells -- which is a
-#:   drive-strength policy for P&R congestion ("Dont use cells to ease
-#:   congestion", that `config.mk`'s own comment), not the "keep non-logic
-#:   cells out of the netlist" exclusion this table exists for. The QoR
-#:   survey section 3.2 flags exactly this asymmetry and warns that the two
-#:   libraries must not be given the same treatment by analogy; measured
-#:   live here rather than assumed (issue #807, 8x8 multiplier, Yosys
-#:   0.68+48): applying it costs **+31% area** (9217.96 -> 12119.39 um^2)
-#:   and **+12% delay** (6150.64 -> 6887.58 ps) against the same run with
-#:   ``-constr`` and no exclusions. Every logic function does keep a
-#:   higher-drive variant (zero functions lost entirely, checked live), so
-#:   the exclusion is *safe* -- it is simply not a QoR win at this stage of
-#:   the flow, and a synthesis-time default that costs a third of the area
-#:   for a congestion benefit no step of this command can observe would be a
-#:   guess dressed as sourcing. gf180 still gets its ``-constr`` entry
-#:   above; a caller wanting ORFS's P&R-oriented exclusion can be served
-#:   later by an explicit request field, measured on its own terms.
-#: - ``sg13g2_stdcell`` (issue #1784) -> the five literal cell names IHP's
-#:   own LibreLane platform config names as its
-#:   ``SYNTH_EXCLUDED_CELL_FILE``
-#:   (``libs.tech/librelane/sg13g2_stdcell/synth_exclude.cells``,
-#:   IHP-Open-PDK v0.3.0): ``sg13g2_lgcp_1``, ``sg13g2_sighold``,
-#:   ``sg13g2_slgcp_1``, ``sg13g2_sdfbbp_1``, ``sg13g2_dfrbp_2`` -- clock-
-#:   gate/scan/sign-hold sequential cells this PDK's own flow keeps out of
-#:   mapping, the same "keep non-logic/special-purpose cells out of the
-#:   netlist" intent as the sky130hd entry above (not a drive-strength
-#:   policy like gf180mcu's deliberately-omitted one). ``abc -dont_use``'s
-#:   glob support degrades gracefully to an exact match for a pattern with
-#:   no wildcard, so these plain cell names are passed through unchanged
-#:   rather than turned into an invented glob.
-#:
-#: A ``cell_library`` with no entry gets no ``-dont_use`` flags at all --
-#: this command's pre-#807 behaviour -- rather than a guessed exclusion.
-_ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
-    "sky130_fd_sc_hd": (
-        "sky130_fd_sc_hd__lpflow_*",
-        "sky130_fd_sc_hd__probe*",
-    ),
-    "sg13g2_stdcell": (
-        "sg13g2_lgcp_1",
-        "sg13g2_sighold",
-        "sg13g2_slgcp_1",
-        "sg13g2_sdfbbp_1",
-        "sg13g2_dfrbp_2",
-    ),
-}
-
 #: How a request's own ``constraints.dont_use`` list combines with the
 #: built-in per-library :data:`_ABC_DONT_USE_GLOBS` table (issue #2382).
 #:
@@ -496,27 +512,12 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:   "exclude nothing" can never be spelled the same way as "exclude only
 #:   these".
 #:
-#: Naming note (issue #2378): ``klt place-and-route`` has an analogous
-#: request-level exclusion gap of its own for OpenROAD's resizer/CTS. If it
-#: grows one, it should reuse this field's name and shape rather than drift
-#: into a ``dont_use`` vs. ``dont_use_cells`` split by accident of which
-#: issue landed first.
 _DONT_USE_MODES: tuple[str, ...] = ("additive", "replace", "none")
 
 #: The :data:`_DONT_USE_MODES` value used when a request supplies
 #: ``constraints.dont_use`` without an explicit ``constraints.dont_use_mode``
 #: (and, trivially, when it supplies neither).
 _DEFAULT_DONT_USE_MODE = "additive"
-
-#: Characters a ``constraints.dont_use`` entry may contain: Liberty cell-name
-#: characters (``[A-Za-z0-9_]``) plus the glob metacharacters ``abc -dont_use``
-#: itself documents ("supports simple glob patterns in the cell name") and the
-#: punctuation real library cell names use. Deliberately an allowlist, not a
-#: blocklist: each entry is interpolated verbatim into a generated ``.ys``
-#: script's own ``abc`` line, so an entry containing whitespace or a command
-#: separator would silently corrupt that line into a different Yosys command
-#: rather than being rejected.
-_DONT_USE_PATTERN_RE = re.compile(r"^[A-Za-z0-9_.*?!\[\]-]+$")
 
 #: Per-cell-library tie-high/tie-low cell for Yosys's ``hilomap`` pass,
 #: as ``((hi_cell, hi_port), (lo_cell, lo_port))`` -- issue #854.
@@ -573,6 +574,19 @@ _DONT_USE_PATTERN_RE = re.compile(r"^[A-Za-z0-9_.*?!\[\]-]+$")
 #:   (``function : "0"``, ``driver_type : open_source``). Same
 #:   two-distinct-cells shape as gf180mcu, not sky130's single dual-output
 #:   cell -- this library has no ``conb``-equivalent either.
+#: - ``asap7sc7p5t_rvt`` and ``asap7sc7p5t_28_R`` (issue #4273) -> two
+#:   distinct cells, ``TIEHIx1_ASAP7_75t_R`` port ``H`` and
+#:   ``TIELOx1_ASAP7_75t_R`` port ``L``. Both keys name the same RVT
+#:   library: the first is its directory under a structurally discovered
+#:   lambdapdk tree (``libs/asap7sc7p5t_rvt``, which
+#:   :func:`~klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
+#:   joins onto ``libs_ref``), the second is the key ``klt-pdk.json``
+#:   descriptors use for its liberty mapping (``docs/cli/pdk.md``).
+#:   Checked 2026-10-27 against lambdapdk 0.2.17: in
+#:   ``asap7sc7p5t_RVT_TT_merged.lib`` ``TIEHIx1_ASAP7_75t_R``'s only
+#:   output is ``H`` (``function "1"``) and ``TIELOx1_ASAP7_75t_R``'s is
+#:   ``L`` (``function "0"``); both are ``CLASS CORE`` in
+#:   ``asap7sc7p5t_28_R.lef``. Same two-distinct-cells shape as gf180mcu.
 #:
 #: **Deviation from ORFS: no ``-singleton``.** ORFS collapses every constant
 #: in the design onto one tie-hi and one tie-lo instance, then splits that
@@ -606,6 +620,14 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "sg13g2_stdcell": (
         ("sg13g2_tiehi", "L_HI"),
         ("sg13g2_tielo", "L_LO"),
+    ),
+    "asap7sc7p5t_rvt": (
+        ("TIEHIx1_ASAP7_75t_R", "H"),
+        ("TIELOx1_ASAP7_75t_R", "L"),
+    ),
+    "asap7sc7p5t_28_R": (
+        ("TIEHIx1_ASAP7_75t_R", "H"),
+        ("TIELOx1_ASAP7_75t_R", "L"),
     ),
 }
 
@@ -688,24 +710,8 @@ _WARNING_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: requirement).
 _MAX_WARNING_REPRESENTATIVES = 10
 
-#: Matches a liberty ``cell (name) {`` header -- used by
-#: :func:`_parse_liberty_leakage_nw` to isolate each cell's own body without
-#: a full brace-matching parse. ``cell_leakage_power`` is always a direct,
-#: top-level attribute of its enclosing ``cell (...) { ... }`` block, never
-#: nested inside a ``pin``/``timing`` sub-block (the Liberty grammar does not
-#: permit it there), so the text between one cell header and the next is
-#: exactly that cell's own body -- :func:`_match_brace`'s full parse (as
-#: ``restructure.py``'s pin-compatibility check needs, since a pin *is*
-#: nested) is not required here. The cell name's own quotes are optional --
-#: a real volare `sky130_fd_sc_hd` liberty quotes it (``cell
-#: ("sky130_fd_sc_hd__buf_1") {``); a synthetic/other-vendor liberty may not
-#: (verified live against both, issue #1626).
-_LIBERTY_CELL_HEADER_RE = re.compile(
-    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
-)
-
-#: The scalar ``cell_leakage_power : <value>;`` attribute Liberty defines for
-#: a cell's state-independent leakage figure -- what issue #1626 asks this
+#: ``cell_leakage_power`` is the scalar attribute Liberty defines for a
+#: cell's state-independent leakage figure -- what issue #1626 asks this
 #: module to sum. Not every cell library populates it: some (verified live,
 #: ``gf180mcu_fd_sc_mcu9t5v0``) report leakage only via per-input-state
 #: ``leakage_power () { when : "..."; value : "..."; }`` groups instead, with
@@ -713,19 +719,16 @@ _LIBERTY_CELL_HEADER_RE = re.compile(
 #: this command has no vector data to supply -- exactly the same "no
 #: activity factor available" gap the issue explicitly carves switching
 #: power out for. :func:`_parse_liberty_leakage_nw` therefore reads *only*
-#: this scalar field and leaves a cell with no such entry absent from its
+#: this scalar attribute and leaves a cell with no such entry absent from its
 #: result, rather than guessing from the conditional groups.
-_CELL_LEAKAGE_POWER_RE = re.compile(
-    r"\bcell_leakage_power\s*:\s*(?P<value>[-+0-9.eE]+)\s*;"
-)
 
-#: ``leakage_power_unit : "1nW";`` (sky130_fd_sc_hd) / ``leakage_power_unit :
-#: 1uW ;`` (gf180mcu_fd_sc_mcu9t5v0, unquoted, space before the semicolon) --
+#: The value of a library's ``leakage_power_unit`` attribute --
+#: ``"1nW"`` (sky130_fd_sc_hd) / ``1uW`` (gf180mcu_fd_sc_mcu9t5v0, unquoted) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
 #: expressed in. Verified live against both installed liberty families
 #: (issue #1626).
 _LEAKAGE_POWER_UNIT_RE = re.compile(
-    r'\bleakage_power_unit\s*:\s*"?(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)"?\s*;'
+    r"^(?P<magnitude>[-+0-9.eE]+)\s*(?P<unit>[a-zA-Z]+)$"
 )
 
 #: Multiplier from one ``leakage_power_unit`` unit to nanowatts.
@@ -739,166 +742,7 @@ _LEAKAGE_UNIT_TO_NW: dict[str, float] = {
 }
 
 
-class SynthesizeError(Exception):
-    """Raised when a synthesis run cannot even be attempted: a missing/
-    malformed request file, an unresolvable/unreadable RTL source, an
-    unresolvable ``pdk.cell_library``/``corner`` (no matching liberty via
-    ``find_pdk()``), an elaboration/hierarchy error, or a Yosys/ABC engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- either a netlist is produced, or this is raised; there is
-    no third "ran but the request itself was unusable" outcome. This is
-    unaffected by issue #1588's additive ``structural`` verdict: a run that
-    *does* produce a netlist but finds an inferred latch, a combinational
-    loop, or a multiply-driven net still returns normally (``status: "ok"``)
-    with ``structural.has_critical: true`` and exit code ``3`` -- never this
-    exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
-    """
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one output-path field for this module's own JSON response
-    (issue #1844) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt synthesize`'s reports and `klt
-    env-provenance`'s own emitter agree on exactly one `{path, scope}`
-    shape, matching the precedent `klt pex`/`klt sim` set for issue #1261.
-
-    Deliberately applied only at the point a path is inserted into the
-    response dict -- every internal caller (`_run_yosys`, `_read_sta_timing`,
-    the equivalence gate, `_run_timing_restructuring`, `_compute_baseline`,
-    arithmetic candidate measurement) keeps using the real absolute path
-    variable for actual file I/O; only the reported *value* changes.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
-def _script_path_text(path: str, *, repo_root: str | None) -> str:
-    """The text :func:`_write_script` embeds for one filesystem path (issue
-    #1844) -- ``path`` unchanged (absolute) when ``repo_root`` is ``None``
-    or ``path`` does not resolve inside it, preserving :func:`_write_script`'s
-    original cwd-independence invariant exactly for those cases; ``path``
-    rewritten relative to ``repo_root`` (POSIX separators) when it does, via
-    the same :func:`~klayout_tools.env_provenance.repo_relative_path` this
-    module's own response fields use -- one normalizer, not two. A caller
-    embedding any relative-form path this way must run the script with
-    ``cwd=repo_root``; see :func:`_write_script`'s own docstring.
-    """
-    if repo_root is None:
-        return path
-    normalized = env_provenance.repo_relative_path(path, repo_root=repo_root)
-    if normalized["scope"] == "repo":
-        return normalized["path"]
-    return path
-
-
-#: The machine-independent placeholder the commit-safe top-level ``.ys``
-#: writes in place of the resolved PDK install root (issue #1870), e.g.
-#: ``$PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib``.
-#: Deliberately the *same* spelling ``klt sim``'s ``request.models.lib``
-#: already accepts for a PDK-anchored path (``sim.py``'s
-#: ``_resolve_models_lib``) and that ``klt pdk env`` exports, so one
-#: convention covers both directions rather than inventing a second token.
-#:
-#: Yosys does **not** expand environment variables in a script file, so a
-#: script carrying this token is not directly runnable -- that is exactly why
-#: :func:`_write_script` also emits the rehydrated
-#: :data:`RUN_SCRIPT_SUFFIX` sibling it actually runs.
-PDK_ROOT_TOKEN = "$PDK_ROOT"
-
-#: Filename suffix of the rehydrated, *runnable* sibling of the commit-safe
-#: top-level script (issue #1870): ``synth_<top>.ys`` -> ``synth_<top>.run.ys``.
-RUN_SCRIPT_SUFFIX = ".run.ys"
-
-#: Header prepended to the commit-safe script whenever it carries a
-#: :data:`PDK_ROOT_TOKEN` -- the token is otherwise indistinguishable from a
-#: path Yosys would try to open literally, and the reader needs to be told,
-#: in the artifact itself, which sibling is the runnable one.
-_COMMIT_SCRIPT_HEADER = (
-    "# Commit-safe form (issue #1870): the liberty below is written relative\n"
-    "# to $PDK_ROOT, which Yosys does NOT expand -- this file is the artifact\n"
-    "# to commit, not the one to run. Run the rehydrated sibling\n"
-    "# '{run_script}' (regenerated by every `klt synthesize` run), or\n"
-    "# substitute your own PDK install root for $PDK_ROOT first.\n"
-)
-
-#: The mirror-image header on the rehydrated sibling. It carries the real
-#: absolute liberty path, so it is machine-specific by construction and must
-#: not be committed -- said in the file itself, where a reviewer looking at a
-#: diff that adds it will actually see it.
-#: Deliberately does not spell the token itself: a rehydrated script
-#: containing no occurrence of :data:`PDK_ROOT_TOKEN` at all is a stronger
-#: (and directly checkable) property than "no occurrence outside the header".
-_RUN_SCRIPT_HEADER = (
-    "# Machine-local rehydration of '{script}' (issue #1870): the PDK-root\n"
-    "# placeholder has been substituted with this machine's resolved PDK\n"
-    "# install root, so this file is runnable but NOT commit-safe. Commit\n"
-    "# '{script}' instead.\n"
-)
-
-
-def run_script_path(script_path: str) -> str:
-    """The rehydrated, runnable sibling of the commit-safe ``script_path``
-    (issue #1870): ``.../synth_gcd.ys`` -> ``.../synth_gcd.run.ys``.
-
-    One function so the writer (:func:`_write_script`), the response field
-    (``run_script_path``), and any caller reconstructing the pair agree on
-    the name by construction rather than by two copies of the same
-    string-munging.
-    """
-    base, extension = os.path.splitext(script_path)
-    return (
-        f"{base}{RUN_SCRIPT_SUFFIX}" if extension else script_path + RUN_SCRIPT_SUFFIX
-    )
-
-
-def rehydrate_script_text(text: str, *, pdk_root: str) -> str:
-    """``text`` with every :data:`PDK_ROOT_TOKEN` prefix replaced by
-    ``pdk_root`` (issue #1870) -- the one documented, testable transformation
-    that turns the commit-safe script into the runnable one.
-
-    Deliberately a plain prefix substitution over the script *text* rather
-    than a re-render from the original inputs: that is what makes "the
-    committed script and the executed script differ in exactly the liberty
-    path, nothing else" a checkable property (the two files are
-    byte-identical after this substitution, modulo their one-line headers)
-    instead of an assumption about two independent code paths agreeing.
-
-    A caller on another machine rehydrates a committed script the same way
-    -- substitute its own install root (``klt pdk find``'s ``root``, or
-    ``$PDK_ROOT``) -- which is the whole point of writing the token.
-    """
-    return text.replace(f"{PDK_ROOT_TOKEN}/", pdk_root.rstrip("/") + "/")
-
-
-def _script_liberty_text(liberty_path: str, *, pdk_root: str | None) -> str:
-    """The text :func:`_write_script` embeds for the resolved liberty (issue
-    #1870) -- ``$PDK_ROOT/<path relative to the install root>`` when
-    ``liberty_path`` resolves inside ``pdk_root``, otherwise ``liberty_path``
-    unchanged (absolute), exactly as before that issue.
-
-    ``pdk_root`` is ``None`` for every script but :func:`run_synthesize`'s own
-    top-level one (the arithmetic-candidate trial scripts, the ABC probe, and
-    the baseline re-derivation script), which keeps those ephemeral internal
-    artifacts fully absolute and directly runnable -- unchanged, and the same
-    split ``repo_root`` already makes for issue #1844's path rewriting.
-
-    Reuses :func:`~klayout_tools.env_provenance.repo_relative_path` as a
-    generic "path relative to this root, or ``external``" helper (it takes
-    the root as an argument and never consults git itself), so the
-    inside/outside test here is the *same* realpath-and-boundary test the
-    repo-relative rewriting uses -- one normalizer, not two. The fallback is
-    the pre-#1870 absolute path: losing machine-independence for a liberty
-    installed outside the resolved PDK root is strictly better than emitting
-    a token that would not rehydrate.
-    """
-    if pdk_root is None:
-        return liberty_path
-    normalized = env_provenance.repo_relative_path(liberty_path, repo_root=pdk_root)
-    if normalized["scope"] != "repo" or normalized["path"] in (None, "."):
-        return liberty_path
-    return f"{PDK_ROOT_TOKEN}/{normalized['path']}"
+_rpath = RequestPaths(SynthesizeError)
 
 
 def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
@@ -936,10 +780,20 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "structural",
         "baseline",
         "arithmetic",
+        "latch_map",
         "run_id",
+        "outputs",
         "parameters",
+        "sv_frontend",
+        "defines",
+        "yosys_timeout_s",
+        "synthesis",
+        "macros",
     }
 )
+
+#: Keys allowed inside the optional request ``outputs`` object (issue #3795).
+_ALLOWED_OUTPUTS_KEYS = frozenset({"dir"})
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -964,9 +818,32 @@ def load_request(request_path: str) -> dict[str, Any]:
     _reject_unknown_keys(
         request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
     )
+    _validate_outputs(request, request_path)
     return request
 
 
+def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
+    """Reject a malformed ``outputs`` object before any engine work (issue #3795)."""
+    if "outputs" not in request:
+        return
+    outputs = request["outputs"]
+    if not isinstance(outputs, dict):
+        raise SynthesizeError("request.outputs must be an object")
+    _reject_unknown_keys(
+        outputs, _ALLOWED_OUTPUTS_KEYS, request_path, "outputs", SynthesizeError
+    )
+    if "dir" in outputs:
+        out_dir = outputs["dir"]
+        if not isinstance(out_dir, str) or not out_dir.strip():
+            raise SynthesizeError("request.outputs.dir must be a non-empty string")
+        if "run_id" in request:
+            raise SynthesizeError(
+                "request.outputs.dir and request.run_id both name the run "
+                "directory; give only one"
+            )
+
+
+@ytimeout.scoped_yosys_timeout
 def run_synthesize(
     request_path: str,
     *,
@@ -974,8 +851,11 @@ def run_synthesize(
     pdk_root: str | None = None,
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
+    equiv_engine: str | None = None,
+    yosys_timeout_s: str | float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
+    _scratch_run_dir: bool = False,
 ) -> dict[str, Any]:
     """Run the Yosys synthesis declared by the request at ``request_path``.
 
@@ -999,15 +879,19 @@ def run_synthesize(
     equivalent to the RTL that was fed into Yosys. A non-``"equivalent"``
     verdict (``"counterexample"`` or ``"inconclusive"``) -- or an
     :class:`~klayout_tools.equiv.EquivError`, e.g. a **sequential** design
-    (this MVP's ``klt equiv`` is combinational-only -- see
+    (the default ``yosys`` engine is combinational-only -- see
     ``docs/cli/equiv.md``'s "Scope" section; a design containing flip-flops/
-    latches/memories cannot use this flag today) -- is a hard
+    latches/memories needs ``equiv_engine="yosys-sequential"``) -- is a hard
     :class:`SynthesizeError`, never a silent warning: a synthesized netlist
     this gate cannot prove faithful to its own source RTL is not "done".
     ``equiv_timeout_s`` (the CLI's ``--equiv-timeout-s``) overrides ``klt
     equiv``'s own default proof timeout; ``None`` leaves
     :data:`klayout_tools.equiv.DEFAULT_TIMEOUT_S` in effect. It also bounds
     the ``klt equiv`` check ``restructure_timing`` runs, below.
+    ``equiv_engine`` (the CLI's ``--equiv-engine``) selects the ``klt equiv``
+    proof engine for the ``verify_equivalence`` gate only (``None`` keeps the
+    combinational ``yosys`` default; ``"yosys-sequential"`` handles
+    flip-flops); the ``restructure_timing`` check stays combinational.
 
     ``restructure_timing`` (the CLI's ``--restructure-timing`` flag; issue
     #926, Epic #704 Phase 3) runs a bounded cell-resizing loop
@@ -1027,6 +911,7 @@ def run_synthesize(
     ``restructure_max_iterations`` overrides
     :data:`klayout_tools.restructure.DEFAULT_MAX_ITERATIONS`; ``None``
     (default) leaves that default in effect.
+    ``yosys_timeout_s`` (``--yosys-timeout-s``, #5773): see ``bind_yosys_timeout``.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
@@ -1047,18 +932,16 @@ def run_synthesize(
     an optional request ``run_id`` exclusively reserves that directory and
     collisions are errors. Declared inputs are checked for mutation before
     returning; transitive Verilog includes are not snapshotted.
+
+    ``_scratch_run_dir`` is private to :func:`rerun_synthesize_report`: it
+    ignores the request's ``outputs.dir`` (still validated) and uses a fresh
+    ``.klt/synthesize/run-<uuid>/`` directory, so a re-run never collides
+    with the populated stable directory the committed report came from.
     """
     request_state = _input_file_state(request_path)
     request = load_request(request_path)
+    mapping = synthesize_abc.resolve_mapping(request, request_path, SynthesizeError)
     request_dir = os.path.dirname(os.path.abspath(request_path))
-    # Issue #1844: every output-path field this run's own JSON response
-    # echoes (`netlist_path`/`script_path` and the nested occurrences --
-    # `arithmetic.candidates[].measured.*`, `restructuring.
-    # restructured_netlist_path`, `baseline.ref`'s literal-path fallback) is
-    # normalised against this one repo root, resolved once from the request
-    # file's own location -- the same "walk up from the input" default
-    # `env_provenance.find_repo_root` uses for its own caller, and the same
-    # convention `klt pex`/`klt sim` established for issue #1261.
     repo_root = env_provenance.find_repo_root(request_dir)
 
     engine = request.get("engine", "yosys")
@@ -1077,6 +960,12 @@ def run_synthesize(
     parameters = validate_parameters(
         request.get("parameters"), SynthesizeError, "request.parameters"
     )
+    defines = validate_defines(
+        request.get("defines"), SynthesizeError, "request.defines"
+    )
+
+    sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
+    budget_s = ytimeout.bind_yosys_timeout(request, SynthesizeError, yosys_timeout_s)
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1096,6 +985,7 @@ def run_synthesize(
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
     delay_target_ps = _resolve_delay_target_ps(constraints)
+    sta_constraints = mapped_sta_constraints(constraints)
     # Issue #2382: request shape is validated here -- before any PDK
     # resolution or run-directory creation -- so a malformed exclusion list
     # fails as cheaply as a malformed `clock_period_ns` does. The
@@ -1103,6 +993,12 @@ def run_synthesize(
     # resolved liberty, just below.
     dont_use_requested, dont_use_mode = _resolve_dont_use_request(constraints)
     expected_latches = _resolve_expected_latches(request)
+    latch_map_request = _resolve_latch_map(request)
+    # Issue #2635: the shared hard-macro declaration. Shape-validated here,
+    # with everything else that needs no PDK resolution; the one
+    # corner-dependent half waits for `_resolve_liberty` below.
+    macros = _validate_macros(request.get("macros"), request_dir)
+    sta_macros = mapped_sta_macros(sta_constraints, macros)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -1110,9 +1006,35 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
+    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    resolved_globs = resolve_dont_use_globs(
+        library_defaults, dont_use_requested, dont_use_mode
+    )
+    abc_constr_request = _resolve_abc_constr_request(
+        constraints, liberty_path, resolved_globs=resolved_globs
+    )
 
+    # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
+    # inputs* to this run exactly as the RTL sources and the standard-cell
+    # liberty are, so they get the same "was this mutated under us?" check
+    # `_assert_inputs_unchanged` applies to everything else. The *generated*
+    # blackbox (when a macro supplies neither a `lib` nor a
+    # `verilog_blackbox`) is an output of this run, not an input, and is
+    # deliberately absent.
+    macro_input_paths = [
+        path
+        for macro in macros
+        for path in (
+            macro["lef"],
+            macro["gds"],
+            macro["verilog_blackbox"],
+            *(macro["lib"] or {}).values(),
+        )
+        if path is not None
+    ]
     input_state = {
-        path: _input_file_state(path) for path in [*resolved_sources, liberty_path]
+        path: _input_file_state(path)
+        for path in [*resolved_sources, liberty_path, *macro_input_paths]
     }
     input_state[request_path] = request_state
     # Hash before any engine invocation. The final state check also covers
@@ -1135,13 +1057,46 @@ def run_synthesize(
     # Issue #3466: record which elaboration this is, so two parameterisations
     # of the same sources are distinguishable in provenance.
     provenance["parameters"] = dict(parameters)
-    output_dir = _create_run_directory(request_dir, request)
+    # Issue #4196: likewise for preprocessor defines (a separate field, so the
+    # input content hash of existing committed reports is unchanged).
+    provenance["defines"] = dict(defines)
+    provenance.update(ytimeout.timeout_fields(budget_s))
+    output_dir = _create_run_directory(
+        request_dir, request, ignore_outputs_dir=_scratch_run_dir
+    )
+
+    # Issue #4198: opt-in sv2v pre-conversion. Converted once; every pass
+    # that reads sources below gets the converted path, while the provenance
+    # hashes above stay over the user's original sources.
+    elab_sources = resolved_sources
+    if sv_frontend == "sv2v":
+        converted_path, sv2v_version_text = convert_sources(
+            resolved_sources,
+            os.path.join(output_dir, f"{hdl_toplevel}_sv2v.v"),
+            SynthesizeError,
+            defines,
+        )
+        elab_sources = [converted_path]
+        provenance["sv_frontend"] = {
+            "route": "sv2v",
+            "sv2v_version": sv2v_version_text,
+        }
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
     stats_path = os.path.join(output_dir, f"{hdl_toplevel}_stats.json")
 
-    constr_inputs = _ABC_CONSTR_INPUTS.get(cell_library)
+    # Issue #4662: a request-supplied `constraints.abc_constr` wins over the
+    # built-in per-library entry and is the only way a library without one
+    # gets `-constr` (sizing/buffering/`stime`).
+    constr_inputs = abc_constr_request or _ABC_CONSTR_INPUTS.get(cell_library)
+    constr_source = (
+        "request"
+        if abc_constr_request is not None
+        else "builtin"
+        if constr_inputs is not None
+        else None
+    )
     constr_path: str | None = None
     abc_log_path: str | None = None
     if constr_inputs is not None:
@@ -1149,20 +1104,37 @@ def run_synthesize(
         abc_log_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.log")
         _write_constr(constr_path, *constr_inputs)
 
+    # Issue #2635: resolved after the run directory exists, because a macro
+    # that supplies neither a `lib` nor a `verilog_blackbox` gets one
+    # generated from its own LEF *into* that directory.
+    macro_inputs = _macro_blackbox_inputs(macros, corner=corner, output_dir=output_dir)
+
     dont_use_globs, cell_exclusions = _resolve_cell_exclusions(
         requested=dont_use_requested,
         mode=dont_use_mode,
         validated=dont_use_validated,
-        cell_library=cell_library,
+        library_defaults=library_defaults,
+        resolved=resolved_globs,
     )
 
+    abc = mapping or synthesize_abc.DEFAULT_MAPPING
+    # Issue #7010: computed once here so the same answer feeds the engine
+    # options, the statistics-dump capture plan, and the executed script.
+    abc_fast = abc.fast_mode(_abc_supports_option)
     engine_options = _EngineOptions(
+        abc_fast=abc_fast,
+        abc_script_path=abc.stage_script(output_dir, SynthesizeError),
+        abc_timeout_s=abc.timeout_s,
         liberty_path=liberty_path,
         cell_library=cell_library,
         delay_target_ps=delay_target_ps,
         dont_use_globs=dont_use_globs,
         tie_cells=_TIE_CELLS.get(cell_library),
         constr_inputs=constr_inputs,
+    )
+
+    latch_map_report, latch_techmap_path = _prepare_latch_map(
+        latch_map_request, liberty_path, output_dir, hdl_toplevel
     )
 
     arithmetic = None
@@ -1173,40 +1145,33 @@ def run_synthesize(
         arithmetic, adder_sources, adder_techmap_path = _run_arithmetic_selection(
             config=arithmetic_config,
             output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             hdl_toplevel=hdl_toplevel,
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
             parameters=parameters,
+            defines=defines,
         )
 
-    # Issue #1844: `repo_root` is threaded into this run's own script so
-    # that inputs resolving inside the invocation's repo (RTL sources, and
-    # the `.klt/synthesize/` output paths for `tee -o`/`write_verilog`) are
-    # embedded as repo-relative text rather than an absolute path -- the
-    # resolved liberty stays absolute regardless (see `_write_script`'s own
-    # docstring for why). Trial/probe/baseline scripts elsewhere in this
-    # module deliberately do **not** get this treatment (`repo_root` is left
-    # at its default `None` for those `_write_script` calls) -- they are
-    # ephemeral internal working artifacts, never the response's own
-    # `script_path`, so keeping them fully absolute (and their own
-    # `_run_yosys` calls `cwd`-independent, unchanged) is lower-risk than
-    # extending the relative-path/explicit-`cwd` pairing to every script
-    # this module writes.
-    #
-    # Issue #1870: `pdk_root` is threaded in for the same reason and with the
-    # same scope -- the top-level script only. It is what lets the resolved
-    # liberty be written as `$PDK_ROOT/...` instead of an absolute (usually
-    # home-rooted) path, which is what finally makes this artifact
-    # `klt env-provenance scan`-clean. `_write_script` then returns the
-    # *runnable* script to hand to Yosys (the rehydrated `synth_<top>.run.ys`
-    # sibling when a token was written, else `script_path` itself); the
-    # response keeps reporting `script_path` -- the commit-safe artifact --
-    # as `script_path`, and names the executed one in `run_script_path`.
-    executed_script_path = _write_script(
+    # Issue #7010: on engines that lose ABC's redirected stdout (the WASI
+    # builds), stage the engine's own constrained script with `stime -pd`
+    # so its statistics dump lands in the run directory and is recoverable.
+    stats_capture = plan_abc_stats_capture(
+        output_dir,
+        constrained=constr_inputs is not None,
+        user_script=engine_options.abc_script_path,
+        abc_fast=abc_fast,
+        delay_target_ps=delay_target_ps,
+    )
+
+    # Publish a repo-relative, PDK-tokenized script and run its rehydrated copy.
+    scripts = _write_script(
+        abc_timeout_s=engine_options.abc_timeout_s,
+        abc_fast=engine_options.abc_fast,
+        abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
-        sources=resolved_sources,
+        sources=elab_sources,
         hdl_toplevel=hdl_toplevel,
         liberty_path=liberty_path,
         stats_path=stats_path,
@@ -1218,52 +1183,104 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        latch_techmap_path=latch_techmap_path,
+        macro_inputs=tuple(macro_inputs),
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
         parameters=parameters,
+        defines=defines,
+        stats_capture=stats_capture,
     )
 
-    # `cwd=repo_root` is what makes the relative paths `_write_script` just
-    # embedded (when `repo_root` is not `None`) resolve correctly -- see
-    # `_write_script`'s docstring "Commit-safety vs. cwd-independence"
-    # section. When `repo_root` is `None` (no repo resolved for this
-    # request), `_write_script` wrote only absolute paths, so `cwd=None`
-    # (subprocess's own default: the invoking process's cwd) is exactly as
-    # correct as it always was. `executed_script_path` (issue #1870) is the
-    # rehydrated sibling whenever the liberty was tokenized -- Yosys would
-    # fail to open a literal `$PDK_ROOT/...` path, so the committed artifact
-    # is never the one executed.
-    yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
+    try:
+        # Issue #7010: with the statistics-dump capture staged, Yosys runs
+        # from this run's own directory (the run sibling carries absolute
+        # paths for exactly this) so ABC's `stats.txt` cannot land anywhere
+        # shared. Without it, the pre-#7010 cwd rule stands: `repo_root`
+        # whenever relative-form paths were embedded.
+        executed_script_path, yosys_log = abc_stages.run_mapping(
+            scripts,
+            cwd=output_dir if stats_capture is not None else repo_root,
+        )
+    except AbcTimeout as exc:
+        _assert_inputs_unchanged(input_state)
+        return exc.report(
+            hdl_toplevel,
+            repo_root,
+            provenance,
+            mapping,
+            arithmetic=arithmetic,
+            verify_equivalence=verify_equivalence,
+            restructure_timing=restructure_timing,
+        )
 
-    # Issue #1973 Failure 1: strip any `signed` port/wire declaration Yosys's
-    # `write_verilog` left in place -- see `_strip_signed_qualifiers`'s own
-    # docstring for why this is a post-write text rewrite rather than a
-    # Yosys pass. Rewritten in place only when something actually changed,
-    # so a netlist with no `signed` declaration at all (the common case) is
-    # never touched -- not even its mtime.
+    # Issues #1973, #4872, #5594: drop `signed` qualifiers and host source dirs
+    # (absolute and repo-relative); rewritten only if changed (mtime kept).
     netlist_text = _read_produced_netlist(netlist_path)
-    stripped_netlist_text = _strip_signed_qualifiers(netlist_text)
-    if stripped_netlist_text != netlist_text:
-        with open(netlist_path, "w", encoding="utf-8") as handle:
-            handle.write(stripped_netlist_text)
+    stripped = _strip_signed_qualifiers(netlist_text)
+    rewrite_netlist(
+        netlist_path, netlist_text, stripped, elab_sources, repo_root=repo_root
+    )
 
-    module_stats = _read_stats(stats_path, hdl_toplevel)
-    timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
+    module_stats = _read_stats(
+        stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
+    )
+    timing = _read_produced_abc_timing(
+        abc_log_path,
+        delay_target_ps,
+        stats_path=stats_capture.stats_path if stats_capture is not None else None,
+    )
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
-    warnings_summary = _summarize_warnings(
-        yosys_log,
-        capability_warnings={
-            **_library_capability_warnings(cell_library),
-            **_missing_timing_warning(abc_log_path, timing),
-            **_dont_use_unsupported_warning(cell_exclusions),
-        },
-    )
     instance_counts_by_type = dict(
         sorted((module_stats.get("num_cells_by_type") or {}).items())
     )
     leakage_power_nw, leakage_by_type_nw = _compute_leakage(
         liberty_path, instance_counts_by_type
+    )
+    # Issue #2635: macro instances reported *separately* from standard
+    # cells. `instance_counts_by_type` deliberately keeps counting every
+    # type (removing the macro from it would be a breaking change, and
+    # "how many cells of every kind" is still the right answer for it);
+    # these two fields are the additive split a caller needs to compare
+    # standard-cell counts against a standard-cell budget.
+    macro_cells = frozenset(macro["cell"] for macro in macros)
+    macro_instance_counts_by_type = {
+        cell_type: count
+        for cell_type, count in instance_counts_by_type.items()
+        if cell_type in macro_cells
+    }
+    macro_instance_count = sum(macro_instance_counts_by_type.values())
+    cells_without_area = _cells_without_area(liberty_path, instance_counts_by_type)
+    # Computed after the instance counts (issue #2635) so the missing-area
+    # disclosure can be one more entry in the same `warnings` block every
+    # other disclosed-but-skipped capability already reports through.
+    warnings_summary = _summarize_warnings(
+        yosys_log,
+        capability_warnings={
+            **_library_capability_warnings(
+                cell_library,
+                constr_inputs is not None,
+                tie_cells=_TIE_CELLS,
+                constr_inputs=_ABC_CONSTR_INPUTS,
+            ),
+            **_missing_timing_warning(abc_log_path, timing, stats_capture),
+            **netlist_warnings(
+                _read_produced_netlist(netlist_path),
+                cell_library=cell_library,
+                has_tie_cells=cell_library in _TIE_CELLS,
+            ),
+            **_dont_use_unsupported_warning(cell_exclusions),
+            **_macro_area_warning(
+                cells_without_area,
+                macro_cells,
+                macros_with_lib=frozenset(
+                    macro_input["cell"]
+                    for macro_input in macro_inputs
+                    if macro_input["source"] == "liberty"
+                ),
+            ),
+        },
     )
     # Issue #2745: memory-mapping evidence from a *separate* Yosys
     # invocation run only after the production run above succeeded -- the
@@ -1271,25 +1288,30 @@ def run_synthesize(
     # never raises (an evidence failure is reported as `indeterminate`).
     memory_mapping, blackbox_modules = collect_memory_evidence(
         output_dir=output_dir,
-        resolved_sources=resolved_sources,
+        resolved_sources=elab_sources,
         hdl_toplevel=hdl_toplevel,
         final_stats_path=stats_path,
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         parameters=parameters,
+        liberty_path=liberty_path,
+        defines=defines,
+        macro_inputs=tuple(macro_inputs),
     )
 
     equivalence = None
     if verify_equivalence:
         equivalence = _verify_synthesis_equivalence(
             synthesize_output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             hdl_toplevel=hdl_toplevel,
             netlist_path=netlist_path,
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
+            engine=equiv_engine,
             parameters=parameters,
+            defines=defines,
         )
 
     sta, sta_unavailable_reason = _read_sta_timing(
@@ -1305,11 +1327,12 @@ def run_synthesize(
             delay_target_ps=delay_target_ps,
             sta=sta,
             output_dir=output_dir,
-            resolved_sources=resolved_sources,
+            resolved_sources=elab_sources,
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
             parameters=parameters,
+            defines=defines,
         )
 
     response: dict[str, Any] = {
@@ -1321,6 +1344,8 @@ def run_synthesize(
         # with (`{}` when none). Additive field, no `schema_version` bump
         # (docs/json-contract.md).
         "parameters": dict(parameters),
+        # Issue #4196: preprocessor defines (`read_verilog -D`), `{}` when none.
+        "defines": dict(defines),
         "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
@@ -1331,13 +1356,70 @@ def run_synthesize(
         # `KeyError` -- see #560.
         "sequential_area_um2": module_stats.get("sequential_area"),
         "instance_counts_by_type": instance_counts_by_type,
+        # Issue #2635: the shared hard-macro block. `macros` echoes the
+        # declaration resolved to absolute paths (identical shape to `klt
+        # sta`'s own echo -- `klayout_tools.macros.macros_response`);
+        # `macro_instance_counts_by_type`/`macro_instance_count` split the
+        # macro instances back out of `instance_counts_by_type` (which still
+        # counts every type, unchanged); `cells_without_area` names every
+        # instantiated type whose area `area_um2` does *not* account for --
+        # `null` when that cannot be established from the resolved liberty.
+        # Always present; additive fields, no `schema_version` bump
+        # (docs/json-contract.md).
+        # `blackbox_source`/`blackbox_path` additionally record *how* each
+        # macro was made visible to Yosys (`"liberty"` /
+        # `"verilog_blackbox"` / `"lef"`, the last being a stub this run
+        # generated into the run directory) -- see
+        # `_macro_blackbox_inputs`.
+        "macros": [
+            {
+                **entry,
+                "blackbox_source": macro_input["source"],
+                "blackbox_path": env_provenance.repo_relative_path(
+                    macro_input["path"], repo_root=repo_root
+                ),
+            }
+            for entry, macro_input in zip(
+                macro_spec.macros_response(
+                    macros,
+                    # Every path in a `klt synthesize` response is the
+                    # `{path, scope}` shape (issue #1844, the reason this
+                    # verb's `schema_version` is 2) -- a committed report is
+                    # evidence, and an absolute path in one leaks the
+                    # author's home directory. `macros[]`'s paths are no
+                    # exception; `find_absolute_path_fields` enforces it.
+                    normalize_path=lambda path: env_provenance.repo_relative_path(
+                        path, repo_root=repo_root
+                    ),
+                ),
+                macro_inputs,
+                strict=True,
+            )
+        ],
+        "macro_instance_counts_by_type": macro_instance_counts_by_type,
+        "macro_instance_count": macro_instance_count,
+        "cells_without_area": cells_without_area,
         # Static (leakage) power only -- issue #1626. `None` when the
         # resolved liberty reports no `cell_leakage_power` for any
         # instantiated cell type at all -- see `_compute_leakage`.
         "leakage_power_nw": leakage_power_nw,
         "leakage_by_type_nw": leakage_by_type_nw,
         "timing": timing,
+        # Issue #2883: which clock constraints the request carried and that
+        # `timing.delay_target_ps` is ONE global ABC target (never per-clock).
+        # Additive field, no `schema_version` bump (docs/json-contract.md).
+        "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
+        **constrained_timing_fields(
+            sta_constraints,
+            netlist_path=netlist_path,
+            hdl_toplevel=hdl_toplevel,
+            cell_library=cell_library,
+            corner=corner,
+            sta_macros=sta_macros,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+        ),
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
         # "STA not applicable to this netlist/liberty pair". `null` exactly
@@ -1354,6 +1436,15 @@ def run_synthesize(
         # Always present (like `structural`/`warnings`); additive field, no
         # `schema_version` bump (docs/json-contract.md).
         "cell_exclusions": cell_exclusions,
+        # Issue #4662: where the `abc -constr` inputs came from -- `request`
+        # (`constraints.abc_constr`), `builtin` (`_ABC_CONSTR_INPUTS`), or
+        # `null` when no `-constr` was passed. Additive field, no
+        # `schema_version` bump.
+        "abc_constr": {
+            "source": constr_source,
+            "driving_cell": constr_inputs[0] if constr_inputs else None,
+            "load_ff": constr_inputs[1] if constr_inputs else None,
+        },
         "warnings": warnings_summary,
         # Issue #2745: whether inferred memories were lowered to logic,
         # optimized away before lowering, or survived mapping -- per module
@@ -1364,26 +1455,36 @@ def run_synthesize(
         # `schema_version` bump (docs/json-contract.md).
         "memory_mapping": memory_mapping,
         "blackbox_modules": blackbox_modules,
-        "netlist_path": _report_path(netlist_path, repo_root=repo_root),
-        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
-        # refers to, taken from the internal absolute path (never the
-        # redacted `{path, scope}` object) after signed-qualifier stripping.
-        # Additive field; no `schema_version` bump.
-        "netlist_sha256": sha256_file(netlist_path),
-        "script_path": _report_path(script_path, repo_root=repo_root),
+        "netlist_path": env_provenance.repo_relative_path(
+            netlist_path, repo_root=repo_root
+        ),
+        # Issues #2452/#7277: the exact-file digest and its banner-normalised
+        # companion, both from the internal absolute path after final
+        # processing — see `_digest.netlist_digest_fields`.
+        **netlist_digest_fields(netlist_path),
+        "script_path": env_provenance.repo_relative_path(
+            script_path, repo_root=repo_root
+        ),
         # Issue #1870: the script Yosys was actually handed. Equal to
         # `script_path` whenever no `$PDK_ROOT` token was written (a liberty
         # outside the resolved install root), and the rehydrated
         # `synth_<top>.run.ys` sibling otherwise -- so "what ran" is always
         # nameable, and never has to be inferred from a filename convention.
         # Additive field, no `schema_version` bump (docs/json-contract.md).
-        "run_script_path": _report_path(executed_script_path, repo_root=repo_root),
+        "run_script_path": env_provenance.repo_relative_path(
+            executed_script_path, repo_root=repo_root
+        ),
         "provenance": provenance,
+        **ytimeout.timeout_fields(budget_s),
         "equivalence": equivalence,
         "restructuring": restructuring,
         "arithmetic": arithmetic,
         "baseline": None,
     }
+    synthesize_abc.record_mapping(mapping, response, provenance)
+    _attach_latch_map_report(
+        response, latch_map_report, latch_techmap_path, repo_root=repo_root
+    )
     if arithmetic is not None:
         arithmetic["selected_measured"] = _candidate_measurement(
             instance_count=module_stats["num_cells"],
@@ -1407,8 +1508,34 @@ def run_synthesize(
     return response
 
 
-def _create_run_directory(request_dir: str, request: dict[str, Any]) -> str:
-    """Exclusively claim a retained directory; an existing ID is never reused."""
+def _create_run_directory(
+    request_dir: str, request: dict[str, Any], *, ignore_outputs_dir: bool = False
+) -> str:
+    """Exclusively claim a retained directory; an existing ID is never reused.
+
+    ``outputs.dir`` (issue #3795) names the run directory itself, relative to
+    the request file's directory; it may be absent or an existing *empty*
+    directory, never a populated one. ``ignore_outputs_dir`` (``--rerun``)
+    skips that claim and allocates a fresh ``run-<uuid>`` directory instead.
+    """
+    _validate_outputs(request, "request")
+    out_dir = None if ignore_outputs_dir else request.get("outputs", {}).get("dir")
+    if out_dir is not None:
+        output_dir = os.path.normpath(os.path.join(request_dir, out_dir))
+        try:
+            os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+            try:
+                os.mkdir(output_dir)
+            except FileExistsError:
+                # Only an existing empty directory may be reused.
+                if not os.path.isdir(output_dir) or os.listdir(output_dir):
+                    raise
+        except OSError as exc:
+            raise SynthesizeError(
+                f"could not claim outputs.dir '{output_dir}': {exc}; it must "
+                "not exist or be an empty directory (prior evidence is retained)"
+            ) from exc
+        return output_dir
     run_id = request.get("run_id", f"run-{uuid.uuid4().hex}")
     if not isinstance(run_id, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
@@ -1473,18 +1600,37 @@ def _read_produced_netlist(path: str) -> str:
 
 
 def _read_produced_abc_timing(
-    path: str | None, delay_target_ps: int | None
+    path: str | None,
+    delay_target_ps: int | None,
+    stats_path: str | None = None,
 ) -> dict[str, Any] | None:
     if path is not None and not os.path.isfile(path):
         raise SynthesizeError(f"yosys did not produce the expected ABC log '{path}'")
-    return _read_abc_timing(path, delay_target_ps)
+    # Issue #7010: the captured log stays authoritative (full precision,
+    # per-region). Only when it yields nothing -- the WASI engines lose
+    # ABC's redirected stdout entirely -- does the run's own statistics
+    # dump get a chance, and only in its unambiguous single-record form.
+    timing = _read_abc_timing(path, delay_target_ps)
+    if timing is not None or stats_path is None:
+        return timing
+    return read_abc_stats_timing(path, stats_path, delay_target_ps)
 
 
 def _missing_timing_warning(
-    abc_log_path: str | None, timing: dict[str, Any] | None
+    abc_log_path: str | None,
+    timing: dict[str, Any] | None,
+    stats_capture: AbcStatsCapture | None = None,
 ) -> dict[str, str]:
     if abc_log_path is None or timing is not None:
         return {}
+    if stats_capture is not None:
+        return {
+            "timing_unavailable": (
+                "The current invocation's ABC log has no readable stime summary "
+                "and its statistics dump cannot attribute a delay to this run; "
+                "timing is null and any requested clock target remains unverified."
+            )
+        }
     return {
         "timing_unavailable": (
             "The current invocation's ABC log has no readable stime summary; "
@@ -1501,8 +1647,10 @@ def _verify_synthesis_equivalence(
     netlist_path: str,
     liberty_path: str,
     timeout_s: float | None,
+    engine: str | None = None,
     request_filename: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -1547,9 +1695,14 @@ def _verify_synthesis_equivalence(
             "liberty": liberty_path,
         },
     }
+    if engine is not None:
+        equiv_request["engine"] = engine
     if parameters:
         # Issue #3466: the gold RTL must be elaborated like the synthesis was.
         equiv_request["gold"]["parameters"] = dict(parameters)
+    if defines:
+        # Issue #4196: ... and preprocessed with the same defines.
+        equiv_request["gold"]["defines"] = dict(defines)
     try:
         with open(equiv_request_path, "w", encoding="utf-8") as handle:
             json.dump(equiv_request, handle, indent=2)
@@ -1565,50 +1718,14 @@ def _verify_synthesis_equivalence(
             f"equivalence check against source RTL could not be completed: {exc}"
         ) from exc
 
-    status = equiv_report["status"]
-    if status != "equivalent":
-        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
-
-    return {
-        "status": status,
-        "engine": equiv_report["engine"],
-        "engine_version": equiv_report["engine_version"],
-        "timeout_s": equiv_report["timeout_s"],
-        "elapsed_s": equiv_report["elapsed_s"],
-        "artifacts": equiv_report["artifacts"],
-    }
-
-
-def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
-    """An actionable :class:`SynthesizeError` message for a non-
-    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
-    -- names the diverging outputs for a proven ``"counterexample"``, or the
-    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
-    log_path = equiv_report.get("artifacts", {}).get("log_path")
-    if status == "counterexample":
-        counterexample = equiv_report.get("counterexample") or {}
-        diverging = counterexample.get("diverging_outputs") or []
-        confirmed = counterexample.get("confirmed_by_simulation")
-        detail = (
-            f"diverging outputs: {', '.join(diverging)}"
-            if diverging
-            else "no diverging outputs reported"
-        )
-        message = (
-            "synthesized netlist is NOT equivalent to its source RTL "
-            f"(klt equiv reported 'counterexample'; {detail}; "
-            f"confirmed_by_simulation={confirmed})"
-        )
-    else:
-        diagnostics = equiv_report.get("diagnostics") or []
-        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
-        message = (
-            "equivalence check against source RTL did not reach a verdict "
-            f"(klt equiv reported '{status}'): {detail}"
-        )
-    if log_path:
-        message += f" -- see {log_path} for the full proof"
-    return message
+    return require_equivalence(
+        equiv_report,
+        error_cls=SynthesizeError,
+        counterexample_prefix=(
+            "synthesized netlist is NOT equivalent to its source RTL"
+        ),
+        no_verdict_prefix="equivalence check against source RTL",
+    )
 
 
 def _run_timing_restructuring(
@@ -1624,6 +1741,7 @@ def _run_timing_restructuring(
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
+    defines: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1706,6 +1824,7 @@ def _run_timing_restructuring(
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
             parameters=parameters,
+            defines=defines,
         )
 
     # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
@@ -1713,7 +1832,7 @@ def _run_timing_restructuring(
     # the value handed back to `run_synthesize`'s response is normalized,
     # and only when it is not already `None` (no resize applied).
     if report["restructured_netlist_path"] is not None:
-        report["restructured_netlist_path"] = _report_path(
+        report["restructured_netlist_path"] = env_provenance.repo_relative_path(
             report["restructured_netlist_path"], repo_root=repo_root
         )
 
@@ -1742,20 +1861,203 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
     if not all(isinstance(entry, str) and entry for entry in sources):
         raise SynthesizeError("request.sources entries must be non-empty strings")
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
-        if not os.path.isfile(path):
-            raise SynthesizeError(f"RTL source not found: {entry}")
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        SynthesizeError,
+        field="request.sources entry",
+        noun="RTL source",
+    )
+
+
+def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+    """Validate the optional ``request.macros`` array (issue #2635) -- the
+    shared, placement-free hard-macro declaration documented once in
+    :mod:`klayout_tools.macros` and accepted identically by ``klt sta``.
+
+    Returns ``[]`` when the field is omitted, so a request written before
+    this field existed synthesizes byte-for-byte as it did. A thin wrapper:
+    the only per-verb differences are the error class and, here alone, the
+    LEF-less relaxation (issue #5612).
+    """
+    return macro_spec.validate_macros(
+        macros, request_dir, error_cls=SynthesizeError, allow_missing_lef=True
+    )
+
+
+def _macro_blackbox_inputs(
+    macros: list[dict[str, Any]], *, corner: str, output_dir: str
+) -> list[dict[str, str]]:
+    """How each declared macro is made visible to Yosys, in request order::
+
+        [{"cell": str, "source": "liberty"|"verilog_blackbox"|"lef",
+          "path": str}, ...]
+
+    Exactly one of three dispositions per macro, in precedence order:
+
+    1. ``lib`` -- the corner-matching macro liberty
+       (:func:`klayout_tools.macros.macro_lib_for_corner`), loaded with
+       ``read_liberty -lib``. Preferred because it carries the macro's real
+       timing *and* area, so a later ``klt sta``/``klt place-and-route`` run
+       on the same declaration sees the same numbers.
+    2. ``verilog_blackbox`` -- a caller-supplied ``(* blackbox *)`` module
+       declaration, loaded with ``read_verilog -lib``.
+    3. Neither -- a blackbox is **generated** from the macro's own LEF pin
+       list (:func:`klayout_tools.macros.blackbox_verilog_text`) into
+       ``<run dir>/<cell>_blackbox.v`` and loaded the same way. This is the
+       path that means a caller with only a LEF never has to hand-write (and
+       hand-maintain) a stub -- unreachable for a LEF-less macro (issue
+       #5612), which has no LEF to generate from and always takes 1 or 2.
+
+    Every disposition has the same effect on the netlist: the macro
+    survives ``hierarchy``/``synth``/``abc`` as one opaque instance rather
+    than being implemented out of standard cells. Live-verified against
+    Yosys 0.69 for dispositions 1 and 2 (see
+    :func:`~klayout_tools.macros.blackbox_verilog_text`); 3 produces the
+    same file shape as 2 by construction.
+
+    The generated file is written into the run directory (never next to the
+    LEF, which may be a read-only PDK install) and retained as a debuggable
+    artifact alongside the ``.ys`` script, matching every other generated
+    input this module keeps.
+    """
+    inputs: list[dict[str, str]] = []
+    for macro in macros:
+        lib_path = macro_spec.macro_lib_for_corner(
+            macro, corner, error_cls=SynthesizeError
+        )
+        if lib_path is not None:
+            inputs.append(
+                {"cell": macro["cell"], "source": "liberty", "path": lib_path}
+            )
+            continue
+        blackbox_path = macro["verilog_blackbox"]
+        if blackbox_path is not None:
+            inputs.append(
+                {
+                    "cell": macro["cell"],
+                    "source": "verilog_blackbox",
+                    "path": blackbox_path,
+                }
+            )
+            continue
+        generated = os.path.join(output_dir, f"{macro['cell']}_blackbox.v")
+        _write_text_file(
+            generated,
+            macro_spec.blackbox_verilog_text(macro, error_cls=SynthesizeError),
+        )
+        inputs.append({"cell": macro["cell"], "source": "lef", "path": generated})
+    return inputs
+
+
+def _cells_without_area(
+    liberty_path: str, instance_counts_by_type: dict[str, int]
+) -> list[str] | None:
+    """The response's ``cells_without_area`` field (issue #2635): every cell
+    type this run instantiated for which the resolved standard-cell liberty
+    reports no ``area``, sorted.
+
+    This is what makes ``area_um2`` non-silent. Yosys's ``stat -liberty``
+    sums only the areas the *one* liberty it was handed declares, so a
+    blackboxed hard macro contributes exactly ``0`` with nothing in the
+    response marking it -- a caller comparing ``area_um2`` against an area
+    budget is then wrong by the macro's whole footprint, and has no way to
+    find out from the response. A non-empty list here says precisely which
+    instantiated types are unaccounted for.
+
+    ``[]`` -- a real, not-fabricated empty answer -- when the design
+    instantiates nothing at all, or when every instantiated type does have
+    an area. ``None`` -- "not establishable", never a fabricated empty list
+    -- when the liberty cannot be read or parsed, or
+    has no ``cell (...)`` group at all (a liberty whose cells all
+    lack ``area`` is *not* that case: its cells are parseable, so every
+    instantiated type is reported missing), exactly the posture
+    :func:`_liberty_cell_names` takes for the same two cases.
+    """
+    if not instance_counts_by_type:
+        return []
+    try:
+        with open(liberty_path, encoding="utf-8") as handle:
+            liberty_text = handle.read()
+        library = parse_liberty_text(liberty_text, source=liberty_path)
+    except (OSError, UnicodeDecodeError, LibertyCompareError):
+        return None
+    cells = [cell for cell in library.children("cell") if cell.args]
+    if not cells:
+        return None
+    areas: set[str] = set()
+    for cell in cells:
         try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise SynthesizeError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
+            float(cell.attributes.get("area", ""))
+        except (TypeError, ValueError):
+            continue
+        areas.add(cell.args[0])
+    return sorted(
+        cell_type for cell_type in instance_counts_by_type if cell_type not in areas
+    )
+
+
+def _macro_area_warning(
+    cells_without_area: list[str] | None,
+    macro_cells: frozenset[str],
+    macros_with_lib: frozenset[str] | None = None,
+) -> dict[str, str]:
+    """A ``warnings`` entry (issue #2635) whenever ``area_um2`` demonstrably
+    does not account for every instantiated cell type.
+
+    A response *field* a caller must remember to read is not enough on its
+    own -- the whole failure this closes is a naive reader trusting
+    ``area_um2``. Surfacing it through the same ``warnings`` block every
+    other disclosed-but-skipped capability uses means it shows up in any
+    harness that already summarises warnings, with no new field to learn.
+    Separate categories for "a declared hard macro" and "some other
+    unmapped type" because the dispositions differ: the first is expected
+    and the caller must add the macro's own area themselves, the second is
+    usually a ``-dont_use``/mapping problem.
+
+    ``macros_with_lib`` (issue #4368) names the macros that have a macro
+    liberty (``response.macros[].lib`` non-null); a LEF-only or
+    blackbox-only macro has no area there, so the text must not send the
+    caller to it. ``None`` treats every macro as having one.
+    """
+    if not cells_without_area:
+        return {}
+    macros_missing = [cell for cell in cells_without_area if cell in macro_cells]
+    others_missing = [cell for cell in cells_without_area if cell not in macro_cells]
+    warnings: dict[str, str] = {}
+    if macros_missing:
+        with_lib = [
+            cell
+            for cell in macros_missing
+            if macros_with_lib is None or cell in macros_with_lib
+        ]
+        without_lib = [cell for cell in macros_missing if cell not in with_lib]
+        text = (
+            "area_um2 excludes the hard macro(s) "
+            + ", ".join(macros_missing)
+            + ": the standard-cell liberty stat -liberty was handed has no "
+            "area for them."
+        )
+        if with_lib:
+            text += (
+                f" Add the area of {', '.join(with_lib)}"
+                " from its macro liberty (response.macros[].lib) before "
+                "comparing area_um2 to an area budget."
+            )
+        if without_lib:
+            text += (
+                f" {', '.join(without_lib)}"
+                " has no macro liberty (response.macros[].lib is null: "
+                "LEF-only, verilog_blackbox-only or abstract-less), so no "
+                "area is available for it here."
+            )
+        warnings["macro_area_excluded"] = text
+    if others_missing:
+        warnings["cells_without_liberty_area"] = (
+            "area_um2 excludes instantiated cell type(s) with no liberty "
+            "area: " + ", ".join(others_missing)
+        )
+    return warnings
 
 
 def _resolve_liberty(
@@ -1781,7 +2083,7 @@ def _resolve_liberty(
     ``corner`` (explicit or nominal-default) liberty view -- the "liberty
     not found for deck" posture this module's docstring describes.
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``place_and_route.py`` and ``post_route_sta.py``'s own
@@ -1795,8 +2097,15 @@ def _resolve_liberty(
 
 
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
-    """``constraints.clock_period_ns`` as an integer picosecond ABC delay
-    target (``abc -D``), or ``None`` when the request does not supply one.
+    """The integer picosecond ABC delay target (``abc -D``) derived from
+    ``constraints``, or ``None`` when the request does not supply one.
+
+    Precedence (issue #2883): an explicit ``constraints.clock_period_ns`` is
+    the global target; otherwise, when ``constraints.clocks`` is given, the
+    *tightest* (smallest) listed ``period_ns`` -- ABC takes a single global
+    ``-D``, so the conservative choice is the one that cannot under-target
+    any listed domain. See :func:`_describe_clock_targets` for the envelope
+    echo of which one was used.
 
     ``None``/omitted is a deliberate, documented state, not an oversight
     (``docs/cli/synthesize.md``): the run still gets ``-constr`` -- so ABC's
@@ -1811,12 +2120,13 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
     """
     if not constraints:
         return None
+    clocks = _resolve_clocks(constraints)
     clock_period_ns = constraints.get("clock_period_ns")
     if clock_period_ns is None:
+        if clocks:
+            return int(round(min(c["period_ns"] for c in clocks) * 1000))
         return None
-    if isinstance(clock_period_ns, bool) or not isinstance(
-        clock_period_ns, (int, float)
-    ):
+    if not is_number(clock_period_ns):
         raise SynthesizeError(
             "request.constraints.clock_period_ns must be a positive number "
             "(nanoseconds) or null"
@@ -1826,6 +2136,89 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
             "request.constraints.clock_period_ns must be greater than zero"
         )
     return int(round(clock_period_ns * 1000))
+
+
+def _describe_clock_targets(
+    constraints: dict[str, Any] | None, delay_target_ps: int | None
+) -> dict[str, Any]:
+    """The response's ``clock_targets`` object (issue #2883): which clock
+    constraints the request carried and how the single ABC delay target was
+    derived from them.
+
+    ``abc -D`` is one global number, so per-clock periods are *never*
+    individually enforced; ``per_clock_enforced`` is always ``false`` and
+    ``delay_target_basis`` names where ``delay_target_ps`` came from:
+    ``"none"``, ``"clock_period_ns"`` or ``"min_clocks_period_ns"``.
+    """
+    clocks = _resolve_clocks(constraints)
+    explicit = (constraints or {}).get("clock_period_ns") is not None
+    if explicit:
+        basis = "clock_period_ns"
+    elif clocks:
+        basis = "min_clocks_period_ns"
+    else:
+        basis = "none"
+    return {
+        "clocks": clocks,
+        "delay_target_ps": delay_target_ps,
+        "delay_target_basis": basis,
+        "per_clock_enforced": False,
+    }
+
+
+def _resolve_abc_constr_request(
+    constraints: dict[str, Any] | None,
+    liberty_path: str,
+    *,
+    resolved_globs: tuple[str, ...],
+) -> tuple[str, float] | None:
+    """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
+    or ``None`` when the request does not supply one (issue #4662).
+
+    Supplies the ``abc -constr`` inputs for any ``cell_library`` and overrides
+    the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
+    problem, an unknown key, a ``driving_cell`` absent from the resolved
+    liberty (skipped only when the liberty's cell list cannot be established,
+    as for ``dont_use``), an excluded driving cell, or a non-positive/non-finite
+    ``load_ff`` is a :class:`SynthesizeError` naming the field.
+    """
+    if not constraints or constraints.get("abc_constr") is None:
+        return None
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
+    if not isinstance(raw, dict):
+        raise SynthesizeError(f"{where} must be a JSON object")
+    unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s) {unknown}; allowed: driving_cell, load_ff"
+        )
+    for key in ("driving_cell", "load_ff"):
+        if key not in raw:
+            raise SynthesizeError(f"{where}.{key} is required")
+    driving_cell = raw["driving_cell"]
+    if not isinstance(driving_cell, str) or not driving_cell:
+        raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
+    load_ff = raw["load_ff"]
+    if not is_finite_number(load_ff) or load_ff <= 0:
+        raise SynthesizeError(
+            f"{where}.load_ff must be a finite number greater than zero "
+            f"(femtofarads), got {load_ff!r}"
+        )
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None and driving_cell not in cell_names:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' is not a cell in the "
+            f"resolved liberty '{os.path.basename(liberty_path)}' "
+            f"({len(cell_names)} cells)"
+        )
+    pattern = first_matching_glob(driving_cell, resolved_globs)
+    if pattern is not None:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' matches dont_use "
+            f"pattern '{pattern}'. Choose another driving cell or change "
+            "constraints.dont_use or constraints.dont_use_mode."
+        )
+    return driving_cell, float(load_ff)
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
@@ -1847,25 +2240,13 @@ def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
 
 
 def _abc_supports_dont_use() -> bool:
-    """Whether the resolved Yosys build's ``abc`` pass accepts ``-dont_use``.
+    return _abc_supports_option("-dont_use")
 
-    Probed against ``yosys -p 'help abc'`` rather than inferred from a
-    version number: measured live (issue #807), Yosys 0.68 documents
-    ``-dont_use`` and Ubuntu 24.04's distro-packaged 0.33 does not mention
-    it at all -- and passing an unknown option to ``abc`` is a hard Yosys
-    error. Older builds therefore degrade to a run with no exclusion list
-    (mapped exactly as before issue #807) rather than failing outright --
-    the same graceful-degradation posture ``sequential_area_um2`` already
-    takes toward those builds (#560). Never raises -- including on a
-    timeout (issue #1775): bounded by the same
-    :data:`DEFAULT_YOSYS_TIMEOUT_S` :func:`_run_yosys` uses, since this is
-    still a Yosys invocation that could in principle hang, but a stuck
-    capability probe degrades to "assume unsupported" rather than raising,
-    exactly like the missing-binary (``OSError``) and nonzero-exit cases
-    right below.
-    """
+
+def _abc_supports_option(option: str) -> bool:
+    """Probe the installed ABC pass, including downstream-patched Yosys builds."""
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-p", "help abc"],
             capture_output=True,
             text=True,
@@ -1875,7 +2256,9 @@ def _abc_supports_dont_use() -> bool:
         return False
     if completed.returncode != 0:
         return False
-    return "-dont_use" in (completed.stdout or "")
+    return any(
+        line.split()[:1] == [option] for line in (completed.stdout or "").splitlines()
+    )
 
 
 def _resolve_dont_use_mode(constraints: dict[str, Any]) -> str:
@@ -1946,7 +2329,7 @@ def _resolve_dont_use_request(
     engine, so it is safe to call before any PDK resolution or run-directory
     creation. The liberty-dependent half (does each pattern actually match a
     cell?) is :func:`_validate_dont_use_against_liberty`; the merge with the
-    built-in per-library table is :func:`_resolve_cell_exclusions`.
+    built-in per-library table is :func:`resolve_dont_use_globs`.
 
     Raises :class:`SynthesizeError` naming the field for a non-array value, a
     non-string/empty entry, an entry containing a character that would corrupt
@@ -1981,39 +2364,6 @@ def _resolve_dont_use_request(
             "built-in per-library exclusions without adding any)"
         )
     return patterns, mode
-
-
-def _liberty_cell_names(liberty_path: str) -> frozenset[str] | None:
-    """Every ``cell (<name>) { ... }`` group name in the resolved liberty, or
-    ``None`` when that set cannot be established (issue #2382).
-
-    Deliberately minimal, the same scope discipline
-    :func:`_parse_liberty_leakage_nw` states for itself -- it reuses that
-    function's own :data:`_LIBERTY_CELL_HEADER_RE` and extracts *only* the
-    names, never a pin/timing model. This is the cell list
-    :func:`_validate_dont_use_against_liberty` checks a request's exclusion
-    patterns against, so that a typo cannot silently change the mapped
-    netlist.
-
-    ``None`` -- meaning "not establishable", which the caller treats as "do
-    not validate" rather than "zero cells, reject everything" -- when the file
-    cannot be read *or* when it contains no ``cell (...)`` group at all. The
-    second case is the important one: a liberty this regex cannot see any cell
-    in is a limitation of this deliberately-partial parser, not evidence that
-    the caller's pattern is a typo, and concluding otherwise would reject a
-    perfectly good request. Never raises, matching
-    :func:`_abc_supports_dont_use`'s "never break a run over an optional
-    probe" posture.
-    """
-    try:
-        with open(liberty_path, encoding="utf-8") as handle:
-            liberty_text = handle.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-    names = frozenset(
-        match.group("name") for match in _LIBERTY_CELL_HEADER_RE.finditer(liberty_text)
-    )
-    return names or None
 
 
 def _validate_dont_use_against_liberty(
@@ -2068,44 +2418,18 @@ def _resolve_cell_exclusions(
     requested: tuple[str, ...],
     mode: str,
     validated: bool | None,
-    cell_library: str,
+    library_defaults: tuple[str, ...],
+    resolved: tuple[str, ...],
 ) -> tuple[tuple[str, ...], dict[str, Any]]:
     """``(dont_use_globs, cell_exclusions)`` -- the ``-dont_use`` glob list
     actually passed to ABC, plus the response block disclosing how it was
     arrived at (issue #2382).
 
-    Merges the request's own ``constraints.dont_use`` patterns (already
-    shape-validated by :func:`_resolve_dont_use_request` and liberty-validated
-    by :func:`_validate_dont_use_against_liberty`) with the built-in
-    per-library :data:`_ABC_DONT_USE_GLOBS` table per ``mode`` -- see
-    :data:`_DONT_USE_MODES` for why ``"additive"`` is the default.
-
-    Degradation is shared, never bypassed: the resolved list is passed only
-    when :func:`_abc_supports_dont_use` says the resolved Yosys build's
-    ``abc`` accepts the flag at all, exactly as the built-in table already
-    degraded before this field existed. The probe is still made only when
-    there is something to exclude, so a library with no table entry and a
-    request with no list runs no extra Yosys invocation. Because degrading
-    means a request that asked for an exclusion gets a netlist that still
-    contains those cells, that case is disclosed -- both here (as
-    ``engine_supports_dont_use: false`` alongside a non-empty ``requested``
-    and an empty ``effective``) and, so it cannot be missed, as the
-    ``dont_use_unsupported`` capability warning
-    :func:`_dont_use_unsupported_warning` emits.
-
-    The returned block's ``effective`` is exactly the list handed to ABC, so a
-    committed report records what was excluded instead of leaving it implicit
-    in the tool version that produced it. Additive response field, no
-    ``schema_version`` bump (``docs/json-contract.md``).
+    The resolved patterns have already been checked against the request's
+    driving cell. Probe the engine only if there is something to exclude.
+    If Yosys lacks ``abc -dont_use``, report an empty ``effective`` list.
+    A dropped request pattern also triggers :func:`_dont_use_unsupported_warning`.
     """
-    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
-    if mode == "none":
-        resolved: tuple[str, ...] = ()
-    elif mode == "replace":
-        resolved = requested
-    else:
-        resolved = tuple(dict.fromkeys((*library_defaults, *requested)))
-
     supported: bool | None = None
     if resolved:
         supported = _abc_supports_dont_use()
@@ -2161,10 +2485,17 @@ def _write_script(
     tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    latch_techmap_path: str | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
     pdk_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
-) -> str:
+    defines: dict[str, str | None] | None = None,
+    abc_fast: synthesize_abc.FastMode = None,
+    abc_script_path: str | None = None,
+    abc_timeout_s: float | None = None,
+    stats_capture: AbcStatsCapture | None = None,
+) -> str | abc_stages.StagedMapping:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
     ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``setundef`` ->
@@ -2215,6 +2546,27 @@ def _write_script(
     (:data:`_TIE_CELLS`'s own docstring, "gets **no** ``hilomap`` pass at
     all") for another rather than fixing anything.
 
+    ``macro_inputs`` (issue #2635, :func:`_macro_blackbox_inputs`' own
+    return value) inserts one line per declared hard macro **between** the
+    ``read_verilog`` of the RTL sources and ``hierarchy``::
+
+        read_liberty -lib <macro liberty>     # source == "liberty"
+        read_verilog -lib <macro blackbox>    # source == "verilog_blackbox"/"lef"
+
+    Its position is load-bearing: ``hierarchy -check -top`` is exactly the
+    pass that rejects a module instantiated but never read (``Module
+    `\\<cell>' referenced in module `\\<top>' in cell `\\<inst>' is not
+    part of the design`` -- the failure this field exists to close), so the
+    macro's declaration must already be loaded when it runs. ``-lib`` on
+    either reader is what makes the module a **blackbox**: its instance
+    survives ``synth``/``abc``/``clean`` untouched into ``write_verilog``'s
+    netlist and into ``stat``'s own ``num_cells_by_type``, instead of being
+    implemented out of standard cells -- which is the entire point of a hard
+    macro, and the thing that feeding the vendor's behavioural Verilog
+    through ``sources`` gets exactly backwards. With no macros declared
+    (every pre-#2635 request) not one line is emitted and the script is
+    byte-identical to before.
+
     ``adder_techmap_path`` (issue #1722, the request's ``arithmetic`` field)
     inserts the arithmetic-architecture substitution **between**
     ``hierarchy`` and ``synth``::
@@ -2236,6 +2588,13 @@ def _write_script(
     Any ``$add`` the rule file declines (via ``_TECHMAP_FAIL_`` -- a width
     that was not generated) is left untouched for Yosys's own expansion, so
     this is always a subset substitution.
+
+    ``latch_techmap_path`` (issue #4458, the request's ``latch_map`` field)
+    inserts ``techmap -map <path>`` **after** ``synth`` and **before**
+    ``dfflibmap``: ``synth`` is what infers the ``$_DLATCH_P_``/
+    ``$_DLATCH_N_`` primitives the rule file matches, and ``dfflibmap``/``abc``
+    would otherwise leave them unmapped. ``None`` emits nothing, so every
+    pre-#4458 script is byte-identical.
 
     Commit-safety vs. cwd-independence (issue #1844): every path embedded in
     the script used to be absolute unconditionally, so the script ran
@@ -2290,78 +2649,98 @@ def _write_script(
     outside ``pdk_root``, no token is written, no sibling is emitted, and the
     return value is ``script_path`` itself: the pre-#1870 behaviour exactly.
 
-    Returns the path of the script to execute (``script_path``, or its
+    ``stats_capture`` (issue #7010, :func:`~klayout_tools.synthesize_abc_
+    timing.plan_abc_stats_capture`'s plan) adds one exception to that
+    sibling rule: the caller executes Yosys from the run directory so
+    ABC's ``stime -d`` statistics dump lands there, so the runnable
+    sibling's paths are **absolute** wherever the commit form keeps
+    repo-relative ones (a sibling is emitted for that reason alone when no
+    token was written), and the ``abc`` line carries the staged capture
+    script via ``-script`` -- the engine's own constrained mapping
+    commands with the ``stime`` tail widened to also dump statistics.
+
+    With an ABC budget, return the three staged scripts and checkpoint paths.
+    Otherwise return the path of the script to execute (``script_path``, or its
     rehydrated sibling) -- never the artifact to commit, which is always
     ``script_path``.
     """
     liberty_text = _script_liberty_text(liberty_path, pdk_root=pdk_root)
-    stats_text = _script_path_text(stats_path, repo_root=repo_root)
-    netlist_text = _script_path_text(netlist_path, repo_root=repo_root)
-    constr_text = (
-        None
-        if constr_path is None
-        else _script_path_text(constr_path, repo_root=repo_root)
+    # Issue #7010: with the statistics-dump capture staged, the executed
+    # script must be runnable from the run directory (Yosys's cwd there is
+    # what makes ABC's `stats.txt` invocation-local), so the same line set
+    # is emitted twice: the commit-safe form below keeps issue #1844's
+    # repo-relative paths, and the run form carries absolute paths only.
+    render = functools.partial(
+        _write_script_lines,
+        liberty_text=liberty_text,
+        stats_path=stats_path,
+        netlist_path=netlist_path,
+        constr_path=constr_path,
+        abc_log_path=abc_log_path,
+        abc_script_path=abc_script_path,
+        stats_capture=stats_capture,
+        delay_target_ps=delay_target_ps,
+        dont_use_globs=dont_use_globs,
+        tie_cells=tie_cells,
+        adder_sources=adder_sources,
+        adder_techmap_path=adder_techmap_path,
+        latch_techmap_path=latch_techmap_path,
+        macro_inputs=macro_inputs,
+        sources=sources,
+        hdl_toplevel=hdl_toplevel,
+        parameters=parameters,
+        defines=defines,
+        abc_fast=abc_fast,
+        pdk_root=pdk_root,
     )
-    abc_log_text = (
-        None
-        if abc_log_path is None
-        else _script_path_text(abc_log_path, repo_root=repo_root)
+    frontend, tail = render(repo_root=repo_root)
+    run_frontend = run_tail = None
+    if stats_capture is not None and repo_root is not None:
+        run_frontend, run_tail = render(repo_root=None)
+    return abc_stages.write_mapping(
+        script_path,
+        frontend,
+        tail,
+        hdl_toplevel,
+        abc_fast,
+        abc_timeout_s,
+        repo_root=repo_root,
+        pdk_root=pdk_root,
+        run_frontend=run_frontend,
+        run_tail=run_tail,
     )
 
-    abc_command = f"abc -liberty {liberty_text}"
-    if constr_text is not None:
-        abc_command += f" -constr {constr_text}"
-    if delay_target_ps is not None:
-        abc_command += f" -D {delay_target_ps}"
-    for glob in dont_use_globs:
-        abc_command += f" -dont_use {glob}"
-    if constr_text is not None and abc_log_text is not None:
-        abc_command = f"tee -q -o {abc_log_text} {abc_command}"
 
-    lines = [
-        f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
-        for path in sources
-    ]
-    # Issue #3466: top-level parameter overrides apply between the reads and
-    # `hierarchy`, so elaboration sees the overridden value.
-    lines += chparam_lines(parameters or {}, hdl_toplevel)
-    lines.append(f"hierarchy -check -top {hdl_toplevel}")
-    if adder_techmap_path is not None:
-        lines += ["proc", "opt_expr", "opt_clean"]
-        lines += [
-            f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
-            for path in adder_sources
-        ]
-        lines.append(
-            f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
-        )
-    lines += [
-        f"synth -top {hdl_toplevel}",
-        f"dfflibmap -liberty {liberty_text}",
-        abc_command,
-        "clean",
-    ]
-    if tie_cells is not None:
-        (hi_cell, hi_port), (lo_cell, lo_port) = tie_cells
-        # Issue #1973: resolve every `x` bit to a concrete `0` *before*
-        # `hilomap` runs, so a dangling-argument `x` constant gets mapped
-        # onto a tie cell exactly like a literal `1'b0`/`1'b1` already is --
-        # see this function's own docstring for why the ordering is
-        # load-bearing.
-        lines.append("setundef -zero")
-        lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
-    lines += [
-        f"tee -q -o {stats_text} "
-        f"stat -liberty {liberty_text} -json -top {hdl_toplevel}",
-        f"write_verilog -noattr {netlist_text}",
-    ]
+def _publish_script(
+    script_path: str,
+    lines: list[str],
+    pdk_root: str | None,
+    run_lines: list[str] | None = None,
+) -> str:
     script_text = "\n".join(lines) + "\n"
-
     if pdk_root is None or PDK_ROOT_TOKEN not in script_text:
-        _write_script_text(script_path, script_text)
-        return script_path
+        # Issue #7010: without a token there is normally nothing to
+        # rehydrate, so no sibling -- unless the statistics-dump capture
+        # needs a runnable form whose paths are absolute (`run_lines`).
+        if run_lines is None:
+            _write_script_text(script_path, script_text)
+            return script_path
+        run_path = run_script_path(script_path)
+        _write_script_text(
+            script_path,
+            _COMMIT_RUNNABLE_HEADER.format(run_script=os.path.basename(run_path))
+            + script_text,
+        )
+        _write_script_text(
+            run_path,
+            _RUN_ABSOLUTE_HEADER.format(script=os.path.basename(script_path))
+            + "\n".join(run_lines)
+            + "\n",
+        )
+        return run_path
 
     run_path = run_script_path(script_path)
+    run_text = "\n".join(run_lines) + "\n" if run_lines is not None else script_text
     _write_script_text(
         script_path,
         _COMMIT_SCRIPT_HEADER.format(run_script=os.path.basename(run_path))
@@ -2370,7 +2749,7 @@ def _write_script(
     _write_script_text(
         run_path,
         _RUN_SCRIPT_HEADER.format(script=os.path.basename(script_path))
-        + rehydrate_script_text(script_text, pdk_root=pdk_root),
+        + rehydrate_script_text(run_text, pdk_root=pdk_root),
     )
     return run_path
 
@@ -2388,76 +2767,61 @@ def _write_script_text(script_path: str, text: str) -> None:
         ) from exc
 
 
-#: Default per-invocation wall-clock timeout for a single ``yosys -s
-#: <script>`` run (:func:`_run_yosys`), overridable per call via its own
-#: ``timeout_s`` keyword. Mirrors ``klayout_tools.equiv.DEFAULT_TIMEOUT_S``'s
-#: role (bound a hang, not a slow-but-legitimate run) but is deliberately
-#: more generous: a full ``synth``/``dfflibmap``/``abc`` mapping pass over a
-#: real design does substantially more work than ``equiv``'s SAT proof, and
-#: in ``"auto"`` arithmetic-architecture mode (issue #1775, following
-#: #1772) this same budget is paid up to ~10+ times per ``klt synthesize``
-#: request, so it must not be so tight that a legitimately-slow-but-healthy
-#: trial synthesis is mistaken for a hang. A fixed module constant (no
-#: request-level override/CLI flag) was chosen over threading a new
-#: ``yosys_timeout_s`` end-to-end alongside the existing ``equiv_timeout_s``
-#: precedent -- lower churn, and every call site already goes through this
-#: one function.
-DEFAULT_YOSYS_TIMEOUT_S = 300.0
+DEFAULT_YOSYS_TIMEOUT_S = ytimeout.DEFAULT_YOSYS_TIMEOUT_S  # see that module
 
 
 def _run_yosys(
     script_path: str,
     *,
-    timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S,
+    timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
-    """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
-    on any failure to run (missing binary, non-zero exit, or a run that
-    exceeds ``timeout_s`` -- default :data:`DEFAULT_YOSYS_TIMEOUT_S`, pass
-    ``None`` for no timeout).
+    """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
+    on any failure to run: missing binary, non-zero exit, or exceeding
+    ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
+    Never raises on a *successful* (exit 0) run; the caller validates that the
+    declared output files appeared. Returns the captured ``stdout`` log text --
+    Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
+    matches :func:`_synthesis_error_message`'s stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
+    (issue #1588) can parse it without a second Yosys invocation.
 
-    Never raises on a *successful* (exit 0) run -- the caller is responsible
-    for validating the declared output files actually appeared. Returns the
-    captured ``stdout`` log text on success -- Yosys's own ``Warning: ``
-    lines land on stdout, never stderr (verified live; matches
-    :func:`_synthesis_error_message`'s own stream-preference note for
-    ``ERROR:`` lines) -- so :func:`_compute_structural`/
-    :func:`_summarize_warnings` (issue #1588) can parse it without a second
-    Yosys invocation.
+    A timed-out run raises :class:`SynthesizeError` exactly like any other Yosys
+    failure (never a bare ``subprocess.TimeoutExpired``) -- this is what lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
+    architecture trial synthesis without killing the rest of the ``"auto"``
+    sweep. The kill takes the child's whole process group (issue #5798), so a
+    ``yosys-abc`` grandchild cannot outlive the watchdog that ended its parent.
 
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this is
-    what lets :func:`_measure_candidate` (issue #1775) treat one hung
-    arithmetic-architecture candidate's trial synthesis the same way it
-    already treats any other failed trial: disqualified, not fatal to the
-    rest of the ``"auto"`` sweep.
-
-    ``cwd`` (issue #1844) is passed straight through to
-    ``subprocess.run``'s own ``cwd``; ``script_path`` itself is always
-    given as an absolute path, so ``cwd`` never affects locating the script
-    -- it only matters for a script :func:`_write_script` wrote with any
-    relative-form embedded path (``repo_root`` given), which must be run
-    with ``cwd=<that same repo_root>`` to resolve correctly. The default
-    ``None`` reproduces the pre-#1844 behaviour exactly (subprocess's own
-    default: the invoking process's cwd), correct for every script that
-    embeds only absolute paths.
+    ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
+    ``script_path`` is always given as an absolute path, so ``cwd`` only matters
+    for a script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must run with ``cwd=<that same repo_root>`` to
+    resolve correctly. The default ``None`` reproduces the pre-#1844 behaviour
+    exactly (subprocess's own default: the invoking process's cwd), correct for
+    every script that embeds only absolute paths. The child env is a copy of
+    ``os.environ`` with ``COLUMNS`` pinned to 4096, applied unconditionally (an
+    inherited ``COLUMNS=80`` is exactly the failing case), so the readline-wrapped
+    ``source`` echo can never wedge the abc handshake (issue #5780; see
+    ``docs/cli/synthesize.md``).
     """
+    timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-s", script_path],
             capture_output=True,
             text=True,
             timeout=timeout_s,
             cwd=cwd,
+            env={**os.environ, "COLUMNS": "4096"},
         )
     except OSError as exc:
         _write_yosys_log(script_path, "", str(exc))
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        _write_yosys_log(script_path, exc.stdout, exc.stderr)
+        log_path = _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
-            f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed"
+            ytimeout.timeout_message(timeout_s, script_path, log_path, exc.stdout)
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
@@ -2469,50 +2833,20 @@ def _run_yosys(
 
 def _write_yosys_log(
     script_path: str, stdout: str | bytes | None, stderr: str | bytes | None
-) -> None:
+) -> str:
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
-        return (
-            stream.decode("utf-8", errors="replace")
-            if isinstance(stream, bytes)
-            else stream or ""
-        )
+        if isinstance(stream, bytes):
+            return stream.decode("utf-8", errors="replace")
+        return stream or ""
 
+    log_path = os.path.splitext(script_path)[0] + ".log"
     _write_text_file(
-        os.path.splitext(script_path)[0] + ".log",
+        log_path,
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
-
-
-def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
-    """Build an actionable error message from a failed ``yosys -s`` run.
-
-    Prefers the last ``ERROR:`` line Yosys itself printed (its own error
-    lines go to stderr -- verified live, Yosys survey worked example), on
-    either stream; falls back to a generic exit-code message with a short
-    tail of captured output when no ``ERROR:`` line is found.
-
-    When the error line is the ``Can't open script file `<path>' for
-    reading: No such file or directory`` shape *and* ``<path>`` verifiably
-    exists on the host filesystem, appends a hint that the ``yosys`` on
-    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368; for a path under
-    the host temp dir the hint instead names the sandbox's private ``/tmp``
-    mount and leads with relocating the request (issue #2453). A script path
-    that genuinely does not exist is a different failure and is left
-    unchanged.
-    """
-    for stream in (completed.stderr or "", completed.stdout or ""):
-        error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
-        if error_lines:
-            message = f"yosys synthesis failed: {error_lines[-1]}"
-            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
-            return message
-
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {completed.returncode}: {snippet}"
+    return log_path
 
 
 def _submodule_key(
@@ -2626,7 +2960,9 @@ def _aggregate_cell_counts(
     return total, aggregated
 
 
-def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
+def _read_stats(
+    stats_path: str, hdl_toplevel: str, *, abc_script_path: str | None = None
+) -> dict[str, Any]:
     """Parse ``stat -liberty ... -json``'s captured output (Yosys survey
     section 2) and return the top module's stats block, with ``num_cells``/
     ``num_cells_by_type`` replaced by a recursive rollup over the design's
@@ -2733,6 +3069,7 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
                 for cell_type, count in raw_by_type.items()
                 if _submodule_key(modules, cell_type, frozenset()) is None
             }
+    synthesize_abc.check_custom_mapping(abc_script_path, result, SynthesizeError)
     return result
 
 
@@ -2766,7 +3103,11 @@ def _read_abc_timing(
     When a run produces several ``stime`` reports (Yosys invokes ABC once
     per combinational region), the **maximum** reported delay is used --
     the critical path across the whole design, not whichever region
-    happened to be mapped last.
+    happened to be mapped last. Every report is also listed, in log order, as
+    ``regions: [{"module": "top", "critical_path_ps": 130.4}, ...]``
+    (issue #4743); ``module`` is the ``Extracting gate netlist of module``
+    banner preceding that ``stime`` line, or ``null`` when the log carries
+    none. The maximum over ``regions`` equals ``critical_path_ps``.
     """
     if abc_log_path is None or not os.path.isfile(abc_log_path):
         return None
@@ -2776,23 +3117,20 @@ def _read_abc_timing(
     except OSError:
         return None
 
-    best: tuple[float, str] | None = None
-    for match in _ABC_STIME_RE.finditer(log_text):
-        try:
-            delay_ps = float(match.group("delay_ps"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
-            continue
-        if best is None or delay_ps > best[0]:
-            best = (delay_ps, match.group("wire_load"))
-    if best is None:
+    regions = parse_abc_regions(log_text)
+    if not regions:
         return None
 
-    critical_path_ps, wire_load = best
+    worst = max(regions, key=lambda r: r.delay_ps)
+    critical_path_ps, wire_load = worst.delay_ps, worst.wire_load
     return {
         "source": "abc_stime",
         "wire_load": None if wire_load.lower() == "none" else wire_load,
         "critical_path_ps": critical_path_ps,
         "delay_target_ps": delay_target_ps,
+        "regions": [
+            {"module": r.module, "critical_path_ps": r.delay_ps} for r in regions
+        ],
     }
 
 
@@ -2802,10 +3140,13 @@ def _read_abc_timing(
 #: absence. Kept as a module constant so the test suite pins the exact
 #: string a consumer branches on.
 STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED = (
-    "the optional klt_statime_native extension is not installed, so no "
-    "gate-level static timing analysis was attempted -- from a repo "
-    "checkout, run `uv sync --group statime` (or `maturin develop "
-    "--release` inside native/statime/) and re-run to populate `sta`"
+    "the optional klt_statime_native extension is not installed (it is not "
+    "shipped with the published klayout-tools package), so no gate-level "
+    "static timing analysis was attempted -- from a repo checkout, run "
+    "`uv sync --group statime` (or `maturin develop --release` inside "
+    "native/statime/) and re-run to populate `sta`; from an installed "
+    "package, `klt sta` with a `verilog` request gives a netlist-level "
+    "timing estimate (needs OpenSTA)"
 )
 
 
@@ -2876,6 +3217,35 @@ def _read_sta_timing(
     in ``place_and_route_power_audit.py``, not a fixed vocabulary a consumer
     would have to exhaustively match.
     """
+    if _netlist_is_hierarchical(netlist_path):
+        # Issue #4224: the native engine reads only the ``top`` module's
+        # text and treats every instance as a liberty cell, so a user
+        # sub-module instance is a "not found in liberty" failure. Analyze a
+        # throwaway flattened copy; the committed netlist stays hierarchical.
+        with tempfile.TemporaryDirectory(prefix="klt_sta_flat_") as scratch:
+            try:
+                flat_path = _flatten_netlist_for_sta(
+                    netlist_path, liberty_path, hdl_toplevel, scratch
+                )
+            except SynthesizeError as exc:
+                if not _statime_native_is_importable():
+                    return None, STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED
+                return None, (
+                    "the netlist is hierarchical (more than one module) and "
+                    f"could not be flattened for the klt_statime_native engine: "
+                    f"{exc} -- `klt sta` with a `verilog` request links and "
+                    "flattens the hierarchy itself"
+                )
+            return _read_sta_timing_flat(flat_path, liberty_path, hdl_toplevel)
+    return _read_sta_timing_flat(netlist_path, liberty_path, hdl_toplevel)
+
+
+def _read_sta_timing_flat(
+    netlist_path: str, liberty_path: str, hdl_toplevel: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The un-flattening half of :func:`_read_sta_timing`: one
+    ``compute_critical_path`` call with ``StaError`` shaped into the
+    ``sta_unavailable_reason`` text."""
     try:
         return compute_critical_path(netlist_path, liberty_path, hdl_toplevel), None
     except StaError as exc:
@@ -2887,22 +3257,64 @@ def _read_sta_timing(
         )
 
 
-def _leakage_unit_scale_to_nw(liberty_text: str) -> float:
-    """The multiplier from this liberty's own ``leakage_power_unit`` to
-    nanowatts (see :data:`_LEAKAGE_POWER_UNIT_RE`). Defaults to ``1.0`` --
-    i.e. assumes the file's own ``cell_leakage_power`` numbers are already
-    nanowatts, Liberty's conventional default unit -- when the file declares
-    no ``leakage_power_unit`` at all, or names a unit :data:`_LEAKAGE_UNIT_TO_NW`
-    does not recognise. Never raises, matching
-    :func:`_abc_supports_dont_use`'s own "never break a run over an
-    optional/best-effort probe" posture.
+_NETLIST_MODULE_RE = re.compile(r"^\s*module\s+(\\\S+|[A-Za-z_][\w$]*)", re.MULTILINE)
+
+
+def _netlist_is_hierarchical(netlist_path: str) -> bool:
+    """Whether the netlist file defines more than one distinct module
+    (issue #4224). A cheap text check; an unreadable file is not
+    hierarchical, leaving the error to the engine call as before."""
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    return len(set(_NETLIST_MODULE_RE.findall(text))) > 1
+
+
+def _flatten_netlist_for_sta(
+    netlist_path: str, liberty_path: str, hdl_toplevel: str, scratch_dir: str
+) -> str:
+    """Write a flattened copy of ``netlist_path`` into ``scratch_dir`` with
+    Yosys and return its path (issue #4224). ``read_liberty -lib`` runs
+    first so mapped-cell instances resolve (see
+    :func:`_baseline_metrics_from_netlist`). Raises :class:`SynthesizeError`
+    on any Yosys failure or a missing output."""
+    script_path = os.path.join(scratch_dir, f"{hdl_toplevel}_sta_flatten.ys")
+    flat_path = os.path.join(scratch_dir, f"{hdl_toplevel}_sta_flat.v")
+    script_lines = [
+        f"read_liberty -lib {liberty_path}",
+        f"read_verilog {netlist_path}",
+        f"hierarchy -check -top {hdl_toplevel}",
+        "flatten",
+        f"write_verilog -noattr {flat_path}",
+    ]
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(script_lines) + "\n")
+    _run_yosys(script_path)
+    if not os.path.isfile(flat_path):
+        raise SynthesizeError("yosys did not write the flattened netlist")
+    return flat_path
+
+
+def _leakage_unit_scale_to_nw(unit_text: str | None) -> float:
+    """Multiplier turning a ``cell_leakage_power`` number expressed in the
+    library's ``leakage_power_unit`` (``unit_text``, the attribute's value --
+    see :data:`_LEAKAGE_POWER_UNIT_RE`) into nanowatts. Defaults to ``1.0``
+    -- liberty's own ``1nW`` default is not assumed to apply, but a library
+    declaring nothing is read as nanowatts -- when ``unit_text`` is absent or
+    names a unit :data:`_LEAKAGE_UNIT_TO_NW` does not recognise. Never
+    raises, matching :func:`_abc_supports_dont_use`'s own "never break a run
+    over an optional/best-effort probe" posture.
     """
-    match = _LEAKAGE_POWER_UNIT_RE.search(liberty_text)
+    if unit_text is None:
+        return 1.0
+    match = _LEAKAGE_POWER_UNIT_RE.match(unit_text.strip())
     if match is None:
         return 1.0
     try:
         magnitude = float(match.group("magnitude"))
-    except ValueError:  # pragma: no cover - regex only matches numbers
+    except ValueError:
         return 1.0
     per_unit_nw = _LEAKAGE_UNIT_TO_NW.get(match.group("unit").lower())
     if per_unit_nw is None:
@@ -2915,36 +3327,32 @@ def _parse_liberty_leakage_nw(liberty_text: str) -> dict[str, float]:
     scalar out of ``liberty_text``, converted to nanowatts via that
     liberty's own ``leakage_power_unit`` (:func:`_leakage_unit_scale_to_nw`).
 
-    Deliberately minimal, matching ``restructure.py``'s
-    :func:`~klayout_tools.restructure._parse_liberty_pins`'s own scope
-    discipline: this is not a general liberty parser, it extracts only the
-    one scalar :func:`_compute_leakage` needs. A cell with no
-    ``cell_leakage_power`` line (see :data:`_CELL_LEAKAGE_POWER_RE`'s
-    docstring -- some libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report
-    leakage only via per-input-state groups instead) is simply absent from
-    the result, never assigned a guessed value.
+    Extracts only the one scalar :func:`_compute_leakage` needs. A cell with
+    no ``cell_leakage_power`` attribute (see the note above
+    :data:`_LEAKAGE_POWER_UNIT_RE` -- some libraries, e.g.
+    gf180mcu_fd_sc_mcu9t5v0, report leakage only via per-input-state groups
+    instead) is simply absent from the result, never assigned a guessed
+    value. Text that is not parseable liberty yields ``{}`` -- the caller
+    treats that as "leakage not establishable" (``None``), never as a zero.
     """
-    unit_scale = _leakage_unit_scale_to_nw(liberty_text)
-    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
+    try:
+        library = parse_liberty_text(liberty_text)
+    except LibertyCompareError:
+        return {}
+    unit_scale = _leakage_unit_scale_to_nw(library.attributes.get("leakage_power_unit"))
     leakage_by_cell: dict[str, float] = {}
-    for index, header in enumerate(headers):
-        body_start = header.end()
-        body_end = (
-            headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(liberty_text)
-        )
-        match = _CELL_LEAKAGE_POWER_RE.search(liberty_text, body_start, body_end)
-        if match is None:
+    for cell in library.children("cell"):
+        raw_value = cell.attributes.get("cell_leakage_power")
+        if raw_value is None or not cell.args:
             continue
         try:
-            value = float(match.group("value"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
+            value = float(raw_value)
+        except ValueError:
             continue
         # A later block for the same cell name (should not happen in a
-        # well-formed liberty) overwrites, matching `_parse_liberty_pins`'s
-        # own "last one wins" convention.
-        leakage_by_cell[header.group("name")] = value * unit_scale
+        # well-formed liberty) overwrites, "last one wins" -- the same
+        # convention as `restructure._parse_liberty_pins`.
+        leakage_by_cell[cell.args[0]] = value * unit_scale
     return leakage_by_cell
 
 
@@ -2969,7 +3377,7 @@ def _compute_leakage(
     *none* of those types have a ``cell_leakage_power`` entry at all (e.g.
     gf180mcu_fd_sc_mcu9t5v0, which reports leakage only via per-input-state
     ``leakage_power()`` groups this module deliberately does not average --
-    see :data:`_CELL_LEAKAGE_POWER_RE`'s docstring). When *some* (not all)
+    see the note above :data:`_LEAKAGE_POWER_UNIT_RE`). When *some* (not all)
     instantiated types are covered, the total sums exactly those --
     ``leakage_by_type_nw`` (the bonus per-type breakdown the issue asks for)
     names precisely which types were covered, so a caller comparing its own
@@ -3003,6 +3411,138 @@ def _compute_leakage(
     return total_nw, dict(sorted(leakage_by_type.items()))
 
 
+#: Latch polarities ``request.latch_map`` may map, to the Yosys internal
+#: primitive each one rewrites (issue #4458). ``$_DLATCH_N_`` is transparent
+#: while its enable is low, ``$_DLATCH_P_`` while high.
+_LATCH_MAP_POLARITIES = {"positive": "$_DLATCH_P_", "negative": "$_DLATCH_N_"}
+_LATCH_MAP_PIN_KEYS = ("enable", "data", "q")
+_LATCH_MAP_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | None:
+    """``request.latch_map`` (issue #4458) shape-validated, or ``None`` when
+    absent. ``{"positive"|"negative": {"cell", "enable", "data", "q"}}``: the
+    library latch each inferred ``$_DLATCH_*_`` is mapped onto. An omitted
+    polarity stays unmapped. Raises :class:`SynthesizeError` on any other
+    shape (unknown key, missing pin, non-identifier name, empty object)."""
+    if "latch_map" not in request:
+        return None
+    latch_map = request["latch_map"]
+    if not isinstance(latch_map, dict) or not latch_map:
+        raise SynthesizeError(
+            "request.latch_map must be a non-empty object keyed by "
+            f"{' and/or '.join(repr(k) for k in _LATCH_MAP_POLARITIES)}"
+        )
+    _reject_unknown_keys(
+        latch_map,
+        frozenset(_LATCH_MAP_POLARITIES),
+        "request",
+        "latch_map",
+        SynthesizeError,
+    )
+    resolved: dict[str, dict[str, str]] = {}
+    for polarity in _LATCH_MAP_POLARITIES:
+        if polarity not in latch_map:
+            continue
+        entry = latch_map[polarity]
+        where = f"request.latch_map.{polarity}"
+        if not isinstance(entry, dict):
+            raise SynthesizeError(f"{where} must be an object")
+        _reject_unknown_keys(
+            entry,
+            frozenset(("cell", *_LATCH_MAP_PIN_KEYS)),
+            "request",
+            f"latch_map.{polarity}",
+            SynthesizeError,
+        )
+        resolved_entry: dict[str, str] = {}
+        for key in ("cell", *_LATCH_MAP_PIN_KEYS):
+            value = entry.get(key)
+            if not isinstance(value, str) or not _LATCH_MAP_NAME.fullmatch(value):
+                raise SynthesizeError(
+                    f"{where}.{key} must be a string naming a Verilog "
+                    "identifier (letters, digits, '_', '$')"
+                )
+            resolved_entry[key] = value
+        if len(set(resolved_entry[k] for k in _LATCH_MAP_PIN_KEYS)) != 3:
+            raise SynthesizeError(f"{where} enable, data and q must be distinct pins")
+        resolved[polarity] = resolved_entry
+    return resolved
+
+
+def _prepare_latch_map(
+    latch_map: dict[str, dict[str, str]] | None,
+    liberty_path: str,
+    output_dir: str,
+    hdl_toplevel: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate ``latch_map`` against the liberty and write its techmap file
+    (issue #4458); ``(report, techmap_path)``, both ``None`` without one."""
+    if latch_map is None:
+        return None, None
+    report = _validate_latch_map_against_liberty(latch_map, liberty_path)
+    techmap_path = os.path.join(output_dir, f"{hdl_toplevel}_latch_map.v")
+    _write_script_text(techmap_path, _latch_techmap_text(latch_map))
+    return report, techmap_path
+
+
+def _attach_latch_map_report(
+    response: dict[str, Any],
+    report: dict[str, Any] | None,
+    techmap_path: str | None,
+    *,
+    repo_root: str | None,
+) -> None:
+    """Add the ``latch_map`` block to ``response`` when a map was requested."""
+    if report is None:
+        return
+    report["techmap_path"] = env_provenance.repo_relative_path(
+        techmap_path, repo_root=repo_root
+    )
+    response["latch_map"] = report
+
+
+def _validate_latch_map_against_liberty(
+    latch_map: dict[str, dict[str, str]], liberty_path: str
+) -> dict[str, Any]:
+    """Reject a ``latch_map`` cell absent from the resolved liberty (issue
+    #4458) and return the response's ``latch_map`` block. When the cell list
+    cannot be established the check is skipped (``validated: false``), the
+    same posture as :func:`_validate_dont_use_against_liberty`."""
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None:
+        for polarity, entry in latch_map.items():
+            if entry["cell"] not in cell_names:
+                raise SynthesizeError(
+                    f"request.latch_map.{polarity}.cell '{entry['cell']}' is "
+                    f"not a cell in the resolved liberty "
+                    f"'{os.path.basename(liberty_path)}'"
+                )
+    return {
+        "mapped": {polarity: dict(entry) for polarity, entry in latch_map.items()},
+        "validated": cell_names is not None,
+        "techmap_path": None,
+    }
+
+
+def _latch_techmap_text(latch_map: dict[str, dict[str, str]]) -> str:
+    """The Yosys ``techmap`` rule file for ``latch_map`` (issue #4458): one
+    module per mapped polarity, instantiating the library latch in place of
+    the ``$_DLATCH_*_`` primitive (ports ``E``/``D``/``Q``)."""
+    chunks = ["// Generated by klt synthesize from request.latch_map (issue #4458)\n"]
+    for polarity, primitive in _LATCH_MAP_POLARITIES.items():
+        entry = latch_map.get(polarity)
+        if entry is None:
+            continue
+        chunks.append(
+            f"module \\{primitive} (input E, input D, output Q);\n"
+            f"  {entry['cell']} _TECHMAP_REPLACE_ "
+            f"(.{entry['enable']}(E), .{entry['data']}(D), .{entry['q']}(Q));\n"
+            "endmodule\n"
+        )
+    return "\n".join(chunks)
+
+
 def _resolve_expected_latches(request: dict[str, Any]) -> int:
     """``request.structural.expected_latches`` (issue #1588; default ``0``
     when ``request.structural`` is omitted entirely) -- the number of
@@ -3021,7 +3561,7 @@ def _resolve_expected_latches(request: dict[str, Any]) -> int:
     if not isinstance(structural_request, dict):
         raise SynthesizeError("request.structural must be a JSON object")
     expected = structural_request.get("expected_latches", 0)
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+    if not is_int(expected) or expected < 0:
         raise SynthesizeError(
             "request.structural.expected_latches must be a non-negative integer"
         )
@@ -3102,35 +3642,6 @@ def _categorize_warning(message: str) -> str:
         if pattern.search(message):
             return category
     return "other"
-
-
-def _library_capability_warnings(cell_library: str) -> dict[str, str]:
-    """Disclose skipped synthesis capabilities without guessing library data.
-
-    Combine missing capabilities into one representative so neither is
-    hidden by warning aggregation. An absent ``dont_use`` entry is not a
-    missing capability: e.g. gf180 intentionally allows minimum-drive cells.
-    """
-    skipped = []
-    if cell_library not in _ABC_CONSTR_INPUTS:
-        skipped.append(
-            "ABC -constr (driving cell/output load), load-driven sizing/buffering "
-            "and ABC timing (timing is null)"
-        )
-    if cell_library not in _TIE_CELLS:
-        skipped.append(
-            "setundef -zero/hilomap (bare 0/1/x constants may remain unroutable "
-            "in place-and-route)"
-        )
-    if not skipped:
-        return {}
-    return {
-        "unsupported_cell_library": (
-            f"cell_library '{cell_library}' has no verified mapping for: "
-            + "; ".join(skipped)
-            + ". These capabilities were skipped."
-        )
-    }
 
 
 def _summarize_warnings(
@@ -3380,19 +3891,12 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
-        )
+        resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
-        )
+        assert netlist_path is not None
+        resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )
@@ -3447,12 +3951,22 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
     {
         "run_id",
         "netlist_path",
+        "stats_path",
         "script_path",
         "run_script_path",
         "restructured_netlist_path",
         "log_path",
         "stage2_script_path",
         "stage2_log_path",
+        # A stub generated from LEF (#2635) lives under the run directory.
+        # Its `macros[].blackbox_path` carries the run ID and would
+        # otherwise make every rerun diff report a spurious difference.
+        # `macros[].lef`/`.lib`/`.gds`/`.verilog_blackbox` are caller-
+        # supplied inputs, stable across reruns, and deliberately stay in
+        # the diff -- a committed report whose macro declaration changed
+        # *should* fail the rerun check.
+        "blackbox_path",
+        *ytimeout.RERUN_BOOKKEEPING_KEYS,  # host-level budget (#5773), not minted
     }
 )
 
@@ -3460,11 +3974,13 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
 def _canonicalize_synthesize_report_for_rerun_diff(
     report: dict[str, Any],
 ) -> dict[str, Any]:
-    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
-    -- the comparison view :func:`rerun_synthesize_report` diffs, never what
-    it embeds as ``fresh``. See :func:`klayout_tools._report_verify.strip_keys`
-    for why the exclusion is keyed by name rather than by path."""
-    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+    """Drop run bookkeeping and proof durations from the replay comparison."""
+    view = strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+    for path in (("equivalence",), ("restructuring", "equivalence")):
+        proof = get_path(view, path)
+        if isinstance(proof, dict):
+            proof.pop("elapsed_s", None)
+    return view
 
 
 def _synthesize_provenance_hashes(
@@ -3472,6 +3988,7 @@ def _synthesize_provenance_hashes(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    skip_deck: bool = False,
 ) -> tuple[str | None, str | None]:
     """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
     at ``request_path`` **without invoking Yosys** -- the cheap half of
@@ -3479,13 +3996,16 @@ def _synthesize_provenance_hashes(
 
     Deliberately mirrors :func:`run_synthesize`'s own hashing, step for step:
     the sources are resolved through the same :func:`_resolve_sources`, a
-    single source hashes through :func:`klayout_tools._provenance._content_hash`
+    single source hashes through :func:`klayout_tools._provenance.content_hash`
     (what :func:`build_provenance`'s ``input_path`` does) and multiple sources
     through :func:`klayout_tools._provenance._combined_content_hash` (what
     :func:`run_synthesize` substitutes for the multi-source case), and the
     liberty resolves through the same :func:`_resolve_liberty`. Any divergence
     here would show up as permanent, unexplained drift on a report that never
     moved, so there is exactly one rule and both call sites follow it.
+
+    With ``skip_deck`` (issue #4315) the liberty is never resolved and the
+    deck hash is returned as ``None`` -- the PDK-less path.
 
     Raises :class:`SynthesizeError` for a request that cannot be read,
     validated, or resolved -- never a traceback.
@@ -3500,18 +4020,19 @@ def _synthesize_provenance_hashes(
     cell_library = pdk_spec.get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise SynthesizeError("request.pdk.cell_library is required")
+    if len(resolved_sources) == 1:
+        input_hash = content_hash(resolved_sources[0])
+    else:
+        input_hash = _combined_content_hash(resolved_sources)
+    if skip_deck:
+        return input_hash, None
     liberty_path, _corner, _pdk_info = _resolve_liberty(
         cell_library,
         pdk_spec.get("corner"),
         variant=pdk_variant,
         root=pdk_root,
     )
-
-    if len(resolved_sources) == 1:
-        input_hash = _content_hash(resolved_sources[0])
-    else:
-        input_hash = _combined_content_hash(resolved_sources)
-    return input_hash, _content_hash(liberty_path)
+    return input_hash, content_hash(liberty_path)
 
 
 def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
@@ -3523,6 +4044,29 @@ def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
         SynthesizeError,
         "request.parameters",
     )
+
+
+def _synthesize_request_defines(request_path: str) -> dict[str, str | None]:
+    """The validated ``defines`` of the request at ``request_path`` (``{}``
+    when absent) -- what ``--check`` compares against the committed report's
+    recorded ``defines`` (issue #4196)."""
+    return validate_defines(
+        load_request(request_path).get("defines"),
+        SynthesizeError,
+        "request.defines",
+    )
+
+
+def _defines_check(recorded: Any, current: dict[str, str | None]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for ``defines`` (issue #4196); an absent
+    recorded ``defines`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "defines",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
 
 
 def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str, Any]:
@@ -3538,12 +4082,39 @@ def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str,
     }
 
 
+def _netlist_sha256_check(
+    committed: dict[str, Any], report_path: str, netlist_override: str | None
+) -> dict[str, Any]:
+    """Cheap-mode ``netlist_sha256`` entry (issue #4313): does the committed
+    gate-level netlist re-hash to the ``netlist_sha256`` the report recorded?
+
+    The file is ``netlist_override`` when given (it always wins), otherwise
+    the report's own ``netlist_path`` resolved from this checkout
+    (``scope: "repo"`` only). A netlist that cannot be located here, or a file
+    that does not exist, yields ``actual: null`` -- ``match: false``, never a
+    silent skip. The hash is :func:`sha256_file` of the file as it sits on
+    disk; the report hashed it after signed-qualifier stripping, which is what
+    was written, so no re-stripping is applied.
+    """
+    path = resolve_committed_path(
+        get_path(committed, ("netlist_path",)),
+        report_path=report_path,
+        override=netlist_override,
+    )
+    actual = sha256_file(path) if path and os.path.isfile(path) else None
+    return hash_check(
+        "netlist_sha256", get_path(committed, ("netlist_sha256",)), actual
+    )
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    netlist_override: str | None = None,
+    skip_deck: bool = False,
 ) -> dict[str, Any]:
     """``klt synthesize <request> --check <report>`` (cheap mode, issue
     #2224): verify a previously committed ``klt synthesize --format json``
@@ -3568,12 +4139,28 @@ def check_synthesize_report(
     that leaves the synthesis result untouched is not evidence drift, and
     reporting it as drift would train a consumer to ignore the verdict.
 
+    A fifth check, ``netlist_sha256`` (issue #4313), re-hashes the committed
+    gate-level netlist against the report's recorded ``netlist_sha256`` (see
+    :func:`_netlist_sha256_check`); ``netlist_override`` is the ``--netlist``
+    path. It proves the committed bytes are the ones the report recorded, not
+    that Yosys would still produce them -- that is ``--rerun``.
+
+    ``skip_deck`` (``--skip-deck``, issue #4315) never resolves the liberty,
+    so the check runs on a host with no PDK install. The
+    ``provenance.deck.content_hash`` entry is then omitted from ``checks[]``
+    and named in an additive ``skipped[]`` list; a ``match`` proves the RTL,
+    parameters, defines and netlist bytes, **not** that the library is the
+    one the report was mapped against.
+
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or an unresolvable request -- never a traceback.
     """
     committed = load_committed_report(report_path, SynthesizeError)
     input_hash, deck_hash = _synthesize_provenance_hashes(
-        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+        request_path,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        skip_deck=skip_deck,
     )
     checks = [
         hash_check(
@@ -3590,8 +4177,31 @@ def check_synthesize_report(
             get_path(committed, ("parameters",)),
             _synthesize_request_parameters(request_path),
         ),
+        _defines_check(
+            get_path(committed, ("defines",)),
+            _synthesize_request_defines(request_path),
+        ),
+        synthesize_abc.mapping_check(
+            committed,
+            synthesize_abc.resolve_mapping(
+                load_request(request_path), request_path, SynthesizeError
+            ),
+        ),
+        _netlist_sha256_check(committed, report_path, netlist_override),
     ]
-    return build_check_result(report_path=report_path, checks=checks)
+    if not skip_deck:
+        return build_check_result(report_path=report_path, checks=checks)
+    checks = [c for c in checks if c["field"] != "provenance.deck.content_hash"]
+    return build_check_result(
+        report_path=report_path,
+        checks=checks,
+        skipped=[
+            {
+                "field": "provenance.deck.content_hash",
+                "reason": "--skip-deck: liberty not resolved",
+            }
+        ],
+    )
 
 
 def rerun_synthesize_report(
@@ -3602,6 +4212,8 @@ def rerun_synthesize_report(
     pdk_root: str | None = None,
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
+    equiv_engine: str | None = None,
+    yosys_timeout_s: str | float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
 ) -> dict[str, Any]:
@@ -3623,12 +4235,17 @@ def rerun_synthesize_report(
     ``--rerun``: the optional flags (``--verify-equivalence``,
     ``--restructure-timing``, their tuning knobs) are not echoed anywhere in
     the response, so they cannot be recovered from ``report_path`` -- pass
-    the same ones again here (the CLI does) or the corresponding blocks
+    the same ones again here (the CLI does; that includes ``equiv_engine``,
+    whose choice shows up as ``equivalence.engine``) or the corresponding blocks
     legitimately drift. A request pinning an explicit ``run_id`` cannot be
     re-run at all: :func:`_create_run_directory` refuses to reuse a retained
     run directory, and that refusal (a :class:`SynthesizeError` naming the
     directory) is surfaced unchanged rather than swallowed -- "could not
     verify" is the honest answer there, never a false ``"match"``.
+    A request using ``outputs.dir`` *can* be re-run: the re-run ignores that
+    stable directory (which the first run left populated) and writes into a
+    fresh ``.klt/synthesize/run-<uuid>/`` scratch directory instead, so the
+    committed artifacts are never touched.
 
     Raises :class:`SynthesizeError` for a missing/unparseable committed
     report or any error the re-run itself raises -- never a traceback.
@@ -3640,14 +4257,10 @@ def rerun_synthesize_report(
         pdk_root=pdk_root,
         verify_equivalence=verify_equivalence,
         equiv_timeout_s=equiv_timeout_s,
+        equiv_engine=equiv_engine,
+        yosys_timeout_s=yosys_timeout_s,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
+        _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)

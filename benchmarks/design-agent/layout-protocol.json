@@ -1,0 +1,148 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_protocol/1",
+  "protocol_version": "1.0.0",
+  "title": "Layout-flow benchmark protocol: draw-only vs gen-only vs gen+refine",
+  "description": "Frozen protocol for the three-arm layout-generation benchmark (epic #2252, phase 1 = #3024). Methodology after Ding, Zou, Sun, Cong, 'Can Agents Design Better Chips with a Higher Level Abstraction?' (ICCAD'26; artifact github.com/ZijD/AHRR, MIT) -- methodology only, no code reuse. Phases 2-4 (#3025 task corpus, #3026 executor, #3027 reporting) consume this document; changing any decision here is a protocol_version bump and invalidates comparisons across versions.",
+  "tool_classes": {
+    "inspect": ["layers", "stats", "cells", "render", "layout-metrics", "economy", "pdk", "deck", "kb", "ring-check", "socket-check"],
+    "verify": ["drc", "lvs", "extract"],
+    "generate": ["gen", "gen-compose"],
+    "draw": ["draw", "clip"]
+  },
+  "tool_recording": {
+    "mechanism": "klt-shim",
+    "description": "Every tool call is made through the benchmark's own `bin/klt` shim (the one the interactive provider already puts on PATH), which appends one record per call to the run's `tool_calls` and refuses -- recording the call, exit code 126 -- any verb outside the current phase's allowed classes. The agent sandbox exposes no other geometry writer (no raw pya/gdstk/klayout, no hand-written stream bytes), so the recorded calls are the complete write path of the scored artifact.",
+    "record_fields": ["seq", "phase", "verb", "class", "exit_code"],
+    "violation_status": "invalid_tool_surface"
+  },
+  "arms": [
+    {
+      "id": "draw-only",
+      "analog": "AHRR flow (i): direct RTL",
+      "description": "The agent places primitives and polygons directly with `klt draw`. No generator verb is available.",
+      "seed": null,
+      "phases": [
+        { "id": "draw", "allowed_classes": ["inspect", "verify", "draw"] }
+      ]
+    },
+    {
+      "id": "gen-only",
+      "analog": "AHRR flow (ii): HLS C++ -> compiler",
+      "description": "The agent parameterizes `klt gen` / `klt gen-compose`; the tools emit all geometry. No direct-geometry verb is available.",
+      "seed": null,
+      "phases": [
+        { "id": "generate", "allowed_classes": ["inspect", "verify", "generate"] }
+      ]
+    },
+    {
+      "id": "gen+refine",
+      "analog": "AHRR flow (ii)+(iii): HLS then RTL refinement",
+      "description": "Starts from a generator-built layout and may then edit freely with the union of both tool surfaces. There is no generate-from-scratch phase of its own: generation skill is measured by gen-only, refinement skill by the delta over that seed.",
+      "seed": {
+        "source_arm": "gen-only",
+        "policy": "same_run_best_valid",
+        "scope": ["task_id", "agent_id", "replicate"],
+        "seed_is_round_zero": true,
+        "unseedable_status": "not_run_no_seed"
+      },
+      "phases": [
+        { "id": "refine", "allowed_classes": ["inspect", "verify", "generate", "draw"] }
+      ]
+    }
+  ],
+  "seeding_decision": {
+    "question": "Is gen+refine seeded from the same agent's gen-only best, or from a fixed reference composition? (#2252 open question 1)",
+    "decision": "same_run_best_valid_gen_only",
+    "rationale": "Matches AHRR's choice and measures the end-to-end flow an agent actually runs. The seed is content-addressed (sha256 of the stream) and recorded in the gen+refine run as `seed_from`, and it is part of that run's seed identity, so the dependency is reproducible from the ledgers alone. A fixed reference composition would isolate refinement skill but make the arm independent of the agent's generation skill; it may be added later as an ablation without changing this protocol's arms.",
+    "reproducibility_check": "A gen+refine run is only valid when its `seed_from` names a `valid` gen-only run of the same (task, agent, replicate) whose artifact hash equals `seed_from.gds_sha256`, and its score may not be worse than that seed's (the seed is round zero of the refine phase). All three are mechanically checked by `validate-layout`.",
+    "measurement_outcome": "no_blocker_found: the seed is a single immutable GDS identified by hash, so there is nothing non-reproducible to fall back from."
+  },
+  "refinement_sufficiency": {
+    "question": "Does `klt draw` today expose enough edit primitives for a fair refinement arm? (#2252 open question 2)",
+    "verdict": "sufficient",
+    "evidence": [
+      "`klt draw` read-modify-write mode (#3378): `params.base_gds` starts from an existing stream and `params.erase_um` windows remove its geometry before `shapes` are added (docs/cli/draw.md `base_gds`/`erase_um`), so a seeded shape can be trimmed or replaced in place.",
+      "The response reports `erased_shape_count` / `erased_label_count` when `base_gds` is given, so an erase is observable in the recorded call.",
+      "Additive refinement is also still expressible: `klt gen-compose` places the seed as a `blocks[].cell` library cell next to a `klt draw` patch cell and routes between them (docs/cli/gen-compose.md, #1189)."
+    ],
+    "gap": null,
+    "consequence": "gen+refine is run with both the additive and the subtractive surface; no additive-only disclosure is required in reports.",
+    "follow_up": null
+  },
+  "task_eligibility": {
+    "description": "A task enters the comparison only if every rule holds; a task failing any rule is excluded from all three arms, never from just one, so arms stay comparable.",
+    "rules": [
+      { "id": "frozen_netlist", "description": "Ships a frozen schematic netlist with a sha256 and no layout; the netlist is the LVS reference and is never taken from the agent's sandbox." },
+      { "id": "reference_layout_valid", "description": "Ships a repo-frozen reference layout that is DRC-clean and LVS-clean against the frozen netlist under the frozen decks, so the task is satisfiable." },
+      { "id": "generator_reachable", "description": "Ships a `klt gen`/`klt gen-compose` recipe that reaches a valid layout, so the gen-only arm is satisfiable without any direct-geometry verb." },
+      { "id": "negative_controls", "description": "Ships at least one known-bad layout per failing check (DRC and/or LVS) that the validity gate must reject, so the gate cannot be vacuously satisfied." },
+      { "id": "open_pdk", "description": "Targets an open PDK (sky130 first); no proprietary PDK data or NDA'd rules." }
+    ]
+  },
+  "validity": {
+    "description": "Frozen validity gate. A run is scored only if every required check passes on the scored artifact.",
+    "required_checks": ["drc", "lvs", "provenance"],
+    "derivation": "repo_frozen",
+    "drc": { "verb": "drc", "pass_status": "clean" },
+    "lvs": { "verb": "lvs", "pass_status": "match", "reference": "task.frozen_netlist" },
+    "provenance": {
+      "rule": "The sha256 of the scored GDS equals the gds_sha256 recorded in the DRC report, the LVS report, and the run's artifact; the LVS report's netlist_sha256 equals the task's frozen netlist sha256.",
+      "scorer_rederives": true
+    },
+    "note": "The scorer re-runs drc/lvs itself on the harness's private copy of the artifact against repo-frozen decks and netlists; checks the agent ran in its sandbox are never trusted (same posture as round mode's read-only submissions copy)."
+  },
+  "score": {
+    "direction": "lower_is_better",
+    "primary": "area_um2",
+    "fields": [
+      { "id": "area_um2", "source": "klt layout-metrics bbox", "required": true },
+      { "id": "utilization", "source": "klt economy", "required": false },
+      { "id": "sim_margin", "source": "klt sim on extracted netlist", "required": false, "deferred": "blocked on RC extraction (#217); null until then" }
+    ],
+    "relative_to": "draw-only",
+    "aggregate": "geomean of per-task area ratio over comparable pairs",
+    "comparable_pair": "Both runs in the pair are valid for the same (task, agent, replicate); denominators are always reported."
+  },
+  "failure_semantics": {
+    "description": "Only `valid` runs carry a score. Every other status is recorded, auditable, and unscored -- never a partial score.",
+    "statuses": [
+      { "id": "valid", "scored": true, "counts_in_denominator": true },
+      { "id": "invalid_drc", "scored": false, "counts_in_denominator": true },
+      { "id": "invalid_lvs", "scored": false, "counts_in_denominator": true },
+      { "id": "invalid_provenance", "scored": false, "counts_in_denominator": true },
+      { "id": "invalid_tool_surface", "scored": false, "counts_in_denominator": true },
+      { "id": "timeout", "scored": false, "counts_in_denominator": true },
+      { "id": "budget_exhausted", "scored": false, "counts_in_denominator": true },
+      { "id": "agent_error", "scored": false, "counts_in_denominator": true },
+      { "id": "not_run_no_seed", "scored": false, "counts_in_denominator": true },
+      { "id": "interrupted", "scored": false, "counts_in_denominator": false, "resumable": true }
+    ]
+  },
+  "seed_identity": {
+    "description": "Each run's identity is a hash of everything that defines it, so an unstable or reused seed is detectable from the record alone.",
+    "hash": "sha256",
+    "canonicalization": "json, keys sorted, separators (',', ':'), ensure_ascii",
+    "fields": ["protocol_version", "task_id", "task_sha256", "arm", "agent_id", "replicate"],
+    "seeded_arm_extra_fields": ["seed_artifact_sha256"]
+  },
+  "repeatability": {
+    "replicates_min": 3,
+    "deterministic_scope": "Everything after the agent: the scorer re-run on a stored artifact must reproduce status, validity checks, and area_um2 exactly, and a report regenerated from ledgers alone must be byte-identical. Agent output itself is not expected to repeat; replicates measure its spread.",
+    "rescore_must_match": ["status", "validity", "score.area_um2"],
+    "fingerprint_fields": ["protocol_sha256", "task_sha256"]
+  },
+  "budget": {
+    "description": "Live-agent budget policy, built on the existing provider/ledger interfaces (#1739 interactive provider, #2253 round ledger, #2294 token usage; CI cost lessons from #1781). Deterministic validation needs no credentials.",
+    "credentialed_steps": ["live agent runs"],
+    "credential_free_steps": ["validate-layout", "schema and fixture validation", "scorer re-derivation of stored artifacts", "report regeneration from ledgers"],
+    "per_run": { "agent_timeout_s": 1800.0, "tool_call_budget": 80 },
+    "ci": {
+      "live_default": "off",
+      "live_smoke": { "tasks": 1, "arms": 3, "replicates": 1 },
+      "skip_when_credentials_missing": true,
+      "never_fail_workflow_on_live_result": true
+    },
+    "accounting": "Per-run cost is the existing ledger `usage` object (tool_calls, turns, input_tokens, output_tokens, cache buckets) copied verbatim into the run record; no new meter is introduced.",
+    "exhaustion_status": "budget_exhausted"
+  }
+}

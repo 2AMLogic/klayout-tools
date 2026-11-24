@@ -21,7 +21,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-release-lag.sh"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-lag.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 # Mirrors the phrase check-release-lag.sh parses out of RELEASING.md's
 # "Release cadence" section. Written independently here on purpose: if either
@@ -233,14 +233,13 @@ def test_threshold_is_parseable_from_this_repos_releasing_md() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_text_report_points_at_the_changelog_unreleased_section(
+def test_text_report_points_at_pending_changelog_entries(
     tmp_path: Path,
 ) -> None:
-    """A consumer pinned to the latest release needs to be told where to look
-    for what has landed since -- CHANGELOG.md's `## Unreleased` section."""
     repo = _tagged_repo(tmp_path, ahead=9, threshold=5)
     proc = _run("--repo", str(repo), "--ref", "HEAD")
     assert proc.returncode == 1
+    assert "changelog.d/" in proc.stdout
     assert "## Unreleased" in proc.stdout
 
 
@@ -305,18 +304,12 @@ MUTATING_GIT = (
 )
 
 
-def test_workflow_is_advisory_and_never_releases() -> None:
-    """The check must not gate unrelated PRs, and must never cut a release."""
+def test_workflow_does_not_gate_pull_requests() -> None:
+    """Release lag is a property of main; it must never redden a PR."""
     text = WORKFLOW.read_text()
-    assert "pull_request:" not in text, (
-        "release lag is a property of main; running on pull_request would "
-        "redden unrelated PRs"
-    )
-    for forbidden in (*MUTATING_GIT, "workflow_call", "gh release"):
-        assert forbidden not in text, (
-            f"release-lag.yml must stay read-only; found {forbidden!r}"
-        )
-    assert "permissions:\n  contents: read" in text
+    assert "pull_request:" not in text
+    assert "release-lag.yml" not in text
+    assert not (REPO_ROOT / ".github" / "workflows" / "release-lag.yml").exists()
 
 
 def test_script_never_mutates_the_repository() -> None:

@@ -9,20 +9,57 @@ Exit codes (see ``docs/cli/sta.md`` for the full table):
     1 - failed to run (bad request, unresolvable def/PDK/LEF/spef, a missing
         clock constraint, or an OpenROAD engine error) -- returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
+    3 - ``--check`` only: the committed report no longer reproduces
+        (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. There is no exit code 3 -- like ``klt place-and-route``, this
-command has no pass/fail concept of its own; timing slack/violation counts
-are data, not a built-in gate.)
+subcommand. A *fresh* run never exits 3 -- this command has no pass/fail
+concept of its own; timing slack/violation counts are data, not a built-in
+gate.)
+
+``--check <report>`` (issue #5841) verifies a previously committed report
+still reproduces from the request given positionally -- see
+``docs/cli/sta.md``, "--check / --rerun". Cheap mode (default): re-hash the
+request's geometry source and liberty(ies) and compare against the report's
+recorded ``provenance`` digests, no OpenROAD run. Full mode (``--check
+<report> --rerun``): re-run the analysis and diff verdict-bearing fields.
 """
 
 import argparse
 
 from ..env_provenance import render_path_field
 from ..post_route_sta import PostRouteStaError, run_sta
-from .output import emit_error, emit_success
+from ..post_route_sta_verify import check_sta_report, rerun_sta_report
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+
+#: The --check/--rerun outcome (issue #5841) -- the same 0/3 split `klt
+#: place-and-route --check` uses. A fresh run never exits 3, so 3 means, and
+#: only means, "the committed report no longer reproduces".
+EXIT_MATCH = 0
+EXIT_DRIFTED = 3
+
+
+def configure(
+    sta_parser: argparse.ArgumentParser, add_format_arg, add_verify_args
+) -> None:
+    """Attach ``--format`` and the shared ``--check``/``--rerun`` flags (issue
+    #5841), and bind :func:`run`. Called from ``parser._add_sta_parser``."""
+    add_format_arg(sta_parser)
+    add_verify_args(
+        sta_parser,
+        verb="sta",
+        inputs="geometry source (def/verilog) and liberty",
+        engine="OpenSTA",
+        docs="docs/cli/sta.md",
+    )
+    sta_parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.check is not None:
+        return _run_check(args)
+    if args.rerun:
+        return emit_error("sta", "--rerun requires --check <report>", args.format)
+
     try:
         report = run_sta(args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root)
     except PostRouteStaError as exc:
@@ -31,6 +68,29 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     return 0
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    """`--check <report>` (and `--rerun`): verify committed evidence against
+    the request still on disk (issue #5841). The positional `request` stays
+    required: a `klt sta` report does not echo the request that produced it
+    (see `_report_verify.py`'s module docstring)."""
+    try:
+        if args.rerun:
+            result = rerun_sta_report(
+                args.check, args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            )
+        else:
+            result = check_sta_report(
+                args.check, args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            )
+    except PostRouteStaError as exc:
+        return emit_error("sta", str(exc), args.format)
+
+    emit_success(
+        result, args.format, render_rerun_drift if args.rerun else render_check_text
+    )
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 def _print_text(report: dict) -> None:
@@ -47,6 +107,9 @@ def _print_text(report: dict) -> None:
     if "corners" in report:
         for entry in report["corners"]:
             print(f"corner: {entry['corner']}")
+            if "interconnect_corner" in entry:
+                print(f"interconnect_corner: {entry['interconnect_corner']}")
+                print(f"spef_path: {_render_input_path(entry['spef_path'])}")
             _print_slack_fields(entry, indent="  ")
             _print_spef_annotation(entry.get("spef_annotation"), indent="  ")
             print()
@@ -93,6 +156,17 @@ def _print_path_record(label: str, path: dict | None) -> None:
         )
 
 
+#: Suffix qualifying every non-`None` `fmax_mhz` in text output (issue
+#: #7005): `timing__fmax`'s eligible clock paths exclude opposite-edge
+#: paths, so the figure can overstate achievable frequency. Shared with
+#: `place-and-route`'s text formatter (issue #7522) so the two commands
+#: cannot drift apart -- the same OpenROAD metric feeds both.
+FMAX_CAVEAT = (
+    " (clock estimate excludes opposite-edge paths"
+    " and can overstate achievable frequency)"
+)
+
+
 def _print_slack_fields(fields: dict, *, indent: str) -> None:
     print(f"{indent}worst_slack_ns: {fields['worst_slack_ns']}")
     print(f"{indent}total_negative_slack_ns: {fields['total_negative_slack_ns']}")
@@ -101,15 +175,19 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
         f"{indent}total_negative_hold_slack_ns: "
         f"{fields['total_negative_hold_slack_ns']}"
     )
-    print(f"{indent}fmax_mhz: {fields['fmax_mhz']}")
+    fmax = fields["fmax_mhz"]
+    caveat = "" if fmax is None else FMAX_CAVEAT
+    print(f"{indent}fmax_mhz: {fmax}{caveat}")
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
     _print_constraint_completeness(fields.get("constraint_completeness"), indent=indent)
+    _print_liberty_warnings(fields.get("liberty_warnings"), indent=indent)
     for key in ("worst_setup_path", "worst_hold_path"):
         _print_path_record(f"{indent}{key}", fields.get(key))
     for port, entry in (fields.get("port_paths") or {}).items():
         for side in ("setup", "hold"):
             _print_path_record(f"{indent}port_paths[{port}].{side}", entry[side])
+    _print_instance_paths(fields, indent=indent)
     print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
     propagation = fields.get("clock_propagation")
     if propagation is not None:
@@ -123,6 +201,30 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
                 f"{', '.join(propagation['clock_sinks_sample'])}"
             )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+    basis = fields.get("power_basis")
+    if basis is not None:
+        print(
+            f"{indent}power_basis: activity_source={basis['activity_source']} "
+            f"activity={basis['activity']} duty={basis['duty']} "
+            f"parasitics={basis['parasitics']}"
+        )
+    # Issue #2886: the per-corner SDF, only when `request.sdf` asked for one
+    # (text output for a request without it stays unchanged).
+    sdf = fields.get("sdf")
+    if sdf is not None:
+        print(f"{indent}sdf: {_render_input_path(sdf)} ({sdf['content_hash']})")
+
+
+def _print_instance_paths(fields: dict, *, indent: str) -> None:
+    """Issue #5754: four records per requested instance (into/out_of x
+    setup/hold), rendered like the port records above."""
+    for instance, sides in (fields.get("instance_paths") or {}).items():
+        for group in ("into", "out_of"):
+            for side in ("setup", "hold"):
+                _print_path_record(
+                    f"{indent}instance_paths[{instance}].{group}.{side}",
+                    sides[group][side],
+                )
 
 
 def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:
@@ -149,6 +251,21 @@ def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:
             print(f"{indent}  {key} (sample): {', '.join(check['sample'])}{more}")
 
 
+def _print_liberty_warnings(block: dict | None, *, indent: str) -> None:
+    """Issue #7411: one summary line naming the two Liberty-model codes,
+    plus the capped verbatim sample. Silent on a clean deck -- `count: 0`
+    has nothing to say, and the always-present JSON field is the stable
+    contract, not the text rendering."""
+    if not block or not block.get("count"):
+        return
+    counts = ", ".join(
+        f"{code}={block['by_code'].get(code, 0)}" for code in ("STA-1253", "STA-1311")
+    )
+    print(f"{indent}liberty_warnings: count={block['count']} ({counts})")
+    for line in block.get("sample") or []:
+        print(f"{indent}  {line}")
+
+
 def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:
     if annotation is None:
         return
@@ -171,6 +288,14 @@ def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:
     missing_sample = annotation.get("design_nets_missing_sample")
     if missing_sample:
         print(f"{indent}missing nets (sample): {', '.join(missing_sample)}")
+    for key, label in (
+        ("unannotated_driver_sample", "unannotated drivers (sample)"),
+        ("partially_unannotated_driver_sample", "partial drivers (sample)"),
+        ("floating_driver_sample", "floating no-net drivers (sample)"),
+    ):
+        pins = annotation.get(key)
+        if pins:
+            print(f"{indent}{label}: {', '.join(pins)}")
     warning_sample = annotation.get("reader_warning_sample")
     if warning_sample:
         print(f"{indent}reader warnings (sample):")

@@ -388,11 +388,18 @@ order. The retarded-coupling checks (`fullwave.rs`,
 
 ## Next steps
 
-Per this issue's "Revision 2026-09-15" plan: implement increment (i) with
-`tests/test_mom.py` and Rust unit coverage in a follow-up PR (the existing
-`pytest.raises(MomError, match="bar-shaped")` tests at
-`tests/test_mom.py:628,802` move to cover only the shapes that remain
-genuinely out of scope after increment (i) lands — mixed-axis, non-bar
-single box), then increment (ii) in a subsequent PR. Tracking issues filed
-for each increment reference this document and
+Historical record — all increments planned here have shipped. The plan in
+"Revision 2026-09-15" landed in this order:
+
+- Increment (i): `524bc9936`
+  ([#1869](https://github.com/2AMLogic/klayout-tools/pull/1869)).
+- Increment (ii): `63863b50e`
+  ([#1879](https://github.com/2AMLogic/klayout-tools/pull/1879)).
+- Increment (iii) (series windings): tracked by
+  [#2728](https://github.com/2AMLogic/klayout-tools/issues/2728),
+  [#2729](https://github.com/2AMLogic/klayout-tools/issues/2729) and
+  [#2730](https://github.com/2AMLogic/klayout-tools/issues/2730), all closed.
+
+For the shipped state, see "Series windings (static solve)" in
+[`docs/cli/mom.md`](../cli/mom.md). The parent tracking issue is
 [#1519](https://github.com/2AMLogic/klayout-tools/issues/1519).

@@ -10,10 +10,98 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_device_well_enclosure,
+    declare_mos_array_extra_params,
+    declare_mos_stack_params,
+    declare_ring_implant_params,
+    declare_ring_well_margin,
+    declare_voltage_flavor_mark_params,
+    declare_well_present,
+    union_box,
+)
+
+
+def _ring_well_mark_box(
+    pcell: Any, info: dict[str, Any]
+) -> tuple[float, float, float, float] | None:
+    """The guard ring's own well tie box, or ``None`` when no ring well is
+    drawn (issue #6458)."""
+    from klayout_tools.gen import _shift_box
+
+    if (
+        info["ring"] is None
+        or not pcell.add_guard_ring
+        or not pcell.well_present
+        or pcell.flavor != "pfet"
+    ):
+        return None
+    margin = pcell.ring_well_margin_um
+    return _shift_box(
+        (
+            -margin,
+            -margin,
+            info["ring"]["outer_w_um"] + margin,
+            info["ring"]["outer_h_um"] + margin,
+        ),
+        *info["ring_offset_um"],
+    )
+
+
+def _diff_pair_pcell_layout(pcell: Any) -> dict[str, Any]:
+    """Build the same resolved pair and ring geometry for validation and drawing."""
+    from klayout_tools.gen import _diff_pair_layout, _pcell_tap_reach_um
+
+    return _diff_pair_layout(
+        pcell.w_um,
+        pcell.l_um,
+        pcell.splits,
+        pcell.add_guard_ring,
+        pcell.ring_gap_side,
+        pcell.ring_gap_um,
+        pcell.ring_gap_offset_um,
+        pcell.ring_padding_um,
+        pcell.row_spacing_um,
+        pcell.gate_contact,
+        pcell.gate_pad_clearance_um,
+        pcell.contact_gate_offset_um,
+        pcell.bottom_endcap_um,
+        pcell.sd_implant_margin_um if pcell.sd_implant_present else 0.0,
+        pitch_x_um=pcell.pitch_x_um,
+        top_endcap_um=pcell.top_endcap_um,
+        tap_reach_um=_pcell_tap_reach_um(pcell),
+        strap_splits=pcell.strap_splits,
+        strap_grid_um=pcell.mfg_grid_um,
+    )
+
+
+def _draw_pcell_strap(
+    pcell: Any,
+    strap: dict[str, Any] | None,
+    li_strap_metal: Any,
+    li_strap_via: Any,
+) -> None:
+    """Draw ``_diff_pair_layout``'s strap result (issue #5557): met1 rails
+    and trunks on ``li_strap_metal``, fixed-size mcons on ``li_strap_via``.
+    ``strap`` is ``None`` unless ``strap_splits`` was requested, in which
+    case this draws nothing -- the same always-call/empty-input shape
+    ``_draw_pcell_tap_pads`` uses. Box coordinates arrive pre-snapped to the
+    family grid from the layout math, so ``_insert_boxes``' per-edge dbu
+    rounding is exact.
+    """
+    if strap is None:
+        return
+    from klayout_tools.gen import _insert_boxes
+
+    dbu = pcell.layout.dbu
+    _insert_boxes(pcell.cell, li_strap_metal, dbu, strap["metal_boxes_um"])
+    _insert_boxes(pcell.cell, li_strap_via, dbu, strap["via_boxes_um"])
 
 
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -35,12 +123,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         MIN_SAME_LAYER_SPACING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
-        _diff_pair_layout,
+        _close_implant_gaps,
+        _draw_pcell_npc,
+        _draw_pcell_tap_pads,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
-        _shift_box,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _DiffPairPCell(kdb.PCellDeclarationHelper):
         """Differential pair / current mirror cell (spike section 4's
@@ -64,6 +154,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
         # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
         mfg_grid_um: float
+        device_well_enclosure_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -90,6 +181,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "and for the routing styles that do work",
                 default=2,
             )
+            declare_mos_array_extra_params(self, kdb)
             self.param(
                 "add_guard_ring",
                 self.TypeBoolean,
@@ -131,10 +223,29 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=MIN_SAME_LAYER_SPACING_UM,
             )
             self.param(
+                "pitch_x_um",
+                self.TypeDouble,
+                "Inter-unit column pitch override (um), clamped up to the "
+                "legal minimum (unit extent + min same-layer spacing) "
+                "(issue #5764). 0.0 (default) = no override",
+                default=0.0,
+            )
+            self.param(
                 "mirror",
                 self.TypeBoolean,
                 "Label devices M1/M2 (current mirror) instead of Q1/Q2 "
                 "(differential pair)",
+                default=False,
+            )
+            self.param(
+                "strap_splits",
+                self.TypeBoolean,
+                "Strap each device's splits together in-cell on the second "
+                "routing plane (met1 via mcon on sky130) and report one "
+                "S/D/G port triple per device on the strap rails instead of "
+                "one triple per sub-instance. Requires gate_contact and a "
+                "device width the S/D strap tracks fit; verified on sky130 "
+                "only -- every other family is rejected (issue #5557)",
                 default=False,
             )
             self.param(
@@ -147,12 +258,12 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "voltage_flavor",
                 self.TypeString,
-                "Optional medium-voltage/thick-oxide device-class marker: "
-                "'' (default, no marker drawn) or a name the resolved PDK "
-                "family's role-layer table recognises (e.g. 'medium_voltage' "
-                "on gf180mcu, drawing its Dualgate marker). A name the family "
-                "doesn't recognise draws nothing and is reported via "
-                "drc_hints.notes, never silently dropped",
+                "Optional medium-voltage/thick-oxide device-class marker: '' "
+                "(default, no marker drawn) or a name the resolved PDK family's "
+                "role-layer table recognises (e.g. 'medium_voltage' on gf180mcu, "
+                "drawing its Dualgate marker; 'lvt' on sky130, drawing lvtn.drawing "
+                "for the low-Vt device). A name the family doesn't recognise draws "
+                "nothing and is reported via drc_hints.notes, never silently dropped",
                 default="",
             )
             self.param(
@@ -165,72 +276,40 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "device (and any automatically-sized guard ring) grows taller",
                 default=False,
             )
-            self.param(
-                "active_layer",
-                self.TypeLayer,
-                "Active/diffusion drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "poly_layer",
-                self.TypeLayer,
-                "Poly gate drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_stack_params(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "tap_layer",
                 self.TypeLayer,
                 "Guard ring tap drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
+            )
+            self.param(
+                "strap_metal_layer",
+                self.TypeLayer,
+                "Second routing metal (metal2 role) the split straps draw on "
+                "(hidden harness-resolved param, issue #5557)",
+                default=kdb.LayerInfo(0, 0),
+                hidden=True,
+            )
+            self.param(
+                "strap_via_layer",
+                self.TypeLayer,
+                "Via joining the local-metal pads to the strap metal (via1 "
+                "role; hidden harness-resolved param, issue #5557)",
+                default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Guard ring well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "ring_implant_layer",
-                self.TypeLayer,
-                "Guard-ring implant drawing layer, tracking the tap ring's "
-                "own band with ring_implant_margin_um of extension beyond "
-                "every edge of it (only used when add_guard_ring and "
-                "ring_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "ring_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "the guard ring's own shape (see _ring_tap_implant_layer)",
-                default=False,
-            )
-            self.param(
-                "ring_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the ring implant extends beyond the "
-                "ring's own band on every edge (only used when "
-                "ring_implant_present)",
-                default=0.0,
-            )
+            declare_well_present(self)
+            declare_ring_implant_params(self, kdb)
             self.param(
                 "voltage_flavor_mark_layer",
                 self.TypeLayer,
@@ -238,14 +317,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer, sized to enclose the device pair's own footprint "
                 "(only used when voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "voltage_flavor_mark_present",
-                self.TypeBoolean,
-                "Whether voltage_flavor_mark_layer is a real layer resolved "
-                "for params.voltage_flavor on this PDK family",
-                default=False,
-            )
+            declare_voltage_flavor_mark_params(self, kdb)
             self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
@@ -253,70 +327,10 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the device pair's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
-            self.param(
-                "gate_pad_clearance_um",
-                self.TypeDouble,
-                "Harness-resolved clearance the gate-poly landing pad keeps "
-                "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
-                default=0.0,
-            )
-            self.param(
-                "contact_gate_offset_um",
-                self.TypeDouble,
-                "Harness-resolved extra S/D-contact-to-gate offset floor "
-                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
-                default=0.0,
-            )
-            self.param(
-                "bottom_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe bottom-edge endcap extension "
-                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "sd_implant_layer",
-                self.TypeLayer,
-                "Source/drain implant drawing layer (only used when "
-                "sd_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "sd_implant_present",
-                self.TypeBoolean,
-                "Whether sd_implant_layer is a real layer this PDK family "
-                "needs over each unit device's own active body",
-                default=False,
-            )
-            self.param(
-                "sd_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the source/drain implant box grows "
-                "beyond each unit device's own active box (only used when "
-                "sd_implant_present)",
-                default=0.0,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
-            )
+            declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
+            declare_device_well_enclosure(self, WELL_ENCLOSURE_MARGIN_UM)
 
         def display_text_impl(self) -> str:
             return f"diff_pair(w={self.w_um},l={self.l_um},splits={self.splits})"
@@ -327,22 +341,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_poly = self.layout.layer(self.poly_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
-            info = _diff_pair_layout(
-                self.w_um,
-                self.l_um,
-                self.splits,
-                self.add_guard_ring,
-                self.ring_gap_side,
-                self.ring_gap_um,
-                self.ring_gap_offset_um,
-                self.ring_padding_um,
-                self.row_spacing_um,
-                self.gate_contact,
-                self.gate_pad_clearance_um,
-                self.contact_gate_offset_um,
-                self.bottom_endcap_um,
-                self.sd_implant_margin_um if self.sd_implant_present else 0.0,
-            )
+            li_strap_metal = self.layout.layer(self.strap_metal_layer)
+            li_strap_via = self.layout.layer(self.strap_via_layer)
+            info = _diff_pair_pcell_layout(self)
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
                 for role, li in (
@@ -354,6 +355,11 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            # Split straps (issue #5557): met1 rails + trunks and the
+            # mcons landing them on each unit's S/D/gate pads -- no-op when
+            # strap_splits is off (`info["strap"]` is None).
+            _draw_pcell_strap(self, info["strap"], li_strap_metal, li_strap_via)
 
             # Source/drain implant (issue #1577): drawn over every unit
             # device's own active body, mirroring mos_array's own treatment.
@@ -368,12 +374,18 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+                _close_implant_gaps(
+                    self.cell,
+                    li_sd_implant,
+                    dbu,
+                    getattr(self, "sd_implant_min_space_um"),  # noqa: B009
+                )
 
             # Shared device-pair-footprint box (well margin), used by the
             # `flavor="pfet"` well shape below -- computed once, independent
             # of `voltage_flavor`, so a caller can request either, both, or
             # neither.
-            margin = WELL_ENCLOSURE_MARGIN_UM
+            margin = self.device_well_enclosure_um
             device_well_box = (
                 -margin,
                 -margin,
@@ -390,15 +402,22 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 li_well = self.layout.layer(self.well_layer)
                 _insert_boxes(self.cell, li_well, dbu, [device_well_box])
 
+            # The ring's own well tie box (flavor == "pfet" only), computed
+            # up front so the marker below can be grown over it (issue
+            # #6458, the `diff_pair` sibling of #6025) and the well shape
+            # drawn further down is the very same box -- the two cannot
+            # drift apart.
+            ring_well_mark_box = _ring_well_mark_box(self, info)
+
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
             # its *own* box (issue #1577), not the well shape's -- gf180mcu's
             # real signoff deck needs the marker to reach further than the
             # well's own margin does, see
-            # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring.
+            # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring. Issue
+            # #6458: also grown over the guard ring's well tie when one is
+            # drawn, so an HV-nwell enclosure rule (sky130 nwell.9) holds;
+            # one unioned box keeps it a single polygon per marker layer.
             if self.voltage_flavor_mark_present:
-                li_voltage_flavor_mark = self.layout.layer(
-                    self.voltage_flavor_mark_layer
-                )
                 mark_margin = self.voltage_flavor_mark_margin_um
                 mark_box = (
                     -mark_margin,
@@ -406,68 +425,25 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_w_um"] + mark_margin,
                     info["core_h_um"] + mark_margin,
                 )
-                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
+                _draw_voltage_flavor_marks(
+                    self, dbu, union_box(mark_box, ring_well_mark_box)
+                )
 
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
-                if self.well_present and self.flavor == "pfet":
+                if ring_well_mark_box is not None:
                     li_well = self.layout.layer(self.well_layer)
-                    margin = WELL_ENCLOSURE_MARGIN_UM
-                    well_box = (
-                        -margin,
-                        -margin,
-                        ring["outer_w_um"] + margin,
-                        ring["outer_h_um"] + margin,
-                    )
-                    _insert_boxes(
-                        self.cell, li_well, dbu, [_shift_box(well_box, ox, oy)]
-                    )
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- still a ring, never a blanket
-                    # over the enclosed pair (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
-                    )
+                    _insert_boxes(self.cell, li_well, dbu, [ring_well_mark_box])
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
+
+            # Tap pads (issue #3648): see `_MosArrayPCell.produce_impl`.
+            _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
@@ -478,5 +454,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_fixed_size_um,
                 self.mfg_grid_um,
             )
+
+            _draw_pcell_npc(self, li_contact, li_poly, dbu)
 
     return {"diff_pair": _DiffPairPCell}

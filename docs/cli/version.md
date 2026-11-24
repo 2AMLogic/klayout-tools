@@ -6,7 +6,7 @@ was built from, and whether that commit is this version's release tag
 version this build/commit was tested against (issue #1490).
 
 ```
-klt version [--format text|json]
+klt version [--format text|json] [--require COMMAND[,COMMAND]...]
 klt --version            # same one-line string as `klt version --format text`
 ```
 
@@ -82,9 +82,14 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   "git_tag": null,
   "dirty": false,
   "is_release": false,
+  "reinstall_spec": "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2",
   "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
-  "klayout_version_expected": "0.30.10"
+  "klayout_version_expected": "0.30.10",
+  "commands": [
+    {"name": "arith-gen", "summary": "…"},
+    {"name": "…", "summary": "…"}
+  ]
 }
 ```
 
@@ -123,19 +128,30 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   release build, `false` for a confirmed non-release build, `null` when the
   question is unanswerable. A consumer gating on "this is a release" must
   require `is_release === true`; `null` is not a weaker `true`.
+- `reinstall_spec` (issue #3985) — a spec for `uvx --from` / `pip install` that
+  re-obtains this build, or `null` when it cannot be re-obtained. `is_release:
+  true` gives `klayout-tools==<version>`; a clean build with a recorded
+  `git_commit` gives `klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>`;
+  a dirty tree or a build with no recorded commit (`…dev0+unknown`) gives
+  `null`, and `klt version` text then prints a `not reinstallable` note to stderr (stdout stays the one-line version).
+  Additive; `schema_version` stays `1`.
 - `grading_ruleset_id` (issue #2216) — **a `klt` version string alone does
   not identify the grading build.** Three installs can report the exact same
   `version`/`git_commit` yet grade a `klt signoff --manifest`/`--fleet`
   tier-verdict report by different rules — a registry wheel built from a
   release tag, a `pip install git+...@<tag>` snapshot of that same tag, and a
   full-repo checkout that has moved past the tag on `main`. This field is a
-  `sha256:`-prefixed content hash of the shipped `signoff.py` grading module:
-  identical between two installs of byte-identical grading code regardless
-  of how each was installed, and different whenever the grading logic
-  changes — see [`signoff.md`'s "Identifying the grading
+  `sha256:`-prefixed content hash of the shipped `signoff*.py` grading
+  modules (issue #7434: every module in the package directory whose filename
+  matches — the grading rules and the `reason` vocabulary they emit are
+  spread across the whole leaf family — with each file's basename mixed into
+  the digest before its bytes, so a rename or a content move between leaves
+  changes the id too): identical between two installs of byte-identical
+  grading code regardless of how each was installed, and different whenever
+  the grading logic changes — see [`signoff.md`'s "Identifying the grading
   build"](signoff.md#identifying-the-grading-build) for the full mechanism,
   including `klt signoff --describe-grader`. `null` only if this install's
-  `signoff.py` cannot be read at all (never fabricated).
+  `signoff*.py` grading modules cannot be read at all (never fabricated).
 - `klayout_version` (issue #1490) — the KLayout engine actually resolved
   into this process (`klayout.__version__`, same value as
   `provenance.klayout_version`), or `null` if unresolvable.
@@ -143,6 +159,31 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   build/commit was tested against, or `null` when unresolvable (a build made
   before this field existed, or a checkout with no reachable `uv.lock`). See
   "Pinning the KLayout engine version" below.
+- `commands` (issue #7324) — the top-level verbs this install provides, as
+  one `{"name", "summary"}` object per verb, sorted by `name` (`summary` is
+  the verb's one-line `klt --help` description). A version pin answers
+  *which release* is installed; this field answers the other half of a
+  toolchain pin check — *is it complete* (a partial/aborted install, a wheel
+  built without an optional extra, a locally patched checkout can all be the
+  right version yet miss commands). Read it instead of scraping `klt --help`,
+  which couples a probe to argparse's formatting and breaks silently toward
+  an empty command set on drift:
+
+  ```bash
+  klt version --format json | jq -e '.commands[].name | select(. == "drc")'
+  ```
+
+  Derived from the live parser's `<command>` choices, so the list cannot
+  drift from what `klt <cmd>` actually accepts; a verb hidden from
+  `klt --help` (`help=argparse.SUPPRESS`) is hidden here too. Top-level
+  verbs only — nested subcommands (`klt pdk find`, `klt deck …`) are not
+  listed. Additive; `schema_version` stays `1`, and `--format text` still
+  prints only the one-line version string.
+- `required_commands` (issue #7331) — present **only** when `--require` is
+  passed: `{"required": [...], "missing": [...]}`, the requested top-level
+  verbs (de-duplicated, input order) and the subset this install does not
+  provide. Additive; `schema_version` stays `1`. See "Requiring commands:
+  `--require`" below.
 
 **`version`/`git_commit`/`git_tag`/`dirty`/`is_release` identify the
 *install*, not only the commit it came from** — two byte-legitimate installs
@@ -151,9 +192,167 @@ of the same pinned `<sha>` can report different values for all five (issue
 fresh re-render; see "These fields describe the install, not only the commit"
 under "Gating a build before doing work" below.
 
-Always exits `0`. Identifying the running build cannot fail — an
-unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
-`is_release: null`, never as an error.
+Without `--require`, always exits `0`. Identifying the running build cannot
+fail — an unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
+`is_release: null`, never as an error. With `--require`, exits `3` when a
+required verb is missing (next section); the report is still emitted.
+
+## Requiring commands: `--require` (issue #7331)
+
+`commands` answers "what does this install provide?"; `--require` turns that
+answer into a gate for a consumer that knows which verbs it invokes. A value
+is one top-level verb or a comma-separated list, and the flag repeats:
+
+```
+klt version --require drc,lvs --require deck --format json
+```
+
+The normal payload is emitted as usual, plus one additive field that is
+present **only** when `--require` is passed:
+
+```json
+"required_commands": {
+  "required": ["drc", "lvs", "deck"],
+  "missing": []
+}
+```
+
+`required` is the requested names, de-duplicated and in input order;
+`missing` is the subset this install does not provide, in the same order.
+
+A name is looked up in `commands`, so the comparison is against the live
+parser's top-level verbs, never against `--help` text. Only a listed
+top-level verb satisfies it: a nested subcommand (`pdk find`) and a verb
+hidden from `klt --help` both count as missing. **An unknown name is the
+signal, not a usage error** — `--require nonesuch` is accepted by the parser
+and reported in `missing`, because "this install lacks that verb" is exactly
+what the flag exists to report. The one exception is a value that names
+nothing at all (empty, or only commas and whitespace): that is a usage error
+(exit `2`, no report), since a gate that checks nothing must not pass
+silently.
+
+**Exit codes.** `0` when every required name is provided, **`3`** otherwise —
+the same "ran fine, the answer is no" convention as `klt pdk cells --supply`
+and `klt drc` finding violations, so the documented payload is still on
+stdout. On exit `3`, stderr carries one line naming the missing commands
+and, when `reinstall_spec` is not `null`, the command that re-obtains the
+running build:
+
+```
+klt: missing required command(s): nonesuch
+klt: this build can be reinstalled with: uvx --from "klayout-tools==X.Y.Z" klt ...
+```
+
+That command re-obtains *this* build. It is the fix for a partial or aborted
+install — the right version, missing commands; if the build simply predates
+the verb, install a release that provides it instead. A build with
+`reinstall_spec: null` (dirty tree, no recorded commit) prints no second
+line but still exits `3`. `--format text` still prints only the one-line
+version string; the gate speaks through stderr and the exit code.
+
+### The two-command pin check
+
+A consumer that pins `klt` chains two existing verbs instead of scraping
+`--help` or writing its own preflight:
+
+```bash
+klt version --require drc,lvs --format json \
+  && klt pdk check --pdk sky130A --expect-version <open_pdks sha> --format json
+```
+
+The first fails (exit `3`) unless the install provides every verb the
+consumer invokes — and its `is_release`/`git_commit` fields say which build
+answered; the second fails unless the PDK install is present, unbroken and at
+the pinned revision (exit `4` for broken symlinks, `6` for a version
+mismatch — see [`pdk.md`](pdk.md)). `klt version` deliberately reads no pin
+file, because every consumer's pin document has its own format and each
+extracts its command list to pass as `--require`; and it carries no
+PDK-asset flags, because that check already belongs to `klt pdk check`.
+
+## Reproducing a recorded pin (issue #3985)
+
+A `.devN+g<sha>` version is not published to any index, so
+`uvx --from "klayout-tools==<version>"` cannot resolve it. Pin on
+**`git_commit`**, not on the version string: record `git_commit` (and
+`reinstall_spec`) next to the result, then re-run under the same build with
+
+```
+uvx --from "<reinstall_spec>" --with "klayout==<klayout_version>" klt ...
+# e.g. uvx --from "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>" \
+#      --with "klayout==0.30.12" klt ...
+```
+
+**`reinstall_spec` pins the klt axis only** (issue #5884). The `klayout`
+engine axis is pinned by the `--with` flag, and its value is the
+**recorded** `klayout_version` — `provenance.klayout_version` from the
+report being reproduced, or `klayout_version` from `klt version --format
+json` on the build that wrote it — *not* `klayout_version_expected`, which
+is the version the commit was tested against, not the one that wrote the
+bytes. Omit `--with` and the `klayout>=0.30` floor resolves whatever engine
+PyPI serves on the day: a reconstruction that verifies today can silently
+stop verifying at the next klayout point release, with no change to the
+recording or the code. If the recording carries `klayout_version: null`
+(engine unresolvable when it was written), the engine axis cannot be
+reconstructed from that recording at all — omit `--with` and accept the
+floor.
+
+Caveat: the re-installed build is the same commit, so `git_commit` and the
+`+g<sha>` segment match, but `N` is computed from the tags visible to the
+clone and may differ from the original build's. Compare `git_commit`, not
+`version`. A build with `reinstall_spec: null` (dirty tree or no recorded
+commit) cannot be reproduced and should not be used as a pin.
+
+Reports record the same handle: `provenance.klt_git_commit` and
+`provenance.klt_reinstall_spec` (issue #4412) equal `git_commit` and
+`reinstall_spec` above, so a committed report names a re-obtainable build
+without re-running `klt version`. `klt_git_commit` is `null` only when no
+commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+dirty or the commit is unrecoverable.
+
+### Pinning a release tag: use the peeled commit
+
+An annotated release tag (`vX.Y.Z`) is its own git object. `git ls-remote`
+lists the **tag-object** sha on the `refs/tags/vX.Y.Z` line and the commit it
+points at on the `refs/tags/vX.Y.Z^{}` line:
+
+```
+$ git ls-remote origin 'refs/tags/v0.8.0*'
+01c67a95a23c…  refs/tags/v0.8.0        # tag object — do not pin this
+c572046be644…  refs/tags/v0.8.0^{}     # peeled commit — pin this
+```
+
+Pin the **peeled commit** (`git rev-parse vX.Y.Z^{commit}`, or the `^{}` line
+above). Pinning the tag-object sha fails:
+
+```
+$ uvx --from "git+https://github.com/2AMLogic/klayout-tools@01c67a95a23c…" klt --version
+error: Failed to resolve `--with` requirement
+  cause: Exact Git revision `01c67a95a23c...` does not match precise commit `c572046be644...`
+```
+
+A lightweight tag has no tag object (its sha already is the commit), so
+nothing needs peeling.
+
+A `git+…@<commit>` install of a release commit still reports a
+`X.Y.(Z+1).devN+g<sha>` version, not `X.Y.Z`: the package manager's scratch
+clone carries no tags (see the route table under "These fields describe the
+install" below). The release identity is `klayout-tools==X.Y.Z` from PyPI;
+use the git pin only to reproduce an exact commit.
+
+**The same `git+…@<sha>` pin can report different `build` blocks depending on
+the installer's cache state.** Whether the scratch checkout carries tags
+depends on how the package manager obtained it, so one pin has been observed
+to yield a dev identity (`0.8.0.devN+g<sha>`, `is_release: false`) from one
+cache and the release identity (`0.8.0`, `is_release: true`) from another. Do
+not depend on either. For the release identity use the PyPI pin
+`klayout-tools==X.Y.Z`, or force a fresh checkout with `uvx --no-cache`
+(worded as observed behaviour, not a guarantee). If you commit a `klt signoff`
+report generated under such a pin, verify it with `klt signoff --check`,
+which excludes the `build` block (see
+[`signoff.md`](signoff.md#verifying-a-committed-report---check-issue-2249) and
+[`json-contract.md`](../json-contract.md)), not a raw byte diff. Behaviour as
+of 2026-11-06; editable installs and PyPI wheels are unaffected.
 
 ## How the identity is determined
 
@@ -192,26 +391,51 @@ was rejected.
 
 ## Pinning the KLayout engine version
 
-Pinning `klayout-tools` to an exact git commit SHA does not, by itself, pin
-the `klayout` engine version that commit resolves —
+Pinning `klayout-tools` — to an exact git commit SHA *or* to a released
+version — does not, by itself, pin the `klayout` engine version it resolves —
 `pyproject.toml`'s `klayout>=0.30` dependency is an unbounded floor, so the
-same commit installed on different days can resolve different `klayout`
+same pin installed on different days can resolve different `klayout`
 versions, and DRC/LVS report internals (deck content hash, `rules_skipped`,
 `category_counts`) can shift alongside it even though the verdict itself
 does not (issue #1490).
 
-`klayout_version_expected` above is the reproduction target; the fix is
-`uv`'s own dependency override, no `klt`-specific flag needed:
+There are two pinning cases with two different targets:
+
+- **Expected** — pin *forward*: install a commit under the engine it was
+  *tested against*. The target is `klayout_version_expected` above.
+- **Recorded** — reproduce a *specific recording*: re-run under the engine
+  that actually wrote its bytes. The target is the recording's own
+  `provenance.klayout_version` (or `klayout_version` from `klt version`),
+  never `klayout_version_expected`.
+
+In both cases the fix is `uv`'s own dependency override, no
+`klt`-specific flag needed. For the expected case, use the install form
+matching how the build you are replacing was installed (`reinstall_spec`
+above already names it):
 
 ```bash
+# expected, released install: install under the tested-against engine
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# expected, dev/git checkout: install under the tested-against engine
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
+
+# recorded: re-run under the engine that wrote the recording
+uvx --from "<reinstall_spec>" --with "klayout==<klayout_version>" klt ...
 ```
 
-`klt drc`/`klt lvs` reports compare the two fields automatically —
-`provenance.klayout_version_mismatch` — with a stderr warning on drift; see
-[`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine
-version" section.
+The recorded form is the canonical reconstruction recipe — see
+"Reproducing a recorded pin" above for its edge cases (`klayout_version:
+null`, `reinstall_spec: null`).
+
+`klt drc`/`klt lvs`/`klt extract` reports compare the two fields
+automatically — `provenance.klayout_version_mismatch` — with a stderr
+warning on drift whose
+remedy prints whichever of the two forms matches the running build (issue
+#5601); see [`../json-contract.md`](../json-contract.md)'s "Pinning the
+KLayout engine version" section.
 
 ## Gating a build before doing work
 
@@ -225,6 +449,10 @@ klt version --format json     | jq -e '.is_release == true'
 klt deck hash --deck sky130 --format json \
   | jq -e '.content_hash == "sha256:<the hash your evidence was produced against>"'
 ```
+
+To gate on command presence as well, add `--require drc,lvs` to the first
+line (exit `3` on a miss) — see "Requiring commands: `--require`" above for
+the two-command pin check it forms with `klt pdk check`.
 
 `provenance.klt_version` in a report carries the same build identity as
 `version` above (issue #2090) — see

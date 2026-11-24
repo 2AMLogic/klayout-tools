@@ -1,4 +1,4 @@
-"""``klt signoff`` command: four modes sharing one verb.
+"""``klt signoff`` command: six modes sharing one verb.
 
 1. **Envelope aggregation** (the original mode, issue #309): combine
    ``klt drc``/``klt lvs``/``klt extract``/``klt sim`` JSON envelope files
@@ -20,9 +20,26 @@
    content hash identifying the grading code itself -- purely informational,
    reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-The four modes are mutually exclusive: ``--manifest``/``--fleet``/
-``--describe-grader`` each replace the positional ``<file>...`` arguments and
-each other.
+5. **Attest T1 items 1, 8, 9, 10** (``--attest ITEM --inventory FILE``, issue
+   #2844): run the item-specific checks a versioned inventory declares and
+   emit the artifact-anchored generic envelope ``--manifest`` binds (see
+   :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
+   diffs instead, writing nothing; exit ``0`` only when the committed
+   envelope still reproduces and still passes, ``3`` otherwise. Its CLI
+   dispatch and text renderers live in :mod:`.signoff_attest_cmd` (moved
+   out of this module for the per-file size ratchet).
+
+6. **Compare two saved reports** (``--diff-reports OLD NEW``, issue #6850):
+   diff the checklist surfaces of two previously committed tier reports --
+   the source doc + content hash and each row's ``title``/``text``/
+   ``notes``, matched by ``(tier, id, partition)`` -- reading nothing but
+   the two files. Read-only: no manifest, no evidence, no grading, and a
+   completed comparison exits ``0`` whether or not anything moved. See
+   :mod:`..signoff_report_diff` and :mod:`.signoff_diff_cmd`.
+
+The modes are mutually exclusive: ``--manifest``/``--fleet``/
+``--describe-grader``/``--attest``/``--diff-reports`` each replace the
+positional ``<file>...`` arguments and each other.
 
 ``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
 modes, not a fifth mode: it re-grades the same manifest and, instead of
@@ -30,18 +47,18 @@ rendering the report, diffs the result against a previously committed one --
 excluding two surfaces that move without any verdict moving with them:
 
 - the ``build`` block, which states how the running install was provisioned
-  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`);
+  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`)
+  -- reported, not dropped, as ``build_skew`` (issues #5852, #5868);
 - the report's verbatim quotation of the checklist doc -- each item's
   ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
   (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).
 
-It exists so a gate script asking "does this committed evidence still hold"
-no longer has to byte-compare the committed file against a fresh render:
-that comparison fails between two byte-legitimate installs of the *same
-pinned commit*, purely on provisioning route, and again whenever an upstream
-release reworded the bundled checklist. Refused (exit 1) with the
-envelope-aggregation and ``--describe-grader`` modes, neither of which
-renders such a report.
+It exists so a gate script asking "does this committed evidence still hold" no
+longer has to byte-compare the committed file against a fresh render: that
+comparison fails between two byte-legitimate installs of the *same pinned
+commit*, purely on provisioning route, and again whenever an upstream release
+reworded the bundled checklist. Refused (exit 1) with the envelope-aggregation
+and ``--describe-grader`` modes, neither of which renders such a report.
 
 The second exclusion is reported, not silently dropped: the ``--check``
 response carries ``doc_drift`` (bool) and ``doc_drift_fields`` (the
@@ -82,12 +99,15 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
         cannot fail once argument validation passes). Under ``--check``:
         ``status: "match"`` -- the committed report still reproduces
         (``doc_drift: true`` does not change this: a reworded checklist is
-        reported, not failed on).
+        reported, not failed on). ``--diff-reports`` mode: any completed
+        comparison, movement included -- the movement is the answer.
     1 - failed to run (missing/unreadable/malformed input file, an envelope
         with an unrecognized shape, or an invalid manifest/fleet manifest,
         or -- under ``--check`` -- a missing/unparseable committed report or
-        one the requested mode could not have produced) -- returned by
-        ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        one the requested mode could not have produced, or -- under
+        ``--diff-reports`` -- an unreadable report, a non-tier report, or an
+        ambiguous duplicate row key) -- returned by ``emit_error`` as
+        ``output.ERROR_EXIT_CODE``
     3 - envelope-aggregation mode: ran successfully, provenance was
         consistent, but at least one check failed. Tier-report mode: ran
         successfully, but at least one T1 item is ``"unmet"``
@@ -106,11 +126,11 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import os
 from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
 from ..signoff import (
+    _ITEMS_ACCEPTING_REGENERATION_CLAIMS,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     SignoffError,
     _read_json_source,
@@ -121,8 +141,46 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
+from ..signoff_artifact import artifact_resolution
+from ..signoff_corner_box import print_corner_box
+from ..signoff_coverage_disclosure import format_coverage as _format_coverage
+from ..signoff_coverage_disclosure import format_undisclosed
+from ..signoff_details import _pex_citation_lines
+from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
+from ..signoff_generator_batch import (
+    GeneratorApprovalError,
+    GeneratorExecution,
+    resolve_execution,
+)
+from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
+from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
+from ..signoff_output import write_output_or_message
+from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
+from .signoff_attest_cmd import maybe_run_attest, tool_pin_usage_error
+from .signoff_diff_cmd import run_diff_reports
+from .signoff_flags import (
+    describe_grader_problem,
+    mode_flag_problem,
+    pre_dispatch_problem,
+)
+from .signoff_repin_cmd import run_repin
+from .signoff_tier_text import (
+    _composed_suffix,
+    _justified_gap_suffix,
+    _not_applicable_suffix,
+    _print_composed_from,
+    _print_justified_gaps,
+    _print_not_applicable,
+    _print_partition_boundary,
+    _print_structural_rows,
+    input_verified_statement,
+    print_upstream_source,
+)
+from .signoff_tier_text import (
+    status_marker as _status_marker,
+)
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
@@ -140,52 +198,34 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 
 
 def run(args: argparse.Namespace) -> int:
+    if (pin_error := tool_pin_usage_error(args)) is not None:
+        return pin_error
+    if getattr(args, "diff_reports", None) is not None:
+        return run_diff_reports(args)
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    problem = pre_dispatch_problem(args, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
+    if getattr(args, "repin", False):
+        # Checked before every other mode so `--repin --attest 9` refuses the
+        # combination rather than quietly running the attestation (issue
+        # #5527): a flag that writes to a manifest must never be ignored.
+        return run_repin(args, manifest_source)
+    attest_result = maybe_run_attest(args, manifest_source, fleet_source)
+    if attest_result is not None:
+        return attest_result
     if getattr(args, "describe_grader", False):
         return _run_describe_grader(args, manifest_source, fleet_source)
-    if manifest_source and fleet_source:
-        return emit_error(
-            "signoff",
-            "--manifest and --fleet are mutually exclusive",
-            args.format,
-        )
-    if getattr(args, "tiers_doc", None) and not (manifest_source or fleet_source):
-        return emit_error(
-            "signoff",
-            "--tiers-doc only applies to --manifest/--fleet (envelope "
-            "aggregation does not read the design-evidence-tiers doc)",
-            args.format,
-        )
-    if getattr(args, "check", None) and not (manifest_source or fleet_source):
-        return emit_error(
-            "signoff",
-            "--check only applies to --manifest/--fleet (it verifies a "
-            "committed tier/fleet report still reproduces from its manifest; "
-            "envelope aggregation produces no such report)",
-            args.format,
-        )
+    problem = mode_flag_problem(args, manifest_source, fleet_source)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     repo_root = getattr(args, "repo_root", None)
-    if repo_root is not None and not (manifest_source or fleet_source):
-        return emit_error(
-            "signoff",
-            "--repo-root only applies to --manifest/--fleet (envelope "
-            "aggregation re-hashes no input artifacts)",
-            args.format,
-        )
-    if repo_root is not None and not os.path.isdir(repo_root):
-        # Issue #2878: an explicit root that is not an existing directory is
-        # refused, never silently ignored -- grading that *looks* right while
-        # resolving against nothing would be worse than the error.
-        return emit_error(
-            "signoff",
-            f"--repo-root '{repo_root}' is not an existing directory",
-            args.format,
-        )
-    if fleet_source:
-        return _run_fleet_report(args, fleet_source, repo_root=repo_root)
-    if manifest_source:
-        return _run_tier_report(args, manifest_source, repo_root=repo_root)
+    with artifact_resolution(getattr(args, "artifact_manifest", None)):
+        if fleet_source:
+            return _run_fleet_report(args, fleet_source, repo_root=repo_root)
+        if manifest_source:
+            return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
 
 
@@ -194,41 +234,24 @@ def _run_describe_grader(
     manifest_source: str | None,
     fleet_source: str | None,
 ) -> int:
-    if args.files or manifest_source or fleet_source:
-        return emit_error(
-            "signoff",
-            "--describe-grader cannot be combined with <file> arguments, "
-            "--manifest, or --fleet",
-            args.format,
-        )
-    if getattr(args, "tiers_doc", None):
-        return emit_error(
-            "signoff",
-            "--tiers-doc is not meaningful with --describe-grader -- it "
-            "always reports this build's own shipped grading rules, never "
-            "an overridden doc's item list",
-            args.format,
-        )
-    if getattr(args, "check", None):
-        return emit_error(
-            "signoff",
-            "--check is not meaningful with --describe-grader -- it verifies "
-            "a committed tier/fleet report, and this mode renders none",
-            args.format,
-        )
-    if getattr(args, "repo_root", None) is not None:
-        return emit_error(
-            "signoff",
-            "--repo-root is not meaningful with --describe-grader -- it "
-            "grades no evidence, so there are no repo-scoped inputs to resolve",
-            args.format,
-        )
+    problem = describe_grader_problem(args, manifest_source, fleet_source)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
+    if getattr(args, "allow_generator_exec", False) or getattr(
+        args, "generator_approvals", None
+    ):
+        return emit_error(
+            "signoff",
+            "--allow-generator-exec/--generator-approvals only apply to "
+            "--manifest/--fleet (envelope aggregation regenerates nothing)",
+            args.format,
+        )
     if not args.files:
         return emit_error(
             "signoff",
@@ -246,6 +269,17 @@ def _run_envelope_aggregation(args: argparse.Namespace) -> int:
     emit_success(result, args.format, _print_text)
 
     return _EXIT_CODES[result["status"]]
+
+
+def _generator_execution(args: argparse.Namespace) -> GeneratorExecution | None:
+    """``--allow-generator-exec`` / ``--generator-approvals`` (issue #3289):
+    the opt-in, or ``None`` (off) unless the caller asked for it. Raises
+    :class:`GeneratorApprovalError` when the opt-in has no usable trusted
+    approvals."""
+    return resolve_execution(
+        bool(getattr(args, "allow_generator_exec", False)),
+        getattr(args, "generator_approvals", None),
+    )
 
 
 def _run_tier_report(
@@ -267,26 +301,31 @@ def _run_tier_report(
                 f"{type(manifest).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_tier_report(
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_tier_report(
-                committed, manifest, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                manifest,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_tier_report_text(payload, palette)
-    )
-
-    return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
+    return _finish_render(result, args, _print_tier_report_text, result["tier"] == "T1")
 
 
 def _run_fleet_report(
@@ -308,31 +347,52 @@ def _run_fleet_report(
                 f"{type(fleet).__name__}"
             )
         tiers_doc = getattr(args, "tiers_doc", None)
+        generator_exec = _generator_execution(args)
         result = (
-            build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
+            build_fleet_report(
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
+            )
             if committed is None
             else check_fleet_report(
-                committed, fleet, tiers_doc=tiers_doc, repo_root=repo_root
+                committed,
+                fleet,
+                tiers_doc=tiers_doc,
+                repo_root=repo_root,
+                generator_exec=generator_exec,
             )
         )
-    except (SignoffError, DesignEvidenceTiersError) as exc:
+    except (SignoffError, DesignEvidenceTiersError, GeneratorApprovalError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
+    return _finish_render(
+        result, args, _print_fleet_report_text, result["not_t1_count"] == 0
     )
-
-    return EXIT_PASS if result["not_t1_count"] == 0 else EXIT_FAIL
 
 
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _finish_render(
+    result: dict, args: argparse.Namespace, print_text: Any, passed: bool
+) -> int:
+    """Emit a fresh render's verdict (issue #5867 wiring): write the
+    ``--output`` envelope (if any) *before* stdout so a write failure
+    never follows a printed success, then render the text report."""
+    problem = write_output_or_message(result, getattr(args, "output", None))
+    if problem:
+        return emit_error("signoff", problem, args.format)
+    palette = resolve_palette(args)
+    emit_success(result, args.format, lambda payload: print_text(payload, palette))
+    return EXIT_PASS if passed else EXIT_FAIL
 
 
 def _print_describe_grader_text(result: dict) -> None:
@@ -353,6 +413,11 @@ def _print_describe_grader_text(result: dict) -> None:
             ", ".join(str(i) for i in items) if items else "none (satisfies nothing)"
         )
         print(f"  {kind}: {scope}")
+    print("pinned PDK runsets (digest -> pdk @ commit):")
+    for digest, pin in result["pinned_runsets"].items():
+        print(
+            f"  {digest}: {pin.get('pdk')} @ {pin.get('commit') or pin.get('revision')}"
+        )
 
 
 def _print_text(result: dict) -> None:
@@ -405,49 +470,29 @@ def _print_text(result: dict) -> None:
         print(line)
 
 
-#: How many entries of each `coverage` list the text rendering names before
-#: summarising the rest as `+N more`. The JSON output always carries every
-#: entry -- this cap only keeps a terminal line readable for a deck with
-#: dozens of rule-free layers.
-_COVERAGE_PREVIEW = 4
-
-
 def _print_input_verified(citation: dict) -> None:
-    """Print one line stating whether a citation's ``content_hash`` was
-    verified against the **input artifact** the cited envelope names, or
-    only against the envelope's own claim about it (issue #2196) -- or
-    nothing at all, when there is nothing to say.
-
-    Its own function (rather than an ``if`` in the already-dense caller)
-    so the "nothing to say" branch does not land in
-    :func:`_print_tier_report_text`'s complexity budget.
-
-    Nothing to say means the envelope recorded no input hash at all *and*
-    none could be re-derived: the citation already renders ``content_hash:
-    None``, and a second line repeating that adds no information. Every
-    other case prints, including the unverified one -- a freshness claim
-    checked against a file and one checked only against another claim being
-    indistinguishable in the output is the exact gap this discloses.
-    """
-    verified = citation.get("input_verified")
-    if verified is None and citation.get("content_hash") is None:
+    """Print the citation's hash source and any verification details."""
+    statement = input_verified_statement(citation)
+    if statement is None:
         return
-    if verified is True:
-        statement = "re-hashed the artifact this envelope names -- matches"
-    elif verified is False:
-        statement = (
-            "CHANGED -- the artifact this envelope names no longer matches "
-            "the content_hash it recorded"
-        )
-    else:
-        statement = (
-            "not re-hashed (content_hash compared against this envelope's own "
-            "claim only -- the artifact itself was not read)"
-        )
     print(f"        input: {statement}")
+    note = citation.get("input_verified_note")
+    if note is not None:
+        gloss = INPUT_VERIFIED_NOTE_GLOSSES.get(note)
+        print(f"        input note: {note}" + (f" -- {gloss}" if gloss else ""))
     for pex_input in citation.get("pex_inputs") or []:
         # Issue #2875: per-role schematic-side verification of a `pex` run.
         print(f"        pex input {pex_input['role']}: {pex_input['status']}")
+
+
+def _print_binding_members(members: list[dict] | None) -> None:
+    """Print each member of a set-bound generic citation (issue #3044) with
+    its verification status, so a drifted member is named on the row."""
+    for member in members or []:
+        path = member.get("path")
+        if isinstance(path, dict):
+            path = path.get("path")
+        print(f"        member {path}: {member.get('status')}")
 
 
 def _print_artifact_binding(item: dict, citation: dict) -> None:
@@ -465,13 +510,19 @@ def _print_artifact_binding(item: dict, citation: dict) -> None:
         return
     binding = citation.get("artifact_binding")
     if binding:
+        members = binding.get("members")
         path = binding.get("path")
         if isinstance(path, dict):
             path = path.get("path")
+        if members:
+            path = f"{len(members)} members"
         print(
             f"        bound: T1 item #{binding.get('t1_item')} -> {path} "
             f"(content_hash={binding.get('content_hash')})"
         )
+        _print_binding_members(members)
+        if item.get("id") in _ITEMS_ACCEPTING_REGENERATION_CLAIMS:
+            _print_regeneration(binding.get("regeneration"))
         return
     print(
         f"        topic: not bound -- a passing {citation.get('kind')} envelope "
@@ -480,116 +531,31 @@ def _print_artifact_binding(item: dict, citation: dict) -> None:
     )
 
 
-def _print_power_delivery(citation: dict) -> None:
-    """Print T1 item 11's compound-citation summary (issue #2025), or
-    nothing at all for every other item's single-artifact citation.
-
-    Its own function for the same reason :func:`_print_input_verified` is
-    (and since issue #2234's extra line, the same C901 budget reason):
-    the caller, :func:`_print_tier_report_text`, is already at the
-    complexity ratchet's limit.
-
-    The second line (issue #2234) names the ties whose tap geometry rested
-    on a caller **assertion** (``ties[].tap_boxes``) rather than on a drawn
-    PDK marker. It is disclosure only -- such a tie is graded ``met``
-    exactly as a marker-derived one, and `klt erc` has already rejected a
-    degenerate or unmatched assertion before the citation could reach here
-    -- but leaving that provenance reachable only through the JSON would
-    make the two indistinguishable in the rendering a reviewer actually
-    reads. Printed only when non-empty, so a purely marker-derived report
-    (and every report produced before the field existed) renders exactly as
-    it did before.
-
-    The third line (issue #2255) does the same for the *well* side: the ties
-    whose substrate region was itself asserted (``ties[].well_layer: null``
-    + ``ties[].well_boxes``), for a block that draws no well/tub layer at
-    all. Same disclosure-only status, same print-when-non-empty rule, and
-    deliberately its own line rather than being folded into the tap one --
-    "which drawn geometry is the tap" and "where the substrate is" are
-    different claims, and the second is the weaker of the two.
+def _print_regeneration(regeneration: Any) -> None:
+    """The ``regeneration:`` line under an item-1/2 ``bound:`` line (issue
+    #2887): what was checked (the attested regenerated hash equals the bound
+    artifact's) and what was not (the generator was never run by klt, and
+    neither its correctness nor the artifact's topical relevance is judged).
     """
-    power_delivery = citation.get("power_delivery")
-    if not power_delivery:
+    if not regeneration:
+        print("        regeneration: not claimed")
+        return
+    if regeneration.get("executed_by_klt"):
+        execution = regeneration.get("execution") or {}
+        print(
+            f"        regeneration: klt ran approved recipe "
+            f"`{execution.get('recipe')}` on the batch runner "
+            f"(job {(execution.get('remote') or {}).get('job_id')}); output "
+            f"{execution.get('output_hash')} is byte-identical to the "
+            "committed artifact (generator correctness and topical relevance "
+            "not checked)"
+        )
         return
     print(
-        "        power delivery: supplies="
-        f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
-        f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
-        f"power_connectivity={power_delivery['power_connectivity_status']}"
-    )
-    asserted = power_delivery.get("ties_checked_by_assertion") or []
-    if asserted:
-        print(
-            f"        taps asserted by the caller: {len(asserted)} "
-            f"({', '.join(asserted)})"
-        )
-    well_asserted = power_delivery.get("ties_checked_by_well_assertion") or []
-    if well_asserted:
-        # Issue #2540 widened this list from "the substrate region was
-        # asserted" (no drawn well at all) to "the well side rested on
-        # caller-named coordinates", which now also covers a *drawn* well
-        # whose bias class was selected by boxes. The line names both rather
-        # than only the older form, so the count can never read as a claim
-        # the spec did not make.
-        print(
-            "        well side rested on the caller's word (asserted region, "
-            f"or a box-selected class): {len(well_asserted)} "
-            f"({', '.join(well_asserted)})"
-        )
-
-
-def _format_coverage(coverage: dict) -> str:
-    """One line summarising a `drc` citation's three disclosed `coverage`
-    fields (issue #2002): each field's entry count, plus the first few
-    entries by name.
-
-    Counts first so a non-zero gap is visible without reading the names, and
-    every field is always shown -- including a `0` -- because "this deck
-    skipped no rules" is exactly the statement item 3 asks a claim to make,
-    and it must not be indistinguishable from a field that went unreported
-    (an envelope with no `coverage` block at all prints no coverage line at
-    all; see the call site).
-    """
-    parts = []
-    for field in (
-        "layers_in_stream_without_rules",
-        "rules_skipped",
-        "deck_scope",
-    ):
-        entries = coverage.get(field) or []
-        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
-        if len(entries) > _COVERAGE_PREVIEW:
-            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
-        suffix = f" ({shown})" if entries else ""
-        parts.append(f"{field}={len(entries)}{suffix}")
-    return ", ".join(parts)
-
-
-def _format_body_bias(body_bias: dict) -> str:
-    """One line summarising a `pex` citation's `body_bias` statement (issue
-    #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
-    and which synthesized nets are involved.
-
-    The verdict is always shown, including `"biased"`, for the same reason
-    `_format_coverage` always shows a `0`: "every device body had a DC bias
-    path" is the statement item 7's evidence is being asked to make, and it
-    must not be indistinguishable from an artifact that never made it (an
-    envelope with no `body_bias` block prints no line at all; see the call
-    site).
-    """
-    status = body_bias.get("status") or "unknown"
-    if status == "biased":
-        return f"{status} (every device body has a DC bias path)"
-    count = body_bias.get("unbiased_device_count") or 0
-    nets = body_bias.get("unbiased_nets") or []
-    shown = ", ".join(str(net) for net in nets[:_COVERAGE_PREVIEW])
-    if len(nets) > _COVERAGE_PREVIEW:
-        shown += f", +{len(nets) - _COVERAGE_PREVIEW} more"
-    suffix = f" on {shown}" if nets else ""
-    return (
-        f"{status} ({count} device(s) with no DC bias path{suffix}) -- "
-        "these post-layout numbers are not comparable to the schematic leg; "
-        "see docs/cli/extract.md"
+        f"        regeneration: {regeneration.get('regenerated_hash')} matches "
+        f"the bound artifact; generator `{regeneration.get('generator')}` was "
+        "attested, not run by klt (generator correctness and topical relevance "
+        "not checked)"
     )
 
 
@@ -620,117 +586,134 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> N
     )
 
 
-def _print_partition_boundary(result: dict) -> None:
-    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
-    #2278) under the `block:`/`kind:` header, or nothing when it declared
-    none.
+def _print_foundry_cell_exceptions(citation: dict) -> None:
+    for exception in citation.get("foundry_cell_exceptions") or []:
+        rules = ", ".join(
+            f"{rule}={count}" for rule, count in exception["rules"].items()
+        )
+        print(
+            f"        foundry-cell exception: {exception['cell']} "
+            f"({exception['cell_hash']}): {rules}"
+        )
 
-    Printed **once per declared partition**, not on each of that partition's
-    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
-    beside the citation they qualify), the boundary is one constant statement
-    per partition, and restating it eleven times would bury the checklist it
-    qualifies. The JSON carries it per row as well, where a consumer
-    filtering `.items[]` needs each row to be self-contained.
 
-    Absent entirely when nothing was declared -- "no statement" must not read
-    as "the partitions were defined" -- exactly as an undeclared boundary is
-    absent from the JSON rather than rendered `null`.
-    """
-    boundary = result.get("partition_boundary") or {}
-    if not boundary:
+def _print_cite_line(citation: dict) -> None:
+    """The ``cite:`` line naming what an item's evidence was: the executed
+    command (issue #825) or the evidence file (issue #722), as before; a
+    ``content_hash_basis`` (issue #6861) renders bare beside the hash."""
+    source = citation["file"] if citation["file"] is not None else citation["command"]
+    basis = citation.get("content_hash_basis")
+    basis = f", content_hash_basis={basis}" if basis is not None else ""
+    print(
+        f"        cite: {source} (kind={citation['kind']}, "
+        f"status={citation['check_status']}, content_hash={citation['content_hash']}"
+        f"{basis}, exit_status={citation['exit_status']})"
+    )
+
+
+def _print_coverage_undisclosed(item: dict) -> None:
+    """Issue #5789: an item 3 refused under ``require_coverage_disclosure``
+    prints what a ``met`` one would have -- the ``cite:`` line and its
+    ``coverage:`` statement, read from ``detail.cited_evidence`` (``citation``
+    itself is documented as present only on a ``met`` item) -- then the
+    entries the claim left undisclosed, beside the ``coverage:`` line they
+    qualify."""
+    detail = item.get("detail") or {}
+    refusal = detail.get("coverage_undisclosed")
+    if not refusal:
         return
-    print("partition boundary:")
-    for partition, text in boundary.items():
-        print(f"  {partition}: {text}")
+    cited = detail.get("cited_evidence") or {}
+    if cited:
+        _print_cite_line(cited)
+        coverage = cited.get("coverage")
+        if coverage:
+            print(f"        coverage: {_format_coverage(coverage)}")
+    print(f"        coverage undisclosed: {format_undisclosed(refusal)}")
 
 
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
+    print_upstream_source(result, "upstream source")
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
-    print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
+    print(
+        f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
+        f"{_not_applicable_suffix(result)}{_justified_gap_suffix(result)}"
+        f"{_composed_suffix(result)}"
+    )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
-    # this build grades renders a shorter checklist, so `11/11 items met`
-    # and `9/9 items met` read identically though the second is a weaker
-    # claim. No per-row note can say this -- the missing items are not rows
-    # -- so it is said beside the count it qualifies. Absent (as before)
-    # whenever the two counts agree, and when this build cannot read its own
-    # doc to compare against.
+    # this build grades renders a shorter checklist, so `11/11` and `9/9`
+    # read identically though the second is a weaker claim; the missing
+    # items are not rows, so it is said beside the count it qualifies.
+    # Absent (as before) whenever the two counts agree, and when this build
+    # cannot read its own doc to compare against.
     _print_t1_scope_shortfall(result, result["source_doc"], palette)
     print()
 
     for item in result["items"]:
-        marker = "MET  " if item["status"] == "met" else "UNMET"
-        color = palette.green if item["status"] == "met" else palette.red
+        # Issue #2865: a recorded "not applicable" is its own marker, never
+        # the plain MET one.
+        marker, color = _status_marker(item["status"], palette)
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(
             f"[{color}{marker}{palette.reset}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
-        # Issue #2176: a row this build has no grading rules for at all --
-        # an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
-        # lists. Shown for every such row, met/unmet and cited/uncited
-        # alike, because the whole failure this prevents is a row that
-        # *looks* exactly like a graded one. Absent for every item of the
-        # shipped doc, which renders exactly as before.
+        # Issue #2176: mark rows introduced by a different tiers doc whose
+        # grading rules this build does not implement.
         if item.get("graded_by_build") is False:
             print(
                 f"        {palette.red}not graded by this build{palette.reset} "
                 f"(no rules for item #{item_id} in klt {result['build']['version']}"
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
+        _print_not_applicable(item)
+        _print_composed_from(item)
+        # Issue #5599: each justified gap's reason, rationale artifact and
+        # closing issue (with the missing-link finding inline). Issue #6985:
+        # each structural row's claim and its hash-pinned artifact.
+        _print_justified_gaps(item)
+        _print_structural_rows(item)
+        _print_group_coverage(item)
+        print_corner_box(item)
         citation = item["citation"]
         if citation:
-            # Command-backed evidence (issue #825) has no static file --
-            # show the executed command instead; file-backed evidence
-            # (issue #722) has no command -- show the evidence file, as
-            # before.
-            source = (
-                citation["file"]
-                if citation["file"] is not None
-                else citation["command"]
-            )
-            print(
-                f"        cite: {source} "
-                f"(kind={citation['kind']}, status={citation['check_status']}, "
-                f"content_hash={citation['content_hash']}, "
-                f"exit_status={citation['exit_status']})"
-            )
+            _print_cite_line(citation)
             # Issue #2196: whether that `content_hash` was checked against
             # the input artifact itself or only against the envelope's own
-            # claim about it. Shown beside the hash it qualifies, because a
-            # freshness claim verified against a file and one verified
-            # against another claim are otherwise indistinguishable to a
-            # reader. Disclosure only -- the verdict above is unaffected.
+            # claim about it. A freshness claim verified against a file and
+            # one verified against another claim are otherwise
+            # indistinguishable; disclosure only, the verdict is unaffected.
             _print_input_verified(citation)
             # Issue #2718: items 1/2/9/10 -- bound artifact, or "not bound".
             _print_artifact_binding(item, citation)
             # Issue #2002: a `drc` citation's own coverage statement, shown
-            # beside the "clean" it qualifies -- item 3's doc text requires
-            # the claim to disclose these, and `klt signoff` does not grade
-            # them, so a reviewer needs them in the artifact they read. Absent
-            # for evidence committed before `klt drc` reported coverage.
+            # beside the "clean" it qualifies -- item 3's doc requires the
+            # claim to disclose these and `klt signoff` does not grade them,
+            # so a reviewer needs them in the artifact they read; absent for
+            # evidence committed before `klt drc` reported coverage.
             coverage = citation.get("coverage")
             if coverage:
                 print(f"        coverage: {_format_coverage(coverage)}")
+            # Issue #4530: item 3 graded `met` through disclosed foundry-cell
+            # exceptions -- every one is listed beside the verdict it qualifies.
+            _print_foundry_cell_exceptions(citation)
             # Issue #1983: a `pex` citation's own body-bias statement, shown
             # beside the post-layout numbers it qualifies -- an extracted
             # netlist with no DC bias path for its device bodies makes those
             # numbers physically wrong (docs/cli/extract.md), and `klt
             # signoff` does not grade on it, so a reviewer of item 7 needs it
-            # in the artifact they read. Absent for evidence committed before
-            # `klt pex` reported body bias.
-            body_bias = citation.get("body_bias")
-            if body_bias:
-                print(f"        body bias: {_format_body_bias(body_bias)}")
+            # in the artifact they read. Issue #6559: and, for a runset leg,
+            # that it carries no parasitics. Absent for older evidence.
+            for line in _pex_citation_lines(citation):
+                print(f"        {line}")
             # Issue #2025: T1 item 11's citation is compound -- the `cite:`
             # line above names its leading (`erc`) part, so every other
             # cited artifact gets its own line rather than being reachable
-            # only through the JSON. Absent for every single-artifact item,
-            # which renders exactly as before.
+            # only through the JSON; absent for every single-artifact item.
             for part in citation.get("parts") or []:
                 if part is citation or part.get("kind") == citation["kind"]:
                     continue
@@ -748,6 +731,20 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            # Issue #5789: an item 3 refused under the coverage ratchet
+            # names exactly which entries it left undisclosed.
+            _print_coverage_undisclosed(item)
+            # Issue #2865: a refused `not_applicable` names the offending row.
+            row = (item.get("detail") or {}).get("row")
+            if row:
+                print(f"        row: {row}")
+            _print_binding_members(
+                (item.get("detail") or {}).get("artifact_binding", {}).get("members")
+            )
+
+    # Issue #5691: the per-spec-row table, when the manifest declared a
+    # top-level `spec_rows` map (silent otherwise, like every disclosure).
+    print_spec_row_table(result.get("spec_rows"), palette, result["items"])
 
     print()
     print(
@@ -774,7 +771,10 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {block['block']} "
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
+            f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
+            f"{_composed_suffix(block)}"
         )
+        print_upstream_source(block, "        upstream")
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render
         # what that count is short of. `source_doc` is the roll-up's one

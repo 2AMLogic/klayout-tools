@@ -10,6 +10,8 @@ this module builds:
 
     "provenance": {
         "klt_version": "0.4.2",
+        "klt_git_commit": "<full sha> | null",
+        "klt_reinstall_spec": "klayout-tools==0.4.2 | null",
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
         "deck": {"name": "sky130", "content_hash": "sha256:...", "released": true},
@@ -23,12 +25,9 @@ installed, no deck involved) are ``null`` -- never fabricated.
 
 This module also owns the single ``sha256_file`` implementation the verbs
 share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
-plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
-and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
-#1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
-WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
-leaving ``equiv.py``'s independent error-formatting function without it;
-issue #2453 narrowed it for scripts under the host temp dir).
+plus ``_yosys_version``/``_combined_content_hash`` (issue #1112) and
+``wasi_sandbox_hint_if_applicable`` (issues #1755/#1368; #2453 narrowed
+it to scripts under the host temp dir).
 
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
@@ -42,12 +41,29 @@ import hashlib
 import os
 import re
 import subprocess
-import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from types import EllipsisType
 from typing import Any
 
 from . import build_identity
+from ._digest import (
+    content_hash as content_hash,
+)
+from ._digest import (
+    content_hash_bytes as content_hash_bytes,
+)
+from ._digest import (
+    content_hash_required as content_hash_required,
+)
+from ._digest import (
+    sha256_file as sha256_file,
+)
+from ._digest import (
+    sha256_file_required as sha256_file_required,
+)
+from ._engine_remedy import _warn_klayout_version_mismatch
+from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
@@ -139,23 +155,6 @@ def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
     return _WASI_SANDBOX_HINT
 
 
-def sha256_file(path: str | None) -> str | None:
-    """Streamed SHA-256 hex digest of the file at ``path``, or ``None``.
-
-    Returns ``None`` for a falsy path or one that is not an existing file --
-    the defensive shape ``sim.py`` already relied on, now shared by every
-    caller (``lvs``/``extract`` only pass paths that exist at hash time, so
-    the guard is a no-op there).
-    """
-    if not path or not os.path.isfile(path):
-        return None
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 # Bumped whenever the canonical serialisation below changes shape, so a digest
 # computed by an older klt build can never be mistaken for a digest of the same
 # geometry computed by a newer one (the two would differ for reasons that have
@@ -237,6 +236,62 @@ def _canonical_instance_token(inst: Any) -> str:
     return token
 
 
+def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
+    """A ``sha256:``-prefixed digest of one cell's decoded geometry, or
+    ``None`` when it cannot be computed (issue #4530).
+
+    Same canonical tokens as :func:`layout_geometry_digest`, restricted to
+    ``cell_name`` and every cell beneath it, so the identical stock cell
+    hashes identically whether it is checked alone or placed inside a
+    block's layout. Cells outside that subtree never contribute. ``None``
+    for an unreadable stream or a cell the stream does not contain.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(path)
+        top = layout.cell(cell_name)
+        if top is None:
+            return None
+        subtree = {top.cell_index(), *top.called_cells()}
+
+        digest = hashlib.sha256()
+
+        def feed(line: str) -> None:
+            digest.update(line.encode("utf-8", errors="backslashreplace"))
+            digest.update(b"\n")
+
+        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION + " cell")
+        feed(f"dbu {layout.dbu:.12g}")
+        layer_keys = [
+            (index, _canonical_layer_key(layout.get_info(index)))
+            for index in layout.layer_indexes()
+        ]
+        cells = [layout.cell(i) for i in subtree]
+        for cell in sorted(cells, key=lambda c: c.name):
+            tokens: list[str] = []
+            for index, layer_key in layer_keys:
+                for shape in cell.shapes(index).each():
+                    tokens.append(
+                        f"shape {layer_key} {_canonical_shape_token(shape)}"
+                        f"{_canonical_properties(layout, shape.prop_id)}"
+                    )
+            for inst in cell.each_inst():
+                tokens.append(
+                    f"{_canonical_instance_token(inst)}"
+                    f"{_canonical_properties(layout, inst.prop_id)}"
+                )
+            feed(f"cell {cell.name}")
+            for token in sorted(tokens):
+                feed(f"  {token}")
+    except Exception:
+        return None
+    return f"sha256:{digest.hexdigest()}"
+
+
 def layout_geometry_digest(path: str | None) -> str | None:
     """A ``sha256:``-prefixed digest of a GDS/OASIS stream's *decoded
     geometry*, or ``None`` when it cannot be computed (issue #2065).
@@ -249,7 +304,7 @@ def layout_geometry_digest(path: str | None) -> str | None:
     happened to emit). A consumer comparing raw-byte hashes therefore sees
     drift on every re-run and cannot tell a re-write from a real change --
     exactly the failure mode issue #2065 was filed against. The byte-level
-    contract of :func:`sha256_file`/:func:`_content_hash` is unchanged and
+    contract of :func:`sha256_file`/:func:`content_hash` is unchanged and
     still what ``drc``/``lvs``/``extract``/``sim`` record; this is a second,
     layout-aware digest for callers that need equality to mean "same
     geometry".
@@ -369,17 +424,20 @@ def _combined_content_hash(paths: list[str]) -> str | None:
     return f"sha256:{combined}"
 
 
-def _content_hash(path: str | None) -> str | None:
-    """The envelope's ``sha256:``-prefixed deck-hash form of ``path``, or
-    ``None`` when the file can't be hashed."""
-    digest = sha256_file(path)
-    return f"sha256:{digest}" if digest is not None else None
-
-
 def _klt_version() -> str:
     """The same build identity as ``klt --version``, including ``+unknown``
     when no git provenance can be recovered."""
     return build_identity.build_version()
+
+
+def _klt_build_handle() -> tuple[str | None, str | None]:
+    """``(git_commit, reinstall_spec)`` for this build (issue #4412) -- the
+    values of ``klt version --format json``'s fields of the same names.
+    ``None`` for each when unrecoverable (dirty tree, tarball install); never
+    fabricated. Probes the build identity once for both."""
+    ident = build_identity.identity()
+    spec = build_identity.reinstall_spec(ident, build_identity.build_version())
+    return (ident.get("git_commit") or None, spec)
 
 
 def _klayout_version() -> str | None:
@@ -390,6 +448,51 @@ def _klayout_version() -> str | None:
     except Exception:
         return None
     return getattr(klayout, "__version__", None)
+
+
+#: `provenance` fields `--check` treats as a non-fatal *advisory*
+#: rather than a hash-integrity failure (issue #1373). `klt_version` and
+#: `klayout_version` are included because they answer the question `--check`
+#: was previously silent on: "did the engine itself change between the
+#: committed run and now". `provenance.pdk.version` is deliberately left out
+#: -- unlike the tool build, a PDK release routinely differs by design
+#: between machines/CI runners without implying anything about *this*
+#: report's reproducibility, so folding it in here would make the advisory
+#: noisy rather than informative. This mirrors -- but is a distinct read
+#: path from -- `_report_verify.VOLATILE_PROVENANCE_PATHS`, which excludes
+#: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
+#: unchanged by this constant.
+VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
+    ("klt_version", _klt_version),
+    ("klayout_version", _klayout_version),
+)
+
+
+def version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Non-fatal advisories (issue #1373) naming any `provenance.<field>` in
+    `VERSION_ADVISORY_FIELDS` that differs between `committed` and the
+    engine currently running `--check`. A missing value on either side (an
+    older report predating these fields, or an unresolvable current
+    version) is "unknown", not "drift" -- it is silently skipped rather than
+    reported, so `--check` never crashes or false-positives on a report
+    format gap.
+    """
+    advisories = []
+    for field, current_getter in VERSION_ADVISORY_FIELDS:
+        report_value = get_path(committed, ("provenance", field))
+        current_value = current_getter()
+        if report_value is None or current_value is None:
+            continue
+        if report_value == current_value:
+            continue
+        advisories.append(
+            {
+                "field": f"provenance.{field}",
+                "report": report_value,
+                "current": current_value,
+            }
+        )
+    return advisories
 
 
 def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
@@ -409,26 +512,9 @@ def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
     return actual != expected
 
 
-def _warn_klayout_version_mismatch(actual: str | None, expected: str | None) -> None:
-    """The stderr warning printed once per report when
-    :func:`_klayout_version_mismatch` is ``True`` (issue #1490) -- a caller
-    piping ``--format json`` to a file still sees this on the terminal,
-    since JSON output goes to stdout only (``docs/json-contract.md``)."""
-    message = (
-        f"klt: warning: resolved klayout engine version {actual!r} differs "
-        f"from klayout=={expected}, the version this klayout-tools build/"
-        "commit was tested against -- DRC/LVS report counts (deck content "
-        "hash, rules_skipped, category_counts, ...) may differ from a "
-        f"report generated with klayout=={expected}, even though the "
-        "verdict itself is unaffected. To reproduce the exact engine: "
-        f'`uv tool install "klayout-tools @ git+...@<sha>" '
-        f"--with klayout=={expected}` -- see docs/json-contract.md's "
-        '"Shared `provenance` block".'
-    )
-    print(message, file=sys.stderr)
-
-
-def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
+def _pdk_block(
+    pdk: dict[str, Any] | None, deck_path: str | None = None
+) -> dict[str, Any] | None:
     """Normalise a :func:`klayout_tools.pdk.find_pdk`-style dict into the
     provenance ``pdk`` shape ``{name, source, version}``; ``None`` when no PDK
     was resolved for the run.
@@ -446,10 +532,21 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     ``docs/json-contract.md``). The absolute roots are named in the
     stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
 
+    ``commit`` (issue #3786) is added **only** when the install carries a
+    ``.fetched-commit`` record (the 40-hex upstream commit); ``version``
+    stays ``fetched:<tag>``.
+
     ``compatibility`` (issue #3427) is likewise added **only** on a
     ``mismatch`` -- the resolved tree's ``SOURCES`` stamp differs from the
     declared open_pdks pin (:mod:`klayout_tools.pdk_compat`); ``version``
     already carries the installed stamp.
+
+    ``linked_trees`` (issue #3070) is added **only** when ``deck_path`` -- the
+    model library the run resolved -- realpath-resolves into a *different* PDK
+    variant tree than ``pdk`` names (a cross-variant symlink): one
+    ``{name, version}`` entry for that tree, ``version`` from the same reader
+    as ``pdk.version``. Path-free, and absent otherwise, so a run with no
+    cross-tree resolution is byte-identical to before.
     """
     if not pdk:
         return None
@@ -458,6 +555,11 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
         "source": pdk.get("resolved_via"),
         "version": pdk.get("version"),
     }
+    if pdk.get("commit"):
+        # Issue #3786: the upstream commit a fetched install was built from;
+        # only when known, so an install without ``.fetched-commit`` keeps
+        # byte-identical provenance.
+        block["commit"] = pdk["commit"]
     ambiguous = pdk.get("ambiguous_roots") or []
     if ambiguous:
         block["ambiguous_sources"] = [entry["resolved_via"] for entry in ambiguous]
@@ -470,7 +572,31 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
             "package": compat.get("package"),
             "expected": (compat.get("expected") or {}).get("value"),
         }
+    linked = _linked_trees(pdk, deck_path)
+    if linked:
+        block["linked_trees"] = linked
     return block
+
+
+def _linked_trees(pdk: dict[str, Any], deck_path: str | None) -> list[dict[str, Any]]:
+    """``[{name, version}]`` for the PDK tree ``deck_path`` really lives in,
+    when that is not the resolved variant's own tree; ``[]`` otherwise."""
+    if not deck_path or not os.path.exists(deck_path):
+        return []
+    from . import pdk as pdk_module
+
+    variant_dir = pdk_module.variant_dir_of(pdk)
+    tree = pdk_module.tree_of(deck_path)
+    if variant_dir is None or tree is None:
+        return []
+    if os.path.realpath(tree) == os.path.realpath(variant_dir):
+        return []
+    return [
+        {
+            "name": os.path.basename(tree),
+            "version": pdk_module.read_version(tree),
+        }
+    ]
 
 
 #: Bumped whenever :func:`_deck_options_hash`'s canonical serialisation below
@@ -574,6 +700,9 @@ def _deck_block(
     path: str | None,
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
+    path_envelope: Mapping[str, Any] | None = None,
+    *,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash, released}``;
     ``None`` when no rule/model deck was involved (e.g. LVS against a
@@ -631,18 +760,30 @@ def _deck_block(
     enumerate, so there are no defaults to resolve and that path stays
     byte-identical (caller-passed keys only, no siblings).
 
-    All three keys are omitted entirely when there is nothing to record --
-    a deck that declares no selectable option and a caller that passed none
-    -- keeping the block byte-identical to before these parameters existed
-    for every call site that does not pass them.
+    ``path_envelope`` (issue #3785, opt-in) is the ``{path, scope}`` locator
+    of the deck file (:func:`klayout_tools.env_provenance.repo_relative_path`,
+    never an absolute host path), recorded under ``path``. Passed only by
+    ``klt sta``/``klt place-and-route``, whose Liberty is a resolved file
+    rather than a built-in deck; ``content_hash`` stays the authoritative
+    identity. Omitted when ``None``, so every other verb's block is
+    byte-identical.
+
+    A deck with no declared or supplied options omits the option keys.
     """
     if name is None:
         return None
-    content_hash = _content_hash(path)
+    if deck_sha256 is ...:
+        from ._deck_hash import source_file_hash
+        from .decks import deck_source_path
+
+        builtin = path and os.path.abspath(path) == deck_source_path(name)
+        deck_hash = source_file_hash(path) if builtin else content_hash(path)
+    else:
+        deck_hash = f"sha256:{deck_sha256}" if deck_sha256 is not None else None
     block: dict[str, Any] = {
         "name": name,
-        "content_hash": content_hash,
-        "released": is_deck_hash_released(name, content_hash),
+        "content_hash": deck_hash,
+        "released": is_deck_hash_released(name, deck_hash),
     }
     if resolve_deck_options:
         options, explicit = _resolved_deck_options(name, deck_options)
@@ -652,6 +793,8 @@ def _deck_block(
             block["options_hash"] = _deck_options_hash(options)
     elif deck_options:
         block["options"] = dict(deck_options)
+    if path_envelope is not None:
+        block["path"] = dict(path_envelope)
     return block
 
 
@@ -690,7 +833,7 @@ def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
     """
     if path is None:
         return None
-    return {"content_hash": _content_hash(path), "role": role}
+    return {"content_hash": content_hash(path), "role": role}
 
 
 class UnknownProvenanceDeckError(Exception):
@@ -704,13 +847,9 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report would carry for ``name``, computed the only way that can
-    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
-    drift from what a real run records.
+    block a report carries for ``name``, computed by :func:`_deck_block`.
 
-    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
-    without which :func:`~klayout_tools.decks.deck_source_path` would happily
-    import and hash any sibling module of the deck package.
+    Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
     from .decks import deck_names, deck_source_path
 
@@ -735,20 +874,19 @@ def build_provenance(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
+    klayout_version_override: str | None = None,
+    klayout_version_override_active: bool = False,
+    deck_path_envelope: Mapping[str, Any] | None = None,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
-    ``deck_name``/``deck_path`` identify the rule (or model) deck a run used
-    and the file whose content is hashed to pin it; pass both ``None`` when no
-    deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
-    dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``input_path`` is the single input artifact a verb ran
-    against; when given, its content hash is recorded as ``provenance.input``
-    (``{content_hash, role}``, mirroring ``deck``) so a stale committed
-    report is a one-line diff against a freshly computed hash. Pass ``None``
-    (the default) only when the verb genuinely has no single input stream to
-    pin. A verb that pins its input under a *verb-specific* key of its own is
-    **not** such a case: ``klt lvs`` carries
+    ``deck_name`` and ``deck_path`` identify the rule or model deck. Omit
+    ``deck_sha256`` to hash it now, or supply the captured digest (including
+    ``None``). ``pdk`` is a ``find_pdk`` result or ``None``. ``input_path``
+    designates the artifact in ``provenance.input``. Pass ``None``
+    only when the verb has no single input stream. A verb that pins its
+    input under a *verb-specific* key still has one: ``klt lvs`` carries
     ``environment.layout_sha256``/``reference_sha256`` and was originally
     (issue #331) left with ``input: null`` on exactly that reasoning, but
     ``klt signoff --manifest``'s staleness gate reads
@@ -781,16 +919,20 @@ def build_provenance(
     (``options_explicit``/``options_hash``) -- see that function's docstring
     for both. ``klt_version``/``klayout_version`` are read at call time.
 
+    ``deck_path_envelope`` (issue #3785, opt-in) adds ``provenance.deck.path``
+    -- see :func:`_deck_block`.
+
     ``include_klayout_version_mismatch`` (issue #1490, opt-in and ``False``
     by default) adds ``provenance.klayout_version_mismatch``: ``True`` when
     the resolved ``klayout_version`` differs from
     :func:`klayout_tools.build_identity.klayout_version_expected` (the
     version this ``klayout-tools`` build/commit was tested against), else
-    ``False``. Passed by ``klt drc``/``klt lvs`` only -- see
-    ``docs/design/klayout-engine-version-pin.md`` for why those two verbs and
-    not every ``build_provenance`` caller. A ``True`` result also prints a
-    one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
-    caller sees the drift even without inspecting the JSON.
+    ``False``. DRC, LVS and in-process extraction opt in. A mismatch also
+    emits a stderr warning. See ``docs/design/klayout-engine-version-pin.md``
+    for the scope and :func:`_warn_klayout_version_mismatch` for the remedy.
+    ``klayout_version_override`` (+ ``..._active``, issue #5660) repopulates
+    ``klayout_version`` from the binary that ran the deck (``--engine klayout``
+    sites); the wheel's version moves to ``klayout_module_version``.
     """
     if input_role not in INPUT_ROLES:
         raise ValueError(
@@ -798,35 +940,45 @@ def build_provenance(
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
     actual_klayout_version = _klayout_version()
+    if klayout_version_override_active:
+        actual_klayout_version = klayout_version_override
+    git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
+        # Additive (issue #4412): the handle that re-obtains the build a
+        # dev-build `klt_version` (never published to an index) names.
+        "klt_git_commit": git_commit,
+        "klt_reinstall_spec": reinstall_spec,
         "klayout_version": actual_klayout_version,
-        "pdk": _pdk_block(pdk),
-        "deck": _deck_block(deck_name, deck_path, deck_options, resolve_deck_options),
+        "pdk": _pdk_block(pdk, deck_path),
+        "deck": _deck_block(
+            deck_name,
+            deck_path,
+            deck_options,
+            resolve_deck_options,
+            deck_path_envelope,
+            deck_sha256=deck_sha256,
+        ),
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
-        # Build-time-recorded only -- deliberately *not*
-        # `build_identity.klayout_version_expected()`'s live-checkout
-        # fallback, which shells out to `git` (issue #1490). That fallback is
-        # fine as a one-shot cost for `klt version --format json`; calling it
-        # from every `klt drc`/`klt lvs` run would add a subprocess call to
-        # every single report on a dev/editable install, and no
-        # `uv tool install ... @<sha>` install (the reproducibility scenario
-        # this field exists for) is ever editable -- `hatch_build.py` always
-        # records `KLAYOUT_VERSION_EXPECTED` for that install path, so the
-        # live probe would only ever fire for a case this field need not
-        # cover. An editable/dev checkout with no build-time record simply
-        # reports `klayout_version_mismatch: False` ("no confirmed
-        # mismatch"), matching `_klayout_version_mismatch`'s documented
-        # "unresolvable renders as False" rule.
+        # Report generation uses the build-time record. The checkout fallback
+        # spawns git, which is appropriate for an explicit `klt version` call.
+        # Editable installs without a record cannot confirm a mismatch.
         expected_klayout_version = build_identity._recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version
         )
         block["klayout_version_mismatch"] = mismatch
-        if mismatch:
+        if mismatch and not klayout_version_override_active:
             _warn_klayout_version_mismatch(
-                actual_klayout_version, expected_klayout_version
+                actual_klayout_version,
+                expected_klayout_version,
+                # Already computed above for `klt_reinstall_spec` -- the
+                # warning reuses it instead of re-deriving, so the hot path
+                # gains no probe (issue #5601).
+                reinstall_spec,
             )
+    if klayout_version_override_active:
+        block["klayout_module_version"] = _klayout_version()
     return block

@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 LAMBDAPDK_VERSION="0.2.17"
 LAMBDAPDK_URL="https://github.com/siliconcompiler/lambdapdk/archive/refs/tags/v${LAMBDAPDK_VERSION}.tar.gz"
 # Computed by downloading the pinned tag archive once and hashing it:
@@ -20,23 +23,11 @@ LAMBDAPDK_URL="https://github.com/siliconcompiler/lambdapdk/archive/refs/tags/v$
 # fails closed on mismatch, so a stale value here blocks every fetch.
 LAMBDAPDK_SHA256="ac7e950c4d0394a829658b6e219fea4a4b0c61a998183d5520f8b9e38c6efff2"
 
-# Detect a portable sha256 command (macOS ships shasum, Linux sha256sum).
-# Mirrors .loom/scripts/verify-install.sh's compute_sha256 helper.
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PDKS_DIR="$REPO_ROOT/pdks"
 DEST="$PDKS_DIR/lambdapdk"
 MARKER="$DEST/.fetched-version"
+COMMIT_MARKER="$DEST/.fetched-commit"
 
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
@@ -53,17 +44,9 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading lambdapdk v$LAMBDAPDK_VERSION ..."
-curl -fL --progress-bar -o "$tmp/lambdapdk.tar.gz" "$LAMBDAPDK_URL"
+fetch_and_verify "$LAMBDAPDK_URL" "$LAMBDAPDK_SHA256" "$tmp/lambdapdk.tar.gz" progress
 
-echo "Verifying checksum ..."
-actual_sha256="$(sha256_of "$tmp/lambdapdk.tar.gz")"
-if [[ "$actual_sha256" != "$LAMBDAPDK_SHA256" ]]; then
-    echo "error: checksum mismatch for lambdapdk v$LAMBDAPDK_VERSION" >&2
-    echo "  expected: $LAMBDAPDK_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+commit="$(tarball_commit "$tmp/lambdapdk.tar.gz")"
 
 echo "Extracting ..."
 mkdir -p "$tmp/extract"
@@ -73,6 +56,9 @@ rm -rf "$DEST"
 mkdir -p "$PDKS_DIR"
 mv "$tmp/extract" "$DEST"
 echo "$LAMBDAPDK_VERSION" > "$MARKER"
+if [[ -n "$commit" ]]; then
+    printf '%s\n' "$commit" >"$COMMIT_MARKER"
+fi
 
 echo "Done: $DEST"
 du -sh "$DEST"

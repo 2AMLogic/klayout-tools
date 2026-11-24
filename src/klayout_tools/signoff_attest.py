@@ -1,0 +1,967 @@
+"""Built-in attestation producer for T1 items 1, 8, 9 and 10 (issues #2844, #4311).
+
+``klt signoff --attest {1,8,9,10} --inventory FILE`` reads a versioned
+**attestation inventory**, runs the item-specific mechanical checks it
+declares, and emits the artifact-anchored ``"generic"`` envelope that
+``klt signoff --manifest`` already knows how to bind (issue #2718 --
+:data:`~klayout_tools.signoff._ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE`,
+:func:`~klayout_tools.signoff._generic_item_binding_refusal`,
+:func:`~klayout_tools.signoff._generic_artifact_binding`). No second envelope
+format: the output *is* a generic envelope, graded by the existing manifest
+path with no special bypass.
+
+Why it exists. Before this module a block that wanted an honest ``met`` on
+items 1/9/10 had to hand-write the inventory, a hash-computing generator, a
+drift check, and the envelope wrapper -- and the envelope's ``status:
+"pass"`` was the author's own assertion. Here ``status`` is *derived*: it is
+``"pass"`` only when every check this module ran passed, and the envelope's
+``attestation.checks[]`` names each one.
+
+What each item checks (see ``docs/cli/signoff.md``, "Attesting items 1, 9
+and 10"):
+
+- **Item 1 (Design sources)** -- every listed source exists; every declared
+  derived artifact exists *and* its declared freshness command (e.g. ``klt
+  netlist ... --check``) exits ``0``. A present-but-stale netlist fails.
+- **Item 8 (Characterization report)** (issue #4311) -- the report file
+  exists; every cited evidence envelope exists and its declared ``--check``
+  command exits ``0``; every declared spec row cites at least one envelope;
+  and, for a digital partition, Fmax, area and power are each bound to a
+  numeric field of a cited envelope for every declared corner. A committed
+  record produced outside klt is citable through ``external_records``
+  (issue #6939), and a metric binding may declare a ``reciprocal``
+  transform (a period binds its frequency). A required metric nobody
+  measured is declared in ``unmeasured_metrics`` (issue #7259) and
+  disclosed as a passing check, not hidden. Item 8 stays
+  open to a bare generic envelope in the grader -- this producer is the
+  tool-produced alternative, disclosed as such on the citation.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
+- **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
+  declared CI/audit command exits ``0``.
+
+Two failure classes, deliberately distinct:
+
+- a **malformed inventory** (unknown ``schema_version``, wrong ``t1_item``,
+  empty/duplicate path lists, a path outside the repository or through a
+  symlink, a wrong-typed field) raises :class:`AttestationError` -- the
+  CLI's ordinary error envelope, exit ``1``; nothing was attested.
+- a **failed check** (a missing file, a stale derived artifact, a failed
+  cold start or CI command, a missing pin) still yields an envelope -- with
+  ``status: "fail"`` -- so the caller sees exactly which check failed. The
+  CLI exits ``3`` and never writes ``--output`` for it.
+
+Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
+:func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
+
+from . import signoff_attest_item8 as item8
+from . import signoff_attest_item9 as item9
+from ._jsonnum import is_finite_number, is_int
+from ._provenance import sha256_file
+from ._report_verify import load_committed_report
+from .build_identity import build_version, klayout_version
+from .env_provenance import find_repo_root
+from .signoff import (
+    _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
+    _classify,
+    _generic_item_binding_refusal,
+)
+from .signoff_attest_command import _run_command, reset_command_side_channels
+from .signoff_attest_drift import drift_result
+from .signoff_attest_env import klt_shim_scope
+from .signoff_attest_glob import expand_entry
+from .signoff_attest_input import attestation_block, input_binding
+from .signoff_attest_pins import item9_pin_checks
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import path_checks, split_entries
+from .signoff_base import (
+    ATTESTABLE_ITEMS,
+    CHARACTERIZATION_ITEM,
+    SCHEMA_VERSION,
+    SignoffError,
+)
+from .signoff_base import STREAM_ATTESTABLE_ITEM as STREAM_ATTESTABLE_ITEM
+
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
+SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
+    {1, INVENTORY_SCHEMA_VERSION}
+)
+
+#: The literal ``kind`` every inventory must declare, so an unrelated JSON
+#: file (a manifest, an envelope) handed to ``--inventory`` is refused rather
+#: than half-read.
+INVENTORY_KIND = "t1-attestation-inventory"
+
+#: The ``attestation.producer`` value every envelope this module emits
+#: carries -- how a reader (or a fleet roll-up) tells a derived pass from a
+#: hand-written generic envelope.
+PRODUCER = "klt signoff --attest"
+
+#: The one hashing rule this producer applies: SHA-256 of the file's raw
+#: bytes, ``sha256:``-prefixed. Recorded in every envelope so the rule is
+#: part of the evidence, not an implicit convention.
+HASH_ALGORITHM = "sha256-raw-bytes"
+
+
+_ITEM_TITLES = {
+    1: "Design sources",
+    2: "Layout",
+    8: "Characterization report",
+    9: "Testbenches shipped",
+    10: "Repo hygiene",
+}
+
+#: Top-level inventory keys each item accepts. Anything else is refused --
+#: an unknown key is far more likely a typo (``testbench`` for
+#: ``testbenches``) than intent, and silently ignoring it would attest an
+#: inventory the author did not write.
+_COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
+_ITEM_KEYS: dict[int, frozenset[str]] = {
+    1: frozenset({"sources", "derived"}),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
+    8: item8.ITEM8_KEYS,
+    9: item9.ITEM9_KEYS,
+    10: frozenset({"hygiene", "checks"}),
+}
+
+#: The metrics a digital partition's characterization must bind per corner.
+_REQUIRED_METRICS = ("area", "fmax", "power")
+
+#: The path lists each item declares, with the ``role`` each entry's check
+#: records.
+_PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
+    1: (("sources", "source"),),
+    8: (),
+    9: (("testbenches", "testbench"),),
+    10: (("hygiene", "hygiene"),),
+}
+
+
+class AttestationError(SignoffError):
+    """A malformed inventory or committed envelope -- nothing was attested.
+
+    A :class:`~klayout_tools.signoff.SignoffError` subclass so the CLI's
+    existing ``except SignoffError`` reports it through the ordinary error
+    envelope (exit ``1``)."""
+
+
+# --------------------------------------------------------------------------- #
+# Inventory reading and structural validation
+# --------------------------------------------------------------------------- #
+
+
+def _read_inventory(path: str, raw: bytes | None = None) -> tuple[dict[str, Any], str]:
+    """Hash and parse the same inventory bytes, including a proposed tool-pin edit."""
+    if path == "-":
+        raise AttestationError(
+            "--inventory must be a file path, not '-': the inventory is the "
+            "artifact the envelope binds to, so it needs a path to pin"
+        )
+    if not os.path.exists(path):
+        raise AttestationError(f"inventory not found: {path}")
+    if os.path.islink(path):
+        raise AttestationError(
+            f"inventory '{path}' is a symlink -- attest the real file so the "
+            "pinned path names the bytes that were hashed"
+        )
+    if not os.path.isfile(path):
+        raise AttestationError(f"inventory is not a file: {path}")
+    try:
+        if raw is None:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+    except OSError as exc:
+        raise AttestationError(f"could not read inventory '{path}': {exc}") from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    from .signoff_base import _finite_json_float, _reject_json_constant
+
+    try:
+        inventory = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+            parse_float=_finite_json_float,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AttestationError(f"inventory '{path}' is not valid JSON: {exc}") from exc
+    if not isinstance(inventory, dict):
+        raise AttestationError(
+            f"inventory '{path}' must be a JSON object, got {type(inventory).__name__}"
+        )
+    return inventory, f"sha256:{digest}"
+
+
+def _validate_header(inventory: Mapping[str, Any], item: int, source: str) -> None:
+    version = inventory.get("schema_version")
+    if not is_int(version):
+        raise AttestationError(
+            f"inventory '{source}' has no integer 'schema_version' (this build "
+            f"reads {sorted(SUPPORTED_INVENTORY_SCHEMA_VERSIONS)})"
+        )
+    if version not in SUPPORTED_INVENTORY_SCHEMA_VERSIONS:
+        raise AttestationError(
+            f"inventory '{source}' declares schema_version {version}, which this "
+            f"build does not read (supported: "
+            f"{sorted(SUPPORTED_INVENTORY_SCHEMA_VERSIONS)}) -- upgrade klt or "
+            "write the inventory against a supported version"
+        )
+    if inventory.get("kind") != INVENTORY_KIND:
+        raise AttestationError(
+            f'inventory \'{source}\' must declare "kind": "{INVENTORY_KIND}"'
+        )
+    declared = inventory.get("t1_item")
+    if not is_int(declared):
+        raise AttestationError(
+            f"inventory '{source}' must declare an integer 't1_item'"
+        )
+    if declared != item:
+        raise AttestationError(
+            f"inventory '{source}' declares t1_item {declared}, but --attest "
+            f"asked for item {item} -- one inventory attests exactly one item"
+        )
+    allowed = _COMMON_KEYS | _ITEM_KEYS[item]
+    unknown = sorted(set(inventory) - allowed)
+    if unknown:
+        raise AttestationError(
+            f"inventory '{source}' has unknown field(s) for item {item}: "
+            f"{', '.join(unknown)} (accepted: {', '.join(sorted(allowed))})"
+        )
+    description = inventory.get("description")
+    if description is not None and not isinstance(description, str):
+        raise AttestationError(
+            f"inventory '{source}' field 'description' must be a string"
+        )
+
+
+def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
+    """Validate one inventory path and return its normalised, ``/``-separated
+    repo-relative form.
+
+    Refused: a non-string or empty value, an absolute path, one that escapes
+    the repository (``..``), and one that traverses a symlink anywhere along
+    its length -- a symlink would let the pinned path name bytes that live
+    somewhere the repository does not control."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise AttestationError(f"'{field}' entries must be non-empty path strings")
+    if os.path.isabs(raw) or raw.startswith(("/", "\\")):
+        raise AttestationError(
+            f"'{field}' path '{raw}' is absolute -- inventory paths are "
+            "repository-relative"
+        )
+    normalized = os.path.normpath(raw).replace(os.sep, "/")
+    if normalized == "." or normalized == ".." or normalized.startswith("../"):
+        raise AttestationError(
+            f"'{field}' path '{raw}' is outside the repository ({root})"
+        )
+    absolute = os.path.join(root, normalized)
+    if os.path.realpath(absolute) != os.path.normpath(absolute):
+        raise AttestationError(
+            f"'{field}' path '{raw}' traverses a symlink -- list the real path "
+            "inside the repository"
+        )
+    return normalized
+
+
+def _path_list(
+    inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
+) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
+    value = inventory.get(field)
+    if not isinstance(value, list):
+        raise AttestationError(f"inventory field '{field}' must be a list of paths")
+    if not value:
+        raise AttestationError(
+            f"inventory field '{field}' is empty -- an empty inventory attests nothing"
+        )
+    paths = []
+    for raw in value:
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
+    return paths
+
+
+#: Upper bound (seconds) on a command's optional ``timeout_s``.
+COMMAND_TIMEOUT_CEILING_S = 21600
+
+
+def _command_spec(
+    raw: Any, field: str, root: str, *, documented_argv: bool = False
+) -> dict[str, Any]:
+    """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
+
+    ``argv`` is run directly (never through a shell) with ``cwd`` resolved
+    against the repository root. Optional ``local_only: true`` marks a check
+    that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
+    it, ``--attest --check`` skips it and carries the committed outcome.
+    ``documented_argv`` enables the item-9 ``documented_argv`` disclosure
+    (:func:`item9.documented_spec`); elsewhere the key is refused."""
+    if not isinstance(raw, Mapping):
+        raise AttestationError(f"'{field}' must be an object with an 'argv' list")
+    argv = raw.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(arg, str) and arg for arg in argv)
+    ):
+        raise AttestationError(
+            f"'{field}.argv' must be a non-empty list of non-empty strings"
+        )
+    cwd_raw = raw.get("cwd", ".")
+    if cwd_raw == ".":
+        cwd = "."
+    else:
+        cwd = _normalize_repo_path(cwd_raw, f"{field}.cwd", root)
+    spec: dict[str, Any] = {"argv": list(argv), "cwd": cwd}
+    local_only = raw.get("local_only", False)
+    if not isinstance(local_only, bool):
+        raise AttestationError(f"'{field}.local_only' must be a boolean")
+    if local_only:
+        spec["local_only"] = True
+    if "timeout_s" in raw:
+        timeout_s = raw["timeout_s"]
+        if (
+            not is_finite_number(timeout_s)
+            or timeout_s <= 0
+            or timeout_s > COMMAND_TIMEOUT_CEILING_S
+        ):
+            raise AttestationError(
+                f"'{field}.timeout_s' must be a positive number of seconds "
+                f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
+            )
+        spec["timeout_s"] = timeout_s
+    spec.update(item9.documented_spec(raw, field, documented_argv))
+    return spec
+
+
+def _validated_command_checks(
+    inventory: Mapping[str, Any], root: str, item: int
+) -> list[dict[str, Any]]:
+    """The inventory's non-empty ``checks`` list as named command specs
+    (shared by items 10 and 2): each entry ``{name, argv, cwd?, timeout_s?,
+    local_only?}`` with a unique non-empty ``name``."""
+    checks = inventory.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise AttestationError(
+            f"item {item} inventory must declare a non-empty 'checks' list -- "
+            "the commands whose result this attestation reports"
+        )
+    names: set[str] = set()
+    specs = []
+    for index, raw in enumerate(checks):
+        spec = _command_spec(raw, f"checks[{index}]", root)
+        name = raw.get("name")
+        if not isinstance(name, str) or not name:
+            raise AttestationError(f"'checks[{index}].name' must be a non-empty string")
+        if name in names:
+            raise AttestationError(f"check name '{name}' is declared more than once")
+        names.add(name)
+        specs.append({"name": name, **spec})
+    return specs
+
+
+def _validated_inventory(
+    inventory: Mapping[str, Any], item: int, root: str, source: str
+) -> dict[str, Any]:
+    """Structurally validate ``inventory`` for ``item`` and return the
+    normalised form the checks run against. Raises :class:`AttestationError`
+    for anything malformed."""
+    _validate_header(inventory, item, source)
+    bench_extra: dict[str, Any] = {}
+    if item == 9:
+        inventory, bench_extra = item9.split_testbenches(
+            inventory, root, _normalize_repo_path, _command_spec
+        )
+    inventory, presence, yaml_selects = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
+    seen: dict[str, str] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
+    for field, _role in _PATH_LISTS[item]:
+        normalized[field] = _path_list(inventory, field, root, seen)
+    if item == 1:
+        normalized["derived"] = _validated_derived(
+            inventory, root, seen, set(normalized["sources"])
+        )
+    elif item == CHARACTERIZATION_ITEM:
+        normalized.update(_validated_characterization(inventory, root))
+    elif item == 9:
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
+    else:
+        normalized["checks"] = _validated_command_checks(inventory, root, 10)
+    return normalized
+
+
+def _validated_characterization(
+    inventory: Mapping[str, Any], root: str
+) -> dict[str, Any]:
+    """Item 8's structure (issue #4311): the report path, the declared spec
+    rows, row -> cited-envelope paths, a freshness command per cited envelope,
+    and (digital) the corner set with the metric bindings and any declared
+    unmeasured pairs (issue #7259). A row with no citation, or a missing
+    metric nobody declared, is a *failed check*, not a malformed inventory --
+    the inventory is well-formed, the evidence is incomplete."""
+    if "report" not in inventory:
+        raise AttestationError(
+            "item 8 inventory must declare 'report' -- the aggregated "
+            "characterization report file"
+        )
+    report = _normalize_repo_path(inventory["report"], "report", root)
+    rows = _validated_spec_rows(inventory)
+    citations = _validated_citations(inventory, rows, root)
+    uncited = item8.validated_uncited_rows(inventory, rows, citations)
+    cited = sorted({path for paths in citations.values() for path in paths})
+    if report in cited:
+        raise AttestationError(
+            f"report '{report}' is also cited as evidence -- the report "
+            "summarises the evidence, it is not itself evidence"
+        )
+    envelope_checks = _validated_envelope_checks(inventory, cited, root)
+    corners, metrics = item8.validated_metrics(
+        inventory, root, AttestationError, _normalize_repo_path, _REQUIRED_METRICS
+    )
+    unmeasured = item8.validated_unmeasured_metrics(
+        inventory, corners, metrics, AttestationError, _REQUIRED_METRICS
+    )
+    external_records = item8.validated_external_records(
+        inventory, cited, root, AttestationError, _normalize_repo_path
+    )
+    return {
+        "report": report,
+        "spec_rows": list(rows),
+        "citations": citations,
+        "uncited_rows": uncited,
+        "envelope_checks": envelope_checks,
+        "external_records": external_records,
+        "corners": corners,
+        "metrics": metrics,
+        "unmeasured_metrics": unmeasured,
+    }
+
+
+def _validated_spec_rows(inventory: Mapping[str, Any]) -> list[str]:
+    rows = inventory.get("spec_rows")
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or not all(isinstance(row, str) and row for row in rows)
+    ):
+        raise AttestationError(
+            "item 8 inventory must declare a non-empty 'spec_rows' list of "
+            "non-empty strings"
+        )
+    if len(set(rows)) != len(rows):
+        raise AttestationError("'spec_rows' lists a row more than once")
+    return rows
+
+
+def _validated_citations(
+    inventory: Mapping[str, Any], rows: list[str], root: str
+) -> dict[str, list[str]]:
+    raw_citations = inventory.get("citations")
+    if not isinstance(raw_citations, Mapping):
+        raise AttestationError(
+            "item 8 inventory must declare 'citations': an object mapping each "
+            "spec row to a list of evidence-envelope paths"
+        )
+    unknown = sorted(set(raw_citations) - set(rows))
+    if unknown:
+        raise AttestationError(
+            f"'citations' names row(s) not in 'spec_rows': {', '.join(unknown)}"
+        )
+    citations: dict[str, list[str]] = {}
+    for row in rows:
+        listed = raw_citations.get(row, [])
+        if not isinstance(listed, list):
+            raise AttestationError(f"'citations.{row}' must be a list of paths")
+        citations[row] = sorted(
+            {_normalize_repo_path(raw, f"citations.{row}", root) for raw in listed}
+        )
+    return citations
+
+
+def _validated_envelope_checks(
+    inventory: Mapping[str, Any], cited: list[str], root: str
+) -> dict[str, dict[str, Any]]:
+    raw_checks = inventory.get("envelope_checks")
+    if cited and not isinstance(raw_checks, Mapping):
+        raise AttestationError(
+            "item 8 inventory must declare 'envelope_checks': an object mapping "
+            "each cited envelope path to its own --check command"
+        )
+    envelope_checks: dict[str, dict[str, Any]] = {}
+    for raw_path, raw_spec in (raw_checks or {}).items():
+        path = _normalize_repo_path(raw_path, "envelope_checks", root)
+        if path not in cited:
+            raise AttestationError(
+                f"'envelope_checks' names '{path}', which no spec row cites"
+            )
+        envelope_checks[path] = _command_spec(
+            raw_spec, f"envelope_checks.{raw_path}", root
+        )
+    missing = [path for path in cited if path not in envelope_checks]
+    if missing:
+        raise AttestationError(
+            "every cited envelope needs an 'envelope_checks' command that fails "
+            f"when it is stale; missing: {', '.join(missing)}"
+        )
+    return envelope_checks
+
+
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def _hex_digest(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
+        raise AttestationError(
+            f"'{field}' must be a 64-character lowercase hex sha256 digest"
+        )
+    return value
+
+
+def _validated_recorded(
+    raw: Any, field: str, root: str, sources: set[str]
+) -> dict[str, Any]:
+    """Validate a ``derived[]`` entry's ``recorded`` freshness record: the
+    derived file's digest plus the digest of every source it was built from."""
+    if not isinstance(raw, Mapping):
+        raise AttestationError(f"'{field}' must be an object")
+    unknown = sorted(set(raw) - {"derived_sha256", "sources"})
+    if unknown:
+        raise AttestationError(f"'{field}' has unknown field(s): {', '.join(unknown)}")
+    derived_sha256 = _hex_digest(raw.get("derived_sha256"), f"{field}.derived_sha256")
+    recorded_sources = raw.get("sources")
+    if not isinstance(recorded_sources, Mapping) or not recorded_sources:
+        raise AttestationError(
+            f"'{field}.sources' must be a non-empty object mapping each source "
+            "path to its sha256 -- a hash of the artifact alone proves nothing "
+            "about the sources it was built from"
+        )
+    normalized: dict[str, str] = {}
+    for raw_path, digest in recorded_sources.items():
+        path = _normalize_repo_path(raw_path, f"{field}.sources", root)
+        if path not in sources:
+            raise AttestationError(
+                f"'{field}.sources' lists '{path}', which is not in the "
+                "inventory's top-level 'sources'"
+            )
+        if path in normalized:
+            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
+        normalized[path] = _hex_digest(digest, f"{field}.sources[{path}]")
+    return {"derived_sha256": derived_sha256, "sources": normalized}
+
+
+def _validated_derived(
+    inventory: Mapping[str, Any],
+    root: str,
+    seen: dict[str, str],
+    sources: set[str],
+) -> list[dict[str, Any]]:
+    derived = inventory.get("derived")
+    if not isinstance(derived, list) or not derived:
+        raise AttestationError(
+            "item 1 inventory must declare a non-empty 'derived' list -- the "
+            "netlist(s) generated from the sources, each with a freshness check"
+        )
+    entries = []
+    for index, raw in enumerate(derived):
+        field = f"derived[{index}]"
+        if not isinstance(raw, Mapping):
+            raise AttestationError(f"'{field}' must be an object")
+        unknown = sorted(set(raw) - {"path", "generator", "check", "recorded"})
+        if unknown:
+            raise AttestationError(
+                f"'{field}' has unknown field(s): {', '.join(unknown)}"
+            )
+        path = _normalize_repo_path(raw.get("path"), f"{field}.path", root)
+        if path in seen:
+            raise AttestationError(
+                f"path '{path}' is listed more than once (in '{seen[path]}' and "
+                f"'{field}') -- each inventoried file must appear exactly once"
+            )
+        seen[path] = field
+        generator = raw.get("generator")
+        if not isinstance(generator, str) or not generator:
+            raise AttestationError(
+                f"'{field}.generator' must name what produced the artifact "
+                '(e.g. "klt netlist")'
+            )
+        if ("check" in raw) == ("recorded" in raw):
+            raise AttestationError(
+                f"'{field}' must declare exactly one of 'check' (a command that "
+                "fails when the artifact is stale, e.g. klt netlist ... --check) "
+                "or 'recorded' (the derived file's and its sources' sha256 "
+                "digests) -- presence alone does not prove a derived artifact "
+                "is current"
+            )
+        entry: dict[str, Any] = {"path": path, "generator": generator}
+        if "check" in raw:
+            entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
+        else:
+            entry["recorded"] = _validated_recorded(
+                raw["recorded"], f"{field}.recorded", root, sources
+            )
+        entries.append(entry)
+    return sorted(entries, key=lambda entry: entry["path"])
+
+
+# --------------------------------------------------------------------------- #
+# Checks
+# --------------------------------------------------------------------------- #
+
+
+def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare the derived file and each recorded source against the digests
+    the inventory recorded; no command is run. ``mismatches`` names every
+    differing path with its expected and actual digest (``None`` = missing)."""
+    recorded = entry["recorded"]
+    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
+    mismatches = []
+    for path in sorted(expected):
+        actual = sha256_file(os.path.join(root, path))
+        if actual != expected[path]:
+            mismatches.append(
+                {"path": path, "expected": expected[path], "actual": actual}
+            )
+    check: dict[str, Any] = {
+        "check": "recorded_hash",
+        "role": "freshness",
+        "target": entry["path"],
+        "generator": entry["generator"],
+        "passed": not mismatches,
+    }
+    if mismatches:
+        check["mismatches"] = mismatches
+    return check
+
+
+def _command_check(
+    root: str, spec: Mapping[str, Any], role: str, **identity: Any
+) -> dict[str, Any]:
+    exit_status, error = _run_command(root, spec)
+    check: dict[str, Any] = {
+        "check": "command",
+        "role": role,
+        **identity,
+        "argv": list(spec["argv"]),
+        "cwd": spec["cwd"],
+        "exit_status": exit_status,
+        "passed": exit_status == 0,
+    }
+    if error is not None:
+        check["error"] = error
+    if spec.get("local_only"):
+        check["local_only"] = True
+    check.update(item9.documented_fields(spec))
+    return check
+
+
+def _skipped_check(
+    spec: Mapping[str, Any],
+    role: str,
+    committed_checks: Sequence[Mapping[str, Any]],
+    **identity: Any,
+) -> dict[str, Any]:
+    """A ``local_only`` command that ``--check`` did not run: the committed
+    check with the same identity is carried through (its outcome is the
+    attest-time one, never a result of this run) and marked ``skipped``. With
+    no committed counterpart the check is a failure -- nothing vouches for it.
+    The ``documented_argv`` disclosure is overlaid from the current spec."""
+    for committed in committed_checks:
+        if (
+            committed.get("check") == "command"
+            and committed.get("role") == role
+            and list(committed.get("argv") or []) == list(spec["argv"])
+            and all(committed.get(key) == value for key, value in identity.items())
+        ):
+            return item9.carried_check(committed, spec)
+    return {
+        "check": "command",
+        "role": role,
+        **identity,
+        "argv": list(spec["argv"]),
+        "cwd": spec["cwd"],
+        "exit_status": None,
+        "passed": False,
+        "local_only": True,
+        "skipped": True,
+        **item9.documented_fields(spec),
+    }
+
+
+def _characterization_checks(
+    root: str, normalized: Mapping[str, Any], command: Any
+) -> list[dict[str, Any]]:
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation or declared gap per row, freshness commands, then digital metrics."""
+    checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(
+        root, cites, _file_check, set(normalized.get("external_records", ()))
+    )
+    checks.extend((*present.values(), *envelopes.values()))
+    checks.extend(item8.row_checks(normalized, envelopes))
+    for path in cited:
+        checks.append(
+            command(
+                normalized["envelope_checks"][path],
+                "freshness",
+                target=path,
+            )
+        )
+    checks.extend(item8.metric_checks(root, normalized, present, _REQUIRED_METRICS))
+    return checks
+
+
+def _derived_freshness_check(
+    root: str,
+    entry: Mapping[str, Any],
+    command: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """The freshness check for one item-1 ``derived`` entry: the recorded
+    hash comparison, or the entry's ``check`` command."""
+    if "recorded" in entry:
+        return _recorded_hash_check(root, entry)
+    return command(
+        entry["check"],
+        "freshness",
+        target=entry["path"],
+        generator=entry["generator"],
+    )
+
+
+def _audit_command_checks(
+    specs: Sequence[Mapping[str, Any]],
+    command: Callable[..., dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One ``role: "audit"`` command check per declared spec (items 10 and 2)."""
+    return [
+        command(
+            {k: v for k, v in spec.items() if k != "name"},
+            "audit",
+            name=spec["name"],
+        )
+        for spec in specs
+    ]
+
+
+def _run_checks(
+    item: int,
+    root: str,
+    normalized: Mapping[str, Any],
+    committed_checks: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Run the item's artifact and command checks in deterministic order.
+    Item 9's pin checks follow once the envelope's build version is known.
+    With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
+    reset_command_side_channels()
+    checks: list[dict[str, Any]] = []
+
+    def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
+        if committed_checks is not None and spec.get("local_only"):
+            return _skipped_check(spec, role, committed_checks, **identity)
+        return _command_check(root, spec, role, **identity)
+
+    for field, role in _PATH_LISTS[item]:
+        checks.extend(path_checks(root, normalized, field, role))
+    if item == 1:
+        for entry in normalized["derived"]:
+            checks.append(_file_check(root, entry["path"], "derived"))
+        checks.extend(
+            _derived_freshness_check(root, entry, command)
+            for entry in normalized["derived"]
+        )
+    elif item == CHARACTERIZATION_ITEM:
+        checks.extend(_characterization_checks(root, normalized, command))
+    elif item == 9:
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
+    else:
+        checks.extend(_audit_command_checks(normalized["checks"], command))
+    return checks
+
+
+# --------------------------------------------------------------------------- #
+# Envelope
+# --------------------------------------------------------------------------- #
+
+
+def build_attestation(
+    item: int,
+    inventory_path: str,
+    committed_checks: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    inventory_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    """``klt signoff --attest ITEM --inventory PATH``: run every check
+    ``PATH`` declares for T1 item ``item`` and return the artifact-anchored
+    generic envelope (``status`` ``"pass"`` iff every check passed).
+
+    Raises :class:`AttestationError` for a malformed inventory, an item this
+    producer does not attest, or an inventory outside any git repository
+    (inventory paths are repository-relative, and the envelope pins the
+    inventory as a ``{"path", "scope": "repo"}`` object the grader resolves
+    against the repository root).
+
+    ``committed_checks`` is passed only by :func:`check_attestation`: it makes
+    ``local_only`` commands skip (carrying the committed outcome, marked
+    ``skipped``) instead of run."""
+    if item not in ATTESTABLE_ITEMS:
+        raise AttestationError(
+            f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
+            f"got {item}"
+        )
+    inventory, inventory_hash = _read_inventory(inventory_path, inventory_bytes)
+    absolute = os.path.realpath(os.path.abspath(inventory_path))
+    root = find_repo_root(os.path.dirname(absolute))
+    if root is None:
+        raise AttestationError(
+            f"inventory '{inventory_path}' is not inside a git repository -- "
+            "inventory paths are repository-relative"
+        )
+    inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
+    normalized = _validated_inventory(inventory, item, root, inventory_path)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    klt_version = build_version()
+    if item == 9:
+        pins = normalized["pins"]
+        checks.extend(item9_pin_checks(pins, root, _normalize_repo_path, klt_version))
+    passed_count = sum(1 for check in checks if check["passed"])
+    status = "pass" if passed_count == len(checks) else "fail"
+    envelope: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "generic",
+        "status": status,
+        "t1_item": item,
+        "summary": (
+            f"T1 item {item} ({_ITEM_TITLES[item]}): {passed_count}/{len(checks)} "
+            f"attestation checks passed ({PRODUCER})"
+        ),
+        "source": inventory_rel,
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
+        "provenance": {
+            "klt_version": klt_version,
+            "klayout_version": klayout_version(),
+            "pdk": None,
+            "deck": None,
+            "input": prov,
+        },
+    }
+    _self_check(envelope, item, digest)
+    return envelope
+
+
+def _self_check(envelope: Mapping[str, Any], item: int, content_hash: str) -> None:
+    """Run the emitted envelope through the grader's own recogniser and
+    binding check -- so this producer can never drift from what ``klt
+    signoff --manifest`` accepts. A failure here is a bug in this module,
+    not in the caller's inventory."""
+    kind = _classify(envelope, "<attestation>")
+    refusal = _generic_item_binding_refusal(
+        kind, item, envelope, {"content_hash": content_hash}
+    )
+    if (  # pragma: no cover - invariant
+        (
+            item not in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+            and item != CHARACTERIZATION_ITEM
+        )
+        or kind != "generic"
+        or refusal is not None
+    ):
+        raise AttestationError(
+            f"internal error: attestation envelope is not bindable ({kind}, {refusal})"
+        )
+
+
+def render_envelope(envelope: Mapping[str, Any]) -> str:
+    """The exact bytes ``--output`` writes: two-space-indented JSON plus a
+    trailing newline -- the same rendering ``--format json`` prints."""
+    return json.dumps(envelope, indent=2) + "\n"
+
+
+def write_attestation(envelope: Mapping[str, Any], output: str) -> bool:
+    """Write ``envelope`` to ``output`` **only if its bytes would change**;
+    return whether the file was written. Unchanged inputs leave a committed
+    envelope untouched (mtime included)."""
+    rendered = render_envelope(envelope).encode("utf-8")
+    try:
+        with open(output, "rb") as handle:
+            if handle.read() == rendered:
+                return False
+    except OSError:
+        pass
+    directory = os.path.dirname(os.path.abspath(output))
+    os.makedirs(directory, exist_ok=True)
+    with open(output, "wb") as handle:
+        handle.write(rendered)
+    return True
+
+
+def check_attestation(
+    item: int, inventory_path: str, committed_path: str
+) -> dict[str, Any]:
+    """``klt signoff --attest ITEM --inventory PATH --check COMMITTED``:
+    re-attest and diff against the committed envelope, writing nothing.
+
+    Returns the shared ``--check`` drift shape (``{schema_version, mode,
+    report, status, drift, fresh}``, :func:`~._report_verify.build_rerun_result`)
+    plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
+    CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
+    "pass"``: a faithfully reproduced failing attestation is still not a
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
+
+    A ``local_only`` command is not run: it is listed in ``skipped_checks``
+    (never counted as passed by this run) and its committed outcome is carried
+    into ``fresh_status``, so a committed failure still fails the gate."""
+    committed = _load_committed_attestation(committed_path)
+    committed_checks = (committed.get("attestation") or {}).get("checks")
+    fresh = build_attestation(
+        item,
+        inventory_path,
+        committed_checks if isinstance(committed_checks, list) else [],
+    )
+    return drift_result(committed_path, committed, fresh)
+
+
+def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
+    committed = load_committed_report(committed_path, AttestationError)
+    if committed.get("kind") != "generic" or "attestation" not in committed:
+        raise AttestationError(
+            f"committed envelope '{committed_path}' is not a klt signoff --attest "
+            'envelope (no "kind": "generic" with an \'attestation\' block) -- '
+            "check the path"
+        )
+    return committed

@@ -304,6 +304,7 @@ def test_deterministic():
 
 from klayout_tools.sim_transfer import (  # noqa: E402
     REASON_CROSSING_NOT_BRACKETED,
+    REASON_LOW_FREQUENCY_ON_AXIS,
     REASON_TOP_NOT_BELOW_UNITY,
     analyze_margins,
     grade_margins,
@@ -452,6 +453,23 @@ def test_benign_high_frequency_phase_excursion_is_not_a_negative_margin():
     )
 
 
+def test_first_sample_exactly_on_negative_real_axis_is_ambiguous():
+    # T starts at +20 dB exactly at -180 deg (offset snaps to 0.0), then |T|
+    # crosses unity with a healthy margin: only the start sits on the line.
+    rep = _margins([(0, 20, -180), (2, -10, -100), (4, -50, -100)])
+    assert rep.band["low_freq_mag_db"] == pytest.approx(20.0)
+    assert REASON_LOW_FREQUENCY_ON_AXIS in rep.ambiguity
+    assert grade_margins(rep, min_phase_margin_deg=45.0) == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("deg", "flagged"), [(-180.0 + 1e-10, True), (-170.0, True), (-100.0, False)]
+)
+def test_low_frequency_axis_guard_boundaries(deg, flagged):
+    rep = _margins([(0, 20, deg), (2, -20, -100), (4, -60, -100)])
+    assert (REASON_LOW_FREQUENCY_ON_AXIS in rep.ambiguity) is flagged
+
+
 def test_margins_edge_cases():
     # Single point, invalid sample, zero-magnitude, plateau, duplicates.
     rep = analyze_margins([1.0], [2.0], [1.0])
@@ -464,3 +482,45 @@ def test_margins_edge_cases():
     with pytest.raises(TransferInputError):
         analyze_margins([1.0, 1.0], [1.0, 1.0], [1.0, 1.0])
     json.dumps(analyze_margins(*_split(COND)).to_dict(), allow_nan=False)
+
+
+# --- max_gain_above_crossover_db (#3160) -----------------------------------
+
+from klayout_tools.sim_transfer import max_gain_above_crossover_db  # noqa: E402
+
+
+def test_max_gain_above_crossover_is_the_sampled_repeak():
+    # 12.04 dB @ 1 Hz, -6.02 dB @ 2 Hz: first falling crossing between them.
+    # The gain climbs back to +6.0206 dB (T = 2) at 4 Hz: that is the peak.
+    freqs = [1.0, 2.0, 4.0, 8.0, 16.0]
+    ts = [4.0, 0.5, 2.0, 0.25, 0.1]
+    metrics = analyze_transfer(freqs, ts, [1.0] * 5)
+    value, reason = max_gain_above_crossover_db(freqs, metrics)
+    assert reason is None
+    assert value == pytest.approx(20 * math.log10(2.0), abs=TOL)
+
+
+def test_max_gain_above_crossover_is_zero_for_a_monotone_roll_off():
+    # The crossover itself (exactly 0 dB) is in the closed interval.
+    freqs = [1.0, 10.0, 100.0]
+    metrics = analyze_transfer(freqs, [10.0, 1.0, 0.1], [1.0] * 3)
+    assert max_gain_above_crossover_db(freqs, metrics) == (0.0, None)
+
+
+def test_max_gain_above_crossover_unavailable_without_a_crossing():
+    freqs = [1.0, 10.0]
+    metrics = analyze_transfer(freqs, [0.5, 0.1], [1.0] * 2)
+    assert max_gain_above_crossover_db(freqs, metrics) == (
+        None,
+        REASON_NO_FALLING_UNITY_CROSSING,
+    )
+
+
+def test_max_gain_above_crossover_unavailable_with_a_gap_above_it():
+    # An invalid (zero) sample above the crossover could hide a peak.
+    freqs = [1.0, 2.0, 4.0, 8.0]
+    metrics = analyze_transfer(freqs, [4.0, 0.5, 0.0, 0.1], [1.0] * 4)
+    assert max_gain_above_crossover_db(freqs, metrics) == (
+        None,
+        REASON_INVALID_SAMPLES,
+    )

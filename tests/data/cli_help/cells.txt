@@ -1,0 +1,10 @@
+Report the cell hierarchy of a GDSII or OASIS layout file: top-cell status,
+per-cell shape/instance counts, direct children/parents, and bounding box.
+
+positional arguments:
+  file path to a GDSII or OASIS layout file
+
+options:
+  -h, --help show this help message and exit
+  --top only report top cells (cells with no parent instances)
+  --format {text,json} output format (default: text)

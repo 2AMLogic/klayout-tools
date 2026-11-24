@@ -11,7 +11,7 @@ activity-weighted current mode) of the power/IR-drop + EM signoff epic
 [#712](https://github.com/2AMLogic/klayout-tools/issues/712).
 
 ```
-klt power <file> <spec> [--top <cell>] [--format text|json]
+klt power <file> <spec> [--top <cell>] [--deck <name> [--resistance-corner nominal|high|low]] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -24,6 +24,17 @@ klt power <file> <spec> [--top <cell>] [--format text|json]
   (**required** in that case — like `klt mom`, `klt power` needs exactly
   one root to analyse, unlike `klt layers`, which defaults to summing
   across every top cell).
+- `--deck` — a built-in parasitics deck name (the `klt extract --deck`
+  name space, e.g. `gf180mcu`). With it, `vias[].resistance_ohm` becomes
+  **optional**: a via that omits it is defaulted from the deck's per-cut
+  resistance (issue [#3400](https://github.com/2AMLogic/klayout-tools/issues/3400);
+  data from #3053). An explicit spec `resistance_ohm` — including `0` —
+  always wins. Without `--deck`, `resistance_ohm` stays required and the
+  output is unchanged.
+- `--resistance-corner` — `nominal` (default), `high` or `low`: which of the
+  deck's published interconnect-resistance corners defaults a via. Not
+  `klt stackup --corner` (a tech-LEF min/nom/max corner). Requires `--deck`
+  (an error otherwise, never silently ignored).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -180,6 +191,12 @@ The spec file is a JSON object:
     name), echoed back on every edge's `em_verdict` entry. See "Worked
     example" below, which cites a real sky130 `.tlef` `DCCURRENTDENSITY`
     line this way.
+  - `sheet_resistance_source` (string, optional) — the same citation
+    convention for `sheet_resistance_ohm_per_sq`: a free-text note of which
+    techfile line, foundry doc or corner variant the number came from,
+    echoed on every metal edge this role contributes as
+    `islands[].edges[].resistance_ohm_source` (issue #5791), `null` on the
+    edges of a role that declared none.
 - `vias` (optional array, default `[]`) — each entry bridges two `stackup`
   roles:
   - `name` (string, optional, defaults to `"via<index>"`) — echoed in every
@@ -188,9 +205,20 @@ The spec file is a JSON object:
     geometry.
   - `between` (array of exactly two distinct `stackup` names, required) —
     which two metal roles this via connects.
-  - `resistance_ohm` (number, required, `>= 0`) — this via's resistance,
-    used verbatim for every via shape matched (see "Scope and limitations"
-    — a via array drawn as one merged shape is not split per cut).
+  - `resistance_ohm` (number, required unless `--deck` is given, `>= 0`) — this via's
+    **per-cut** resistance. Each merged via shape is priced at
+    `resistance_ohm / n_cuts` (see `cut_size_um`/`cut_space_um` below and
+    "Scope and limitations"); without those keys `n_cuts` is 1, so the value
+    is used verbatim per shape.
+  - `cut_size_um` / `cut_space_um` (numbers `> 0`, optional, both or neither,
+    issue #3401) — the cut layer's drawn cut size and cut-to-cut spacing in
+    µm. With them a merged via polygon holds
+    `n_cuts = max(1, floor((W+s)/(c+s)) * floor((H+s)/(c+s)))` cuts, where
+    `W×H` is its bounding box, `c = cut_size_um` and `s = cut_space_um`; a
+    non-rectangular polygon falls back to `max(1, floor(area / (c+s)²))` and
+    adds a `warnings` entry. The edge's resistance is `resistance_ohm /
+    n_cuts`. The parasitics deck does not supply cut geometry (its per-cut
+    rows carry resistance only), so this comes from the spec.
   - `current_limit_a` (number, optional, `>= 0`) — this via role's own EM
     limit. Unlike a metal role's `current_limit_a_per_um`, a real PDK's
     `DCCURRENTDENSITY` for a via/cut layer is already a flat per-shape
@@ -200,6 +228,19 @@ The spec file is a JSON object:
     one resistor" model.
   - `current_limit_source` (string, optional) — same citation convention as
     a `stackup` entry's, above.
+  - `resistance_ohm_source` (string, optional) — the citation convention for
+    `resistance_ohm` (issue #5791), echoed on every via edge this role
+    contributes as `islands[].edges[].resistance_ohm_source`, `null` when
+    the role declared none. Only meaningful alongside an explicit
+    `resistance_ohm`: giving the citation **without** the number is an
+    error — under `--deck` the number would come from the deck and the
+    report's own `resistance_source` would say `deck:<name>:<corner>`, so
+    the spec citation would assert false provenance. An explicit
+    `resistance_ohm` (including under `--deck`) always wins over the deck,
+    so an accepted citation is always truthful. Note the deliberate name:
+    the report's `vias[].resistance_source` (deck-only, below) is a
+    different field with a different meaning — `"spec"` or
+    `"deck:<name>:<corner>"` — not this free-text citation.
 - `devices` (optional array, default `[]`, issue #2260) — where a drawn
   **device body** sits on an already-declared role, so it stops being read
   as wire. Identical in shape and semantics to `klt erc`'s own `devices[]`
@@ -689,6 +730,36 @@ IR-drop solve already produced are checked against those limits, per net.
   own `current_limit_a`; `margin_a = current_limit_a - abs(current_a)` is
   reported signed so a caller can see *how much* headroom (positive) or
   overage (negative) an edge has, not just pass/fail.
+- **A split arm is judged on its cross-section, not row by row** (issue
+  #6449). Where two arms of one merged polygon join, the vertex grid (see
+  "Non-rectangular segments") can cut a wider arm lengthwise into parallel
+  mesh rows. The metal is continuous across those cuts, but a pad or load
+  snaps to a single node, so one row can carry the whole port current while
+  its sibling carries ~0 A — against a *row-width* limit that is up to half
+  what the drawn arm tolerates. So for a cut perpendicular to the flow
+  (strictly inside the cells' half-spans), the signed sum of every branch
+  crossing it is compared against `current_limit_a_per_um *` the contiguous
+  conducting width at that cut (the summed `current_limit_a` of those
+  rows). A section is only formed when it is unambiguous: the crossing
+  branches must tile each contiguous metal interval exactly once and be
+  *all* the metal the polygon has at that cut (a cell the mesh models as
+  flowing the other way leaves metal unmapped, so that cut is skipped);
+  every member needs a solved current and a declared limit; and members
+  must share one layer and one merged polygon, so width is never lent
+  across a gap, a layer or a polygon. A true neck (one narrow interval at
+  the cut) is judged at its own width. Endpoint order and the flow axis do
+  not change the result. Each edge is attributed to the worst eligible
+  section it crosses, and such an entry in `em_verdict` carries three extra
+  fields — `basis: "cross_section"`, `width_um` (the conducting width) and
+  `section_edge_ids` — with `current_a`/`current_limit_a` the section's
+  current and limit. Every other edge (vias, rectangular rails, edges on no
+  eligible cut, a section with a member of unknown current or limit) keeps
+  the per-edge comparison above, byte-identical to before and with none of
+  those fields. A section can only relax a per-row finding (the summed
+  limit is never below the sum of the members' currents when each passes),
+  never tighten one. `checked_edge_count`/`unchecked_edge_count` and the
+  `coverage` block are unchanged: an edge is checked exactly when it has a
+  limit and a solved current, as before.
 - **An edge with no declared limit, or no solved current, is `unchecked`,
   never guessed at.** The same discipline `_solve_ir_drop` already applies
   to droop: a `stackup`/`vias` role that declared no
@@ -726,6 +797,37 @@ IR-drop solve already produced are checked against those limits, per net.
   currents to compare, the same condition under which `ir_drop_map` itself
   is `null`.
 
+## Defaulting via resistance from a deck (`--deck`, issue #3400)
+
+With `--deck NAME`, a spec via that omits `resistance_ohm` takes the deck's
+resistance for the cut layer it lands on:
+
+1. The via's GDS `layer` is looked up in the deck's via stack (entry `i`
+   joins metal `i` to metal `i + 1`).
+2. The deck's per-cut resistance for that level is read at
+   `--resistance-corner`. For `gf180mcu`: `nominal` 4.5 Ω, `high` 15.0 Ω,
+   `low` 0.0 Ω per cut.
+
+Rules:
+
+- **An explicit spec `resistance_ohm` always wins**, including `0`; vias in
+  one spec may mix sources.
+- **Never a silent default.** A via layer the deck does not know, a cut
+  level the deck publishes no resistance for, or a corner the deck leaves
+  unpublished is an error (exit `1`) naming the via — set `resistance_ohm`
+  explicitly or pick another corner. An unpublished corner never falls back
+  to nominal.
+- **A published `0.0` (the `low` corner of `gf180mcu`) passes through as an
+  ideal short**, exactly like a spec-declared `resistance_ohm: 0` (see
+  "Static IR-drop solve").
+- The resistance is per **merged via polygon**, the model's existing unit;
+  scaling by cut count is out of scope.
+
+With `--deck` the report gains `resistance_corner` and a top-level `vias`
+array (`{"name", "layer", "resistance_ohm", "resistance_source"}`);
+`resistance_source` is `"spec"` or `"deck:<name>:<corner>"`. Without
+`--deck` neither key is present.
+
 ## Provenance (issue #2349)
 
 Every report carries the same shared `provenance` block `klt erc` emits
@@ -755,10 +857,12 @@ exact artifacts it was solved from:
   the layout alone leaves a committed report re-verifiable only halfway.
   This is the identical reasoning that put `provenance.spec` on `klt erc`
   (issue #2036), in the same `{content_hash}` shape.
-- **`pdk`/`deck` are always `null`.** `klt power` resolves no installed
-  PDK and applies no rule deck — the spec declares its sheet resistances
-  and EM limits directly. `null`, never fabricated, matching the shared
-  block's own convention.
+- **`pdk` is always `null`; `deck` is `null` unless `--deck` is given.**
+  `klt power` resolves no installed PDK, and the spec declares its sheet
+  resistances and EM limits directly. With `--deck`, `provenance.deck`
+  carries the deck's name and content hash (the same block `klt extract`
+  emits), since the defaulted via resistances are a function of it. `null`,
+  never fabricated, otherwise.
 - **`klayout_version` and `top_cell`.** The solved network *is*
   `LayoutToNetlist`'s output — which polygons merge, where a segment's
   endpoint nodes land — so the droop depends on the KLayout build and the
@@ -810,7 +914,10 @@ the shared envelope (`schema_version`, error shape, exit codes).
               "cross_um": 1.0,
               "area_um2": null,
               "current_limit_a": 0.0028,
-              "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
+              "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um",
+              "resistance_ohm_source": null,
+              "n_cuts": null,
+              "n_cuts_source": null
             }
           ]
         }
@@ -878,7 +985,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
               {"id": "n0", "voltage_v": 1.8, "droop_mv": 0.0, "injected_current_a": 0.0, "pad_voltage_v": 1.8},
               {"id": "n1", "voltage_v": 1.799, "droop_mv": 1.0, "injected_current_a": -0.001, "pad_voltage_v": null}
             ],
-            "edges": [{"id": "e0", "current_a": 0.001, "current_density_a_per_um": 0.001}]
+            "edges": [{"id": "e0", "current_a": 0.001, "current_density_a_per_um": 0.001, "cross_section_density_a_per_um": null}]
           }
         ]
       }
@@ -946,7 +1053,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].node_count`/`edge_count` | integer | This island's own totals (both `0` when `unsolved_reason` is set).                                 |
 | `islands[].unsolved_reason` | string \| null | `null` on a modelled island. A non-null string means this island's geometry could not be modelled exactly (not axis-aligned, or over the decomposition cap) and **no** resistor network was emitted for it — see "Non-rectangular segments" above. Never accompanied by an approximate network. |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source", "resistance_ohm_source", "n_cuts", "n_cuts_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. `resistance_ohm_source` (issue #5791) is the contributing role's free-text citation of where its resistance came from — `stackup[].sheet_resistance_source` on a metal edge, `vias[].resistance_ohm_source` on a via edge — `null` when that role declared none. `n_cuts` / `n_cuts_source` (issue #3401) are a **via** edge's cut count and its provenance: `"spec"` when the via's `cut_size_um`/`cut_space_um` derived it, `"assumed"` (count 1) when they are absent; both `null` on a metal edge. A via edge's `resistance_ohm` is already divided by `n_cuts`. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
@@ -954,7 +1061,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `devices`            | array\<object\>    | One entry per `devices[]` spec declaration, in declaration order: `{"name", "body_layer", "on", "body_area_um2"}`. `body_area_um2` is the area this declaration **actually** subtracted — the marker intersected with the `on` role's own drawn region, not the marker layer's own area — so `0.0` means the declaration changed nothing. `[]` when the spec declares no `devices`. See "Device bodies are not wires" below. |
 | `max_decomposition_cells` | integer      | The effective decomposition cap this run used: the spec's `max_decomposition_cells`, or the default `4096` when omitted. |
 | `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
-| `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk`/`deck` (always `null` for this verb), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
+| `resistance_corner`  | string             | **Only with `--deck`** (issue #3400): the corner used (`nominal`/`high`/`low`). Absent otherwise. |
+| `vias`               | array\<object\>    | **Only with `--deck`** (issue #3400): per spec via, `{"name", "layer", "resistance_ohm", "resistance_source"}`; `resistance_source` is `"spec"` or `"deck:<name>:<corner>"`. Absent otherwise. |
+| `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk` (always `null` for this verb), `deck` (`null` unless `--deck` is given), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
 
 ### `ir_drop_map` (Phase 1b)
 
@@ -982,7 +1091,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].worst_case_droop_mv`/`worst_case_node_id` | number \| null / string \| null | This island's worst droop magnitude and where.                       |
 | `islands[].iterations`/`residual` | integer / number | Conjugate-gradient iterations and the achieved relative residual (worst over the island's components). |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "voltage_v", "droop_mv", "injected_current_a", "pad_voltage_v"}` — `id` matches the sibling `networks[]` node; `voltage_v`/`droop_mv` are `null` on an unsolved island; `injected_current_a` is signed (negative = drawn off this net) and `pad_voltage_v` is `null` unless a pad landed here. |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a", "current_density_a_per_um"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. `current_density_a_per_um` (issue #2345) is `abs(current_a)` divided by the same-named `networks[]` edge's own `cross_um`, `null` for a via edge or an edge with no solved current — a derived number with **no** verdict attached, so a role the PDK publishes no limit for is still reported as a density a human can price against a datasheet. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a", "current_density_a_per_um", "cross_section_density_a_per_um"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. `current_density_a_per_um` (issue #2345) is `abs(current_a)` divided by the same-named `networks[]` edge's own `cross_um`, `null` for a via edge or an edge with no solved current — a derived number with **no** verdict attached, so a role the PDK publishes no limit for is still reported as a density a human can price against a datasheet. It is a **per-mesh-row solver diagnostic**: where a non-rectangular polygon's mesh cuts an arm lengthwise into parallel rows and a pad/load snaps to one node, it can overstate the drawn-section density (2× on the stair-step example in `tests/test_power_em_sections.py`; that is an example, not a bound). `cross_section_density_a_per_um` (issue #6525) is the drawn-section density: for the **highest-density** eligible cut that pools two or more branches and contains the edge, `abs(Σ signed branch currents) / Σ row widths` in A/µm. Eligibility is the EM verdict's cross-section rule (see "A split arm is judged on its cross-section, not row by row" above) **except** that no declared limit is required, so a role the PDK publishes no limit for still gets the number. It is `null` for an edge in no such section — a single-row edge, a via edge, a gap/overlap/unmapped-metal cut, a member with no solved current, or an unsolved island — and `0.0` (not `null`) for an eligible multi-row section carrying zero net current. It is a diagnostic beside the per-row field, which is unchanged: it adds no verdict, threshold or flag, and `em_verdict`, `coverage` and exit codes never read it. Additive, so no `schema_version` bump. |
 
 ### `em_verdict` (Phase 1c)
 
@@ -996,7 +1105,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `nets[].status`      | string             | This net's own `"pass"`/`"fail"`/`"not_checked"`.                                                  |
 | `nets[].checked_edge_count`/`unchecked_edge_count`/`fail_count` | integer | This net's own totals.                                                        |
 | `nets[].worst_case`  | object \| null     | This net's own worst-margin checked edge (same shape as below), `null` if none was checked.        |
-| `nets[].failing_edges[]` | array\<object\> | Every edge on this net that failed: `{"net", "island_id", "edge_id", "kind", "layer", "current_a", "current_limit_a", "current_limit_source", "margin_a", "status"}` — `current_a`/`current_limit_a` are magnitudes; `margin_a = current_limit_a - current_a` (negative for a failing edge); `current_limit_source` is the spec's citation, `null` if none was given; `status` is always `"fail"` in this array (present for symmetry with `worst_case`, which can be `"pass"`). |
+| `nets[].failing_edges[]` | array\<object\> | Every edge on this net that failed: `{"net", "island_id", "edge_id", "kind", "layer", "current_a", "current_limit_a", "current_limit_source", "margin_a", "status"}` — `current_a`/`current_limit_a` are magnitudes; `margin_a = current_limit_a - current_a` (negative for a failing edge); `current_limit_source` is the spec's citation, `null` if none was given; `status` is always `"fail"` in this array (present for symmetry with `worst_case`, which can be `"pass"`). An entry judged on a **cross-section** (issue #6449) additionally carries `"basis": "cross_section"`, `"width_um"` (the contiguous conducting width, number) and `"section_edge_ids"` (the branch edges pooled into that section, array\<string\>), and its `current_a`/`current_limit_a` are the section's; an entry on the per-edge basis has none of these three keys. |
 
 ## Worked example: real `klt place-and-route` output (the `gcd` corpus fixture)
 
@@ -1227,12 +1336,16 @@ criterion 4):**
   missing role. That normally means the spec's `vias[].between` does not
   name the roles the shape really joins; wiring it to the nearest rail it
   does *not* touch would invent connectivity the layout has not got.
-- **One via shape = one resistor, at the spec's given `resistance_ohm`.** A
-  via drawn as a single merged shape covering what a real design would cut
-  as an array of several via cuts is not split into a parallel-resistor
-  combination — the spec's `resistance_ohm` is used verbatim per merged
-  via polygon. Model a via array's true (lower) parallel resistance by
-  passing that already-combined value in the spec. Each via edge reports
+- **One merged via shape = one resistor, `resistance_ohm / n_cuts`.** A
+  via array drawn as a single merged shape has lost its individual cut
+  outlines, so the cut count is *derived*, not read: from the via's
+  `cut_size_um`/`cut_space_um` and the shape's bounding box (area for a
+  non-rectangular shape, with a warning). Without those keys `n_cuts` is 1
+  (`n_cuts_source: "assumed"`) and the spec's `resistance_ohm` is used
+  verbatim per merged polygon, which overstates a multi-cut array by roughly
+  its cut count — give the cut geometry, or pass the already-combined value.
+  An irregular array (missing cuts, mixed pitches) is counted as if full.
+  EM `current_limit_a` is not scaled by `n_cuts`. Each via edge reports
   its merged polygon's `area_um2` (issue #2345), so a run whose via edges
   all carry many-array-sized areas is distinguishable in data from one
   solved per individual cut.

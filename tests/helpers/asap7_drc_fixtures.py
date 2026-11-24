@@ -56,11 +56,14 @@ LAYERS = {
     "V8": 85,
     "M9": 90,
     "V9": 95,
+    "PAD": 96,
     "SDT": 88,
     "SLVT": 97,
     "LVT": 98,
     "SRAMDRC": 99,
     "SRAMVT": 110,
+    # Assumed stream number: the DRM / asap7.lyp have no thick-oxide marker (#4465).
+    "THICKOX": 111,
 }
 
 DBU_UM = 0.00025
@@ -602,6 +605,211 @@ def _select_cases() -> list[Case]:
     return c
 
 
+def _tk_device(
+    *,
+    gate_w: float = 20,
+    active_h: float = 81,
+    **kw: float,
+) -> list[Shape]:
+    """A THICKOX-marked :func:`device` (marker 46/27 nm past ACTIVE) whose
+    channel GATE is ``gate_w`` wide and whose ACTIVE is ``active_h`` tall."""
+    shapes = device(vt="THICKOX", ay1=27 + active_h, **kw)
+    if gate_w != 20:
+        shapes = [
+            box("GATE", 71, 10, 71 + gate_w, 125)
+            if s == box("GATE", 71, 10, 91, 125)
+            else s
+            for s in shapes
+        ]
+    return shapes
+
+
+def _thickox_cases() -> list[Case]:
+    """THICKOX.* (#4465): predictive rules, every threshold assumed."""
+    # Every marked device here draws the core 20 nm gate (GATE.W.1 requires
+    # it), so it is also under the assumed 30 nm THICKOX.GATE.L minimum.
+    lg = ["THICKOX.GATE.L"]
+    # A 30 nm channel gate crowds its neighbours and the SDT; a 53.75 nm
+    # ACTIVE is off the 27 nm height step and short of the fins.
+    gw = ["GATE.S.2", "GATE.ACTIVE.EX.2", "SDT.GATE.AUX.1"]
+    aw = ["ACTIVE.W.2", "ACTIVE.FIN.EX.1", "SDT.W.3"]
+    core = device()
+    return [
+        _fail("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=27 - D, vt_v=27 - D), lg),
+        _pass("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=27, vt_v=27), lg),
+        # marker edge coincident with the ACTIVE edge: zero enclosure
+        _fail("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=0, vt_v=27), lg),
+        _fail(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 174 - D, 0, 294, 60)],
+        ),
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 174, 0, 294, 60)],
+        ),
+        # abutting and overlapping markers merge into one
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 120, 0, 240, 60)],
+        ),
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 100, 0, 220, 60)],
+        ),
+        _fail("THICKOX.GATE.L", _tk_device(gate_w=30 - D), [*gw, "GATE.W.1"]),
+        # the conforming 30 nm marked gate is itself an exact-20 nm GATE.W.1 miss
+        _pass("THICKOX.GATE.L", _tk_device(gate_w=30), [*gw, "GATE.W.1"]),
+        # a core device (no marker) keeps its 20 nm gate
+        _pass("THICKOX.GATE.L", core),
+        _fail("THICKOX.ACTIVE.W", _tk_device(active_h=54 - D), [*lg, *aw]),
+        _pass("THICKOX.ACTIVE.W", _tk_device(active_h=54), lg),
+        # a core device keeps a narrow (27 nm) channel
+        _pass("THICKOX.ACTIVE.W", device(ay1=54)),
+    ]
+
+
+def _sram_active(
+    sel: str,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    h: float = 46,
+    v: float = 27,
+    marker: bool = True,
+) -> list[Shape]:
+    """An ACTIVE box under ``sel`` (``h`` / ``v`` nm of horizontal / vertical
+    enclosure) plus, when ``marker``, an SRAMDRC box that overlaps the ACTIVE
+    by half its width. Every other rule sees the same geometry either way, so
+    the with/without pair isolates the SRAMDRC scoping."""
+    shapes: list[Shape] = [box("ACTIVE", x1, y1, x2, y2)]
+    if sel == "NSELECT" or sel == "PSELECT":
+        shapes.append(box(sel, x1 - h, y1 - v, x2 + h, y2 + v))
+    else:
+        # ACTIVE.AUX.1 wants ACTIVE under NSELECT or PSELECT, so the VT layers
+        # ride on a loosely enclosing NSELECT.
+        shapes.append(box("NSELECT", x1 - 46, y1 - 27, x2 + 46, y2 + 27))
+        shapes.append(box(sel, x1 - h, y1 - v, x2 + h, y2 + v))
+    if marker:
+        shapes.append(box("SRAMDRC", (x1 + x2) / 2, y1 - 10, x2 + 10, y2 + 10))
+    return shapes
+
+
+def _sram_cases() -> list[Case]:
+    """SRAMDRC-scoped ACTIVE rules (DRM 1.2.2 note 7, Tables 3.5.1, 3.5.2 and
+    3.7.1). Each threshold pair is paired with a control that draws the same
+    geometry without SRAMDRC, where the non-SRAM rule applies instead."""
+    c: list[Case] = []
+    active = (0, 0, 70, 81)
+    for gap, mk in ((13.5 - D, _fail), (13.5, _pass)):
+        well = box("WELL", 70 + gap, 0, 300, 81)
+        c.append(mk("SRAM.ACTIVE.WELL.S.5", [*_sram_active("NSELECT", *active), well]))
+    # Outside SRAMDRC the same 13.5 nm gap is the 27 nm ACTIVE.WELL.S.4 case.
+    c.append(
+        _fail(
+            "ACTIVE.WELL.S.4",
+            [
+                *_sram_active("NSELECT", *active, marker=False),
+                box("WELL", 83.5, 0, 300, 81),
+            ],
+        )
+    )
+    for m, mk in ((13.5 - D, _fail), (13.5, _pass)):
+        well = box("WELL", -m, -m, 130, 141)
+        c.append(mk("SRAM.ACTIVE.WELL.EN.2", [*_sram_active("PSELECT", *active), well]))
+    c.append(
+        _fail(
+            "ACTIVE.WELL.EN.1",
+            [
+                *_sram_active("PSELECT", *active, marker=False),
+                box("WELL", -13.5, -13.5, 130, 141),
+            ],
+        )
+    )
+
+    # Area: the smallest legal ACTIVE (16 x 27 nm, ACTIVE.W.3 x ACTIVE.W.1) is
+    # exactly 432 nm^2, so anything smaller also breaks a width rule.
+    thin = (0, 0, 16, 27)
+    fail_thin = (0, 0, 16, 27 - D)
+    kw = {"h": 52, "v": 27}
+    c.append(
+        _fail(
+            "SRAM.ACTIVE.A.2A",
+            _sram_active("NSELECT", *fail_thin, **kw),
+            also=["ACTIVE.W.1", "ACTIVE.W.2"],
+        )
+    )
+    c.append(_pass("SRAM.ACTIVE.A.2A", _sram_active("NSELECT", *thin, **kw)))
+    c.append(_fail("ACTIVE.A.1A", _sram_active("NSELECT", *thin, marker=False, **kw)))
+    outer = (0, 0, 200, 120)
+    for hole, mk, also in (
+        ((84, 46, 100, 73 - D), _fail, ["ACTIVE.S.2B", "ACTIVE.S.1", "ACTIVE.W.2"]),
+        ((84, 46, 100, 73), _pass, ["ACTIVE.S.2B", "ACTIVE.W.2"]),
+    ):
+        shapes = [ring("ACTIVE", outer, hole), box("NSELECT", -46, -27, 246, 147)]
+        shapes.append(box("SRAMDRC", 0, 0, 20, 20))
+        c.append(mk("SRAM.ACTIVE.A.2B", shapes, also=also))
+    c.append(
+        _fail(
+            "ACTIVE.A.1B",
+            [
+                ring("ACTIVE", outer, (84, 46, 100, 73)),
+                box("NSELECT", -46, -27, 246, 147),
+            ],
+            also=["ACTIVE.S.2B", "ACTIVE.W.2"],
+        )
+    )
+
+    # AUX.2: ACTIVE sharing no area with SRAMDRC may not touch it. An edge
+    # abutment or a single shared corner is a touch; one database unit of
+    # clearance, or real overlap, is not.
+    base = active_in("NSELECT", 0, 0, 70, 81)
+    abut = [*base, box("SRAMDRC", 70, 0, 150, 81)]
+    # Touching makes the polygon "interact", so it is also held to the SRAM
+    # values -- which it meets with the full 46 / 27 nm enclosure.
+    c.append(_fail("SRAM.ACTIVE.AUX.2", abut))
+    c.append(_fail("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 70, 81, 150, 160)]))
+    c.append(_pass("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 70 + D, 0, 150, 81)]))
+    c.append(_pass("SRAM.ACTIVE.AUX.2", [*base, box("SRAMDRC", 35, 0, 150, 81)]))
+
+    # Select enclosure of SRAM ACTIVE: 13.5 nm each way, for the NSELECT rules
+    # and the section 3.7 mirrors on the other four layers. 90 x 81 nm ACTIVE
+    # keeps the select above its own 108 x 54 nm minimum.
+    wide = (0, 0, 90, 81)
+    for name in ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT"):
+        c.append(
+            _fail(
+                f"SRAM.{name}.ACTIVE.EN.3", _sram_active(name, *wide, h=13.5 - D, v=27)
+            )
+        )
+        c.append(
+            _pass(f"SRAM.{name}.ACTIVE.EN.3", _sram_active(name, *wide, h=13.5, v=27))
+        )
+        c.append(
+            _fail(
+                f"SRAM.{name}.ACTIVE.EN.4", _sram_active(name, *wide, h=46, v=13.5 - D)
+            )
+        )
+        c.append(
+            _pass(f"SRAM.{name}.ACTIVE.EN.4", _sram_active(name, *wide, h=46, v=13.5))
+        )
+        # Without SRAMDRC the same 13.5 nm enclosure is the 46 / 27 nm rule.
+        c.append(
+            _fail(
+                f"{name}.ACTIVE.EN.1",
+                _sram_active(name, *wide, h=13.5, v=27, marker=False),
+            )
+        )
+        c.append(
+            _fail(
+                f"{name}.ACTIVE.EN.2",
+                _sram_active(name, *wide, h=46, v=13.5, marker=False),
+            )
+        )
+    return c
+
+
 def _sdt_w3_cases() -> list[Case]:
     """SDT.W.3: like ACTIVE.W.2 for SDT (outside SRAMDRC). SDT horizontal
     edges lie on ACTIVE's (SDT.ACTIVE.AUX.2) and SDT sits inside LISD
@@ -818,6 +1026,183 @@ def _lig_cases() -> list[Case]:
     return c
 
 
+def _sram_sdt_cases() -> list[Case]:
+    """SRAM.SDT.W.4 / ACTIVE.OV.3 / LISD.OV.4 (17 nm, SDT interacting with
+    SRAMDRC), each with the same geometry drawn without the marker (which the
+    unmarked 27 nm rules then judge) and with the marker only touching it."""
+    c: list[Case] = []
+    marker = box("SRAMDRC", -60, -40, 130, 120)
+
+    def sd(
+        sdt: tuple[float, float],
+        active: tuple[float, float] = (0, 81),
+        lisd: tuple[float, float] = (0, 60),
+        mark: Box | None = marker,
+    ) -> list[Shape]:
+        shapes = [
+            *active_in("NSELECT", 0, active[0], 70, active[1]),
+            box("SDT", 10, sdt[0], 34, sdt[1]),
+            box("LISD", 10, lisd[0], 34, lisd[1]),
+        ]
+        return shapes + ([mark] if mark else [])
+
+    # A SDT that is short is also a short overlap with the ACTIVE and LISD it
+    # sits on (SDT.LISD.AUX.4 forces the LISD to cover it).
+    # Unmarked, the 17 - D nm SDT is also no whole multiple of 27 nm (SDT.W.3).
+    unmarked = [
+        "SDT.W.2",
+        "SDT.W.3",
+        "SDT.ACTIVE.OV.1",
+        "SDT.LISD.OV.2",
+        "SDT.ACTIVE.AUX.2",
+    ]
+    all3 = ["SRAM.SDT.W.4", "SRAM.SDT.ACTIVE.OV.3", "SRAM.SDT.LISD.OV.4"]
+    short = (0, 17 - D)
+    c.append(_pass("SRAM.SDT.W.4", sd((0, 17))))
+    c.append(_fail("SRAM.SDT.W.4", sd(short), also=all3[1:]))
+    # Marker edge: touching SDT's top edge is interacting; one dbu clear of it
+    # is not, and the unmarked rules apply instead.
+    c.append(
+        _fail(
+            "SRAM.SDT.W.4",
+            sd(short, mark=box("SRAMDRC", 0, 17 - D, 60, 120)),
+            also=all3[1:],
+        )
+    )
+    c.append(
+        _pass(
+            "SRAM.SDT.W.4",
+            sd(short, mark=box("SRAMDRC", 0, 17, 60, 120)),
+            also=unmarked,
+        )
+    )
+    c.append(_pass("SRAM.SDT.W.4", sd(short, mark=None), also=unmarked))
+    # ACTIVE overlaps only the upper 17 - D nm of a 40 nm SDT. The trimmed
+    # ACTIVE is no whole multiple of 27 nm, and ACTIVE.W.2 ignores SRAMDRC.
+    c.append(
+        _pass(
+            "SRAM.SDT.ACTIVE.OV.3",
+            sd((0, 40), active=(23, 81)),
+            also=["ACTIVE.W.2"],
+        )
+    )
+    c.append(
+        _fail(
+            "SRAM.SDT.ACTIVE.OV.3",
+            sd((0, 40), active=(23 + D, 81)),
+            also=["ACTIVE.W.2"],
+        )
+    )
+    c.append(
+        _pass(
+            "SRAM.SDT.ACTIVE.OV.3",
+            sd((0, 40), active=(23 + D, 81), mark=None),
+            also=["SDT.ACTIVE.OV.1", "SDT.ACTIVE.AUX.2", "SDT.W.3", "ACTIVE.W.2"],
+        )
+    )
+    # LISD overlaps only the upper part of the SDT, so SDT.LISD.AUX.4 (SDT
+    # inside LISD) trips with the overlap rule: the two cannot be separated.
+    c.append(_pass("SRAM.SDT.LISD.OV.4", sd((0, 17))))
+    c.append(
+        _fail(
+            "SRAM.SDT.LISD.OV.4",
+            sd((0, 40), lisd=(23 + D, 60)),
+            also=["SDT.LISD.AUX.4"],
+        )
+    )
+    c.append(
+        _pass(
+            "SRAM.SDT.LISD.OV.4",
+            sd((0, 40), lisd=(23 + D, 60), mark=None),
+            also=[
+                "SDT.LISD.OV.2",
+                "SDT.LISD.AUX.4",
+                "SDT.ACTIVE.AUX.2",
+                "SDT.W.3",
+            ],
+        )
+    )
+    return c
+
+
+def _sram_lisd_cases() -> list[Case]:
+    c: list[Case] = []
+
+    def tips(w: float, gap: float, mark: Box | None) -> list[Shape]:
+        shapes = [box("LISD", 0, 0, w, 100), box("LISD", 0, 100 + gap, w, 200 + gap)]
+        return shapes + ([mark] if mark else [])
+
+    marker = box("SRAMDRC", -50, -50, 100, 260)
+    c.append(_pass("SRAM.LISD.S.4", tips(24, 27, marker)))
+    c.append(_fail("SRAM.LISD.S.4", tips(24, 27 - D, marker)))
+    # 36 nm is still a tip edge; 36.25 nm is a side edge (LISD.S.1's 18 nm).
+    c.append(_fail("SRAM.LISD.S.4", tips(36, 27 - D, marker)))
+    c.append(_pass("SRAM.LISD.S.4", tips(36 + D, 18, marker)))
+    # Outside SRAMDRC the same tips are LISD.S.3's.
+    c.append(_pass("SRAM.LISD.S.4", tips(24, 27 - D, None), also=["LISD.S.3"]))
+    # Only the first LISD polygon is in scope: neither this rule nor LISD.S.3
+    # (which wants both polygons clear of SRAMDRC) judges the pair.
+    c.append(
+        _pass("SRAM.LISD.S.4", tips(24, 27 - D, box("SRAMDRC", -50, -50, 100, 110)))
+    )
+    # LISD.AUX.1: a LISD not overlapping SRAMDRC may not touch it.
+    bar = box("LISD", 0, 0, 24, 100)
+    c.append(_fail("SRAM.LISD.AUX.1", [bar, box("SRAMDRC", 24, 0, 150, 100)]))
+    c.append(_fail("SRAM.LISD.AUX.1", [bar, box("SRAMDRC", 24, 100, 150, 200)]))
+    c.append(_pass("SRAM.LISD.AUX.1", [bar, box("SRAMDRC", 24 + D, 0, 150, 100)]))
+    c.append(_pass("SRAM.LISD.AUX.1", [bar, box("SRAMDRC", 10, 0, 150, 100)]))
+    c.append(_pass("SRAM.LISD.AUX.1", [bar, box("SRAMDRC", -10, -10, 40, 110)]))
+    return c
+
+
+def _sram_lig_cases() -> list[Case]:
+    c: list[Case] = []
+    marker = box("SRAMDRC", -30, 30, 100, 110)
+
+    def over(
+        x: tuple[float, float], y: tuple[float, float], mark: Box | None = marker
+    ) -> list[Shape]:
+        shapes = [*gate_pair(), box("LIG", x[0], y[0], x[1], y[1])]
+        return shapes + ([mark] if mark else [])
+
+    # LIG across both gates (20 nm each): overlap area is 20 x (height past
+    # the gate end at y 100) per gate. 12 nm tall = 240 nm^2.
+    thin = (88 + D, 104 + D)
+    c.append(_pass("SRAM.LIG.GATE.A.4", over((-17, 91), (88, 104))))
+    c.append(_fail("SRAM.LIG.GATE.A.4", over((-17, 91), thin)))
+    c.append(
+        _pass("SRAM.LIG.GATE.A.4", over((-17, 91), thin, None), also=["LIG.GATE.A.3"])
+    )
+    # Marker touching the LIG's top edge only: still interacting, but the LIG
+    # is then a SRAM.LIG.AUX.2 touch as well.
+    c.append(
+        _fail(
+            "SRAM.LIG.GATE.A.4",
+            over((-17, 91), thin, box("SRAMDRC", -30, 104 + D, 100, 140)),
+            also=["SRAM.LIG.AUX.2"],
+        )
+    )
+    # Horizontal overlap with the first gate only: 15 nm passes, 14.75 fails
+    # even though the area (14.75 x 20 = 295 nm^2) clears SRAM.LIG.GATE.A.4.
+    c.append(_pass("SRAM.LIG.GATE.OV.2", over((-17, 15), (40, 60))))
+    c.append(_fail("SRAM.LIG.GATE.OV.2", over((-17, 15 - D), (40, 60))))
+    c.append(
+        _pass(
+            "SRAM.LIG.GATE.OV.2",
+            over((-17, 15 - D), (40, 60), None),
+            also=["LIG.GATE.A.3", "LIG.GATE.AUX.1"],
+        )
+    )
+    # LIG.AUX.2: a LIG not overlapping SRAMDRC may not touch it.
+    bar = box("LIG", 0, 0, 16, 100)
+    c.append(_fail("SRAM.LIG.AUX.2", [bar, box("SRAMDRC", 16, 0, 150, 100)]))
+    c.append(_fail("SRAM.LIG.AUX.2", [bar, box("SRAMDRC", 16, 100, 150, 200)]))
+    c.append(_pass("SRAM.LIG.AUX.2", [bar, box("SRAMDRC", 16 + D, 0, 150, 100)]))
+    c.append(_pass("SRAM.LIG.AUX.2", [bar, box("SRAMDRC", 8, 0, 150, 100)]))
+    c.append(_pass("SRAM.LIG.AUX.2", [bar, box("SRAMDRC", -10, -10, 30, 110)]))
+    return c
+
+
 # --------------------------------------------------------------------------
 # Net-aware spacing (#3084): ACTIVE.S.2A, LIG.LISD.S.6/S.7, LIG.SDT.S.8
 # --------------------------------------------------------------------------
@@ -874,10 +1259,10 @@ def _remote_m2(gap: float, *, far_via: bool = True) -> list[Shape]:
     there. ``far_via`` False omits the V1 under the LISD side's M2 end."""
     shapes: list[Shape] = [
         box("V0", 0, 0, 18, 18),
-        box("M1", -60, 0, 18, 18),
+        box("M1", -62, 0, 18, 18),
         box("V1", -60, 0, -42, 18),
         box("V0", 21 + gap, 82, 39 + gap, 100),
-        box("M1", 21 + gap, 82, 120 + gap, 100),
+        box("M1", 21 + gap, 82, 122 + gap, 100),
         box("M2", -60, 0, -42, 100),
         box("M2", -60, 82, 120 + gap, 100),
     ]
@@ -968,10 +1353,10 @@ def _row_links(
     if m2:
         return [
             box("V0", 99, low, 117, low + 18),
-            box("M1", 99, low, 117, low + 28),
+            box("M1", 99, low - 2, 117, low + 28),
             box("V1", 99, low, 117, low + 18),
             box("V0", 207, low, 225, low + 18),
-            box("M1", 207, low, 225, low + 28),
+            box("M1", 207, low - 2, 225, low + 28),
             box("V1", 207, low, 225, low + 18),
             box("M2", 99, low, 225, low + 18),
         ]
@@ -1256,15 +1641,13 @@ def _stack(
     upper: tuple[float, float, float, float] | str | None = "track",
     via_y0: float = 0,
 ) -> list[Shape]:
-    """A ``w`` x 18 nm via at ``(0, via_y0)`` on a vertical lower-metal bar
-    and a horizontal upper-metal bar (``None`` omits that metal). Both bars
-    are 18 nm wide and flush with the via across their track, except M4
-    above V3, drawn as a legal minimum-width M4 track: 24 nm tall on track
-    0 (M4.W.1, M4.AUX.1, M4.AUX.2)."""
+    """A via flush across its upper track (24 nm for M4, else 18 nm).
+    The lower bar runs vertically and the upper bar runs horizontally."""
     lo, up = _VIA_METALS[via]
+    height = 24 if up == "M4" else 18
     if upper == "track":
-        upper = (-50, 0, 68, 24 if up == "M4" else 18)
-    shapes: list[Shape] = [box(via, 0, via_y0, w, via_y0 + 18)]
+        upper = (-50, 0, 68, height)
+    shapes: list[Shape] = [box(via, 0, via_y0, w, via_y0 + height)]
     if lower is not None:
         shapes.append(box(lo, *lower))
     if upper is not None:
@@ -1274,6 +1657,8 @@ def _stack(
 
 
 def _via_cases() -> list[Case]:
+    from helpers import asap7_drc_enclosure_fixtures as enclosure
+
     c: list[Case] = []
     for via in _VIA_METALS:
         c += [
@@ -1282,46 +1667,24 @@ def _via_cases() -> list[Case]:
         ]
         # Partly off the upper metal: the via sticks out 1 nm across it. An
         # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
+        # This also breaks V3/M4 width alignment or the V1/V2 end cap.
         off = (
             _stack(via, via_y0=-1)
             if via == "V3"
             else _stack(via, upper=(-50, 1, 68, 19))
         )
+        other = "V3.M4.AUX.2" if via == "V3" else enclosure.END_CAP_RULES[via]
         c += [
             _fail(f"{via}.AUX.1", _stack(via, upper=None)),
             _fail(f"{via}.AUX.1", _stack(via, lower=None)),
-            _fail(f"{via}.AUX.1", off),
+            _fail(f"{via}.AUX.1", off, also=[other]),
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
-    # "At least two opposite sides": the enclosing metal is a 26 nm bar
-    # (4 nm past the via on both sides across it, short of every threshold)
-    # that extends `e0` / `e1` past the via at its two ends -- top/bottom
-    # for a vertical bar, left/right for a horizontal one. The 26 nm width
-    # keeps the bar above the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
-    # The other metal keeps its long default bar.
-    def capped(
-        via: str, which: str, e0: float, e1: float, vertical: bool
-    ) -> list[Shape]:
-        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
-        return _stack(via, **{which: bar})
+    c += enclosure.two_side_cases()
 
-    for rule, via, which, e in (
-        ("V2.M2.EN.1", "V2", "lower", 5),
-        ("V3.M3.EN.1", "V3", "lower", 5),
-    ):
-        for vertical in (True, False):
-            c.append(_fail(rule, capped(via, which, e - D, e - D, vertical)))
-            c.append(_pass(rule, capped(via, which, e, e, vertical)))
-        # Short at one end only is still short on that pair.
-        c.append(_fail(rule, capped(via, which, e, e - D, True)))
-
-    # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
-    # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
-    # the two ends share 26 nm: one end exactly 11 nm passes, one dbu less
-    # at either end fails. (A vertically enclosing M4 would be 72 nm tall
-    # and at least 44 nm wide, i.e. >= 13 nm past the via on both pairs, so
-    # no M4-legal shape fails in that orientation.)
+    # V3 is flush across its 24 nm M4 track. M4.W.5 requires at least
+    # 44 nm along it, leaving 26 nm to distribute between the two ends.
     def m4_capped(e0: float, e1: float) -> list[Shape]:
         return _stack("V3", upper=(-e0, 0, 18 + e1, 24))
 
@@ -1331,7 +1694,7 @@ def _via_cases() -> list[Case]:
         _pass("V3.M4.EN.2", m4_capped(11, 15)),
         _pass("V3.M4.EN.2", m4_capped(15, 11)),
     ]
-    return c
+    return [*c, *enclosure.end_cap_cases(), *enclosure.v3_m4_width_cases()]
 
 
 def _transpose(shapes: Iterable[Shape]) -> list[Shape]:
@@ -1370,8 +1733,7 @@ _SADP = {
 
 
 def _sadp_metal_cases(layer: str) -> list[Case]:
-    """Drawn for a horizontally routed layer (bars along x, on track 0 at
-    y = 0) and transposed for M5 / M7."""
+    """Draw horizontal bars on track 0, then transpose them for M5 and M7."""
     direction, g, wmax = _SADP[layer]
 
     def bar(y0: float, h: float, x0: float = 0, x1: float = 200) -> Box:
@@ -1382,25 +1744,27 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
 
     r = f"{layer}."
     c: list[Case] = [
-        # With both horizontal edges on the g grid (AUX.1) every width is a
-        # multiple of g: a width one dbu off any multiple is inseparable
-        # from an off-grid edge.
+        # A width off the g grid necessarily puts an edge off-grid (AUX.1).
         _fail(r + "W.1", [bar(0, g - D)], ids("AUX.1")),
         _pass(r + "W.1", [bar(0, g)]),
         _fail(r + "W.2", [bar(0, wmax + D)], ids("AUX.1")),
         _fail(r + "W.2", [bar(0, wmax + g)]),
-        # The W.2 maximum itself is an even multiple of g (20 g), which
-        # W.3 forbids: the boundary passes W.2 but trips W.3.
+        # At the W.2 maximum, the even 20 g width also trips W.3.
         _pass(r + "W.2", [bar(0, wmax)], ids("W.3")),
         _pass(r + "W.2", [bar(0, wmax - g)]),
         _fail(r + "W.3", [bar(0, 2 * g)]),
         _fail(r + "W.3", [bar(0, 4 * g)]),
         _pass(r + "W.3", [bar(0, 3 * g)]),
+        # A legal 9 g strap and g-wide signal span 14 g across the gap (#7226).
+        _pass(r + "W.3", [bar(g, 9 * g), bar(14 * g, g)]),
+        # Moving the strap off-grid adds only AUX.1.
+        _pass(r + "W.3", [bar(D, 9 * g), bar(14 * g, g)], ids("AUX.1")),
+        # A 14 g length along the track is legal.
+        _pass(r + "W.3", [bar(0, g, 0, 14 * g)]),
+        _fail(r + "W.3", [bar(g, 2 * g), bar(4 * g, g)]),
         _fail(r + "W.5", [bar(0, g, 0, 44 - D)]),
         _pass(r + "W.5", [bar(0, g, 0, 44)]),
-        # Across the track: g apart on tracks 0 and 1. A neighbour one dbu
-        # closer has an off-grid edge (see W.1); it is drawn 3 g wide so it
-        # is not also an off-track minimum-width bar (AUX.2).
+        # The 3 g neighbour isolates spacing from the minimum-width track rule.
         _fail(r + "S.1", [bar(0, g), bar(2 * g - D, 3 * g)], ids("AUX.1")),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, 3 * g)]),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, g)]),
@@ -1409,8 +1773,7 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
         _pass(r + "S.2", [bar(0, g, 0, 100), bar(0, g, 140, 240)]),
         _fail(r + "AUX.1", [bar(g / 2, 3 * g)]),
         _pass(r + "AUX.1", [bar(g, 3 * g)]),
-        # A minimum-width bar between tracks 0 and 1 (on the g grid, off the
-        # 2 g track pitch).
+        # On the g grid but between the 2 g tracks.
         _fail(r + "AUX.2", [bar(g, g)]),
         _pass(r + "AUX.2", [bar(2 * g, g)]),
         _fail(
@@ -1681,8 +2044,8 @@ def _top_metal_cases(layer: str) -> list[Case]:
     return c
 
 
-#: V8 / V9 -> (metal below, metal above or None: PAD is not read).
-_TOP_VIAS: dict[str, tuple[str, str | None]] = {"V8": ("M8", "M9"), "V9": ("M9", None)}
+#: V8 / V9 -> (metal below, layer above: M9 for V8, PAD for V9).
+_TOP_VIAS: dict[str, tuple[str, str | None]] = {"V8": ("M8", "M9"), "V9": ("M9", "PAD")}
 
 
 def _top_via_one(via: str, lo: str, up: str | None) -> list[Case]:
@@ -1788,9 +2151,14 @@ def all_cases() -> list[Case]:
         *_active_cases(),
         *_gcut_cases(),
         *_select_cases(),
+        *_thickox_cases(),
+        *_sram_cases(),
         *_sdt_cases(),
         *_lisd_cases(),
         *_lig_cases(),
+        *_sram_sdt_cases(),
+        *_sram_lisd_cases(),
+        *_sram_lig_cases(),
         *_net_cases(),
         *_v0_cases(),
         *_metal_cases("M1"),

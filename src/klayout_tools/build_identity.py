@@ -62,9 +62,10 @@ tag, a ``pip install git+...@<tag>`` snapshot of that same tag, and an
 editable checkout that has moved past it on ``main`` can all report
 overlapping or identical version strings while grading a tier-verdict report
 by different rules. :func:`grading_ruleset_id` is a content hash of the
-shipped ``signoff.py`` module, so two installs of byte-identical grading code
-report the same id regardless of how each was installed, and any edit to
-that module's logic changes it. ``klt version --format json`` reports it
+shipped ``signoff*.py`` grading modules, so two installs of byte-identical
+grading code report the same id regardless of how each was installed, and
+any edit to any of those modules' logic changes it. ``klt version --format
+json`` reports it
 alongside the rest of the build identity, and it is echoed into every
 tier-verdict/fleet report's own ``build`` block (``signoff.py``'s
 ``_BUILD_IDENTITY_FIELDS``) so a committed report names the grading rules
@@ -73,6 +74,7 @@ that produced it, not just the source checkout.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import re
@@ -247,7 +249,7 @@ def _checkout_version(directory: str | None = None) -> str | None:
     return _version_scheme.version_for_checkout(root, base)
 
 
-def _klayout_version() -> str | None:
+def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build actually
     resolved into this process), or ``None`` when unresolvable.
 
@@ -324,70 +326,47 @@ def klayout_version_expected() -> str | None:
     return _checkout_klayout_version_expected()
 
 
-def _grading_module_path() -> str:
-    """Absolute path to ``signoff.py`` next to this module, in whichever
-    install layout is running -- a wheel unpacks it into ``site-packages``
-    beside this file, an editable/source install has it in the same
-    ``src/klayout_tools`` directory. Never imports the module itself: this
-    only needs its *bytes*, not its behaviour, and ``signoff.py`` already
-    imports :func:`version_report` from this module, so importing back would
-    be circular.
-    """
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "signoff.py")
+def _grading_module_paths() -> list[str]:
+    """Find shipped signoff modules beside this file, ordered by basename."""
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        names = os.listdir(package_dir)
+    except OSError:
+        return []
+    return [
+        os.path.join(package_dir, name)
+        for name in sorted(names)
+        if fnmatch.fnmatch(name, "signoff*.py")
+    ]
 
 
 def grading_ruleset_id() -> str | None:
-    """A content hash identifying the grading rules ``klt signoff``'s
-    tier-verdict mode ships in *this* build (issue #2216) -- the missing
-    half ``git_commit``/``git_tag`` cannot answer.
+    """Identify the installed grading rules by their source bytes (#2216, #7434).
 
-    Three installs can report the exact same ``klt`` version string while
-    grading a tier-verdict report by different rules: a registry wheel built
-    from a release tag, a ``pip install git+...@<tag>`` snapshot of that
-    same tag, and a full-repo checkout that has moved past the tag on
-    ``main``. ``git_commit``/``git_tag`` identify the *source checkout* each
-    of those was built from, not the grading logic actually compiled into
-    the running build -- and a consumer who commits a tier-verdict report as
-    evidence has no way to tell, from ``klt version`` alone, which grading
-    rules produced it.
+    Hash every shipped ``signoff*.py`` module in basename order, including each
+    basename and a NUL before its contents. Wheels and checkouts with identical
+    files then agree, while a change to a grading leaf or its name changes the
+    digest. Reading the files directly also avoids importing the grader here.
 
-    Deliberately a **content** hash of the shipped ``signoff.py`` module
-    rather than something derived from ``git_commit``:
+    Modules outside the ``signoff*.py`` family (``design_evidence_tiers.py``,
+    ``coverage.py``, ``metrics.py``, ...) are deliberately not covered; the
+    T1 checklist doc itself is covered separately by the report's
+    ``source_doc_content_hash``.
 
-    - Two installs built from the *same* commit -- a PyPI-published wheel
-      and a ``git+...`` snapshot of the same release tag -- ship
-      byte-identical ``signoff.py`` source and must report the *same* id,
-      with no shared git history to compare against (a wheel's
-      ``site-packages`` install carries no ``.git`` directory at all).
-      Hashing the file achieves that for free; comparing commits does not.
-    - An edit to ``signoff.py``'s grading logic changes this id even when
-      unrelated files elsewhere in the repo also changed in the same commit
-      -- a stable, scoped answer to "did the grading rules change", rather
-      than the much coarser "did *anything* change" ``git_commit`` answers.
-
-    Hashes the **whole** ``signoff.py`` module (not just its per-item
-    grading functions): the module has no sharp internal boundary between
-    "grading logic" and "everything else" that would not itself need
-    updating -- and require re-verification -- every time a helper is
-    renamed or refactored across that line. A doc-only edit inside
-    ``signoff.py`` (e.g. a docstring correction) does move this id; that
-    false-positive is the deliberately conservative trade-off for never
-    missing a real grading-logic change, mirroring
-    :func:`~.design_evidence_tiers.parse_tier_doc`'s own whole-file
-    ``content_hash`` for the checklist doc (issue #2175) rather than a
-    narrower, harder-to-keep-accurate per-item extraction.
-
-    ``None`` only in the pathological case where the shipped module cannot
-    be read at all (e.g. a corrupted or hand-truncated install) -- never
-    fabricated.
+    Return None if the orchestrator is missing or any grading file is unreadable.
     """
-    path = _grading_module_path()
-    if not os.path.isfile(path):
+    paths = _grading_module_paths()
+    if not any(os.path.basename(path) == "signoff.py" for path in paths):
         return None
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    try:
+        for path in paths:
+            digest.update(os.path.basename(path).encode("utf-8") + b"\x00")
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+    except OSError:
+        return None
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -422,6 +401,25 @@ def build_version() -> str:
     return live if live is not None else __version__
 
 
+_REPO_URL = "https://github.com/2AMLogic/klayout-tools"
+
+
+def reinstall_spec(ident: dict[str, Any], version: str) -> str | None:
+    """A ``uvx --from``/``pip install`` spec that re-obtains this build (issue #3985).
+
+    A release is resolvable from the index by version. A ``.devN+g<sha>``
+    build is not published anywhere, but its commit is installable from git.
+    ``None`` means "not reinstallable": a dirty tree (the working-tree edits
+    exist nowhere else) or no recorded commit (e.g. ``X.Y.Z.dev0+unknown``).
+    """
+    if ident.get("is_release") is True:
+        return f"klayout-tools=={version}"
+    commit = ident.get("git_commit")
+    if commit and ident.get("dirty") is False:
+        return f"klayout-tools @ git+{_REPO_URL}@{commit}"
+    return None
+
+
 def version_report() -> dict[str, Any]:
     """The ``klt version`` JSON payload (``docs/json-contract.md``).
 
@@ -450,6 +448,8 @@ def version_report() -> dict[str, Any]:
         "git_tag": ident["git_tag"],
         "dirty": ident["dirty"],
         "is_release": ident["is_release"],
+        # Issue #3985: how to get this build back, or null when it cannot be.
+        "reinstall_spec": reinstall_spec(ident, build_version()),
         # Issue #2216: a content hash of the grading rules `klt signoff`'s
         # tier-verdict mode ships -- distinct from git_commit/git_tag, which
         # identify the checkout, not the grading code. See
@@ -460,6 +460,6 @@ def version_report() -> dict[str, Any]:
         # and the version this build/commit was tested against -- a caller
         # can detect a drifted engine before trusting a "reproduced" report
         # without waiting for a `klt drc`/`klt lvs` run to say so.
-        "klayout_version": _klayout_version(),
+        "klayout_version": klayout_version(),
         "klayout_version_expected": klayout_version_expected(),
     }
