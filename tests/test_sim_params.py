@@ -390,8 +390,10 @@ def test_deck_without_params_is_unchanged():
         "save all",
         "alter v1=2.0",
         "op ",
+        "echo klt_expr_begin i",
         "let i = i(v1)",
         "print i",
+        "echo klt_expr_end",
         "quit",
         ".endc",
     ]
