@@ -53,6 +53,7 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import sim_measurement_kind, sim_noise_contributors, sim_noise_mechanism
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: Spectrum vectors of ngspice's first noise plot, aliased by bare name
@@ -87,12 +88,7 @@ def swept_range(analysis: dict[str, Any]) -> tuple[str, float, float] | None:
 
 
 def _positive_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value
-        and 0 < value < float("inf")
-    )
+    return is_finite_number(value) and value > 0
 
 
 def validate_noise_spec(name: Any, body: Any) -> None:

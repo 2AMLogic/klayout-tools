@@ -453,9 +453,7 @@ def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int
         candidates = [i for i in candidates if points[i]["process"] == process]
     temperature_c = sizing_spec.get("temperature_c")
     if temperature_c is not None:
-        if isinstance(temperature_c, bool) or not isinstance(
-            temperature_c, (int, float)
-        ):
+        if not is_number(temperature_c):
             raise SizeError("request.corners.sizing.temperature_c must be a number")
         candidates = [
             i for i in candidates if points[i]["temperature_c"] == float(temperature_c)

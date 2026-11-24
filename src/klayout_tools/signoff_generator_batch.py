@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, remote_transport, sim_batch
+from ._jsonnum import is_number
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -207,11 +208,7 @@ def _parse_approval(index: int, raw: Any) -> GeneratorApproval:
             f"{label}.allowed_arguments must be a list of string lists"
         )
     timeout_s = raw.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if (
-        isinstance(timeout_s, bool)
-        or not isinstance(timeout_s, (int, float))
-        or not 0 < timeout_s <= MAX_TIMEOUT_S
-    ):
+    if not is_number(timeout_s) or not 0 < timeout_s <= MAX_TIMEOUT_S:
         raise GeneratorApprovalError(
             f"{label}.timeout_s must be a number in (0, {int(MAX_TIMEOUT_S)}]"
         )

@@ -3146,11 +3146,7 @@ def _prepare_sim_request(
 
     budget_s = budget_s if budget_s is not None else options.get("wall_clock_budget_s")
     if budget_s is not None:
-        if (
-            not isinstance(budget_s, (int, float))
-            or isinstance(budget_s, bool)
-            or budget_s <= 0
-        ):
+        if not is_number(budget_s) or budget_s <= 0:
             raise SimError(
                 "options.wall_clock_budget_s must be a positive number of seconds"
             )

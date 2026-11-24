@@ -881,29 +881,21 @@ def _validate_power(
             )
 
         width_um = strap.get("width_um")
-        if (
-            not isinstance(width_um, (int, float))
-            or isinstance(width_um, bool)
-            or width_um <= 0
-        ):
+        if not is_number(width_um) or width_um <= 0:
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].width_um is required and must be a "
                 "positive number"
             )
 
         pitch_um = strap.get("pitch_um")
-        if (
-            not isinstance(pitch_um, (int, float))
-            or isinstance(pitch_um, bool)
-            or pitch_um <= 0
-        ):
+        if not is_number(pitch_um) or pitch_um <= 0:
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].pitch_um is required and must be a "
                 "positive number"
             )
 
         offset_um = strap.get("offset_um", 0.0)
-        if not isinstance(offset_um, (int, float)) or isinstance(offset_um, bool):
+        if not is_number(offset_um):
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].offset_um must be a number when given"
             )
@@ -920,11 +912,7 @@ def _validate_power(
         # required to have >= 2 straps: it describes this stripe's own
         # power/ground pairing, independent of any other strap.
         spacing_um = strap.get("spacing_um")
-        if spacing_um is not None and (
-            not isinstance(spacing_um, (int, float))
-            or isinstance(spacing_um, bool)
-            or spacing_um <= 0
-        ):
+        if spacing_um is not None and (not is_number(spacing_um) or spacing_um <= 0):
             raise PlaceAndRouteError(
                 f"request.power.straps[{i}].spacing_um must be a positive "
                 "number when given"
@@ -1033,11 +1021,7 @@ def _validate_power(
                         "required and must be a non-empty string"
                     )
                 sc_width_um = split_cuts.get("width_um")
-                if (
-                    not isinstance(sc_width_um, (int, float))
-                    or isinstance(sc_width_um, bool)
-                    or sc_width_um <= 0
-                ):
+                if not is_number(sc_width_um) or sc_width_um <= 0:
                     raise PlaceAndRouteError(
                         f"request.power.connects[{i}].split_cuts.width_um is "
                         "required and must be a positive number"
@@ -1217,9 +1201,7 @@ def _validate_macros(
             )
 
         for key in ("x_um", "y_um"):
-            if not isinstance(macro.get(key), (int, float)) or isinstance(
-                macro.get(key), bool
-            ):
+            if not is_number(macro.get(key)):
                 raise PlaceAndRouteError(
                     f"{label}.{key} is required and must be a number"
                 )
@@ -1530,11 +1512,7 @@ def _validate_constraints(
 
     max_transition_ns = constraints.get("max_transition_ns")
     if max_transition_ns is not None:
-        if not (
-            isinstance(max_transition_ns, (int, float))
-            and not isinstance(max_transition_ns, bool)
-            and max_transition_ns > 0
-        ):
+        if not (is_number(max_transition_ns) and max_transition_ns > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_transition_ns must be a positive number"
             )
@@ -1542,11 +1520,7 @@ def _validate_constraints(
 
     max_capacitance_pf = constraints.get("max_capacitance_pf")
     if max_capacitance_pf is not None:
-        if not (
-            isinstance(max_capacitance_pf, (int, float))
-            and not isinstance(max_capacitance_pf, bool)
-            and max_capacitance_pf > 0
-        ):
+        if not (is_number(max_capacitance_pf) and max_capacitance_pf > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_capacitance_pf must be a positive number"
             )
@@ -1554,11 +1528,7 @@ def _validate_constraints(
 
     max_fanout = constraints.get("max_fanout")
     if max_fanout is not None:
-        if not (
-            isinstance(max_fanout, (int, float))
-            and not isinstance(max_fanout, bool)
-            and max_fanout > 0
-        ):
+        if not (is_number(max_fanout) and max_fanout > 0):
             raise PlaceAndRouteError(
                 "request.constraints.max_fanout must be a positive number"
             )
@@ -1597,13 +1567,7 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     (issue #1865): optional, and a non-negative number when given."""
     if value is None:
         return None
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or value < 0
-        or value != value  # NaN
-        or value in (float("inf"), float("-inf"))
-    ):
+    if not is_finite_number(value) or value < 0:
         raise PlaceAndRouteError(
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )
