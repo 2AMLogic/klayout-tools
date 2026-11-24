@@ -319,7 +319,9 @@ from .signoff_power_delivery import (
 from .signoff_row_extent import has_covers, invalid_covers, label_list
 from .signoff_runset import (
     PINNED_RUNSETS,
+    REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
     check_runset,
+    mirrored_inductor_limitation,
     runset_disclosure,
     unrecognised_device_gaps,
 )
@@ -2752,12 +2754,10 @@ def _non_passing_reason(
     """Why a non-passing envelope of a kind this item accepts is not
     evidence: :data:`_REASON_NOTHING_CHECKED` (issue #5479),
     :data:`_REASON_PARTIAL_COVERAGE` or :data:`_REASON_CHECK_FAILED`
-    (issue #2109).
-
-    :data:`_REASON_NOTHING_CHECKED` is decided here as well as in
-    :func:`_kind_gated_check` because an envelope reporting the rollup's
-    zero-coverage token fails :func:`_check_passed` and so never reaches that
-    function -- see :mod:`klayout_tools.signoff_nothing_checked`.
+    (issue #2109). The zero-coverage reason is decided here as well as in
+    :func:`_kind_gated_check`: such an envelope fails
+    :func:`_check_passed`, so it never reaches that function (see
+    :mod:`klayout_tools.signoff_nothing_checked`).
 
     Real failures keep precedence over both the zero-coverage and the partial
     token, by two different mechanisms -- only one of which is structural
@@ -2766,15 +2766,14 @@ def _non_passing_reason(
     - *Producer-side*, by construction: a run that found a defect reports
       its *failure* token, never the partial one
       (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
-      before it ever consults coverage), so those two tokens are disjoint
-      at the producer and reading which one was reported is enough.
+      before it ever consults coverage), so reading which one was reported
+      is enough.
     - *Signoff-side*, by the ordering below: :func:`_check_passed` fails an
       envelope off :func:`_critical_metric_blockers` (issue #1850)
       regardless of what its ``status`` says, so a partial token and a
-      failing registered ``critical: true`` metric can and do co-occur on
-      one envelope. That case is decided **here**, not at the producer --
-      the blocker is a real, mechanically-detected defect, so it must not
-      be reported as a mere coverage gap, and the check for it therefore
+      failing ``critical: true`` metric can co-occur on one envelope. That
+      case is decided **here**: the blocker is a real, mechanically-detected
+      defect that must not read as a mere coverage gap, so the check for it
       runs *before* the status token is read.
     """
     if _critical_metric_blockers(envelope):
@@ -2782,10 +2781,9 @@ def _non_passing_reason(
     # Issue #5479: a run whose own rollup token says it covered nothing, its
     # `coverage` block agreeing (never `coverage_unknown`/`malformed_coverage`
     # /`no_limits_checked`, each of which keeps its own reason) and the item
-    # accepting the kind, so a wrong artifact is not relabelled as a thin one.
-    # Directly after the blocker gate and nowhere earlier: a detected defect
-    # outranks a coverage statement, while every reason below reads a
-    # *different* status token, so none can co-occur with this one.
+    # accepting the kind, so a wrong artifact is not relabelled as a thin
+    # one. Directly after the blocker gate: a detected defect outranks a
+    # coverage statement, and every reason below reads a *different* token.
     if (
         vacuous.reports_zero_coverage(envelope)
         and _kind_is_accepted(kind, allowed_kinds)
@@ -2795,14 +2793,17 @@ def _non_passing_reason(
     # Issue #2870: a runset report that matched only the devices it knew.
     if (
         kind == "lvs"
+        and envelope.get("engine") == "klayout-runset"
         and envelope.get("status") == "match"
         and unrecognised_device_gaps(envelope)
-        and envelope.get("engine") == "klayout-runset"
     ):
         return _REASON_RUNSET_UNRECOGNISED_DEVICE
+    # Issue #6903: a runset report failing with the mirrored-inductor2
+    # terminal-order limit names it, not a bare check_failed.
+    if kind == "lvs" and mirrored_inductor_limitation(envelope) is not None:
+        return REASON_RUNSET_INDUCTOR_TERMINAL_ORDER
     # Issue #2873: a `klt yield` run whose only shortfall is evidence
-    # (`min_converged_samples` unmet, or a `target_sigma` that could not be
-    # evaluated) is "draw more / fix the sample set", not a design defect.
+    # (`min_converged_samples` unmet, a `target_sigma` unevaluable).
     if kind == "yield" and envelope.get("status") == "insufficient_evidence":
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
@@ -2810,12 +2811,9 @@ def _non_passing_reason(
     if _generic_overstates_coverage(kind, cast(_EvidenceEnvelope, envelope)):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
-    # rules it deliberately omitted is a coverage gap, not a defect.
-    if (
-        kind == "drc"
-        and envelope.get("status") == "clean"
-        and _drc_rule_subset(envelope)
-    ):
+    # rules it omitted is a coverage gap, not a defect.
+    drc_clean = envelope.get("status") == "clean" and _drc_rule_subset(envelope)
+    if kind == "drc" and drc_clean:
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
 
@@ -3228,9 +3226,9 @@ def _check_input_hashes(
     comparison exactly as before instead of dropping into a bucket of its
     own and quietly weakening the gate.
 
-    A merged sim report compares on its common shard digest. Mixed or
-    missing shard hashes produce a mismatch even within one report.
-    The mismatch preserves the original values and their artifact role.
+    Mixed or missing shard hashes in a merged sim report also produce a
+    mismatch. Each disagreeing role gets one entry with ``field`` set to
+    ``"input.content_hash"``, that ``role``, and its original ``values``.
     """
     by_role: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
