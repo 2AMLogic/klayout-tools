@@ -378,7 +378,15 @@ from . import (
     RuleProvenance,
 )
 from .sky130_lvt import lvt_mos_flavour
+from .sky130_offgrid import (  # noqa: F401
+    _OFFGRID_ROWS,
+    OFFGRID_GRID_UM,
+    OFFGRID_UNCHECKED_LAYERS,
+    offgrid_rules,
+)
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
+
+DRC_RULE_SOURCES = ("sky130_offgrid", "sky130_unmodeled")
 
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
@@ -742,6 +750,8 @@ DECK: list[DrcRule] = [
         layer=(68, 20),  # met1.drawing
         other_layer=(67, 44),  # mcon.drawing
         check="enclosing",
+        # #5737: every mcon lands on met1
+        require_containment=True,
         threshold_dbu=30,  # 0.03 um
         # sky130.lydrc rule "m1.4": not_in_cell6_m1.enclosing(mcon, 0.03, euclidian)
         # -> "m1.4 : min. m1 enclosure of mcon : 0.03um"
@@ -906,6 +916,8 @@ DECK: list[DrcRule] = [
         layer=(67, 20),  # li1.drawing -- the conductor *above* the cut
         other_layer=(66, 44),  # licon1.drawing
         check="enclosing",
+        # #5737: every licon (diff, tap and poly) lands on li1
+        require_containment=True,
         threshold_dbu=0,  # 0.0 um -- see the approximation note below
         # sky130A_mr.drc rule "li.5":
         #   li.enclosing(licon_peri, 0.08, projection).second_edges
@@ -1067,6 +1079,8 @@ DECK: list[DrcRule] = [
         layer=(68, 20),  # met1.drawing
         other_layer=(68, 44),  # via.drawing
         check="enclosing",
+        # #5737: every via cut lands on met1 (met1<->met2)
+        require_containment=True,
         threshold_dbu=55,  # 0.055 um
         # sky130A_mr.drc rule "via.4a": m1.edges.enclosing(via, 0.055,
         # euclidian) -> "via.4a : min. m1 enclosure of 0.15um via : 0.055um"
@@ -1097,6 +1111,8 @@ DECK: list[DrcRule] = [
         layer=(69, 20),  # met2.drawing
         other_layer=(68, 44),  # via.drawing
         check="enclosing",
+        # #5737: every via cut lands on met2 (met1<->met2)
+        require_containment=True,
         threshold_dbu=55,  # 0.055 um
         # sky130A_mr.drc rule "m2.4": m2.enclosing(via_outside_periphery,
         # 0.055, euclidian) -> "m2.4 : min. m2 enclosure of via : 0.055um"
@@ -1227,6 +1243,8 @@ DECK: list[DrcRule] = [
         layer=(69, 20),  # met2.drawing
         other_layer=(69, 44),  # via2.drawing
         check="enclosing",
+        # #5737: every via2 cut lands on met2 (met2<->met3)
+        require_containment=True,
         threshold_dbu=40,  # 0.04 um
         # sky130A_mr.drc rule "via2.4": m2.enclosing(via2, 0.04, euclidian)
         # -> "via2.4 : min. m2 enclosure of via2 : 0.04um"
@@ -1239,6 +1257,8 @@ DECK: list[DrcRule] = [
         layer=(70, 20),  # met3.drawing
         other_layer=(69, 44),  # via2.drawing
         check="enclosing",
+        # #5737: every via2 cut lands on met3 (met2<->met3)
+        require_containment=True,
         threshold_dbu=65,  # 0.065 um
         # sky130A_mr.drc rule "m3.4": m3.enclosing(via2, 0.065, euclidian)
         # -> "m3.4 : min. m3 enclosure of via2 : 0.065um"
@@ -1392,6 +1412,8 @@ DECK: list[DrcRule] = [
         layer=(71, 20),  # met4.drawing
         other_layer=(70, 44),  # via3.drawing
         check="enclosing",
+        # #5737: every via3 cut lands on met4 (capm via3 still reaches met4)
+        require_containment=True,
         threshold_dbu=65,  # 0.065 um
         # sky130A_mr.drc rule "m4.3": m4.enclosing(via3, 0.065, euclidian)
         # -> "m4.3 : min. m4 enclosure of via3 : 0.065um"
@@ -1506,6 +1528,8 @@ DECK: list[DrcRule] = [
         layer=(72, 20),  # met5.drawing
         other_layer=(71, 44),  # via4.drawing
         check="enclosing",
+        # #5737: every via4 cut lands on met5 (capm2 via4 still reaches met5)
+        require_containment=True,
         threshold_dbu=310,  # 0.31 um
         # sky130A_mr.drc rule "m5.3": m5.enclosing(via4, 0.31, euclidian)
         # -> "m5.3 : min. m5 enclosure of via4 : 0.31um"
@@ -1759,236 +1783,10 @@ DECK: list[DrcRule] = [
     ),
 ]
 
-# ---------------------------------------------------------------------------
-# Manufacturing-grid / corner-angle rules -- the source deck's own `OFFGRID`
-# rule group (issue #2642)
-# ---------------------------------------------------------------------------
-#
-# `sky130.lydrc` declares three rule groups it can run, as plain Ruby locals
-# near the top of the script:
-#
-#     FEOL    = false # front-end-of-line checks
-#     BEOL    = true # back-end-of-line checks
-#     OFFGRID = true # manufacturing grid/angle checks
-#
-# -- i.e. the grid/angle group is **on by default** in the deck a foundry
-# signs off against, and (unlike `FEOL`) is not one of the groups that ships
-# switched off. Until this issue the curated deck transcribed nothing from it
-# at all, on any layer: `klt drc`'s "clean" verdict was silent about a defect
-# class the real deck actively flags, and the only way to notice was to
-# cross-check a `klt precheck --grid-um 0.005` census (a separate,
-# deck-independent, caller-supplied check -- see `docs/cli/precheck.md`)
-# against a clean `klt drc` run on the same layout.
-#
-# The group's body is one or two calls per drawn layer:
-#
-#     dnwell.ongrid(0.005).output("dnwell_OFFGRID", "x.1b : OFFGRID vertex on dnwell")
-#     dnwell.with_angle(0 .. 45).output("dnwell_angle",
-#                                    "x.3a : non 45 degree angle dnwell")
-#
-# so the transcription below is a table with one row per source-deck layer,
-# in the source block's own line order, rather than ~75 near-identical
-# `DrcRule(...)` literals: a row-per-source-line table can be diffed directly
-# against that contiguous section of the upstream file, which is the property
-# that makes a transcription of this size reviewable. The rules it builds are
-# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below), and
-# they live in *this* module on purpose -- `decks.deck_source_path()` hashes
-# this file as the deck's identity for `provenance.deck.content_hash`, so a
-# rule table moved to a sibling module would be invisible to that hash.
-#
-# Grid: **0.005um for every checked layer**, verbatim -- the source block
-# passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer
-# variation to get wrong. Expressed as `grid_um` (a real physical distance
-# rescaled against the layout's own dbu), not `threshold_dbu`; see that
-# field's docstring in `decks/rules.py`.
-#
-# Angle: two published limits, per layer, under two official rule ids --
-# `x.3a` ("non 45 degree angle <layer>", `with_angle(0 .. 45)`) on the
-# implant/well/metal layers, and `x.2` ("non 90 degree angle <layer>",
-# `with_angle(0 .. 90)`) on poly, the cut/via layers, and `mf`. What the
-# upstream primitive actually enforces is a *minimum interior corner angle*,
-# not "every edge lies on a multiple of 45 degrees" -- see
-# `DrcRule.angle_limit_deg` and `drc.py`'s `_run_angle_check` for the
-# verified semantics. This deck transcribes the primitive and the value the
-# source deck uses, and documents the gap, rather than "correcting" the rule
-# into something whose verdict is no longer comparable to the PDK deck's own.
-#
-# Two deliberate deviations, both recorded rather than silently defaulted:
-#
-# 1. `diff`/`tap` angle: the source deck does not apply one limit to these
-#    two layers. It splits each by a *three-input derived* layer --
-#
-#        diff.not(areaid_en.and(uhvi)).with_angle(0 .. 90) -> "x.2"
-#        diff.and(areaid_en.and(uhvi)).with_angle(0 .. 45) -> "x.2c"
-#
-#    -- i.e. 90 degrees outside the extended-drain/ultra-high-voltage marker
-#    intersection and 45 degrees inside it. `DerivedLayer` combines exactly
-#    two drawn layers, so neither half is expressible here. Both rows below
-#    therefore transcribe the **45-degree floor** (`x.2c`), the weaker of the
-#    two limits: every corner it flags is also flagged by the official deck
-#    (a corner under 45 degrees is under 90 too), so this can only
-#    under-report, never produce a finding the real deck would not. That is
-#    the same "transcribe the unconditional floor rather than the published
-#    conditional value" pattern this module's own threshold-fidelity note
-#    (see the module docstring, `li1.enclosing.licon1.1`/
-#    `tap.enclosing.licon.1`) already established. These two rules are also
-#    the only ones in this group left `voltage_independent=False`: their
-#    source rule genuinely publishes two columns, so the
-#    `coverage.voltage_domain_warnings` gate's "may have applied the wrong
-#    column" premise does hold for them (issue #552/#2369). Every other row
-#    here publishes a single value for every layer and voltage domain, which
-#    is what `voltage_independent=True` asserts.
-#
-# 2. `areaid_re` (areaid.rfdiode, 81/125) is checked `ongrid` but has **no
-#    `with_angle` call in the OFFGRID block at all** -- the one layer in the
-#    block with a grid check and no angle check. Its angle constraint lives
-#    in the `FEOL` block instead, as a differently-identified rule
-#    (`areaid_re.with_angle(0 .. 90).output("rfdiode.1", ...)`), which this
-#    deck does not transcribe. So its row below carries `None` for the angle
-#    limit and this deck emits no `areaid_re.angle.*` rule: an absence copied
-#    from the source, not an omission by oversight.
-#
-# Layers the OFFGRID block checks *neither* grid nor angle on are recorded in
-# `OFFGRID_UNCHECKED_LAYERS` below rather than left to inference.
+# Manufacturing-grid / corner-angle rules live in `sky130_offgrid` (pure move,
+# file-size ceiling; issue #2642).
+DECK += offgrid_rules(_sky130_provenance)
 
-#: The manufacturing grid every `ongrid` call in `sky130.lydrc`'s OFFGRID
-#: block passes, in micrometres (`layer.ongrid(0.005)`, 38 call sites, one
-#: literal). Also the grid a caller would pass to `klt precheck --grid-um`
-#: for this PDK.
-OFFGRID_GRID_UM = 0.005
-
-#: One row per layer `sky130.lydrc`'s `if OFFGRID ... end` block checks, in
-#: that block's own line order:
-#: ``(rule-id stem, (layer, datatype), angle limit in degrees or None,
-#: official angle rule id)``. The stem is this deck's own layer naming (so
-#: `m1` -> `met1`, matching `met1.width.1` et al.); the trailing comment on
-#: each row is the source deck's own variable name where it differs. An
-#: angle limit of `None` means the source block emits no `with_angle` call
-#: for that layer (see note 2 above).
-_OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], float | None, str], ...] = (
-    ("dnwell", (64, 18), 45.0, "x.3a"),
-    ("nwell", (64, 20), 45.0, "x.3a"),
-    ("pwbm", (19, 44), 45.0, "x.3a"),
-    ("pwde", (124, 20), 45.0, "x.3a"),
-    ("hvtp", (78, 44), 45.0, "x.3a"),
-    ("hvtr", (18, 20), 45.0, "x.3a"),
-    ("lvtn", (125, 44), 45.0, "x.3a"),
-    ("ncm", (92, 44), 45.0, "x.3a"),
-    # `x.2`/`x.2c` pair, transcribed at the 45-degree floor -- see note 1.
-    ("diff", (65, 20), 45.0, "x.2c"),
-    ("tap", (65, 44), 45.0, "x.2c"),
-    ("tunm", (80, 20), 45.0, "x.3a"),
-    ("poly", (66, 20), 90.0, "x.2"),
-    ("rpm", (86, 20), 45.0, "x.3a"),
-    ("npc", (95, 20), 45.0, "x.3a"),
-    ("nsdm", (93, 44), 45.0, "x.3a"),
-    ("psdm", (94, 20), 45.0, "x.3a"),
-    ("licon1", (66, 44), 90.0, "x.2"),  # source deck: `licon`
-    ("li1", (67, 20), 45.0, "x.3a"),  # source deck: `li`
-    ("mcon", (67, 44), 90.0, "x.2"),
-    ("vpp", (82, 64), 45.0, "x.3a"),  # lyt layer-map: `capacitor.drawing`
-    ("met1", (68, 20), 45.0, "x.3a"),  # source deck: `m1`
-    ("via", (68, 44), 90.0, "x.2"),
-    ("met2", (69, 20), 45.0, "x.3a"),  # source deck: `m2`
-    ("via2", (69, 44), 90.0, "x.2"),
-    ("met3", (70, 20), 45.0, "x.3a"),  # source deck: `m3`
-    ("via3", (70, 44), 90.0, "x.2"),
-    ("nsm", (61, 20), 45.0, "x.3a"),
-    ("met4", (71, 20), 45.0, "x.3a"),  # source deck: `m4`
-    ("via4", (71, 44), 90.0, "x.2"),
-    ("met5", (72, 20), 45.0, "x.3a"),  # source deck: `m5`
-    ("pad", (76, 20), 45.0, "x.3a"),
-    ("mf", (76, 44), 90.0, "x.2"),  # lyt layer-map: `target.drawing`
-    ("hvi", (75, 20), 45.0, "x.3a"),
-    ("hvntm", (125, 20), 45.0, "x.3a"),
-    ("vhvi", (74, 21), 45.0, "x.3a"),
-    ("uhvi", (74, 22), 45.0, "x.3a"),
-    ("pwell_rs", (64, 13), 45.0, "x.3a"),  # lyt layer-map: `pwell.res`
-    # Grid-checked, angle-unchecked in the OFFGRID block -- see note 2.
-    ("areaid_re", (81, 125), None, ""),
-)
-
-#: Layers the source deck defines and this curated deck otherwise models, but
-#: which `sky130.lydrc`'s OFFGRID block checks **neither** grid nor angle on
-#: -- recorded so a reader can tell a transcribed absence from an untranscribed
-#: one (issue #2642's own "never silently default" requirement). Verified by
-#: reading every call in that block: the names below appear nowhere in it.
-#:
-#: The two MiM-capacitor top-plate marks are the interesting case, and exactly
-#: the "a layer is exempted while everything that contacts it is checked"
-#: shape the issue describes: `capm`/`capm2` carry width/space/enclosure rules
-#: in this deck (`capm.width.1`, ...) and sit directly on top of `via3`/`via4`
-#: and `met3`/`met4`, every one of which *is* grid- and angle-checked. So a
-#: layout whose MiM top plate is off-grid stays clean here, not because this
-#: deck declined to transcribe the rule but because the source deck declines
-#: to make it.
-OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
-    (89, 44): "capm.drawing -- no ongrid/with_angle call in the OFFGRID block",
-    (97, 44): "capm2.drawing (source deck `cap2m`) -- likewise unchecked",
-    (82, 44): "pnp.drawing -- device-recognition mark, not a patterned layer",
-    (79, 20): "urpm.drawing -- no ongrid/with_angle call in the OFFGRID block",
-}
-
-
-def _offgrid_rules() -> list[DrcRule]:
-    """Build the `DrcRule` entries for `_OFFGRID_ROWS` (issue #2642).
-
-    One `"ongrid"` rule per row, plus one `"angle"` rule for every row whose
-    source line emits a `with_angle` call. Every value comes from the table
-    above or from `OFFGRID_GRID_UM`; nothing is inferred here.
-    """
-    rules: list[DrcRule] = []
-    for stem, layer, angle_limit_deg, angle_rule_id in _OFFGRID_ROWS:
-        rid = native_output_id(stem, "OFFGRID", "x.1b")
-        rules.append(
-            DrcRule(
-                id=f"{stem}.ongrid.1",
-                description=(
-                    f"{stem} vertices must be on the "
-                    f"{OFFGRID_GRID_UM}um manufacturing grid"
-                ),
-                layer=layer,
-                check="ongrid",
-                threshold_dbu=0,  # unused by "ongrid" -- see grid_um
-                grid_um=OFFGRID_GRID_UM,
-                # sky130.lydrc OFFGRID block: `<layer>.ongrid(0.005)`
-                # -> "x.1b : OFFGRID vertex on <layer>"
-                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", rid),
-                # One grid for every layer and every voltage domain: the
-                # source block has no second column to have misread (#2369).
-                voltage_independent=True,
-            )
-        )
-        if angle_limit_deg is None:
-            continue
-        rid = native_output_id(stem, "angle", angle_rule_id)
-        rules.append(
-            DrcRule(
-                id=f"{stem}.angle.1",
-                description=(
-                    f"minimum {angle_limit_deg:g}-degree interior corner "
-                    f"angle on {stem}"
-                ),
-                layer=layer,
-                check="angle",
-                threshold_dbu=0,  # unused by "angle" -- see angle_limit_deg
-                angle_limit_deg=angle_limit_deg,
-                # sky130.lydrc OFFGRID block:
-                # `<layer>.with_angle(0 .. <limit>)`
-                # -> "<rule id> : non <limit> degree angle <layer>"
-                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", rid),
-                # `x.2c` is the diff/tap floor of a genuinely two-column
-                # source rule (note 1 above) -- the only rows here that keep
-                # the conservative default.
-                voltage_independent=angle_rule_id != "x.2c",
-            )
-        )
-    return rules
-
-
-DECK += _offgrid_rules()
 
 # (layer, datatype) -> "name.purpose" string, from sky130.lyt's layer-map,
 # used only to render violations[].layer as e.g. "poly.drawing" instead of
@@ -2900,10 +2698,9 @@ PARASITICS = ParasiticsDeck(
         ),
         # met2 (issue #508). sheet: `resist (allm2)/metal2` in the same
         # nominal `variants (),(orig),(si)` block as met1 above (125
-        # milliohms/sq = 0.125 ohm/sq -- identical to met1's own value in
-        # that block); area/perim from the matching nominal
-        # `defaultareacap`/`defaultperimeter allm2 metal2` entries (17.5
-        # aF/um^2, 37.76 aF/um).
+        # milliohms/sq = 0.125 ohm/sq, identical to met1's own value in that
+        # block); area/perim from the matching nominal `defaultareacap`/
+        # `defaultperimeter allm2 metal2` entries (17.5 aF/um^2, 37.76 aF/um).
         LayerRC(
             sheet_res_ohm_sq=0.125,
             sheet_res_high_ohm_sq=0.145,
@@ -2915,8 +2712,8 @@ PARASITICS = ParasiticsDeck(
         # nominal `variants (),(orig),(si)` block as met1/met2 above (47
         # milliohms/sq = 0.047 ohm/sq); area/perim from the matching nominal,
         # non-RERAM `defaultareacap`/`defaultperimeter allm3 metal3` entries
-        # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
-        # same branch met1/met2's own values above were transcribed from).
+        # (12.37 aF/um^2, 40.99 aF/um, the `#else (!RERAM)` branch met1/met2
+        # above were transcribed from too).
         LayerRC(
             sheet_res_ohm_sq=0.047,
             sheet_res_high_ohm_sq=0.056,
@@ -2926,8 +2723,8 @@ PARASITICS = ParasiticsDeck(
         ),
         # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
         # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
-        # milliohms/sq = 0.047 ohm/sq -- identical to met3's own value in
-        # that block); area/perim from the matching nominal, non-RERAM
+        # milliohms/sq = 0.047 ohm/sq, identical to met3's own value in that
+        # block); area/perim from the matching nominal, non-RERAM
         # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
         # aF/um^2, 36.68 aF/um).
         LayerRC(
@@ -2956,12 +2753,12 @@ PARASITICS = ParasiticsDeck(
     # (L5132-5138); high-R: `variants (hrhc),(hrlc)` (L5180-5186); low-R:
     # `variants (lrhc),(lrlc)` (L5228-5234). The high/low *metal* sheet
     # resistances on `metals` above are from L5166-5170 / L5214-5218 (li1 is
-    # `allli`, L5165 / L5213; nominal L5117-5122). Unlike gf180mcu the cuts
-    # differ per layer.
+    # `allli`, L5165 / L5213; nominal L5117-5122); cuts differ per layer.
     # `lower_metal_index` is the level the cut lands on: mcon = li1->met1,
     # m2c = met1->met2, m3c = met2->met3, via3 = met3->met4, via4 =
-    # met4->met5. Not curated: the diffusion/poly contacts (`ndc`, `pdc`,
-    # `pc`, ...), `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack).
+    # met4->met5. Not curated: the diffusion contacts (`ndc`, `pdc`, ...),
+    # `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack); the poly
+    # contact is `poly_contact` below.
     cuts=(
         CutRC("mcon", 0, nominal_ohm=9.3, high_ohm=23.0, low_ohm=1.6),
         CutRC("m2c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=2.0),
@@ -2969,6 +2766,13 @@ PARASITICS = ParasiticsDeck(
         CutRC("via3", 3, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
         CutRC("via4", 4, nominal_ohm=0.38, high_ohm=0.891, low_ohm=0.012),
     ),
+    # The poly->li1 contact (licon, issue #6917): `contact pc,xpc` in the
+    # same three corner blocks as `cuts` above -- nominal `152000` (L5131),
+    # high-R `252000` (L5179), low-R `52000` (L5227), milliohm per cut /
+    # 1000. A separate field, not a `cuts` row: `cuts` is keyed by
+    # `lower_metal_index` between two metals, and poly is not one, so the
+    # index is unused here.
+    poly_contact=CutRC("pc", 0, nominal_ohm=152.0, high_ohm=252.0, low_ohm=52.0),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
     # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
     # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
@@ -2985,10 +2789,9 @@ PARASITICS = ParasiticsDeck(
     # `... nwell,pwell well` and `... allpolynonres active` rows describe
     # overlap onto the substrate/poly the existing `cap_area_ff_um2` ground
     # term already covers, and its non-adjacent rows (e.g. `allm3 metal3
-    # allm1 metal1`) are Stage 2's non-adjacent-level extension, not this one.
-    #
-    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
-    # `cap_area_ff_um2`'s convention above.
+    # allm1 metal1`) are Stage 2's non-adjacent-level extension, not this
+    # one. Magic states these in aF/um^2; divided by 1000 to fF/um^2,
+    # matching `cap_area_ff_um2`'s convention above.
     metal_overlaps=(
         # li1 (idx0) <-> met1 (idx1): `defaultoverlap allm1 metal1 allli
         # locali 114.20`.
@@ -3011,13 +2814,11 @@ PARASITICS = ParasiticsDeck(
     # same-layer coupling (unlike `metal_overlaps`' adjacent-*pair*
     # indexing), so this table has `len(metals)` = 6 entries for this
     # li1..met5 stack. First parameter only (aF/um, divided by 1000 to
-    # fF/um to match `cap_perim_ff_um`'s convention) -- the second
-    # parameter's exact magic distance/scaling semantics are an open
-    # question (docs/design/extract-fidelity-roadmap.md's open question #1),
-    # deliberately not transcribed here (see `metal_sidewall_lookback_um`
-    # below for what this deck uses instead). Transcribed from the same
-    # nominal `variants (),(orig),(si)` block `metal_overlaps` above is
-    # sourced from.
+    # fF/um to match `cap_perim_ff_um`'s convention); the second parameter's
+    # exact magic semantics are an open question (roadmap open question #1),
+    # deliberately not transcribed (see `metal_sidewall_lookback_um` below
+    # for what this deck uses instead). Same nominal `variants (),(orig),
+    # (si)` block `metal_overlaps` above is sourced from.
     metal_sidewalls=(
         # li1 (idx0): `defaultsidewall allli locali 25.5 0.14`.
         0.0255,
@@ -3036,21 +2837,18 @@ PARASITICS = ParasiticsDeck(
     # this deck's own same-layer minimum-spacing DRC rule for that level (see
     # `DECK` above), not magic's own `defaultsidewall` second parameter (see
     # `metal_sidewalls`' comment above for why). Exactly the bare minimum
-    # spacing itself was tried first and rejected: a `separation_check(d)`
-    # only reports edges *closer than* `d`, so a lookback of exactly the
-    # legal minimum can only ever fire on a DRC-*illegal* layout (impossible
-    # on anything `klt drc`-clean) -- measured directly on the routed `gcd`
-    # corpus fixture (`tests/corpus/place_and_route/gcd.gds.gz`) via a raw
-    # `Region.space_check` self-scan per layer: **zero** same-layer facing
-    # pairs at 1x minimum spacing on every populated level (li1/met1/met2/
-    # met3/met4), vs. thousands at 2x (e.g. li1: 0 -> 17 668, met1: 0 -> 7
-    # 793) -- i.e. real detail-routed pitch on this design sits at roughly
-    # double the bare DRC minimum, not at it. 2x is a simple, round,
-    # empirically-grounded choice that captures genuinely near-neighbour
-    # routing on a DRC-clean layout; it is not a decode of magic's own
-    # second parameter (still an open question), and a narrower or
-    # differently-shaped lookback model is a named follow-on, not this
-    # issue's scope.
+    # spacing was tried first and rejected: a `separation_check(d)` only
+    # reports edges *closer than* `d`, so a 1x lookback can only fire on a
+    # DRC-*illegal* layout -- measured directly on the routed `gcd` corpus
+    # fixture (`tests/corpus/place_and_route/gcd.gds.gz`) via a raw
+    # `Region.space_check` self-scan per layer: zero same-layer facing pairs
+    # at 1x minimum spacing on every populated level (li1/met1/met2/met3/
+    # met4) vs. thousands at 2x (li1: 0 -> 17 668, met1: 0 -> 7 793), i.e.
+    # real detail-routed pitch sits at roughly double the bare minimum, not
+    # at it. 2x is a round, empirically-grounded choice that captures
+    # genuinely near-neighbour routing on a DRC-clean layout; it is not a
+    # decode of magic's second parameter (still an open question), and a
+    # narrower lookback model is a named follow-on, not this issue's scope.
     metal_sidewall_lookback_um=(
         0.34,  # li1 (idx0): 2x `li1.space.1` (0.17).
         0.28,  # met1 (idx1): 2x `met1.space.1` (0.14).

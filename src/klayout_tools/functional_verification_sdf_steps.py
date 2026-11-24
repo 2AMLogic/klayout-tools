@@ -1,35 +1,31 @@
-"""SDF-normalization pipeline steps for :func:`run_functional_verification`
-that reach into ``functional_verification`` only lazily, never at runtime
-module scope.
-
-Split out of ``functional_verification.py`` / ``functional_verification_sdf.py``
-because the per-file size ratchet (``scripts/check_file_size_baseline.py``)
-lets those files only shrink; a new step lands here instead (issue #5296).
-"""
+"""SDF-normalization pipeline steps for :func:`run_functional_verification`."""
 
 from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from .functional_verification_base import (
+    SDF_ALIAS_PORT_DROPPED_CLASS,
+    FunctionalVerificationError,
+)
 from .functional_verification_sdf import (
     _SDF_BUS_PORT_TOKEN_RE,
     _SDF_INTERCONNECT_HEAD_RE,
+    _SDF_IOPATH_HEAD_RE,
     _collect_sdf_alias_port_bits,
-    _cut_sdf_spans,
+    _drop_sdf_iopath_arcs,
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_bus_port_source_interconnects,
     _normalize_sdf_header_triples,
     _read_sdf_text,
-    _sdf_cell_celltype,
-    _sdf_cell_entry_removals,
     _sdf_interconnect_is_zero_delay,
     _sdf_iopath_arc,
 )
-
-if TYPE_CHECKING:
-    from .functional_verification import FunctionalVerificationError
+from .functional_verification_sdf_output_concat import (
+    _apply_sdf_output_assign_rewrite,
+)
 
 #: The ``environment.sdf.dropped`` class counting ``COND``-wrapped ``IOPATH``
 #: entries removed before annotation because their condition is an operator
@@ -37,10 +33,15 @@ if TYPE_CHECKING:
 #: ``Invalid/malformed COND``, failing the whole annotation (issue #5296).
 #: Carries an ``arcs`` list like :data:`SDF_BUS_BIT_MODPATH_DROPPED_CLASS`.
 SDF_COND_EXPRESSION_DROPPED_CLASS = "iopath_cond_expression"
+SDF_EMPTY_DELAY_DROPPED_CLASS = "iopath_empty_delay"
 
-#: ``SDF_BENIGN_DIAGNOSTIC_REASONS`` entry for the class above, merged into
-#: that dict by ``functional_verification``.
-SDF_COND_EXPRESSION_REASONS: dict[str, str] = {
+#: Receipt reasons for IOPATH entries removed before Icarus parses the SDF.
+SDF_IOPATH_SYNTAX_REASONS: dict[str, str] = {
+    SDF_EMPTY_DELAY_DROPPED_CLASS: (
+        "OpenSTA write_sdf can emit a sequential IOPATH with no delay operands. "
+        "Icarus rejects that entry. Each removed entry contributed no delay value, "
+        "and 'arcs' lists the affected cell paths."
+    ),
     SDF_COND_EXPRESSION_DROPPED_CLASS: (
         "Icarus Verilog's SDF parser accepts only a bare signal or a simple "
         "equality as a conditional-path condition; an operator expression "
@@ -54,6 +55,31 @@ SDF_COND_EXPRESSION_REASONS: dict[str, str] = {
         "place"
     ),
 }
+
+
+def _bus_input_port_names(ports: list[tuple[str, str, str]]) -> set[str]:
+    return {name for direction, width, name in ports if width and direction == "input"}
+
+
+def _write_sdf_drop_step(
+    drop: tuple[str, int] | tuple[str, int, list[dict[str, str]]] | None,
+    annotate_source_path: str,
+    output_dir: str,
+    filename: str,
+    dropped_class: str,
+    counts: dict[str, int],
+    arcs: dict[str, list[dict[str, str]]] | None = None,
+) -> str:
+    """Persist a changed SDF and record the count and arcs for this step."""
+    if drop is None:
+        return annotate_source_path
+    new_path = os.path.join(output_dir, filename)
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(drop[0])
+    counts[dropped_class] = drop[1]
+    if len(drop) == 3 and arcs is not None:
+        arcs[dropped_class] = drop[2]
+    return new_path
 
 
 def _apply_sdf_header_normalization(sdf_path: str, output_dir: str) -> str:
@@ -128,53 +154,57 @@ def _drop_sdf_cond_expression_iopaths(
     if text is None or "COND" not in text:
         return None
 
-    arcs: set[tuple[str, str, str]] = set()
-    removed_spans: list[tuple[int, int]] = []
-    dropped = 0
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        celltype = _sdf_cell_celltype(text, cell_match.start()) or ""
+    return _drop_sdf_iopath_arcs(text, _sdf_cond_iopath_arc)
 
-        def _droppable(entry_text: str, _cell=celltype) -> bool:
-            arc = _sdf_cond_iopath_arc(entry_text)
-            if arc is None:
-                return False
-            arcs.add((_cell, *arc))
-            return True
 
-        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), _droppable)
-        removed_spans.extend(spans)
-        dropped += count
+_EMPTY_IOPATH_RE = re.compile(_SDF_IOPATH_HEAD_RE.pattern + r"\s*\)")
+_SIMPLE_CONDITIONAL_PATH_RE = re.compile(
+    r"\((?:CONDELSE|COND\s+[A-Za-z_$][\w$]*(?:\s*={2,3}\s*(?:1'[bB][01]|[01]))?)"
+    r"\s+(\(IOPATH\b.*\))\s*\)",
+    re.DOTALL,
+)
 
-    if not dropped:
+
+def _empty_iopath_arc(entry: str) -> tuple[str, str] | None:
+    """Match the complete path so even an empty parentheses operand is preserved."""
+    wrapper = _SIMPLE_CONDITIONAL_PATH_RE.fullmatch(entry)
+    match = _EMPTY_IOPATH_RE.fullmatch(wrapper[1] if wrapper else entry)
+    if match is None:
         return None
-    return (
-        _cut_sdf_spans(text, removed_spans),
-        dropped,
-        [{"celltype": c, "from": s, "to": d} for c, s, d in sorted(arcs)],
-    )
+    return match["edge_src"] or match["src"], match["dst"]
 
 
-def _apply_sdf_cond_expression_drop(
+def _drop_sdf_empty_delay_iopaths(
+    sdf_path: str,
+) -> tuple[str, int, list[dict[str, str]]] | None:
+    text = _read_sdf_text(sdf_path)
+    if text is None or not _EMPTY_IOPATH_RE.search(text):
+        return None
+    return _drop_sdf_iopath_arcs(text, _empty_iopath_arc)
+
+
+def _apply_sdf_iopath_syntax_drops(
     annotate_source_path: str,
     output_dir: str,
     sdf_pre_dropped_counts: dict[str, int],
     sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
 ) -> str:
-    """Issue #5296's ``COND``-expression ``IOPATH`` drop, applied as one step
-    of the SDF-normalization pipeline. Returns the path the next step should
-    read -- ``annotate_source_path`` unchanged when nothing was dropped.
-    Count and arcs are recorded into the two dicts in place, as in
-    :func:`_apply_sdf_bus_bit_modpath_drop`."""
-    cond_drop = _drop_sdf_cond_expression_iopaths(annotate_source_path)
-    if cond_drop is None:
-        return annotate_source_path
-    cond_text, cond_count, cond_arcs = cond_drop
-    new_path = os.path.join(output_dir, "klt_sdf_cond_expression_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(cond_text)
-    sdf_pre_dropped_counts[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_count
-    sdf_pre_dropped_arcs[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_arcs
-    return new_path
+    """Classify operator conditions first, then remove paths with no operands."""
+    for drop, dropped_class in (
+        (_drop_sdf_cond_expression_iopaths, SDF_COND_EXPRESSION_DROPPED_CLASS),
+        (_drop_sdf_empty_delay_iopaths, SDF_EMPTY_DELAY_DROPPED_CLASS),
+    ):
+        stem = dropped_class.removeprefix("iopath_")
+        annotate_source_path = _write_sdf_drop_step(
+            drop(annotate_source_path),
+            annotate_source_path,
+            output_dir,
+            f"klt_sdf_{stem}_dropped.sdf",
+            dropped_class,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
+        )
+    return annotate_source_path
 
 
 def _apply_sdf_alias_port_drop(
@@ -183,38 +213,33 @@ def _apply_sdf_alias_port_drop(
     sources: list[str],
     hdl_toplevel: str,
     sdf_pre_dropped_counts: dict[str, int],
-) -> str:
-    """Issue #2285's zero-delay alias-port ``INTERCONNECT`` drop, one step
-    of :func:`run_functional_verification`'s SDF-normalization pipeline --
-    the code of that function's own inline alias block, moved out to this
-    module unchanged (its two sibling drops already live as helpers there
-    for the same reason: no new branch in the already-baselined function,
-    which the per-file size ratchet also caps at its current line count).
+) -> tuple[str, list[str], list[dict[str, Any]]]:
+    """Prepare independently assigned output bits for Icarus annotation.
 
-    An ``INTERCONNECT`` onto a top-level port bit the netlist drives
-    through a Verilog ``assign`` alias cannot be annotated by Icarus at
-    all and cannot be made annotatable by rewriting the endpoint either;
-    when such an entry is zero-delay at every corner, dropping it cannot
-    change simulated timing, so it is removed here and counted under
-    :data:`SDF_ALIAS_PORT_DROPPED_CLASS`. A non-zero entry is left in
-    place and still fails the diagnostic gate loudly. Returns the path
-    the next step should read -- ``annotate_source_path`` unchanged when
-    nothing was dropped.
+    Rewrite eligible buses to whole-vector assignments in build copies (#7534).
+    On the remaining alias bits, count and drop arcs with zero delay at every
+    corner (#2285) and refuse nonzero delays before building (#6937).
+    Return the SDF path, build sources, and per-port rewrite records for
+    ``environment.sdf.output_assign_rewritten``.
     """
-    from .functional_verification import SDF_ALIAS_PORT_DROPPED_CLASS
-
-    alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
-        annotate_source_path,
-        _collect_sdf_alias_port_bits(sources, hdl_toplevel),
+    sources, rewritten = _apply_sdf_output_assign_rewrite(
+        annotate_source_path, sources, hdl_toplevel, output_dir
     )
-    if alias_drop is None:
-        return annotate_source_path
-    alias_text, alias_dropped_count = alias_drop
-    new_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(alias_text)
-    sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
-    return new_path
+    return (
+        _write_sdf_drop_step(
+            _drop_sdf_zero_delay_alias_port_interconnects(
+                annotate_source_path,
+                _collect_sdf_alias_port_bits(sources, hdl_toplevel),
+            ),
+            annotate_source_path,
+            output_dir,
+            "klt_sdf_alias_dropped.sdf",
+            SDF_ALIAS_PORT_DROPPED_CLASS,
+            sdf_pre_dropped_counts,
+        ),
+        sources,
+        rewritten,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -251,18 +276,17 @@ def _apply_sdf_bus_port_source_drop(
     Returns ``annotate_source_path`` unchanged when nothing was dropped, or
     a new normalized-copy path otherwise.
     """
-    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
+    return _write_sdf_drop_step(
+        _drop_sdf_zero_delay_bus_port_source_interconnects(
+            annotate_source_path,
+            _bus_input_port_names(ports),
+        ),
         annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
+        output_dir,
+        "klt_sdf_bus_port_source_dropped.sdf",
+        SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
     )
-    if drop is None:
-        return annotate_source_path
-    text, count = drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
-    return new_path
 
 
 def _sdf_refusal_attribution(
@@ -279,9 +303,7 @@ def _sdf_refusal_attribution(
     """
     return {
         "annotate_paths": list(annotate_paths),
-        "bus_input_ports": {
-            name for direction, width, name in ports if width and direction == "input"
-        },
+        "bus_input_ports": _bus_input_port_names(ports),
     }
 
 
@@ -460,8 +482,6 @@ def _sdf_refusal_error(
     merges ``details`` flat into ``error``: the path is
     ``error.sdf.dropped``.
     """
-    from .functional_verification import FunctionalVerificationError
-
     shown = " | ".join(diagnostics[:5])
     more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
     error = FunctionalVerificationError(

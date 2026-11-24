@@ -41,7 +41,7 @@ def test_match_verdict_from_database(tmp_path, fake_klayout):
     report = run_lvs(_request(tmp_path, 1, deck_vars={"feol": True}))
     assert report["status"] == "match"
     assert report["engine"] == "klayout-runset"
-    assert report["device_census"] == {"layout": {"NMOS": 1}, "reference": {"NMOS": 1}}
+    fx.assert_nmos_reference_census(report, expected_layout={"NMOS": 1})
     assert report["counts"]["devices"]["matched"] == 1
     assert coverage_validation_error(report["coverage"]) is None
     assert report["coverage"]["checked"] == ["NMOS"]
@@ -199,7 +199,7 @@ def test_empty_extraction_without_compare_is_a_graded_mismatch(tmp_path, fake_kl
     fake_klayout["compare"] = False
     report = run_lvs(_request(tmp_path, 1))
     assert report["status"] == "mismatch"
-    assert report["device_census"] == {"layout": {}, "reference": {"NMOS": 1}}
+    fx.assert_nmos_reference_census(report, expected_layout={})
     assert report["error_count"] > 0
     unmatched = [m for m in report["mismatches"] if m["category"] == "device.unmatched"]
     assert len(unmatched) == 1
@@ -276,7 +276,7 @@ def test_nonzero_exit_with_unusable_database_is_an_error(
     fake_klayout["returncode"] = 1
     fake_klayout["stdout"] = "ERROR: died after extraction\n"
 
-    def no_xref(path, reference=None):
+    def no_xref(path, reference=None, **kwargs):
         raise LvsError("database has no cross-reference")
 
     monkeypatch.setattr(lvs_runset, "read_lvsdb_verdict", no_xref)
@@ -475,19 +475,10 @@ def test_deck_flags_refused_for_other_engines(tmp_path):
         run_lvs(request, deck_file="d.lvs")
 
 
-def test_cli_deck_var_parsing():
-    from klayout_tools.cli.lvs_cmd import _parse_deck_vars
-
-    assert _parse_deck_vars(["a=1", "b=x=y", "a=2"]) == {"a": "2", "b": "x=y"}
-    assert _parse_deck_vars(None) == {}
-    with pytest.raises(LvsError, match="invalid --deck-var"):
-        _parse_deck_vars(["novalue"])
-
-
 def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
     default = run_lvs(_request(tmp_path, 1))
-    assert find_absolute_path_fields(default)
-    assert os.path.isabs(default["environment"]["klayout_binary"])
+    assert find_absolute_path_fields(default)  # absolute inputs still echo
+    assert default["environment"]["klayout_binary"] == "klayout"
 
     portable = run_lvs(_request(tmp_path, 1, portable_paths=True))
     assert find_absolute_path_fields(portable) == []

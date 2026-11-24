@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .lvs_base import LvsError
+
 DEFAULT_SUPPLY_NETS = ("GND", "VCC", "VDD", "VGND", "VPWR", "VSS")
 
 #: Issue #2078: a supply name spans more than one disconnected layout net in a
@@ -14,7 +16,6 @@ CATEGORY_NET_SUPPLY_FRAGMENTED = "net.supply_fragmented"
 
 def parse_supply_nets(options: Mapping[str, Any]) -> list[str]:
     """Resolve an exact, case-insensitive allowlist; an empty list disables it."""
-    from .lvs import LvsError
 
     names = options.get("supply_nets", list(DEFAULT_SUPPLY_NETS))
     if not isinstance(names, list) or any(

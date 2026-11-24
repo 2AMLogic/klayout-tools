@@ -53,6 +53,7 @@ import os
 import tempfile
 from typing import Any
 
+from ._drc_gf180_3lm import prelude_files
 from ._provenance import build_provenance
 from .drc import SCHEMA_VERSION, DrcError
 from .drc_klayout_app import (
@@ -173,6 +174,7 @@ def list_klayout_deck_rule_categories(
     allow_missing_host_tools: bool = False,
     min_klayout_version: str | None = None,
     klayout_binary: str | None = None,
+    native_deck: dict | None = None,
 ) -> dict[str, Any]:
     """The rule categories ``deck_file`` declares under ``deck_vars``.
 
@@ -218,6 +220,7 @@ def list_klayout_deck_rule_categories(
                 input_path=input_path,
                 report_path=report_path,
                 deck_vars=deck_vars,
+                prelude_files=prelude_files(native_deck),
                 timeout_s=timeout_s,
             )
             # `allow_deck_errors=False`, always: a partial report's shorter
@@ -256,6 +259,7 @@ def list_klayout_deck_rule_categories(
             klayout_version_override_active=True,
         ),
         deck_file,
+        native_deck,
     )
     _warn_binary_mismatch(provenance)
     return {

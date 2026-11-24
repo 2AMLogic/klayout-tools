@@ -4,8 +4,8 @@ A pin leaf may name the file that owns its value instead of hand-copying the
 value into the inventory: ``{"from": "config/toolchain.json", "key":
 "tools.ngspice.commit"}`` resolves to the non-empty string at dotted ``key``
 of that JSON file at attest and ``--check`` time, so a pin bump drifts the
-envelope the same way a source edit does since #4764. A literal leaf is
-checked for shape only, exactly as before.
+envelope the same way a source edit does since #4764. Item 9 compares the
+resolved ``tools.klt`` pin with the build recorded in envelope provenance.
 
 Split out of :mod:`signoff_attest` for the per-file size ratchet (that module
 sits at its baseline ceiling), the same reason :mod:`signoff_attest_item9`
@@ -17,12 +17,12 @@ helpers.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .signoff import _finite_json_float, _reject_json_constant
+from .signoff_attest_item9 import pin_checks
+from .signoff_base import SignoffError, _read_envelope
 
 
 def _resolve_section(
@@ -69,15 +69,16 @@ def json_node(root: str, path: str, field: str) -> Any:
     read or parsed, or the key is absent. A JSON ``null`` at the key is
     indistinguishable from an absent one; both callers require a type a
     ``null`` fails (item 8's metric bindings a finite number, item 9's pins a
-    non-empty string), so the ambiguity never reaches a caller."""
+    non-empty string), so the ambiguity never reaches a caller.
+
+    The read is the shared :func:`~.signoff._read_envelope`, like every other
+    evidence read in ``klt signoff``: a ``.json.gz`` is read as it stands (gzip
+    by magic bytes, so a ``klt sim --report-out report.json.gz`` is citable
+    without a decompressed copy), and a nonfinite literal or a truncated or
+    damaged gzip is refused as unreadable (#6259)."""
     try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
+        node: Any = _read_envelope(os.path.join(root, path))
+    except SignoffError:
         return None
     for segment in field.split("."):
         if isinstance(node, Mapping) and segment in node:
@@ -124,8 +125,7 @@ def resolve_pin_refs(
     """Item 9's ``pins`` with every reference-form leaf resolved (issue
     #5563), plus the provenance to record on the checks: a map with ``pdk`` /
     ``tools`` entries, each naming the ``{"from", "key"}`` object that leaf
-    declared. Empty when no reference was used, so a literal-only inventory
-    grades exactly as before. Leaf positions: ``pins.pdk.name``,
+    declared. Empty when no reference was used. Leaf positions: ``pins.pdk.name``,
     ``pins.pdk.revision`` and every ``pins.tools.<tool>``."""
     if not isinstance(pins, Mapping):
         return pins, {}
@@ -153,16 +153,32 @@ def resolve_pin_refs(
     return resolved, sources
 
 
-def with_resolved_from(
-    checks: list[dict[str, Any]], sources: Mapping[str, Any]
+def item9_pin_checks(
+    pins: Any,
+    root: str,
+    normalize_path: Callable[[Any, str, str], str],
+    klt_version: str,
 ) -> list[dict[str, Any]]:
-    """Item 9's pin ``checks`` (from ``pin_checks``) with each check's
-    ``resolved_from`` set to the ``{"from", "key"}`` declarations that
-    :func:`resolve_pin_refs` resolved for its ``role`` -- only for a check that
-    used a reference, so a literal-only inventory emits the checks it always
-    did. Lives here, not on ``pin_checks``, so :mod:`signoff_attest_item9`
-    stays under the per-file size limit."""
+    """Grade item 9's pins and compare a declared klt pin with the running build."""
+    resolved, sources = resolve_pin_refs(pins, root, normalize_path)
+    checks = pin_checks(resolved)
     for check in checks:
         if sources.get(check["role"]):
             check["resolved_from"] = sources[check["role"]]
+    tools = resolved.get("tools") if isinstance(resolved, Mapping) else None
+    if isinstance(tools, Mapping) and "klt" in tools:
+        pinned = tools["klt"]
+        unverifiable = "+unknown" in klt_version
+        version_check = {
+            "check": "pin",
+            "role": "tool_version",
+            "tool": "klt",
+            "passed": unverifiable or pinned == klt_version,
+            "value": pinned,
+        }
+        if unverifiable:
+            version_check["unverifiable"] = True
+        elif not version_check["passed"]:
+            version_check["running"] = klt_version
+        checks.append(version_check)
     return checks

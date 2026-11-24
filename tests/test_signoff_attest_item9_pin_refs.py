@@ -3,6 +3,7 @@ file that owns its value (issue #5563)."""
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -116,14 +117,14 @@ def test_no_pdk_form_is_not_treated_as_a_reference(tmp_path):
 
 def test_tools_may_mix_a_literal_and_a_reference(tmp_path):
     _, inventory = _toolchain_repo(
-        tmp_path, {"tools": {"klt": "0.7.0", "ngspice": _NG_REF}}
+        tmp_path, {"tools": {"yosys": "0.48", "ngspice": _NG_REF}}
     )
 
     envelope = build_attestation(9, inventory)
 
     tools = _pin_check(envelope, "tools")
     assert tools["passed"] is True
-    assert tools["value"] == {"klt": "0.7.0", "ngspice": "a1b2c3d4e5f6"}
+    assert tools["value"] == {"yosys": "0.48", "ngspice": "a1b2c3d4e5f6"}
     assert tools["resolved_from"] == {"ngspice": _NG_REF}
 
 
@@ -195,6 +196,9 @@ def test_literal_only_pins_keep_the_envelope_unchanged(tmp_path):
 
     envelope = build_attestation(9, inventory)
 
+    assert [
+        c["role"] for c in envelope["attestation"]["checks"] if c["check"] == "pin"
+    ] == ["pdk", "tools"]
     assert _pin_check(envelope, "pdk") == {
         "check": "pin",
         "role": "pdk",
@@ -240,3 +244,43 @@ def test_check_drifts_after_the_referenced_value_changes(tmp_path, capsys):
     assert code == 3
     assert report["status"] == "drifted"
     assert any(entry["field"].endswith("value.ngspice") for entry in report["drift"])
+
+
+_GZ_REF = {"from": "config/toolchain.json.gz", "key": "tools.ngspice.commit"}
+
+
+def _gz_toolchain_repo(tmp_path, payload: bytes) -> tuple[Path, str]:
+    repo = make_repo(tmp_path)
+    (repo / "config").mkdir()
+    (repo / "config" / "toolchain.json.gz").write_bytes(payload)
+    return repo, make_inventory(
+        repo,
+        pins={"pdk": PINS["pdk"], "tools": {"ngspice": _GZ_REF}},
+        testbenches=["tb/a.spice"],
+        cold_start={"argv": OK_ARGV},
+    )
+
+
+def test_gzip_reference_resolves_like_the_plain_form(tmp_path):
+    # The shared dotted-key walker reads through the gzip-transparent envelope
+    # reader (#6259), so a ``.json.gz`` owner file is citable as it stands.
+    _, inventory = _gz_toolchain_repo(
+        tmp_path, gzip.compress(json.dumps(_TOOLCHAIN).encode())
+    )
+
+    envelope = build_attestation(9, inventory)
+
+    assert envelope["status"] == "pass"
+    tools = _pin_check(envelope, "tools")
+    assert tools["value"] == {"ngspice": "a1b2c3d4e5f6"}
+    assert tools["resolved_from"] == {"ngspice": _GZ_REF}
+
+
+def test_truncated_gzip_reference_fails_the_check_without_raising(tmp_path):
+    payload = gzip.compress(json.dumps(_TOOLCHAIN).encode())
+    _, inventory = _gz_toolchain_repo(tmp_path, payload[: len(payload) // 2])
+
+    envelope = build_attestation(9, inventory)
+
+    assert envelope["status"] == "fail"
+    assert _pin_check(envelope, "tools")["passed"] is False

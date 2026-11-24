@@ -50,7 +50,7 @@ The tool never draws or fixes a seal ring.
 
 | PDK | Checked | Not checked |
 | --- | --- | --- |
-| `sg13g2` (IHP) | `Seal.n` (EdgeSeal enclosed by unbroken Passiv ring), `Seal.b` (Activ space to EdgeSeal-metal1..5/topmetal1..2/activ/psd, 4.9 um), `Seal.k` (45-degree EdgeSeal edge >= 21 um), `Seal.m` (one ring per top cell), plus `Seal.continuity` (EdgeSeal 39/0 is one closed annulus -- a klayout-tools assertion, `source.kind: klayout_tools_derived`, not a kit rule). Source: `libs.tech/klayout/tech/drc/rule_decks/beol/6_10_sealring.drc`. | `Seal.l` (no structures outside EdgeSeal.boundary): listed as `not_checked`. `Seal.m` is approximated per top cell; the kit decks use the CHIP marker. |
+| `sg13g2` (IHP) | `Seal.n` (EdgeSeal enclosed by unbroken Passiv ring), `Seal.b` (Activ space to EdgeSeal-metal1..5/topmetal1..2/activ/psd, 4.9 um), `Seal.k` (45-degree EdgeSeal edge >= 21 um), `Seal.m` (at most one merged EdgeSeal polygon per top cell), plus `Seal.continuity` (EdgeSeal 39/0 is one closed annulus -- a klayout-tools assertion, `source.kind: klayout_tools_derived`, not a kit rule). Source: `libs.tech/klayout/tech/drc/rule_decks/beol/6_10_sealring.drc`. | `Seal.l` (no structures outside EdgeSeal.boundary): listed as `not_checked`. The kit counts disjoint EdgeSeal polygons within the chip extent, including solid fragments. |
 | `sky130` | nothing | The kit ships only a Magic reference generator (`libs.tech/magic/seal_ring_generator`), no rule table or stream cell: `status: "not_checked"`. |
 | `gf180mcu` | nothing | The kit ships a seal-ring pycell generator (`libs.tech/klayout/tech/pymacros/sealring_cells`) but no published rule table: `status: "not_checked"`. |
 

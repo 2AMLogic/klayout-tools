@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .lvs_base import LvsError
 from .lvs_mismatch import _mismatch
 from .verilog_netlist import (
     convert_gate_level_verilog,
@@ -55,13 +56,6 @@ def _gate_level_port_case_fold_warnings(
     ]
 
 
-def _lvs_error() -> type[Exception]:
-    """`LvsError`, imported late (`lvs` imports this module)."""
-    from .lvs import LvsError
-
-    return LvsError
-
-
 def _convert_gate_level_reference(
     text: str,
     pin_orders: Mapping[str, Any],
@@ -98,7 +92,7 @@ def _library_cell_body_lookup(pin_orders: Mapping[str, Any]):
                 with open(path, encoding="utf-8", errors="replace") as handle:
                     parsed[path] = parse_subckt_blocks(handle.read())
             except OSError as exc:
-                raise _lvs_error()(
+                raise LvsError(
                     f"could not read library cell source '{path}': {exc}"
                 ) from exc
         return parsed[path].get(cell)

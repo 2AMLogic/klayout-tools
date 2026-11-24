@@ -38,21 +38,30 @@ pytestmark = pytest.mark.usefixtures(
 
 
 @pytest.mark.parametrize(
-    "options,home_init,source",
+    "options,home_init,source,ambient",
     [
-        ({"ngspice_init": ["set wnflag=1"]}, None, "request"),
-        ({"threads_per_worker": 2}, None, "thread_pin"),
-        ({"threads_per_worker": 1, "ngspice_init": ["set wnflag=1"]}, None, "request"),
-        ({}, "set wnflag=0\n", "home"),
-        ({}, None, "none"),
+        ({"ngspice_init": ["set wnflag=1"]}, None, "request", None),
+        ({"threads_per_worker": 2}, None, "thread_pin", None),
+        (
+            {"threads_per_worker": 2, "ngspice_init": ["set wnflag=1"]},
+            None,
+            "request",
+            "8",
+        ),
+        ({}, "set wnflag=0\n", "home", "4"),
+        ({}, None, "none", None),
     ],
 )
 @pytest.mark.parametrize("attach", [False, True])
 @pytest.mark.parametrize("state,exit_code", [("done", "0"), ("failed", "137")])
-def test_batch_collects_init_from_worker_report(
-    tmp_path, monkeypatch, options, home_init, source, state, exit_code, attach
+def test_batch_collects_init_and_pin_from_worker_report(
+    tmp_path, monkeypatch, options, home_init, source, ambient, state, exit_code, attach
 ):
     with monkeypatch.context() as local_patch:
+        if ambient is None:
+            local_patch.delenv("OMP_NUM_THREADS", raising=False)
+        else:
+            local_patch.setenv("OMP_NUM_THREADS", ambient)
         report = _init_report(
             tmp_path, local_patch, options=options, home_init=home_init
         )
@@ -62,23 +71,30 @@ def test_batch_collects_init_from_worker_report(
     runner.default = fake_completed(_status(state, exit_code=exit_code))
     runner.outputs = {
         "report.json": json.dumps(report),
-        "worker_environment.json": _capture(),
+        "worker_environment.json": _capture(omp_num_threads=ambient),
     }
     _, _, environment = _run_one_job(tmp_path, monkeypatch, runner, attach=attach)
     if attach:
         assert not runner.argvs_matching("launch")
-    assert environment["worker_environment"]["ngspice_init"] == expected
-    assert str(tmp_path) not in json.dumps(
-        environment["worker_environment"]["ngspice_init"]
-    )
+    observed = environment["worker_environment"]
+    assert observed["ngspice_init"] == expected
+    assert observed["threads_per_worker"] == options.get("threads_per_worker")
+    assert observed["omp_num_threads"] == ambient
+    assert str(tmp_path) not in json.dumps(observed["ngspice_init"])
 
 
 @pytest.mark.parametrize("capture", [None, "{bad json"])
-def test_init_is_available_without_preflight_capture(tmp_path, monkeypatch, capture):
+def test_report_observations_survive_missing_preflight(tmp_path, monkeypatch, capture):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
-    block = {"source": "home", "lines": None, "sha256": _sha("set wnflag=1\n")}
-    runner.outputs = {"report.json": _sim_report(ngspice_init=block)}
+    block = {
+        "source": "thread_pin",
+        "lines": ["set num_threads=2"],
+        "sha256": _sha("set num_threads=2\n"),
+    }
+    runner.outputs = {
+        "report.json": _sim_report(ngspice_init=block, threads_per_worker=2)
+    }
     if capture is not None:
         runner.outputs["worker_environment.json"] = capture
     _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
@@ -86,16 +102,23 @@ def test_init_is_available_without_preflight_capture(tmp_path, monkeypatch, capt
         "absent" if capture is None else "malformed"
     )
     assert environment["worker_environment"]["ngspice_init"] == block
+    assert environment["worker_environment"]["threads_per_worker"] == 2
 
 
 @pytest.mark.parametrize("report", [None, {}, {"environment": []}, {"environment": {}}])
 def test_legacy_report_is_unknown(report, tmp_path):
-    assert (
-        sb._read_job_identity(str(tmp_path), report=report)["worker_environment"][
-            "ngspice_init"
-        ]
-        is None
-    )
+    env = sb._read_job_identity(
+        str(tmp_path), {"options": {"threads_per_worker": 7}}, report=report
+    )["worker_environment"]
+    assert env["ngspice_init"] is None
+    assert env["threads_per_worker"] is None
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, "2", 2.0, [2], {}])
+def test_malformed_worker_pin_is_unknown(value, tmp_path):
+    report = {"environment": {"threads_per_worker": value}}
+    observed = sb._read_job_identity(str(tmp_path), report=report)["worker_environment"]
+    assert observed["threads_per_worker"] is None
 
 
 @pytest.mark.parametrize(
@@ -142,15 +165,21 @@ def test_missing_worker_data_never_reads_client_home(tmp_path, monkeypatch):
     assert env["worker_environment"]["ngspice_init"] is None
 
 
-def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
-    blocks = {}
+@pytest.mark.parametrize("pins", [{0: None, 2: None}, {0: 2, 2: 3}])
+def test_each_shard_retains_its_own_worker_observations(tmp_path, monkeypatch, pins):
+    reports = {}
     for first, home_init in [(0, "set wnflag=0\n"), (2, "set wnflag=1\n")]:
         workdir = tmp_path / str(first)
         workdir.mkdir()
         with monkeypatch.context() as local_patch:
-            report = _init_report(workdir, local_patch, home_init=home_init)
-        blocks[first] = report["environment"]["ngspice_init"]
-    assert blocks[0]["sha256"] != blocks[2]["sha256"]
+            report = _init_report(
+                workdir,
+                local_patch,
+                home_init=home_init,
+                options={"threads_per_worker": pins[first]},
+            )
+        reports[first] = report["environment"]
+    assert reports[0]["ngspice_init"]["sha256"] != reports[2]["ngspice_init"]["sha256"]
     _pin_client_version(monkeypatch)
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
@@ -167,7 +196,7 @@ def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}" for point in points
                     ),
-                    ngspice_init=blocks[first],
+                    **reports[first],
                 ),
                 "worker_environment.json": _capture(),
             }
@@ -194,7 +223,11 @@ def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
     )
     assert [
         entry["worker_environment"]["ngspice_init"] for entry in environment["fleet"]
-    ] == [blocks[0], blocks[2]]
+    ] == [reports[0]["ngspice_init"], reports[2]["ngspice_init"]]
+    assert [
+        entry["worker_environment"]["threads_per_worker"]
+        for entry in environment["fleet"]
+    ] == [pins[0], pins[2]]
 
 
 def test_total_init_content_is_bounded():
@@ -244,3 +277,165 @@ def test_outer_report_keeps_client_runner_label_and_worker_observation(
         "lines": None,
         "sha256": _sha("set wnflag=1\n"),
     }
+
+
+def _init_job_files(index, observed, lines):
+    block = {"source": "request", "lines": lines, "sha256": _sha(lines[0] + "\n")}
+    if observed == "pinned_request":
+        pinned = ["set num_threads=2", *lines]
+        block.update(lines=pinned, sha256=_sha("\n".join(pinned) + "\n"))
+    elif observed == "malformed":
+        block["sha256"] = "truncated"
+    elif observed == "different_request":
+        block.update(lines=["set wnflag=0"], sha256=_sha("set wnflag=0\n"))
+    elif observed == "home":
+        block.update(source="home", lines=None)
+    return {
+        "report.json": _sim_report(
+            corner_ids=(f"tt_1.800_{index}",),
+            **({"ngspice_init": block} if observed is not None else {}),
+            threads_per_worker=2 if observed == "pinned_request" else None,
+        ),
+        "runner_identity.json": json.dumps({"runner_klt_version": "0.9.0"}),
+    }
+
+
+@pytest.mark.parametrize(
+    "observations,explicit",
+    [
+        ([None], True),
+        ([None, "request"], True),
+        (["malformed", "pinned_request"], True),
+        (["home", "different_request"], True),
+        ([None, "request"], False),
+    ],
+)
+def test_collected_init_diagnostic_by_job(
+    tmp_path, monkeypatch, observations, explicit
+):
+    _pin_client_version(monkeypatch, "0.9.3.dev1")
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    lines = ["set wnflag=1"]
+
+    def transport(argv, timeout_s):
+        upload = uploaded_request_of(argv)
+        if upload is not None:
+            document, job_id = upload
+            points = document.get("_explicit_points")
+            index = int(points[0]["temperature_c"]) if points else 0
+            runner.outputs_by_job[job_id] = _init_job_files(
+                index, observations[index], lines
+            )
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", transport)
+    _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "models.lib"},
+            "backend": "batch",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {
+                "process": ["tt"],
+                "supply_v": {"vdd": [1.8]},
+                "temperature_c": list(range(len(observations))),
+            },
+            "options": {"ngspice_init": lines} if explicit else {},
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+    )
+    report = sim.run_sim(str(request), hosts=len(observations))
+    assert report["status"] == "not_checked"
+    env = report["environment"]
+    assert env["ngspice_init"] == {"source": "runner", "lines": None, "sha256": None}
+    warnings = [
+        d
+        for d in report.get("diagnostics", [])
+        if d["code"] == "batch_ngspice_init_unverified"
+    ]
+    if not explicit:
+        assert not warnings
+        return
+    remote = env["remote"]
+    members = remote.get("fleet", [remote])
+    (warning,) = warnings
+    assert warning["severity"] == "warning"
+    assert warning["feature"] == "options.ngspice_init"
+    assert warning["simulator_application"] == "unverified"
+    by_job = {row["job_id"]: row for row in warning["jobs"]}
+    for i, member in enumerate(members):
+        assert member["runner_compatibility"] == "match"
+        assert member["runner_request_features"]["status"] == "supported"
+        row = by_job[member["job_id"]]
+        assert row["fleet_index"] == (i if len(observations) > 1 else None)
+        worker = member["worker_environment"]["ngspice_init"]
+        observation = observations[i]
+        if observation in (None, "malformed"):
+            assert worker is None
+        else:
+            assert worker["source"] == ("home" if observation == "home" else "request")
+        expected = (
+            "digest_reported"
+            if observation in ("request", "pinned_request")
+            else "unverified"
+        )
+        assert row["request_identity"] == expected
+    assert len(by_job) == len(observations)
+
+
+def test_collected_model_selection_abort_suggests_declaring_init(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    error = json.loads(_sim_report())
+    error.update(status="error", errored=1, passed=0)
+    error["corners"][0].update(
+        status="error",
+        diagnostics=[
+            {
+                "code": "ngspice_fatal",
+                "severity": "error",
+                "message": "Error on line 4: could not find a valid modelname",
+            }
+        ],
+    )
+    runner.outputs = {"report.json": json.dumps(error)}
+    _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "models.lib"},
+            "backend": "batch",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {
+                "process": ["tt"],
+                "supply_v": {"vdd": [1.8]},
+                "temperature_c": [27],
+            },
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0,
+            },
+        },
+    )
+    report = sim.run_sim(str(request))
+    assert report["status"] == "error"
+    hints = [
+        d
+        for d in report.get("diagnostics", [])
+        if d["code"] == "ngspice_model_selection_init_hint"
+    ]
+    assert len(hints) == 1
+    assert hints[0]["feature"] == "options.ngspice_init"

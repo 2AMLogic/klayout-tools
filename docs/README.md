@@ -30,6 +30,7 @@ docs/
   cli/                   # per-verb CLI reference
     arith-gen.md
     artifact.md
+    cell-hash.md
     cells.md
     characterize.md
     clip.md
@@ -103,6 +104,7 @@ docs/
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
     em-site-export-format.md
+    em-validation.md
     extract-fidelity-roadmap.md
     fastcap-oracle.md
     flute-congestion-precheck-results.md
@@ -148,6 +150,7 @@ docs/
     siliconcompiler-core-survey.md
     sim-corner-reached-s.md
     sim-evidence-discipline-spike.md
+    site-eslint-evaluation.md
     sky130-modexp-canary-openroad-ground-truth.md
     sky130-modexp-canary-signoff-status.md
     spice-corner-runner-spike.md
