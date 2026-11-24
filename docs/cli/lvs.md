@@ -387,6 +387,9 @@ failed. Those findings are parsed back out of the database (the
 records the log verbatim, warnings included) and listed as
 `severity: "error"` `port.name_mismatch` entries in `mismatches[]`, the
 finding text verbatim in `description` and the two net names in `net`.
+Apostrophes in a net name are preserved. When the runset text leaves the
+boundary between names ambiguous, both names are `null` and the error
+still counts toward the verdict.
 **While any error-severity one stands, `status` is never `match`** —
 before #6903 a strict-port failure on an otherwise clean compare read
 `status: "match"` beside the runset's own `ERROR : Netlists don't match`

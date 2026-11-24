@@ -124,6 +124,31 @@ def test_augment_verdict_forces_mismatch_status(tmp_path):
     ) == 2
 
 
+@pytest.mark.parametrize(
+    ("message", "layout", "reference"),
+    [
+        ("Port mismatch 'LA,VDD'X' vs. 'VDD'", "LA,VDD'X", "VDD"),
+        ("Port mismatch 'LB,OUT'X' vs. 'OUT'X'", "LB,OUT'X", "OUT'X"),
+        ("Port mismatch 'a' vs. 'b' vs. 'c'", None, None),
+        ("Port mismatch reported by runset", None, None),
+    ],
+)
+def test_error_port_messages_always_fail_verdict(tmp_path, message, layout, reference):
+    db = tmp_path / "ports.lvsdb"
+    encoded = message.replace("'", "\\'")
+    db.write_text(f"Z(\n M(E B('{encoded}'))\n)\n", encoding="utf-8")
+    verdict = {"status": "match", "mismatches": []}
+    ports.augment_verdict(verdict, str(db))
+    assert verdict["status"] == "mismatch"
+    (item,) = verdict["mismatches"]
+    assert (item["severity"], item["category"], item["description"]) == (
+        "error",
+        ports.CATEGORY_PORT_NAME_MISMATCH,
+        message,
+    )
+    assert item["net"] == {"layout": layout, "reference": reference}
+
+
 def test_augment_verdict_warning_only_keeps_status(tmp_path):
     db = tmp_path / "report.lvsdb"
     db.write_text(

@@ -101,9 +101,6 @@ _SEVERITY = {
     "info": "info",
 }
 
-# The strict-port findings' own shape: Port mismatch '<layout>' vs. '<ref>'.
-_PORT_MISMATCH_RE = re.compile(r"Port mismatch '([^']*)' vs\. '([^']*)'\Z")
-
 # IHP's runset logs this line when its strict mode is active (sg13g2.lvs:
 # "Starting SG13G2 LVS Comparison in strict port mode."). Absent from the
 # log -> None ("not observed"), never guessed.
@@ -144,16 +141,21 @@ def strict_port_findings(lvsdb_text: str) -> list[dict[str, Any]]:
     """
     out = []
     for entry in xref_log_entries(lvsdb_text):
-        match = _PORT_MISMATCH_RE.search(entry["message"])
-        if match is None:
+        message = entry["message"]
+        if message != "Port mismatch" and not message.startswith("Port mismatch "):
             continue
+        layout_name = reference_name = None
+        # KLayout inserts the names verbatim inside quotes. An apostrophe in
+        # a name is ordinary text. The full separator inside a name makes
+        # the pair ambiguous, while the reported failure remains definitive.
+        prefix = "Port mismatch '"
+        if message.startswith(prefix) and message.endswith("'"):
+            names = message[len(prefix) : -1]
+            left, separator, right = names.partition("' vs. '")
+            if separator and names.find(separator) == names.rfind(separator):
+                layout_name, reference_name = left, right
         out.append(
-            {
-                "severity": entry["severity"],
-                "message": entry["message"],
-                "layout_name": match.group(1),
-                "reference_name": match.group(2),
-            }
+            {**entry, "layout_name": layout_name, "reference_name": reference_name}
         )
     return out
 
