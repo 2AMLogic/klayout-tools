@@ -43,6 +43,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import sim_noise_leaves
+from ._jsonnum import is_int
 from .sim_errors import SimError
 from .sim_measurement_grading import SAVE_MODE_NETLIST_NO_VALUE_HINT
 
@@ -66,7 +67,7 @@ def validate_top_n(name: Any, body: dict[str, Any]) -> None:
     if "top_n" not in body:
         return
     top_n = body["top_n"]
-    if isinstance(top_n, bool) or not isinstance(top_n, int) or top_n < 1:
+    if not is_int(top_n) or top_n < 1:
         raise SimError(
             f"measurement '{name}': noise.top_n must be a positive integer "
             f"(got {top_n!r})"

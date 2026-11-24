@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings_dc, sim_measurement_kind, sim_supply_relative, sim_window
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from .sim_crossings_reduce import (
     graded_value_from,
     reduce_crossings,
@@ -229,11 +229,7 @@ def validate_supply_relative_levels(
 def _validate_max(name: Any, value: Any) -> None:
     if value is None:
         return
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not 1 <= value <= MAX_CROSSINGS_CAP
-    ):
+    if not is_int(value) or not 1 <= value <= MAX_CROSSINGS_CAP:
         raise SimError(
             f"measurement '{name}': crossings.max must be an integer in "
             f"[1, {MAX_CROSSINGS_CAP}] (got {value!r}); omit it for the "

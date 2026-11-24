@@ -1001,9 +1001,7 @@ def _validate_power(
 
             max_columns = connect.get("max_columns")
             if max_columns is not None and (
-                not isinstance(max_columns, int)
-                or isinstance(max_columns, bool)
-                or max_columns <= 0
+                not is_int(max_columns) or max_columns <= 0
             ):
                 raise PlaceAndRouteError(
                     f"request.power.connects[{i}].max_columns must be a "

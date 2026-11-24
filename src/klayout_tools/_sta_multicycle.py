@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from ._jsonnum import is_int
 from ._tcl import tcl_literal as _tcl_literal
 from .post_route_sta_errors import PostRouteStaError
 
@@ -107,7 +108,7 @@ def _validate_selector(value: Any, field: str) -> str:
 
 
 def _validate_multiplier(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise PostRouteStaError(f"{field} must be a positive integer (got {value!r})")
     return value
 

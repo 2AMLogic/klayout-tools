@@ -18,6 +18,7 @@ from functools import lru_cache
 from typing import Any
 
 from . import gen_compose_top_metal_floors as _top_metal_floors
+from ._jsonnum import is_int
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .decks.plain_rules import largest_plain_rule_um
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
@@ -460,11 +461,6 @@ def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
     if not isinstance(layer, dict):
         return None
     layer_num, datatype = layer.get("layer"), layer.get("datatype")
-    if (
-        isinstance(layer_num, int)
-        and not isinstance(layer_num, bool)
-        and isinstance(datatype, int)
-        and not isinstance(datatype, bool)
-    ):
+    if is_int(layer_num) and is_int(datatype):
         return (layer_num, datatype)
     return None

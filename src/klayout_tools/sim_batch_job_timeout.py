@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from .sim_batch_contract import (
     _BATCH_PROVISION_SLACK_S,
     BATCH_MAX_UNITS_CODE,
@@ -213,7 +213,7 @@ def _resolve_max_units_per_job(
     value = batch_spec.get("max_units_per_job")
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int(value) or value < 1:
         raise SimError(
             "request.batch.max_units_per_job must be a positive integer "
             f"(got {value!r})",

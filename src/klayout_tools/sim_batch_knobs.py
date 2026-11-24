@@ -33,7 +33,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from .sim_batch_contract import (
     BATCH_MAX_CONCURRENT_CODE,
     DEFAULT_BATCH_MAX_JOB_SECONDS,
@@ -109,7 +109,7 @@ def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
     value = batch_spec.get("max_concurrent_jobs")
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int(value) or value < 1:
         raise SimError(
             "request.batch.max_concurrent_jobs must be a positive integer "
             f"(got {value!r})",
@@ -168,7 +168,7 @@ def resolve_capacity_retries(batch_spec: dict[str, Any]) -> int:
     ratchet stays green; re-imported there under the same name. Unchanged
     by the move apart from the module-level ``SimError`` import."""
     value = batch_spec.get("capacity_retries", 0)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if not is_int(value) or value < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {value!r})")
     return value
 
