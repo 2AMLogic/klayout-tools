@@ -14,27 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt sta` `violating_endpoints` (#7418)**: the request gains an optional
-  `constraints.max_violating_endpoints` positive-integer knob, and when it is
-  set the response (single-corner and every `corners[]` entry) gains
-  `violating_endpoints` — the bounded, worst-first list of violating
-  endpoints `{check_type, engine_check_role, startpoint, endpoint, slack_ns,
-  path_group}` per side that `setup_violation_count` / `hold_violation_count`
-  only count, with `setup_truncated` / `hold_truncated` separating "all of
-  them" from "first N". Rows are unique per endpoint per path group (the same
-  population the counts measure), so untruncated the list length equals the
-  count; a disagreement is reported as `status: "inconsistent"` with a
-  reason rather than a silently short list, and a failed engine query as
-  `status: "unavailable"` with empty lists. The emitter iterates
-  `sta::path_group_names` querying cap+1 rows per group (live-verified
-  against OpenROAD 26Q3-1510: `-slack_max` is inclusive at the boundary, so
-  a strict slack < 0 filter keeps zero-slack endpoints out;
-  `-group_path_count` caps per path group; `-path_group` is list-valued, so
-  multi-word group names must be `[list]`-quoted or the filter silently
-  disables — the capture fixture records all three). **Additive —
-  `schema_version` unchanged:** an omitted knob emits no Tcl and the
-  response is byte-identical.
-
+- **`klt sim` rejects a malformed `batch.poll_interval_s` /
+  `batch.poll_timeout_s` through the error envelope** (issue #7543,
+  2026-11-23): the last two `request.batch` seconds knobs still parsed with
+  a bare `float()` in `_resolve_batch_config` now go through validating
+  resolvers (`sim_batch_job_timeout.resolve_poll_interval_s` /
+  `resolve_poll_timeout_s`, beside the sibling `resolve_job_timeout_s`), the
+  same early-refusal discipline as every other `batch.*` knob. A
+  non-numeric, `bool`, non-finite or negative value — previously a raw
+  `ValueError`/`TypeError` traceback past the JSON envelope, or silently
+  accepted (`true` read as `1.0`, `nan`, negatives) — is now a documented
+  `{"error": {...}}` envelope with exit 1 on both the dry-run and submit
+  paths, before any S3 write, carrying the new `error.code:
+  "batch_poll_knob_invalid"`; the dry-run runner check re-raises that code
+  so a dry run refuses exactly what the submit refuses. `0` stays accepted
+  for both and absent keys keep the same defaults. **Additive —
+  `schema_version` unchanged:** no success payload field changes, but a
+  request that previously "worked" with `true`/`nan`/negative poll knobs
+  now refuses.
 - **`klt place-and-route` warns on two deck-known gf180mcu power configurations**
   (issue #7311, 2026-11-23): a `request.power` on `gf180mcu_fd_sc_mcu9t5v0`/
   `gf180mcu_fd_sc_mcu7t5v0` that applies `power.connects[].split_cuts`
@@ -806,6 +803,16 @@ not `klt --version`, if you need to detect this kind of drift. See
     keep the generic (accurate) messages.
   Request/response shape change is additive only (a new optional
   `routing.*` request field; no response field changed).
+- **`klt sim --op-lint` honors `--pdk-root` and reports its resolved PDK**
+  (#5751, 2026-11-17): `--pdk-root` was refused with `--op-lint` ("has no
+  effect") although the lint's resolution already reads `models.pdk_root`; it is
+  now folded in exactly as on the graded path (`--job-status` still refuses it).
+  An unpinned lint on a multi-install host now prints the same stderr ambiguity
+  warning as the graded path, and `--format text` prints the `pdk:` /
+  `pdk: WARNING` lines; `--format json` is unchanged. The `batch`
+  `models_pdk_root_host_path` refusal now names `$PDK_ROOT`, the client-side pin
+  that does work there (code and refuse-before-submit behavior unchanged).
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a

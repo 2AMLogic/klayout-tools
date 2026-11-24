@@ -3,14 +3,19 @@ per the per-file size ratchet (issue #5610's compaction knob included).
 
 Each helper turns a committed report's own echo back into the request
 fields that reproduce it, so a rerun does not report the echo as drift.
-Pure ``dict``-in/``dict``-out; no engine state.
+Portable conversion inputs are resolved on the verifying host.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from typing import Any
 
+from ._report_verify import get_path, resolve_committed_path
 from .lvs_base import LvsError
+from .pdk import PdkNotFoundError, find_pdk
+from .place_and_route_portable import PDK_ROOT_TOKEN, portable_response
 
 
 def _validate_omit_mismatches(value: Any) -> bool:
@@ -104,6 +109,78 @@ def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
     if isinstance(echoed.get("device_map"), dict):
         spec["device_map"] = dict(echoed["device_map"])
     return spec
+
+
+def _pdk_token(path: Any) -> bool:
+    return isinstance(path, str) and (
+        path == PDK_ROOT_TOKEN or path.startswith(f"{PDK_ROOT_TOKEN}/")
+    )
+
+
+def _resolve_conversion_path(
+    path: Any, field: str, report_path: str, pdk_root: str | None
+) -> Any:
+    if _pdk_token(path) and pdk_root is not None:
+        suffix = path.removeprefix(PDK_ROOT_TOKEN).removeprefix("/")
+        return os.path.join(pdk_root, suffix) if suffix else pdk_root
+    if isinstance(path, dict):
+        resolved = resolve_committed_path(path, report_path=report_path)
+        if resolved is None:
+            raise LvsError(
+                f"cannot resolve committed reference_conversion.{field}: {path}"
+            )
+        return resolved
+    return path
+
+
+def rerun_with_conversion_paths(
+    request: dict[str, Any],
+    committed: dict[str, Any],
+    report_path: str,
+    run: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Resolve portable gate-level conversion inputs and compare in the
+    report's path convention, anchored to the repository that holds the report.
+    The reconstructed request is private to this rerun."""
+    ref = request["reference"]
+    root = ref.get("pdk_root")
+    files = ref.get("pin_order_files", [])
+    paths = [root, *files]
+    if ref.get("form") != "gate-level-verilog" or not any(
+        isinstance(path, dict) or _pdk_token(path) for path in paths
+    ):
+        return run(request)
+    pdk_root = None
+    variant = ref.get("pdk")
+    if any(_pdk_token(path) for path in paths):
+        resolved_variant = variant or get_path(committed, ("provenance", "pdk", "name"))
+        try:
+            install = find_pdk(variant=resolved_variant)
+            pdk_root = install["root"]
+            ref["pdk"] = install["variant"]
+        except PdkNotFoundError as exc:
+            raise LvsError(str(exc)) from exc
+    if root is not None:
+        ref["pdk_root"] = _resolve_conversion_path(
+            root, "pdk_root", report_path, pdk_root
+        )
+    if files:
+        ref["pin_order_files"] = [
+            _resolve_conversion_path(
+                path, f"pin_order_files[{i}]", report_path, pdk_root
+            )
+            for i, path in enumerate(files)
+        ]
+    fresh = run(request)
+    if pdk_root is not None and variant is None:
+        # Keep the original request echo. The selected library variant is
+        # independently recorded and compared in provenance.pdk.name.
+        fresh["reference_conversion"]["pdk"] = variant
+    return portable_response(
+        fresh,
+        request_dir=os.path.dirname(os.path.abspath(report_path)),
+        pdk_root=pdk_root,
+    )
 
 
 def _constant_nets_replay_hints(committed: dict[str, Any]) -> dict[str, Any]:

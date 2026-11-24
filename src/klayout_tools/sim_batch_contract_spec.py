@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     remote_transport,
     sim_eye,
+    sim_mismatch_scale,
     sim_op_check,
     sim_post_commands,
     sim_search,
@@ -184,25 +185,15 @@ def _runner_gate_release(version: str) -> str | None:
     return ".".join(parts[:2]) if len(parts) >= 2 else None
 
 
-#: Request features a client can send that a runner built before the feature
-#: landed cannot parse (issue #3249): ``name -> (first runner release that
-#: supports it, detector)``. The major.minor gate (:func:`_runner_gate_release`)
-#: deliberately lets a post-tag client talk to a patch-level older runner, so
-#: it cannot see these; this registry compares the *full* release segment
-#: instead. ``analysis_steps[]`` (#2482) landed after ``v0.7.0``, so the first
-#: release segment that can carry it is ``0.7.1`` (post-tag builds render as
-#: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
-#: indistinguishable from one built after, so it counts as supporting it.
-#: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
-#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment, as is
-#: ``stimulus`` (the declarative timed stimulus block, #2977), and
-#: ``dual_injection`` (``analysis.passes`` / ``measurements[].tian``,
-#: #3159/#3160/#3161), ``complex_vectors`` (``options.complex_vectors``,
-#: #3337), ``twoport`` (``analysis.kind: "twoport"``, #3338), and
-#: ``twoport_noise`` (``analysis.noise``, #3339), and ``snm``
-#: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
-#: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
-#: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
+#: The registry maps each feature to its first supporting release segment and
+#: detector (#3249). The major.minor gate allows patch-level differences, so
+#: feature checks compare the full release segment. Post-tag builds such as
+#: ``0.7.1.devN`` count as ``0.7.1`` even if built before the feature landed.
+#: Following v0.7.0, the first 0.7.1 features were analysis_steps (#2482),
+#: measurements[].transfer (#2923/#2924), stimulus (#2977), dual_injection
+#: (analysis.passes / measurements[].tian, #3159/#3160/#3161), complex_vectors
+#: (#3337), twoport (#3338), twoport_noise (#3339), snm (#3895) and search
+#: (#4121). Eye (#4292) and stress (#4592/#4858) first ship in 0.8.1.
 #: ``search_param`` (``measurements[].search.param``, #5391) landed after
 #: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
 #: reject the key or silently search nothing, hence mandatory. ``slope_band``
@@ -212,6 +203,7 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
 #: likewise first ships in ``0.9.3``; an older runner would reject the unknown
 #: key (at best) or grade the raw crossing count, hence mandatory.
+#: Scanned mismatch_params (#5486) likewise require a post-v0.9.2 runner.
 def _uses_extended_eye(request: dict[str, Any]) -> bool:
     for step in request.get("analysis_steps") or []:
         if isinstance(step, dict) and any(
@@ -247,6 +239,7 @@ def _uses_pdk_relative_osdi(request: dict[str, Any]) -> bool:
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
+    "_regrade": ((0, 9, 3), lambda r: r.get("_regrade") is not None),  # also CLI-probed
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
     "slope_band": (
@@ -304,6 +297,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
+    "mismatch_params": ((0, 9, 3), sim_mismatch_scale.wire_uses_scanned_cards),
     # No entry for `options.measurement_cases` (issue #5731): the expansion is
     # resolved client-side -- `sim_measurement_template.expand_request` runs
     # in `load_request` (which `run_sim` calls, passing the loaded request
@@ -330,8 +324,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: process x temperature with ``status: pass`` (#4235). ``post_commands`` is
 #: mandatory because an older runner ignores the field, composing the deck
 #: without ``linearize``/``fft`` and evaluating ``expr`` measurements against
-#: the transient plot with ``status: pass`` (#6080). The #5645 five
-#: (``corners.options``, ``options.nodeset``,
+#: the transient plot with ``status: pass`` (#6080).
+#: Older runners drop mismatch_params and run at nominal sigma even when the
+#: report echoes the requested scale, invalidating the negative control (#5486).
+#: The #5645 five (``corners.options``, ``options.nodeset``,
 #: ``options.initial_conditions``, ``analysis_overrides``,
 #: ``analysis.op_check``) are mandatory because each one's post-run
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
@@ -345,6 +341,8 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: check is the gate.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
+        "mismatch_params",
+        "_regrade",
         "transfer",
         "snm",
         "slope_band",

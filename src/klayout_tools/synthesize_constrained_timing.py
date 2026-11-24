@@ -1,4 +1,4 @@
-"""Named synthesis clocks and exception-aware STA on the final mapped Verilog."""
+"""Synthesis clocks and exception-aware STA on pre-restructure mapped Verilog."""
 
 from __future__ import annotations
 

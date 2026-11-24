@@ -31,6 +31,7 @@ CASES = {
     "_sta_multicycle": ("validate_multicycle_paths", [{"multicycle_paths": False}]),
     "_sta_period_maps": ("validate_period", [0, "clock"]),
     "_sta_request_diag": None,
+    "_sta_sdc_multicycle": None,
     "_sta_sdc_check": ("resolve_sdc_check", [False, "."]),
     "_sta_timing_derate": ("validate_timing_derate", [{"timing_derate": False}]),
     "_sta_wire_load": None,
