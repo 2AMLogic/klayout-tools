@@ -383,9 +383,7 @@ def test_save_mode_netlist_still_orders_reset_before_alter():
 
 def test_deck_without_params_is_unchanged():
     point = sim.CornerPoint(None, {"v1": 2.0}, 27)
-    lines = _control(point)
-    assert not any(line.startswith("alterparam") or line == "reset" for line in lines)
-    assert lines == [
+    assert _control(point) == [
         ".control",
         "save all",
         "alter v1=2.0",
