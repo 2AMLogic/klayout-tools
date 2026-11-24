@@ -36,21 +36,22 @@ def test_shipped_lower_via_cut_sites(lib, suffix):
             total_sites[level] += len(cuts)
             if level == 2 or not cuts:
                 continue
-            conductors = list(
-                kdb.Region(cell.shapes(layout.layer(metal, 0))).each_merged()
-            )
+            # Only a rectangular conductor can span the cut across its track.
+            # Another island's bounding box may cross the cut through empty space.
+            rectangles = [
+                polygon.bbox()
+                for polygon in kdb.Region(
+                    cell.shapes(layout.layer(metal, 0))
+                ).each_merged()
+                if polygon.is_box()
+            ]
             for cut in cuts:
-                touching = [
-                    polygon for polygon in conductors if polygon.bbox().overlaps(cut)
-                ]
-                if len(touching) != 1 or not touching[0].is_box():
-                    continue
-                box = touching[0].bbox()
-                if (
+                if any(
                     cut.inside(box)
                     and box.width() > box.height()
                     and _across_track(cut, box) == (True, False)
+                    for box in rectangles
                 ):
                     horizontal_sites[level] += 1
     assert total_sites == [8576, 389, 0]
-    assert horizontal_sites == [5210, 389]
+    assert horizontal_sites == [5395, 389]
