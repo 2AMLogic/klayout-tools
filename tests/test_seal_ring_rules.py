@@ -130,12 +130,45 @@ def test_activ_too_close_to_seal_fails_seal_b(tmp_path):
     assert v["bbox"]["top"] <= 382 * _UM
 
 
+def test_activ_beside_another_activ_island_inside_seal_fails_seal_b(tmp_path):
+    shapes = _clean_shapes()
+    shapes[_ACTIV] = _box(180, 382, 220, 390) + _box(185, 375, 215, 379)
+    report = run_seal_ring_check(_write(tmp_path / "a.gds", shapes), "sg13g2")
+
+    (hit,) = [v for v in report["violations"] if v["rule"] == "Seal.b"]
+    assert "Seal.b_activ" in hit["description"]
+    assert hit["bbox"] == {
+        "left": 181126,
+        "bottom": 379000,
+        "right": 218874,
+        "top": 382000,
+    }
+
+
 def test_short_corner_fails_seal_k(tmp_path):
     shapes = _clean_shapes()
     shapes[_EDGESEAL] = _ring(chamfer=10)  # diagonal ~14 um < 21 um
     report = run_seal_ring_check(_write(tmp_path / "a.gds", shapes), "sg13g2")
 
-    assert _status(report, "Seal.k") == "fail"
+    boxes = [v["bbox"] for v in report["violations"] if v["rule"] == "Seal.k"]
+    assert sorted((b["left"], b["bottom"], b["right"], b["top"]) for b in boxes) == [
+        (0, 0, 10000, 10000),
+        (0, 390000, 10000, 400000),
+        (390000, 0, 400000, 10000),
+        (390000, 390000, 400000, 400000),
+    ]
+
+
+def test_two_solid_edgeseal_fragments_fail_seal_m(tmp_path):
+    shapes = _clean_shapes()
+    shapes[_EDGESEAL] = _box(0, 0, 20, 20) + _box(50, 0, 70, 20)
+    report = run_seal_ring_check(_write(tmp_path / "a.gds", shapes), "sg13g2")
+
+    boxes = [v["bbox"] for v in report["violations"] if v["rule"] == "Seal.m"]
+    assert sorted((b["left"], b["bottom"], b["right"], b["top"]) for b in boxes) == [
+        (0, 0, 20000, 20000),
+        (50000, 0, 70000, 20000),
+    ]
 
 
 def test_two_rings_fail_seal_m(tmp_path):

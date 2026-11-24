@@ -904,13 +904,41 @@ Use `--expect-rule-categories` to assert their count. An older gf180mcu layout (
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
+**Metal slotting on 3LM gf180mcu.** To check slotting on a three-metal stack,
+use the family deck.
+
+```sh
+klt drc block.gds --engine klayout --pdk gf180mcuA --deck-var decks=mslot --format json
+```
+
+The foundry’s `mslot.rb` reads `metal4_drawn` while checking the three lower
+metals. For the auto-resolved family script, klt loads a packaged Ruby macro
+before the deck when the effective stack is `3LM`. The macro supplies an empty
+Metal4 layer when the PDK omits it. This keeps the slot checks in the foundry
+deck and avoids maintaining a second implementation or patching the PDK.
+An explicit stack such as `--deck-var metal_level=4LM` takes precedence over
+the variant preset.
+Other stacks and explicit `--deck-file` runs load the original script directly.
+
+On KLayout 0.30.12 with the `f6eeac7dad08` PDK, a 40 µm square of unslotted
+Metal1 on 34/0 produced one `MSLOT1.1` violation (exit 3). The deck logged
+slot checks for Metal1 through Metal3 and declared 27 unique categories.
+Native rule IDs use `MSLOT<n>.<k>`, where `n` is the metal level. The curated
+deck lists the separate `MSLOT.<k>` IDs under `coverage.unmodeled_rules`.
+
+`native_deck.preludes` and `provenance.deck.preludes` record the macro’s name,
+SHA-256 digest and reason. `klt drc --check` verifies its digest. Selecting
+`decks=mslot` checks slotting alone. Without an independent category assertion,
+a zero-finding native run returns `coverage_unknown` (exit 4). Asserting
+all 27 slot categories returns `clean_partial` because 171 other deck IDs
+were omitted on this PDK.
+
 #### GF180 3LM deck selection
 
-On the installed gf180mcuA three-metal/30 kÅ stack, the default PDK
-`gf180mcu.drc` starts the MSLOT deck `mslot1` and aborts when its rule
-references `metal4_drawn`. That stack has three routing metals. Repeating
-the same metal globals leaves the missing fourth layer unresolved. Issue
-#6916 tracks the MSLOT implementation. An upstream PDK filing is pending.
+When run directly on the installed gf180mcuA three-metal/30 kÅ stack, the
+PDK's `gf180mcu.drc` starts `mslot1` and aborts on the missing
+`metal4_drawn` layer. The packaged macro described above lets the
+auto-resolved family deck complete the slot checks on that stack.
 
 The native runner accepts the PDK's comma-separated deck tags. Additions and
 exclusions apply from left to right starting with an empty selection. Run
@@ -937,8 +965,8 @@ reason `not_selected`. Signoff withholds full DRC credit, including T1 item 3.
 
 Read `native_deck.deck_selection` for the registry IDs selected, omitted,
 observed starting and never reached. A start establishes only that the
-runner entered a deck. The default buck run started 161 decks, including
-the failing `mslot1`, and never reached the remaining 16. On an abort,
+runner entered a deck. The original buck run without the prelude started 161 decks,
+including the failing `mslot1`, and never reached the remaining 16. On an abort,
 `error.deck_selection` accompanies the existing `abort` and `decks_executed`
 fields. Tolerating an abort with `--allow-deck-errors` also records the
 selection under `engine_deck_errors`. When a parallel run fails, `abort.decks`
@@ -2972,7 +3000,7 @@ Pick a pin from this table, not from the unreleased examples in this page.
 | `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
 | `0.8.0` | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
 
-`--expect-rule-categories` in the example below (267 on the current deck; 263
+`--expect-rule-categories` in the example below (268 on the current deck; 263
 on `0.8.0`), and FinFET LVS, need `0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
 to refuse FinFET devices.
 
@@ -2983,7 +3011,7 @@ packaged `asap7.drc` as separate artifacts (`content_hash` vs
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
-    --expect-rule-categories 267 --format json
+    --expect-rule-categories 268 --format json
 ```
 
 `klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
@@ -3148,7 +3176,7 @@ placements are the consumer's to own.
 
 `FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
 all moved by the same off-grid offset is still reported `clean`. Two opt-in
-rules check the absolute origin. They are not among the 267 default ids; they
+rules check the absolute origin. They are not among the 268 default ids; they
 run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
 scale), and with neither set the deck output, categories and coverage are
 unchanged:
@@ -3168,7 +3196,7 @@ declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
 and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
 `0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
 so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
-grid report. `--expect-rule-categories` stays `267` for the default run;
+grid report. `--expect-rule-categories` stays `268` for the default run;
 add the opt-in ids to the count when you set the vars.
 
 ### Rule ids (the contract)
@@ -3177,10 +3205,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 267 ids are declared once, in
+substitutes the layer name. These 268 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 267` so that a deck
+Pass `--expect-rule-categories 268` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -3222,7 +3250,7 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | Table 3.11.1 | `V0.W.1` |
 | Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
 | Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
-| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` |
+| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V1.M1.EN.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` |
 | Table 3.14.1 | `M4.W.1`, `M4.W.2`, `M4.W.3`, `M4.W.5`, `M4.S.1`, `M4.S.2`, `M5.W.1`, `M5.W.2`, `M5.W.3`, `M5.W.5`, `M5.S.1`, `M5.S.2` |
 | Table 3.14.2 | `M4.AUX.1`, `M4.AUX.2`, `M4.AUX.3`, `M5.AUX.1`, `M5.AUX.2`, `M5.AUX.3` |
 | Table 3.15.1 | `V4.S.1`, `V4.S.3`, `V4.AUX.1`, `V5.S.1`, `V5.S.3`, `V5.AUX.1`, `V4.W.1`, `V5.W.1`, `V4.M5.AUX.2`, `V5.M6.AUX.2`, `V4.M4.EN.1`, `V4.M5.EN.2`, `V5.M5.EN.1`, `V5.M6.EN.2` |
@@ -3351,9 +3379,9 @@ Related notes:
   V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
   when its enclosure is short on the left/right pair *and* on the top/bottom
   pair, so they need no routing direction; a coincident edge is a 0 nm
-  enclosure. `V1.M1.EN.1` ("5 & 2")
-  and `V(x).M(x+1).EN.2` ("(5 & 5) | (5 & 0)") pair a threshold with a
-  specific side and are not checked yet (#3147).
+  enclosure. For `V1.M1.EN.1`, either the horizontal or vertical pair must
+  clear 5 nm at one end and 2 nm at the other. Both ends at 4 nm fail.
+  The upper-metal end-cap alternatives remain in the gap table below.
 - **Shipped-cell BEOL.** The pinned standard cells draw M1, V1 and M2 (and
   V0), so the M1/M2/V1 rules run against them; they are clean under every
   BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
@@ -3485,7 +3513,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V0.M1.EN.1` | Table 3.11.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V0.M1.EN.1` | Table 3.11.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
 | `V0.LIG.EN.4` | Table 3.11.2 | 'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG past V0) needs the LIG routing direction to pick the side pair | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
@@ -3493,11 +3521,11 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V1.S.2`, `V1.S.3`, `V1.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V1.M2.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
-| `V1.M1.EN.1`, `V1.M2.EN.2` | Table 3.13.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V1.M2.EN.2` | Table 3.13.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V2.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V2.S.2`, `V2.S.3`, `V2.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V2.M3.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
-| `V2.M3.EN.2` | Table 3.13.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V2.M3.EN.2` | Table 3.13.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V3.M4.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
@@ -3692,7 +3720,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 267 --format json
+       --expect-rule-categories 268 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+from . import _warn
 
 
 def match_antenna_layers(
@@ -15,9 +15,8 @@ def match_antenna_layers(
         if name.casefold() in folded:
             matched.setdefault(name, folded[name.casefold()])
     if names and matched.keys().isdisjoint(names):
-        print(
+        _warn.warn(
             f"klt erc: warning: no non-gate stackup layer ({', '.join(names)}) "
-            f"matches the {pdk} antenna table ({', '.join(sorted(limits))})",
-            file=sys.stderr,
+            f"matches the {pdk} antenna table ({', '.join(sorted(limits))})"
         )
     return matched

@@ -224,12 +224,13 @@ def _extraction_preflight(
 
 def _resolve_testbenches(
     testbench_paths: Sequence[str],
+    timeout_s: float | None,
 ) -> tuple[list[str], list[str]]:
     """Validate schematic probes and resolve each testbench body and DUT."""
     body_paths: list[str] = []
     dut_paths: list[str] = []
     for testbench_path in testbench_paths:
-        request = _load_testbench_request(testbench_path)
+        request = _load_testbench_request(testbench_path, timeout_s)
         schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
@@ -277,6 +278,7 @@ def run_pex_dry_run(
     hosts: int | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -344,6 +346,7 @@ def run_pex_dry_run(
         testbench_paths,
         reference_netlist,
         measure_timeout_s,
+        timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
         device_only_leg=device_only_leg,
@@ -354,7 +357,7 @@ def run_pex_dry_run(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    _body_paths, dut_paths = _resolve_testbenches(testbench_paths)
+    _body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
     resolved_top = _extraction_preflight(
         layout_path,
         deck_name,
@@ -400,6 +403,7 @@ def run_pex_dry_run(
         hosts=hosts,
         resume=resume,
         capacity_wait_s=capacity_wait_s,
+        timeout_s=timeout_s,
     )
 
     testbenches: list[dict[str, Any]] = []
@@ -432,6 +436,7 @@ def run_pex_dry_run(
         # version: every field below is additive (docs/json-contract.md).
         "schema_version": SCHEMA_VERSION,
         "dry_run": True,
+        **({"simulation_timeout_s": timeout_s} if timeout_s is not None else {}),
         "status": "valid",
         "layout": env_provenance.repo_relative_path(
             layout_path or None, repo_root=repo_root

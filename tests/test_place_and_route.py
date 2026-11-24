@@ -6150,6 +6150,7 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "max_capacitance_violation_count": 2,
             "max_transition_violation_count_vs_library": 3,
             "max_capacitance_violation_count_vs_library": 2,
+            "library_limit_report_path": report["library_limit_report_path"],
         }
     ]
 
@@ -7970,11 +7971,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
-            # Issue #2357: the library-only counterpart -- also 0/0 here,
-            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
-            # was given for this request.
             "max_transition_violation_count_vs_library": 0,
             "max_capacitance_violation_count_vs_library": 0,
+            "library_limit_report_path": None,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -8063,9 +8062,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
-        # Issue #2357: the library-only counterpart, also 0/0 here.
         "max_transition_violation_count_vs_library": 0,
         "max_capacitance_violation_count_vs_library": 0,
+        "library_limit_report_path": None,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)

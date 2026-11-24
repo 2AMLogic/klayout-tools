@@ -241,7 +241,7 @@ def _seal_corner_length(
     from .seal_ring_rules import SG13G2_EDGESEAL
 
     edges = _seal_layer(kdb, layout, cell, SG13G2_EDGESEAL).edges()
-    diag = edges.with_angle(45, False) + edges.with_angle(135, False)
+    diag = edges.with_angle(kdb.Edges.DiagonalEdges, False)
     limit = round((rule.threshold_um or 0.0) / dbu)
     short = diag.with_length(0, limit, False)
     return [
@@ -261,23 +261,21 @@ def _seal_single_ring(
 ) -> list[dict[str, Any]]:
     from .seal_ring_rules import SG13G2_EDGESEAL
 
-    rings = [
-        p
-        for p in _seal_layer(kdb, layout, cell, SG13G2_EDGESEAL).each()
-        if p.holes() > 0
-    ]
-    if len(rings) <= 1:
+    # The deck counts merged EdgeSeal polygons interacting with the chip extent.
+    seal = _seal_layer(kdb, layout, cell, SG13G2_EDGESEAL)
+    count = seal.count()
+    if count <= 1:
         return []
     return [
         _seal_violation(
             rule,
             cell,
             _label(SG13G2_EDGESEAL),
-            f"{len(rings)} seal rings in one top cell; only one allowed",
+            f"{count} separate EdgeSeal polygons in one top cell; only one allowed",
             p.bbox(),
             p,
         )
-        for p in rings
+        for p in seal.each()
     ]
 
 
