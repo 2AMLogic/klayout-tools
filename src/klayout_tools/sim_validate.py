@@ -14,6 +14,7 @@ from typing import Any
 from . import (
     sim_crossings,
     sim_cycle_mean,
+    sim_derive,
     sim_energy,
     sim_eye,
     sim_forms,
@@ -299,6 +300,7 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
         )
 
 
+# `derive` is last: the first validator to see a conflict names its form first.
 _EXCLUSIVE_FORM_VALIDATORS = (
     sim_windowed.validate_form_exclusive,
     sim_slope_band_meas.validate_form_exclusive,
@@ -309,6 +311,7 @@ _EXCLUSIVE_FORM_VALIDATORS = (
     sim_snm_meas.validate_form_exclusive,
     sim_tian.validate_form_exclusive,
     sim_transfer_meas.validate_form_exclusive,
+    sim_derive.validate_form_exclusive,
 )
 
 
@@ -382,10 +385,9 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
 
 
 def _validate_on_unreached(name: Any, spec: dict[str, Any], *, has_spice: bool) -> None:
-    """``measurements[].on_unreached`` (issue #3108): ``"error"`` | ``"null"``,
-    and only on a ``spice`` (``.meas``) measurement -- an ``expr`` or
-    ``crossings`` entry has no "target" to leave unreached, so it is rejected
-    rather than silently ignored."""
+    """``measurements[].on_unreached`` (issue #3108): ``"error"`` | ``"null"``, and only
+    on a ``spice`` (``.meas``) measurement -- an ``expr`` or ``crossings`` entry has no
+    "target" to leave unreached, so it is rejected rather than silently ignored."""
     if "on_unreached" not in spec:
         return
     value = spec["on_unreached"]
@@ -464,20 +466,18 @@ def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None
 
 def _measurement_name_key(name: Any) -> Any:
     """A ``measurements[].name`` reduced to the identity ngspice actually
-    round-trips: the lower-cased string. A non-string name is returned
-    unchanged so this stays total (``_validate_measurement_form`` is what
-    rejects one)."""
+    round-trips: the lower-cased string. A non-string name is returned unchanged
+    so this stays total (``_validate_measurement_form`` is what rejects one)."""
     return name.lower() if isinstance(name, str) else name
 
 
 def _expr_measurements(
     measurements_spec: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533),
-    in the caller's own declaration order -- which is also the order their
-    ``let`` lines are emitted in, so a later expression may reference an
-    earlier one's name (verified against ngspice 46: ``let b = a * 2`` after
-    ``let a = ...`` resolves)."""
+    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533), in the
+    caller's own declaration order -- which is also the order their ``let`` lines are
+    emitted in, so a later expression may reference an earlier one's name (verified
+    against ngspice 46: ``let b = a * 2`` after ``let a = ...`` resolves)."""
     return [
         spec
         for spec in measurements_spec
