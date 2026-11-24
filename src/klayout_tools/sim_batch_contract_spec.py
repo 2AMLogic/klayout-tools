@@ -162,7 +162,7 @@ def _runner_gate_release(version: str) -> str | None:
 #: The registry maps each feature to its first supporting release segment and
 #: detector (#3249). The major.minor gate allows patch-level differences, so
 #: feature checks compare the full release segment. Step-scoped on_unreached
-#: also checks the first supporting development build inside that segment.
+#: needs a worker observation for development builds within the same segment.
 #: Following v0.7.0, the first 0.7.1 features were analysis_steps (#2482),
 #: measurements[].transfer (#2923/#2924), stimulus (#2977), dual_injection
 #: (analysis.passes / measurements[].tian, #3159/#3160/#3161), complex_vectors
@@ -460,29 +460,26 @@ def _feature_release_key(name: str) -> int:
     return key
 
 
-# First main build with #7093. Its first parent was 0.9.3.dev3404.
-STEP_UNREACHED_FIRST_DEV = 3412
-
-
 def _missing_runner_features(
-    features: list[str], runner_version: str | None
+    features: list[str], runner_version: str | None, step_probe: object = None
 ) -> list[str] | None:
-    """The ``features`` a runner of ``runner_version`` predates, or ``None``
-    when its version is unknown (unknown is never "missing")."""
+    """Known missing features, or None when only unverified features remain."""
     release = _release_segment(runner_version) if runner_version else None
     key = _release_key(release) if release else None
     if key is None:
         return None
-    dev = re.fullmatch(
-        r"0\.9\.3\.dev(\d+)", (runner_version or "").partition("+")[0].strip()
-    )
-    predates_step_policy = dev is not None and int(dev[1]) < STEP_UNREACHED_FIRST_DEV
-    return [
-        name
-        for name in features
-        if key < _feature_release_key(name)
-        or (name == "step_on_unreached" and predates_step_policy)
-    ]
+    missing = [name for name in features if key < _feature_release_key(name)]
+    # SCM development distance counts commits on a branch, not feature ancestry.
+    if (
+        "step_on_unreached" in features
+        and key == _feature_release_key("step_on_unreached")
+        and release != (runner_version or "").strip().partition("+")[0]
+    ):
+        if step_probe == "unsupported":
+            missing.append("step_on_unreached")
+        elif step_probe != "supported" and not missing:
+            return None
+    return missing
 
 
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):

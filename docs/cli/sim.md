@@ -5209,11 +5209,13 @@ data instead:
   counts corners). The key is **absent** unless some measurement declared
   `on_unreached`.
 
-For a measurement inside an analysis step, batch preflight checks the worker
-capability `step_on_unreached`. The first main build that grades these misses
-is `0.9.3.dev3412`. A `0.9.0` worker can report major/minor compatibility
-with a `0.9.3.devN` client and still lack this capability. Use a runner image
-built from a version that includes the step policy.
+For a measurement inside an analysis step, batch and remote preflight check
+the worker capability `step_on_unreached`. A published release through 0.9.2
+predates it. For a 0.9.3 development image, the commit count alone cannot
+establish support. The worker replays one completed step through its installed
+grader, with a positive control and a missed target, before starting the solver.
+Batch collection reports the observed capability. When the observation is
+unavailable, it reports `unknown`. Use an image that includes the step policy.
 
 The classification is deliberately narrow: it applies only when ngspice
 logged the reason `out of interval` together with `failed!` for that card
