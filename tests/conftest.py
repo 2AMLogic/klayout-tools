@@ -22,7 +22,26 @@ from types import SimpleNamespace
 import pytest
 
 from klayout_tools import _paths as paths_module
-from klayout_tools import _version_scheme, build_identity
+from klayout_tools import _version_scheme, build_identity, sim_batch_image
+
+
+@pytest.fixture(scope="session")
+def built_wheel(tmp_path_factory):
+    """Build the distribution once for tests that exercise its installed layout."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("needs the `uv` CLI to build a wheel")
+    out = tmp_path_factory.mktemp("dist")
+    build = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(out)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert build.returncode == 0, f"uv build failed:\n{build.stdout}\n{build.stderr}"
+    (wheel,) = out.glob("*.whl")
+    return wheel
 
 
 @pytest.fixture
@@ -73,6 +92,8 @@ def _no_host_sim_backend_default(monkeypatch):
     and submit a real Spot job; the tests that exercise the host default set
     it themselves.
     """
+    # Unit tests resolve fleet configs without accessing a host's live AWS profile.
+    monkeypatch.setattr(sim_batch_image, "read_batch_runner_images", lambda *args: [])
     monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
     # The same for `klt netlist`'s host default (issue #3182): a host that
     # keeps xschem off itself sets KLT_NETLIST_BACKEND=batch, and a local

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_coverage import _implausible_dimensions
 from .lvs_flatten import root_selected_circuit
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
@@ -30,6 +31,7 @@ class _ReferenceStage(NamedTuple):
     reference_gate_level_case_folds: list[dict[str, str]]
     supply_universe: _lvs._SupplyPinUniverse | None
     unresolved_subckt_call_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     reference_pin_order_files: list[str]
     reference_netlist: Any
     reference_known_limit_counts: dict[str, int]
@@ -188,6 +190,13 @@ def _read_reference_stage(
         finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
+    )
+    dimensions = _implausible_dimensions(
+        reference_netlist,
+        _lvs._reachable_circuits(
+            reference_netlist, reference_spec.get("top"), "reference"
+        ),
+        "reference",
     )
     # Issue #5676: the mirror image of the X-card form guard inside
     # `_read_reference_netlist` -- a plain-element reference whose `M` cards
@@ -365,6 +374,7 @@ def _read_reference_stage(
         reference_gate_level_case_folds=reference_gate_level_case_folds,
         supply_universe=supply_universe,
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        dimensions=dimensions,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
         reference_known_limit_counts=reference_known_limit_counts,
@@ -384,7 +394,7 @@ def _reject_unpairable_sim_model_classes(
     by the deck's generic names (``nfet``/``pfet``). The two class-name sets
     are disjoint, so the compare provably pairs nothing and would report a
     device/net-unmatched cascade that reads like a layout bug. Best-effort,
-    like ``_reject_bare_resistor_x_cards``: without a ``deck`` or for one
+    like ``_reject_bare_deck_x_cards``: without a ``deck`` or for one
     with no curated model table, return early and leave validation to the
     reference read itself. Four clauses, all required:
 

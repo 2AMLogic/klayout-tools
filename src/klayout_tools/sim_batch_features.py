@@ -9,9 +9,9 @@ non-empty ``missing`` list.
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
+from . import _warn
 from ._digest import normalize_sha256
 from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
 from .sim_batch_corner_libs import (
@@ -41,10 +41,10 @@ def warn_unverified_features(
         return None
     message = (
         f"the client could not verify support for {', '.join(features)} before "
-        "launch because the AMI manifest has no candidate images. The worker "
-        "will check these mandatory features when it starts."
+        "launch because the published batch runner image identity is unknown. "
+        "The worker will check these mandatory features when it starts."
     )
-    print(f"klt sim: warning: {message}", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {message}")
     return {
         "code": BATCH_RUNNER_FEATURE_UNVERIFIED_CODE,
         "severity": "warning",

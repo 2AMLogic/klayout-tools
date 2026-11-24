@@ -26,9 +26,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   `.gz`; `--format text` still writes JSON to the file). The file is written
   for clean and violating runs alike (exit `3` included) and for
   `--engine both`; stdout and exit codes are unchanged. An unwritable `PATH`
-  is the standard error envelope (exit `1`). Rejected with `--check` and
-  `--list-rules`, which emit no run report. Mirrors `klt sim --report-out`
-  (issue #4393).
+  is the standard error envelope (exit `1`). The report is staged as a
+  sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Rejected with `--check` and `--list-rules`, which emit no run report.
+  Mirrors `klt sim --report-out` (issue #4393).
 - `--max-violations N` — `--engine klayout` only (issue #4464): serialize at
   most `N` entries in `violations[]`, the first `N` in the report's
   deterministic sort order; `0` is summary-only (no polygons, `coverage`
@@ -3011,7 +3013,7 @@ Pick a pin from this table, not from the unreleased examples in this page.
 | `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
 | `0.8.0` | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
 
-`--expect-rule-categories` in the example below (268 on the current deck; 263
+`--expect-rule-categories` in the example below (272 on the current deck; 263
 on `0.8.0`), and FinFET LVS, need `0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
 to refuse FinFET devices.
 
@@ -3022,7 +3024,7 @@ packaged `asap7.drc` as separate artifacts (`content_hash` vs
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
-    --expect-rule-categories 268 --format json
+    --expect-rule-categories 272 --format json
 ```
 
 `klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
@@ -3040,7 +3042,8 @@ the standard `--engine klayout` envelope described in "Engine" above.
 
 **Scope today: FEOL, MOL and BEOL M1-M9 / V0-V9.** Phase 1 (#2760) checks
 DRM Tables 3.1.1 (geometry) to 3.10.3 (LIG) and V0 width/connectivity from
-Tables 3.11.1-2. Phase 2 (#2810) adds the BEOL stack: `V0.LIG.A.1`, M1-M3
+Tables 3.11.1-2. Phase 2 (#2810) adds the BEOL stack: `V0.LIG.A.1`,
+`V0.M1.EN.1`, M1-M3
 (Table 3.12.1), V1-V3 (Table 3.13.1), M4-M7 (Tables 3.14.1-3.14.2 and
 3.16.1-3.16.2), V4-V7 (Tables 3.15.1 and 3.17.1), M8-M9 (Tables
 3.18.1-3.18.2) and V8-V9 (Table 3.19.1), and applies
@@ -3061,7 +3064,12 @@ SDT horizontal edge is not on an ACTIVE edge); the list and rationale are in
 an `SDT.ACTIVE.AUX.2` hit that lies on an instance of one of those cells is
 expected library content, not a router error. The deck does not waive these
 hits, so they stay in the report; recognise them by the cell name, not by
-filtering the rule.
+filtering the rule. Match on the marker's `source_cell` after folding it to
+the listed name: drop a trailing `$VAR<n>` (a layout variant of the base cell,
+for example `BUFx4_ASAP7_75t_R$VAR1` or `BUFx4_ASAP7_75t_R$VAR12`), then the
+`_ASAP7_75t_<VT>` suffix, and compare what is left with the list (`BUFx4`). A
+cell whose folded name is not on the list stays unclassified. "Retained
+deviations" below says what the shipped-cell gate does and does not cover.
 
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
@@ -3187,7 +3195,7 @@ placements are the consumer's to own.
 
 `FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
 all moved by the same off-grid offset is still reported `clean`. Two opt-in
-rules check the absolute origin. They are not among the 268 default ids; they
+rules check the absolute origin. They are not among the 272 default ids; they
 run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
 scale), and with neither set the deck output, categories and coverage are
 unchanged:
@@ -3207,7 +3215,7 @@ declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
 and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
 `0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
 so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
-grid report. `--expect-rule-categories` stays `268` for the default run;
+grid report. `--expect-rule-categories` stays `272` for the default run;
 add the opt-in ids to the count when you set the vars.
 
 ### Rule ids (the contract)
@@ -3216,10 +3224,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 268 ids are declared once, in
+substitutes the layer name. These 272 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 268` so that a deck
+Pass `--expect-rule-categories 272` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -3258,10 +3266,10 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5`, `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` |
 | Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `SRAM.LIG.GATE.A.4`, `LIG.GATE.AUX.1` |
 | Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1`, `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` |
-| Table 3.11.1 | `V0.W.1` |
+| Table 3.11.1 | `V0.W.1`, `V0.M1.EN.1` |
 | Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
 | Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
-| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V1.M1.EN.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` |
+| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V1.M1.EN.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2`, `V3.M4.AUX.2`, `V1.M2.EN.2`, `V2.M3.EN.2` |
 | Table 3.14.1 | `M4.W.1`, `M4.W.2`, `M4.W.3`, `M4.W.5`, `M4.S.1`, `M4.S.2`, `M5.W.1`, `M5.W.2`, `M5.W.3`, `M5.W.5`, `M5.S.1`, `M5.S.2` |
 | Table 3.14.2 | `M4.AUX.1`, `M4.AUX.2`, `M4.AUX.3`, `M5.AUX.1`, `M5.AUX.2`, `M5.AUX.3` |
 | Table 3.15.1 | `V4.S.1`, `V4.S.3`, `V4.AUX.1`, `V5.S.1`, `V5.S.3`, `V5.AUX.1`, `V4.W.1`, `V5.W.1`, `V4.M5.AUX.2`, `V5.M6.AUX.2`, `V4.M4.EN.1`, `V4.M5.EN.2`, `V5.M5.EN.1`, `V5.M6.EN.2` |
@@ -3386,13 +3394,18 @@ Related notes:
   width classes `M8.S.5` (80-120 nm wide needs 80 nm) contradicts `M8.S.1`
   (two shapes of 80 nm or more need 40 nm), so the DRM supports no
   consistent reading; they are not checked (#3156).
+- **V3 width across M4.** Section 3.14 specifies horizontal M4 routing.
+  `V3.M4.AUX.2` checks that both horizontal edges of an overlapping V3 lie
+  on the local M4 boundary along their entire length. `V3.AUX.1` covers
+  cuts that miss M4 or only touch its edge.
 - **Via enclosure.** `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` and the
   V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
   when its enclosure is short on the left/right pair *and* on the top/bottom
   pair, so they need no routing direction; a coincident edge is a 0 nm
   enclosure. For `V1.M1.EN.1`, either the horizontal or vertical pair must
   clear 5 nm at one end and 2 nm at the other. Both ends at 4 nm fail.
-  The upper-metal end-cap alternatives remain in the gap table below.
+  `V0.M1.EN.1`, `V1.M2.EN.2` and `V2.M3.EN.2` are the upper-metal end caps
+  ("(5 & 5) | (5 & 0)"): see "Upper-metal end caps" below.
 - **Shipped-cell BEOL.** The pinned standard cells draw M1, V1 and M2 (and
   V0), so the M1/M2/V1 rules run against them; they are clean under every
   BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
@@ -3506,6 +3519,58 @@ does not join them), the threshold and one dbu inside it, a corner pair at
 and below the 15 nm / 14 nm distances, and facing edges that overlap by one
 dbu. The shipped-cell regression needed no new deviation.
 
+### Upper-metal end caps (`V0.M1.EN.1`, `V1.M2.EN.2`, `V2.M3.EN.2`)
+
+DRM Table 3.11.1 states `V0.M1.EN.1` as "Minimum enclosure of V0 by M1 on
+two opposite sides >= (5 & 5) | (5 & 0) nm". Table 3.13.1 states
+`V1.M2.EN.2` in the same words for V1 by M2, and section 3.13 applies it to
+V2 by M3 (`V2.M3.EN.2`). The deck reads it as it reads `V1.M1.EN.1` ("5 &
+2"): `a & b` pairs a lower bound with a side, and the operator is `>=` for
+every bound. Of two opposite sides, one must be enclosed by at least 5 nm
+and its opposite by at least 5 nm (the `5 & 5` case) or by at least 0 nm
+(the `5 & 0` case). Either pair of sides (left / right or top / bottom)
+and either order qualifies, so no routing direction is needed.
+
+- **An opposite end strictly between 0 and 5 nm is legal**: it meets the
+  `5 & 0` bound. The DRM draws only the ends of that range. Fig. 3.11.1(b)
+  and Fig. 3.13.1(b) each show two vias that are flush with the metal at
+  one end and enclosed at the other, both labelled with the rule, and
+  take the corner-to-corner distance between their flush ends as
+  `V0.S.3` / `V1.S.3` ("both without a 5 nm end-cap"): a 5 nm end cap is a
+  property of one end of one via.
+- **A side is a 5 nm end only along its whole length.** The check reads
+  the via edges facing the metal, split where the metal boundary steps. A
+  side that is 5 nm past the via over part of its length and 2 nm over the
+  rest is not a 5 nm end, and two such fragments on one side cannot stand
+  in for opposite sides.
+- **The 0 nm bound means covered.** KLayout's `enclosing` check reports
+  only via edges that the metal covers, so the deck also takes the via
+  edges that are neither inside the metal nor on its boundary; any such
+  edge fails the rule. A via that sticks out of its metal is reported
+  here and, for V1 and V2, by `V1.AUX.1` / `V2.AUX.1`. A via with no metal
+  above it at all is left to the `AUX.1` rules.
+
+The fixtures (`tests/helpers/asap7_drc_enclosure_fixtures.py`) put the via
+under a 26 nm bar that is 4 nm past it across and runs `e0` / `e1` nm past
+its two ends. They pass `5 & 5` and `5 & 0` with the bar horizontal and
+vertical, `0 & 5`, and the intermediate `5 & 2.5`, `5 & 4.75` and `4.75 &
+5`. They fail a required end one database unit short (`4.75 & 0` with the
+bar horizontal and vertical, `0 & 4.75`, `4.75 & 4.75` horizontal and
+vertical), a bar 4 nm past the via on all four sides, a side that is 5 nm
+over part of its length and 2 nm over the rest, and a via one database unit
+out of the end of its metal (horizontal and vertical).
+
+The pinned shipped cells pass in all three libraries, and every via end
+in them is either flush or at least 5 nm; none lies between, so the cells
+confirm the flush case and leave the intermediate reading to the table's
+`>=`. Measured on each of the 212 cells of a library on its own (the counts
+are the same in R, L and SL): of 8,576 V0, 165 meet the rule only as `5 &
+0`, with one end flush on left / right (150) or top / bottom (15), and the
+others have a pair with both ends at least 5 nm (7,369 on left / right,
+1,042 on top / bottom); of 389 V1, 25 meet it only as `5 & 0` and 364 have
+both left and right ends at least 5 nm. The shipped-cell regression
+needed no new deviation.
+
 ### Not implemented
 
 DRM rules in Tables 3.1-3.19 that the deck does not check yet. The same ids
@@ -3524,22 +3589,18 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V0.M1.EN.1` | Table 3.11.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
-| `V0.LIG.EN.4` | Table 3.11.2 | 'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG past V0) needs the LIG routing direction to pick the side pair | #3147 |
+| `V0.LIG.EN.4` | Table 3.11.2 | V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT and SLVT library has 1,413 selected V0 wholly inside LIG. Figure 3.11.2(a) shows V0 protruding beyond LIG. Of the 6,312 selected cuts per library, 4,899 protrude by exactly 1 nm on both sides. The 1,413 fully covered cuts occupy 208 of 212 cell masters and have no LISD overlap. They include 18 nm square V0 centered in 22 nm square LIG. The rule needs clarification for V0 wholly inside LIG. | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
 | `V0.M1.AUX.3` | Table 3.11.2 | exact width across the metal track needs the metal routing direction | #3147 |
 | `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V1.S.2`, `V1.S.3`, `V1.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V1.M2.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
-| `V1.M2.EN.2` | Table 3.13.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V2.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V2.S.2`, `V2.S.3`, `V2.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V2.M3.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
-| `V2.M3.EN.2` | Table 3.13.1 | the DRM gives 5/5 or 5/0 nm on opposite sides; intermediate end-cap lengths between flush and 5 nm have not been validated | #3147 |
 | `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V3.M4.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
 | `M4.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
 | `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M4.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
@@ -3731,7 +3792,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 268 --format json
+       --expect-rule-categories 272 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied
@@ -3740,9 +3801,11 @@ The gate has two parts, run for each library:
 
 **Retained deviations.** These ten cells violate `SDT.ACTIVE.AUX.2` as the
 DRM states it. They are the same in all three libraries (names drop the
-`_ASAP7_75t_<VT>` suffix). Table 3.8.1 says SDT horizontal edges (SDT not
-interacting with SRAMDRC) must coincide with ACTIVE horizontal edges, and
-Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE edge as illegal.
+`_ASAP7_75t_<VT>` suffix, and a `$VAR<n>` layout variant of a cell folds into
+its base name; see "Layout variants" after the table). Table 3.8.1 says SDT
+horizontal edges (SDT not interacting with SRAMDRC) must coincide with ACTIVE
+horizontal edges, and Fig. 3.8.1(d) marks an SDT edge that is not on an ACTIVE
+edge as illegal.
 The rule is not loosened and the deck does not waive anything. Each deviation
 is an exact `(cell, rule)` entry, never a rule-wide or cell-wide waiver.
 Leaving a cell out of the clean run does not hide its other rules, because
@@ -3762,13 +3825,30 @@ rule:
 | `ICGx6p67DC` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 | `OAI22xp33` | `SDT.ACTIVE.AUX.2` | Table 3.8.1, Fig. 3.8.1(d) | R, L, SL | SDT drawn 81 nm tall over a 54 nm ACTIVE: the SDT top edge is not on an ACTIVE horizontal edge | kept as stated; expected exactly; left out of the clean run |
 
+**Layout variants (`$VAR<n>`).** A placed block can also carry layout variants
+of these cells, named `<cell>_ASAP7_75t_<VT>$VAR<n>`. Fold a variant into its
+base cell before matching a marker's `source_cell` against the table: strip
+`$VAR<n>`, then the suffix. `BUFx4_ASAP7_75t_R$VAR1` is `BUFx4`, which is
+listed; `INVx1_ASAP7_75t_R$VAR1` is `INVx1`, which is not, so it stays
+unclassified. The table names library cells only and never variants, because
+a variant's name depends on the layout being checked.
+
+**Gate coverage, measured.** On lambdapdk v0.2.17 each of the three pinned GDS
+files holds 212 cells, all of them top cells, and none has a `$` in its name
+(read with KLayout 0.30.13). The gate places those cells by their library
+names, so it never places a `$VAR` variant and does not check that a variant's
+shapes equal its base cell's; the fold is a naming rule. A `$VAR` name in
+`source_cell` is a cell of the layout under check, since the pinned library
+holds none; what created it was not traced here.
+
 ### Per-rule fixtures
 
 `tests/helpers/asap7_drc_fixtures.py` generates, for every rule id, at
 least one failing layout that trips that id and one passing layout drawn at
 the threshold boundary (one 0.25 nm dbu away from the failing one; where
 the threshold is a Euclidean distance with no point on the 0.25 nm grid,
-the two cases straddle it by one dbu). All cases share one GDS, one
+the two cases straddle it by one dbu). The via-enclosure cases live in
+`tests/helpers/asap7_drc_enclosure_fixtures.py`. All cases share one GDS, one
 5.376 um slot each (a multiple of the M4-M7 grids, so the absolute-grid
 rules see the same coordinates in every slot), written to a temp
 directory, so one
@@ -3793,6 +3873,9 @@ cases list the extra ids and say why, for example:
   that `W.3` forbids.
 - LIG.SDT.S.8 is only separable from `LIG.LISD.S.6` where SDT sticks out of
   its LISD, which is `SDT.LISD.AUX.4` (see "Net-aware spacing").
+- a V1 / V2 that sticks out of the metal above it is outside that metal
+  (`V1.AUX.1`, `V2.AUX.1`) and has no enclosure there (`V1.M2.EN.2`,
+  `V2.M3.EN.2`; see "Upper-metal end caps").
 
 ## Limitation: whole-layout, flattened
 
