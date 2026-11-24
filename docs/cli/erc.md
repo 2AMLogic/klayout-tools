@@ -1048,7 +1048,9 @@ drawn geometry actually ties them together. An LVS run built on a deck like
 that does not independently verify this specific property — check what the
 LVS deck's own connectivity setup actually does before trusting its "match"
 verdict as proof that a `klt erc` multi-island finding is a false positive
-rather than a real one.
+rather than a real one. The same limitation applies when a `klt lvs` request explicitly
+sets [`layout.join_same_named_nets`](lvs.md#implicit-connections-by-label).
+The inline extractor follows drawn connections by default.
 
 This is a documented modeling limitation, not a commitment to a fix
 timeline: expressing "this well/tap geometry conducts, scoped only to its
