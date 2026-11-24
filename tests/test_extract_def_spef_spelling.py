@@ -104,7 +104,7 @@ def test_live_def_bus_bits_annotate_the_design(tmp_path):
 
 
 def _extract_finfet_dotted_fixture(
-    tmp_path, *, internal_label="sub.b[0]", collision=False
+    tmp_path, *, internal_label="sub.b[0]", collision=False, underscore_label="sub_sig"
 ):
     """Routed names from the STA test design, on separate ASAP7 capacitor plates.
 
@@ -141,6 +141,8 @@ def _extract_finfet_dotted_fixture(
         y = index // 2 * 2000
         plate = metal.insert(kdb.Box(x, y, x + 200, y + 200))
         label = internal_label if name == "sub.b[0]" else str(name)
+        if name == "sub_sig":
+            label = underscore_label
         plate.set_property(1, label)
         labels.insert(kdb.Text(label, kdb.Trans(x + 100, y + 100)))
         if index % 2:
@@ -226,3 +228,38 @@ def test_colliding_finfet_spellings_do_not_take_another_nets_instance_pins(tmp_p
     assert "DEF sub.sig -> extracted sub_sig" in "\n".join(report["warnings"])
     assert "*I ff1:Q B" not in spef
     assert r"*D_NET sub\.b[0] " in spef
+
+
+def test_def_only_underscore_net_cannot_supply_pins_to_a_dotted_layout_net(tmp_path):
+    report, spef = _extract_finfet_dotted_fixture(
+        tmp_path, collision=True, underscore_label="c1"
+    )
+    nets = [row["net"] for row in report["parasitics"]["nets"]]
+    assert nets.count("sub_sig") == 1
+    block = spef.split(r"*D_NET sub\.sig ", 1)[1].split("*END", 1)[0]
+    assert "*P out[1] B" in block and "*I ff1:Q B" in block
+    assert "*I ff1:CLK B" not in block and "*I b3:X B" not in block
+    assert "*D_NET sub_sig " not in spef
+
+
+def test_observed_rename_keeps_only_its_own_def_instance_and_port_pins():
+    from klayout_tools.extract import _remap_def_net_connections
+    from klayout_tools.extract_spef import DefName, DefNetConnections
+
+    dotted, other = DefName("sub.sig"), DefName("sub_sig")
+    # The two DEF declarations may appear in either order.
+    for keys in ((dotted, other), (other, dotted)):
+        pins = {dotted: (("ff1", "Q"),), other: (("b3", "X"),)}
+        ports = {dotted: ("out[1]",), other: ("unrelated",)}
+        original = DefNetConnections(
+            {key: pins[key] for key in keys}, {key: ports[key] for key in keys}
+        )
+        renames = [("top", "sub.sig", "sub_sig")]
+        remapped = _remap_def_net_connections(original, renames)
+        (key,) = remapped
+        assert key.spef == r"sub\.sig"
+        assert remapped[key] == (("ff1", "Q"),)
+        assert remapped.port_pins[key] == ("out[1]",)
+        # A physically internal dotted net cannot acquire the other DEF net's port.
+        del original.port_pins[dotted]
+        assert not _remap_def_net_connections(original, renames).port_pins

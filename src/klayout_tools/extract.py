@@ -5158,26 +5158,32 @@ def _remap_def_net_connections(
     after_by_before: dict[str, str] = {}
     for _circuit, before, after in renames:
         after_by_before.setdefault(before, after)
-    remapped: dict[str, Sequence[tuple[str, str]]] = {}
-    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
-    for key, pins in def_net_connections.items():
-        target = after_by_before.get(key)
-        if target is None:
-            remapped[key] = pins
-        else:
-            # Issue #3900: the key carries the DEF's own SPEF spelling, so
-            # the SPEF a linked design reads still names the net as the DEF
-            # does; only the SPICE/JSON spelling is the renamed one.
-            renamed_items[_renamed_def_name(target, key)] = pins
-    # The renamed net is what actually exists, so it wins any key clash.
-    remapped.update(renamed_items)
-    # Keep the DEF's renamed-port map (issue #3257 gap B), re-keyed the same way.
+    targets = set(after_by_before.values())
+
+    def remap_key(key: str) -> str:
+        return (
+            _renamed_def_name(after_by_before[key], key)
+            if key in after_by_before
+            else key
+        )
+
+    # Keep the observed net's DEF spelling, instance pins and port pins together.
+    # An absent DEF net with the same normalized spelling has no layout island.
+    remapped = {
+        remap_key(key): pins
+        for key, pins in def_net_connections.items()
+        if key in after_by_before or key not in targets
+    }
     port_pins = getattr(def_net_connections, "port_pins", None)
     if port_pins is None:
         return remapped
     return DefNetConnections(
         {net: tuple(pins) for net, pins in remapped.items()},
-        {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
+        {
+            remap_key(key): pins
+            for key, pins in port_pins.items()
+            if key in after_by_before or key not in targets
+        },
     )
 
 

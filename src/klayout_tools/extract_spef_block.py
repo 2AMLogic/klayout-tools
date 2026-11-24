@@ -40,10 +40,7 @@ def _observed_def_renames(
     return [
         (circuit.name, original, spelling)
         for original, spelling in zip(names, spellings, strict=True)
-        if "." in original
-        and original in connections
-        and counts[spelling] == 1
-        and spelling not in connections
+        if "." in original and original in connections and counts[spelling] == 1
     ]
 
 
