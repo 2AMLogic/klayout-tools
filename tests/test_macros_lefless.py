@@ -97,3 +97,18 @@ def test_sta_and_place_and_route_still_reject_a_lefless_entry(tmp_path):
         post_route_sta._validate_macros(request, str(tmp_path))
     with pytest.raises(Exception, match=r"macros\[0\]\.lef is required"):
         pnr_validate_macros([{**request[0], "instance": "u_a"}], str(tmp_path))
+
+
+def test_blackbox_module_identity_ignores_quoted_parameter_text(tmp_path):
+    blackbox = (
+        '(* blackbox, note = "*) module attribute_decoy" *)\n'
+        'module real_cell #(parameter DESCRIPTION = "module diagnostic",\n'
+        '    parameter URL = "https://example.invalid/*") ();\n'
+        '  localparam ESCAPED = "quote: \\"module other_decoy\\"";\n'
+        "endmodule\n"
+    )
+    request = _lefless(tmp_path, blackbox)
+    assert _validate_lefless(request, tmp_path)[0]["cell"] == "real_cell"
+    request[0]["cell"] = "diagnostic"
+    with pytest.raises(_Err, match=r"'diagnostic'.*\['real_cell'\]"):
+        _validate_lefless(request, tmp_path)

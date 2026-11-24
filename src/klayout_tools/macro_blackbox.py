@@ -6,8 +6,7 @@ against the entry's ``cell`` (:func:`check_blackbox_declares_cell`), and
 ``klt synthesize`` alone (issue #5612) lets a LEF-less entry take its
 whole identity from the blackbox (:func:`resolve_lefless_identity`).
 Both answers come from :func:`verilog_declared_modules`, which reads only
-the file's ``module`` declarations -- comments and ``(* ... *)``
-attributes stripped -- never the logic inside them.
+module declarations while skipping strings, comments and attributes.
 
 Split out of :mod:`klayout_tools.macros` so the macro validator stays
 under its per-file size ceiling while the blackbox-identity machinery
@@ -20,21 +19,33 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_VERILOG_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
-_VERILOG_ATTRIBUTE_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
-_VERILOG_MODULE_RE = re.compile(
-    r"(?<![\w$])(?:macro)?module\s+(?:\\(\S+)|([A-Za-z_][\w$]*))"
+_VERILOG_TOKEN_RE = re.compile(
+    r'(?P<comment>//[^\n]*|/\*.*?\*/)|(?P<string>"(?:[^"\\]|\\.)*")'
+    r"|(?P<attribute>\(\*|\*\))|(?P<identifier>\\\S+|[A-Za-z_][\w$]*)"
+    r"|\$[\w$]+|\S",
+    re.DOTALL,
 )
 
 
 def verilog_declared_modules(text: str) -> list[str]:
-    """Module names declared in Verilog ``text``, in order. Comments and
-    ``(* ... *)`` attributes are stripped first, so a commented-out
-    ``module`` line is not a declaration; escaped identifiers
-    (``\\name``) are returned without the backslash."""
-    text = _VERILOG_COMMENT_RE.sub(" ", text)
-    text = _VERILOG_ATTRIBUTE_RE.sub(" ", text)
-    return [m.group(1) or m.group(2) for m in _VERILOG_MODULE_RE.finditer(text)]
+    """Read module names in order, keeping strings and escaped identifiers intact."""
+    names = []
+    in_attribute = False
+    expect_name = False
+    for match in _VERILOG_TOKEN_RE.finditer(text):
+        kind = match.lastgroup
+        token = match.group()
+        if kind == "comment":
+            continue
+        if kind == "attribute":
+            in_attribute = token == "(*"
+            continue
+        if in_attribute:
+            continue
+        if expect_name and kind == "identifier":
+            names.append(token.removeprefix("\\"))
+        expect_name = token in {"module", "macromodule"}
+    return names
 
 
 def check_blackbox_declares_cell(
