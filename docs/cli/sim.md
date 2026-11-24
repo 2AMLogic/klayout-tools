@@ -738,26 +738,25 @@ immediately. A non-positive or non-integer `max_workers` is an application
 error (exit 1).
 
 **Threads per worker (issue [#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)).**
-The `max_workers // 8` estimate above (`_ASSUMED_THREADS_PER_NGSPICE`) is kept:
-it sizes the *pool* for the cores one ngspice may use. Separately, whenever a
-`local-parallel` (hence `batch`) run has more than one worker in flight, each
-`ngspice` is started with `OMP_NUM_THREADS=1` in its process environment, so N
-workers do not each spawn a full OpenMP team and oversubscribe the host (on the
-fleet this was a measured ~270× per-unit slowdown, bit-identical `.meas`
-values). The environment variable is used rather than `options.ngspice_init`
-because an older runner silently drops the latter. `options.threads_per_worker`
-(positive integer; anything else is an application error, exit 1) overrides the
-default for `local` and `local-parallel` alike. A single worker with no
-override keeps the ambient environment. A netlist that itself runs
-`set num_threads=N` in a `.control` block still wins (it executes after the
-environment is read). `engine: "xyce"` is not given the variable. The value in
-force is reported as `environment.threads_per_worker` (absent when the ambient
-environment decided).
-The resolved count is also written as `set num_threads=N` into each corner's
-generated `.spiceinit` ([#3619](https://github.com/2AMLogic/klayout-tools/issues/3619)):
-on the batch fleet (ngspice-46) `OMP_NUM_THREADS` alone did not prevent
-oversubscription, while `set num_threads=1` did. An `options.ngspice_init` line
-is written after it and wins.
+When several workers share a host, klt gives each ngspice process `OMP_NUM_THREADS=1` and writes
+`set num_threads=1` to its corner's `.spiceinit`. A single worker inherits the
+ambient settings. Set `options.threads_per_worker` to a positive integer to
+override either default on `local` or `local-parallel`, including a batch
+worker. Invalid values return exit 1. A declared `options.ngspice_init` line
+runs after the generated pin, and the netlist's `.control` runs later still.
+`environment.threads_per_worker` records the count klt requested when it set
+one.
+
+On the ngspice 46 fleet, oversubscription caused a reported ~270× per-unit
+slowdown with identical measurement values. The generated `.spiceinit` pin
+was added after an environment-only run still timed out. [Fleet verification](https://github.com/2AMLogic/klayout-tools/issues/3619)
+
+On the ngspice 47 fleet, a four-corner SKY130 ring test cleared `num_threads`
+with `options.ngspice_init: ["unset num_threads"]`. Each solver observed its
+requested OpenMP value. Changing it from 1 to 8 changed each corner's runtime
+by at most 2.1% on an eight-core worker running one corner at a time. All four
+ring frequencies matched. The internal OpenMP team size remains unmeasured.
+[Measurements and runner details](https://github.com/2AMLogic/klayout-tools/issues/3522#issuecomment-7111416078)
 
 **Useful on a workstation, harmful on a shared worker.** `local-parallel`
 trades CPU/memory for wall-clock time — fine on a dedicated development
