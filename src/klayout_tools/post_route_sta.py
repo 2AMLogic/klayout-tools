@@ -335,6 +335,7 @@ from ._sta_period_maps import (
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
+    SPEF_NO_PIN_ATTACH_HINT,
     SPEF_SKIP_DRIVER_ONLY,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
@@ -1780,9 +1781,8 @@ def _spef_annotation_block(
     if not names_correlated:
         reasons.append(
             f"only {design_nets_annotated} of {design_nets_total} nets in "
-            "the linked design are named by this SPEF"
+            f"the linked design are named by this SPEF{SPEF_NAME_MISMATCH_HINT}"
         )
-        reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
     if reader_warnings:
         discarded = {
@@ -1799,7 +1799,7 @@ def _spef_annotation_block(
         reasons.append(
             "every timing path reported after read_spef is byte-identical to "
             "the same report taken before it, so this run's delays are the "
-            "unannotated ones"
+            f"unannotated ones{SPEF_NO_PIN_ATTACH_HINT}"
         )
     if gating_unannotated:
         reason = (

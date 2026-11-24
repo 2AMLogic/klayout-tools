@@ -976,8 +976,14 @@ measurement.
 **What a `klt extract --spef` SPEF models (issue #3257).** By default it is
 lumped capacitance per net with no wire resistance between DEF-level pins
 (zero-ohm legs), so `read_spef` adds wire load but not pin-to-pin wire delay.
-Build it with `--def-net-connections`, `--def-pins` **and** `--def-net-names`;
-without `--def-pins`, whether OpenSTA attaches the nets at all is
+Build it with `--def-net-connections`, `--def-pins` **and** `--def-net-names`
+(on a FinFET deck such as `asap7`, where `klt extract` refuses `--def-pins` by
+name, pass `--pins <A,B,...>` with the routed DEF `PINS` section's names in its
+place; `--def-net-names` and `--def-net-connections` are accepted there as
+they are, see `docs/cli/extract.md`, "ASAP7 FinFET extraction"); without
+`--def-net-connections` the SPEF carries no instance `*CONN`, so `read_spef`
+attaches nothing to any pin and `delay_changed` is `false`; without the
+declared pins, whether OpenSTA attaches the nets at all is
 layout-dependent, not a guaranteed "nothing annotates" (the #3560 `gcd` run
 annotated 537 / 537 and still reported `delay_changed: true`), and without
 `--def-net-names` the extracted names are `$N` so almost nothing correlates
@@ -1148,7 +1154,12 @@ except that `unannotated_driver_count` now gates net of the floating drivers.
   every failing check and stating that `worst_slack_ns`/etc. are not a
   real-parasitics measurement to the extent annotation is missing. When the
   name-correlation check fails, the sentence also hints at re-running `klt
-  extract` with `--def-net-names` and `--def-pins <routed.def>`.
+  extract` with `--def-net-names`, `--def-net-connections <routed.def>` and the
+  declared pins (`--def-pins <routed.def>` on a planar deck, or `--pins
+  <A,B,...>` listing the routed DEF `PINS` names where `--def-pins` is refused,
+  i.e. a FinFET deck). The `delay_changed: false` sentence points at
+  `--def-net-connections <routed.def>`, since a SPEF without instance `*CONN`
+  attaches nothing to any pin.
 
 > **Historical note (issue #1624).** Before this evidence was added,
 > `annotation_complete` attested *name correlation only*. A SPEF whose
