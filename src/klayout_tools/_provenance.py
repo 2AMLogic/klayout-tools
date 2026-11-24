@@ -42,7 +42,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import EllipsisType
 from typing import Any
 
@@ -236,6 +236,40 @@ def _canonical_instance_token(inst: Any) -> str:
     return token
 
 
+def _hash_layout_cells(layout: Any, cells: Iterable[Any], header: str) -> str:
+    """Hash the selected cells using the canonical geometry stream format."""
+    digest = hashlib.sha256()
+
+    def feed(line: str) -> None:
+        digest.update(line.encode("utf-8", errors="backslashreplace"))
+        digest.update(b"\n")
+
+    feed(header)
+    feed(f"dbu {layout.dbu:.12g}")
+
+    layer_keys = [
+        (index, _canonical_layer_key(layout.get_info(index)))
+        for index in layout.layer_indexes()
+    ]
+    for cell in sorted(cells, key=lambda c: c.name):
+        tokens: list[str] = []
+        for index, layer_key in layer_keys:
+            for shape in cell.shapes(index).each():
+                tokens.append(
+                    f"shape {layer_key} {_canonical_shape_token(shape)}"
+                    f"{_canonical_properties(layout, shape.prop_id)}"
+                )
+        for inst in cell.each_inst():
+            tokens.append(
+                f"{_canonical_instance_token(inst)}"
+                f"{_canonical_properties(layout, inst.prop_id)}"
+            )
+        feed(f"cell {cell.name}")
+        for token in sorted(tokens):
+            feed(f"  {token}")
+    return f"sha256:{digest.hexdigest()}"
+
+
 def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
     """A ``sha256:``-prefixed digest of one cell's decoded geometry, or
     ``None`` when it cannot be computed (issue #4530).
@@ -257,39 +291,13 @@ def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
         if top is None:
             return None
         subtree = {top.cell_index(), *top.called_cells()}
-
-        digest = hashlib.sha256()
-
-        def feed(line: str) -> None:
-            digest.update(line.encode("utf-8", errors="backslashreplace"))
-            digest.update(b"\n")
-
-        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION + " cell")
-        feed(f"dbu {layout.dbu:.12g}")
-        layer_keys = [
-            (index, _canonical_layer_key(layout.get_info(index)))
-            for index in layout.layer_indexes()
-        ]
-        cells = [layout.cell(i) for i in subtree]
-        for cell in sorted(cells, key=lambda c: c.name):
-            tokens: list[str] = []
-            for index, layer_key in layer_keys:
-                for shape in cell.shapes(index).each():
-                    tokens.append(
-                        f"shape {layer_key} {_canonical_shape_token(shape)}"
-                        f"{_canonical_properties(layout, shape.prop_id)}"
-                    )
-            for inst in cell.each_inst():
-                tokens.append(
-                    f"{_canonical_instance_token(inst)}"
-                    f"{_canonical_properties(layout, inst.prop_id)}"
-                )
-            feed(f"cell {cell.name}")
-            for token in sorted(tokens):
-                feed(f"  {token}")
+        return _hash_layout_cells(
+            layout,
+            (layout.cell(i) for i in subtree),
+            _LAYOUT_GEOMETRY_DIGEST_VERSION + " cell",
+        )
     except Exception:
         return None
-    return f"sha256:{digest.hexdigest()}"
 
 
 def layout_geometry_digest(path: str | None) -> str | None:
@@ -333,39 +341,11 @@ def layout_geometry_digest(path: str | None) -> str | None:
 
         layout = kdb.Layout()
         layout.read(path)
-
-        digest = hashlib.sha256()
-
-        def feed(line: str) -> None:
-            digest.update(line.encode("utf-8", errors="backslashreplace"))
-            digest.update(b"\n")
-
-        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION)
-        feed(f"dbu {layout.dbu:.12g}")
-
-        layer_keys = [
-            (index, _canonical_layer_key(layout.get_info(index)))
-            for index in layout.layer_indexes()
-        ]
-        for cell in sorted(layout.each_cell(), key=lambda c: c.name):
-            tokens: list[str] = []
-            for index, layer_key in layer_keys:
-                for shape in cell.shapes(index).each():
-                    tokens.append(
-                        f"shape {layer_key} {_canonical_shape_token(shape)}"
-                        f"{_canonical_properties(layout, shape.prop_id)}"
-                    )
-            for inst in cell.each_inst():
-                tokens.append(
-                    f"{_canonical_instance_token(inst)}"
-                    f"{_canonical_properties(layout, inst.prop_id)}"
-                )
-            feed(f"cell {cell.name}")
-            for token in sorted(tokens):
-                feed(f"  {token}")
+        return _hash_layout_cells(
+            layout, layout.each_cell(), _LAYOUT_GEOMETRY_DIGEST_VERSION
+        )
     except Exception:
         return None
-    return f"sha256:{digest.hexdigest()}"
 
 
 def _yosys_version(binary: str = "yosys") -> str | None:
