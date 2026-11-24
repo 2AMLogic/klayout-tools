@@ -116,14 +116,30 @@ def rename_top_subckt(text: str, old: str, new: str) -> str:
 _SG13G2_RF_CARDS = {"INDUCTOR": ("L", 3), "SG13_HV_SVARICAP": ("C", 4)}
 
 
-def _sg13g2_rf_reference(text: str, source: str, binding: Any) -> tuple[str, set[str]]:
-    """Prepare the element cards the native SG13G2 reader pairs with RF devices."""
+def _sg13g2_rf_card(tokens: list[str], positional: list[str]) -> str:
+    name = positional[-1]
+    prefix, count = _SG13G2_RF_CARDS[name.upper()]
+    terminals = len(positional) - 1
+    if terminals != count:
+        raise LvsError(f"SG13G2 {name} requires {count} terminals, got {terminals}")
+    return " ".join(
+        [prefix + tokens[0][1:], *(t for t in tokens[1:] if t.lower() != "params:")]
+    )
+
+
+def _sg13g2_reference_cards(
+    text: str, source: str, binding: Any, explicit: frozenset[str]
+) -> tuple[str, set[int]]:
+    """Write native element cards and preserve hierarchical or unresolved X calls."""
     from ._spice_text import fold_spice_continuations
+    from .lvs_runset_sg13g2_cards import native_card, native_primitive_names
     from .netlist_normalize import _binding_known, _split_params, _tokenize
     from .netlist_normalize_scan import recovery_subckt_names
 
-    defined = recovery_subckt_names(text, source, set(_SG13G2_RF_CARDS))
+    primitives = set(_SG13G2_RF_CARDS) | native_primitive_names()
+    defined = recovery_subckt_names(text, source, primitives)
     lines = fold_spice_continuations(text.split("\n"))
+    kept: set[int] = set()
     enclosing = ""
     for i, line in enumerate(lines):
         head = line.lstrip().split(None, 2)
@@ -135,28 +151,29 @@ def _sg13g2_rf_reference(text: str, source: str, binding: Any) -> tuple[str, set
             enclosing = ""
         elif head[0][:1].lower() == "x":
             tokens = _tokenize(line)
-            positional, _ = _split_params(tokens[1:])
+            positional, params = _split_params(tokens[1:])
             name = positional[-1] if positional else ""
             model = name.upper()
-            if model not in _SG13G2_RF_CARDS or _binding_known(name, binding):
+            if model not in primitives or name in explicit:
                 continue
-            # A PDK unit test may give its top the same name as the primitive
-            # inside it. A call to a separate defined circuit is hierarchy.
+            if model in _SG13G2_RF_CARDS and _binding_known(name, binding):
+                continue
+            # PDK unit fixtures may give a top the same name as the primitive
+            # it contains. Calls to a separate defined circuit are hierarchy.
             if model in defined and model != enclosing:
+                kept.add(i)
                 continue
-            prefix, count = _SG13G2_RF_CARDS[model]
-            terminals = len(positional) - 1
-            if terminals != count:
-                raise LvsError(
-                    f"SG13G2 {name} requires {count} terminals, got {terminals}"
-                )
-            lines[i] = " ".join(
-                [
-                    prefix + tokens[0][1:],
-                    *(t for t in tokens[1:] if t.lower() != "params:"),
-                ]
+            card = (
+                _sg13g2_rf_card(tokens, positional)
+                if model in _SG13G2_RF_CARDS
+                else native_card(tokens, positional, params)
             )
-    return "\n".join(lines), defined
+            if card is None:
+                # Leave the original X call visible to the unresolved-call scan.
+                kept.add(i)
+            else:
+                lines[i] = card
+    return "\n".join(lines), kept
 
 
 def _protect_passthrough_calls(
@@ -177,10 +194,10 @@ def _protect_passthrough_calls(
         _tokenize,
     )
 
-    binding = _build_subckt_map(deck, device_map)[0]
+    binding, explicit = _build_subckt_map(deck, device_map)
+    kept: set[int] = set()
     if sg13g2_reference is not None:
-        text, defined = _sg13g2_rf_reference(text, sg13g2_reference, binding)
-        passthrough = passthrough | defined
+        text, kept = _sg13g2_reference_cards(text, sg13g2_reference, binding, explicit)
     saved: dict[str, str] = {}
     lines = text.split("\n")
     for i, line in enumerate(lines):
@@ -188,7 +205,9 @@ def _protect_passthrough_calls(
             continue
         positional, _ = _split_params(_tokenize(line)[1:])
         name = positional[-1] if positional else ""
-        if name.upper() in passthrough and not _binding_known(name, binding):
+        if i in kept or (
+            name.upper() in passthrough and not _binding_known(name, binding)
+        ):
             marker = f"* __klt_passthrough_{i}__"
             saved[marker] = line
             lines[i] = marker
@@ -235,9 +254,7 @@ def convert_reference(
             _deck_device_list(deck_file),
             deck,
             device_map,
-            sg13g2_reference=reference
-            if os.path.basename(deck_file) == "sg13g2.lvs"
-            else None,
+            sg13g2_reference=reference if is_sg13g2_runset(deck_file) else None,
         )
         try:
             result = convert_reference_netlist(text, deck=deck, device_map=device_map)
@@ -260,18 +277,40 @@ def convert_reference(
     return out
 
 
+def is_sg13g2_runset(deck_file: str) -> bool:
+    """Whether ``deck_file`` is IHP's native ``sg13g2.lvs`` runset."""
+    return os.path.basename(deck_file) == "sg13g2.lvs"
+
+
+def _converted_call_names(declared: dict[str, Any], deck_file: str) -> set[str]:
+    """Upper-cased callees the runset's own reader is known to turn into
+    devices, which the unresolved-call scan therefore must not report: the
+    classes either side declares plus the deck's ``DEVICE_LIST``.
+
+    The SG13G2 reader converts no ``X`` card (issue #7836): declaring a class
+    cannot prove a particular call to it survived, so nothing is exempt."""
+    if is_sg13g2_runset(deck_file):
+        return set()
+    from .lvs_runset import _deck_device_list
+
+    return {
+        str(n).upper() for side in declared.values() for n in side or []
+    } | _deck_device_list(deck_file)
+
+
 def _unresolved_reference_calls(
     reference_path: str,
     top: str | None,
-    converted_names: set[str],
+    declared: dict[str, Any],
+    deck_file: str,
     find_unresolved: Callable[..., list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
     calls the runset neither converted nor could resolve.
 
     The reference is re-read with the plain SPICE reader (hierarchy intact).
-    A callee the runset itself converts (``converted_names``, upper-cased:
-    its declared device classes plus the deck's ``DEVICE_LIST``) is not
+    A callee the runset itself converts (:func:`_converted_call_names`: its
+    ``declared`` device classes plus the deck's ``DEVICE_LIST``) is not
     reported. ``[]`` when the reference cannot be re-read: the
     runset's own verdict stands."""
     import klayout.db as kdb
@@ -283,7 +322,7 @@ def _unresolved_reference_calls(
         return []
     return find_unresolved(
         netlist,
-        converted_names,
+        _converted_call_names(declared, deck_file),
         form="spice",
         top=top,
         reference_path=reference_path,

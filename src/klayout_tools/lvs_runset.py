@@ -649,12 +649,11 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
         augment_verdict(verdict, lvsdb_path)
         _attach_reference_source(verdict, runset_reference, deck_file)
-        declared = verdict["coverage"]["declared_device_classes"]
         unresolved = _unresolved_reference_calls(
             runset_reference,
             request["reference"].get("top") and (top or request["reference"]["top"]),
-            {str(n).upper() for side in declared.values() for n in side or []}
-            | _deck_device_list(deck_file),
+            verdict["coverage"]["declared_device_classes"],
+            deck_file,
             _unresolved_reference_subckt_calls,
         )
     finally:
