@@ -34,6 +34,16 @@ with no ``verilog/`` view at all (its sibling ``gp12t3v3``) is a named
 refusal. ``__blackbox*.v`` siblings (sky130 ships two) can never be selected:
 the resolver picks files by name, never by directory scan, and a blackbox has
 no behaviour -- including one would elaborate but simulate nothing.
+
+A descriptor-declared root (``klt-pdk.json``, issue #3782) can name the models
+itself: ``views.<cell_library>.verilog`` is an ordered file list (issue
+#7695), consulted **before** the ``libs.ref`` convention and returned verbatim
+-- no ``primitives.v`` probing, no reordering. ASAP7 needs it: its public
+release groups models by family and threshold voltage
+(``asap7sc7p5t_{AO,INVBUF,OA,SEQ,SIMPLE}_RVT_TT_<date>.v``), so no
+``<lib>/verilog/<lib>.v`` exists for the convention to find. A library the
+descriptor does not map a ``verilog`` list for falls through to the
+convention unchanged.
 """
 
 from __future__ import annotations
@@ -42,7 +52,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from .pdk import PdkNotFoundError, find_pdk
+from .pdk import PdkNotFoundError, descriptor_views, find_pdk
 
 
 def resolve_cell_models_for_cell_library(
@@ -55,7 +65,8 @@ def resolve_cell_models_for_cell_library(
     """Resolve ordered behavioural-model sources for ``cell_library``.
 
     Returns ``(model_paths, pdk_info)``: the Verilog files to compile, in
-    dependency order (``primitives.v`` before ``<cell_library>.v``), plus
+    dependency order (``primitives.v`` before ``<cell_library>.v``, or the
+    descriptor's ``views.<cell_library>.verilog`` list as declared), plus
     :func:`find_pdk`'s own resolution dict unchanged for the caller.
     ``error_cls`` is the caller's error class (the same injection
     :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library` takes,
@@ -73,13 +84,15 @@ def resolve_cell_models_for_cell_library(
     always wins: ``find_pdk`` disables the search for it, so the ambiguity
     refusal never fires when one was pinned.
 
-    If no PDK install resolves, raises ``error_cls`` with the lookup error's
-    message. Model resolution failures carry a stable ``code``:
+    If no PDK install resolves, or its descriptor cannot be loaded, raises
+    ``error_cls`` with the lookup error's message. Model resolution failures
+    carry a stable ``code``:
 
     - ``pdk_ambiguous_install`` -- the resolved install is ambiguous
       (``ambiguous_roots`` non-empty) and no explicit ``root`` pinned it;
-    - ``pdk_no_verilog_view`` -- the install ships no ``libs_ref`` asset, the
-      named library is absent from it, or the library ships no ``verilog/``
+    - ``pdk_no_verilog_view`` -- the library has no descriptor ``verilog``
+      list and the install ships no ``libs_ref`` asset, the named library is
+      absent from it, or the library ships no ``verilog/``
       view (real case: gf180mcuD's ``gf180mcu_osu_sc_gp12t3v3`` -- it has
       ``lef``/``lib`` and no simulation models at all);
     - ``pdk_no_cell_models`` -- the ``verilog/`` view exists but ships no
@@ -104,6 +117,13 @@ def resolve_cell_models_for_cell_library(
             "were synthesized against",
             code="pdk_ambiguous_install",
         )
+
+    try:
+        described = descriptor_views(info, cell_library).get("verilog")
+    except PdkNotFoundError as exc:
+        raise error_cls(str(exc)) from exc
+    if described is not None:
+        return list(described), info
 
     libs_ref = info["assets"]["libs_ref"]
     if libs_ref is None:

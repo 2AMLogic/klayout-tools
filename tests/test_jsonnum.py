@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from klayout_tools._jsonnum import require_finite_number
+from klayout_tools import artifact_verify
+from klayout_tools._jsonnum import is_int, require_finite_number
 
 
 class Refused(Exception):
@@ -51,3 +52,26 @@ def test_number_and_finite_messages_override_each_refusal():
         require_finite_number("five", Refused, "x.band", **kwargs)
     with pytest.raises(Refused, match=r"x\.band must be finite, got 10"):
         require_finite_number(10**400, Refused, "x.band", **kwargs)
+
+
+def test_artifact_verify_standalone_is_int_matches_jsonnum():
+    """``artifact_verify`` is stdlib-only for standalone vendoring (#5958), so
+    its inlined ``_is_int`` twin must agree with ``_jsonnum.is_int``."""
+    samples = [
+        0,
+        1,
+        -3,
+        10**400,
+        True,
+        False,
+        0.0,
+        1.5,
+        float("nan"),
+        float("inf"),
+        "1",
+        None,
+        [],
+        {},
+    ]
+    for value in samples:
+        assert artifact_verify._is_int(value) is is_int(value)

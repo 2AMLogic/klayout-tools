@@ -28,6 +28,14 @@ GROUP_DATES = {
     "SEQ": "220123",
     "SIMPLE": "211120",
 }
+# The Verilog dates differ from the Liberty ones, as in the public checkout.
+VERILOG_DATES = {
+    "AO": "201020",
+    "INVBUF": "201020",
+    "OA": "201020",
+    "SEQ": "220101",
+    "SIMPLE": "201020",
+}
 
 
 def _put(path, data):
@@ -65,6 +73,11 @@ def source(tmp_path):
     for suffix, vt in (("R", "RVT"), ("L", "LVT")):
         _put(cells / "LEF" / f"{CELL_DIR}_{suffix}_1x_220121a.lef", "lef")
         _put(cells / "GDS" / f"{CELL_DIR}_{suffix}_220121a.gds", "gds")
+        for group, date in {**VERILOG_DATES, "TBUF": "260831"}.items():
+            _put(
+                cells / "Verilog" / f"asap7sc7p5t_{group}_{vt}_TT_{date}.v",
+                f"module {group}x1_{vt}; endmodule\n",
+            )
         for corner in ("TT", "SS"):
             for group, revision in GROUP_DATES.items():
                 default = 4000 if group == "SIMPLE" else 320
@@ -133,6 +146,48 @@ def test_assembled_root_records_real_inputs_and_matches_named_views(source, tmp_
     assert (root / "klt-pdk-sources.json").read_bytes() == (
         again / "klt-pdk-sources.json"
     ).read_bytes()
+
+
+def test_verilog_models_are_mapped_in_group_order_and_hashed(source, tmp_path):
+    from klayout_tools.functional_verification import FunctionalVerificationError
+    from klayout_tools.pdk_cell_models import resolve_cell_models_for_cell_library
+
+    root = tmp_path / "assembled"
+    result = _run(source, root, "--vt", "RVT", "LVT", "--corner", "TT", "SS")
+    assert result.returncode == 0, result.stderr
+    provenance = json.loads((root / "klt-pdk-sources.json").read_text())
+    for vt in ("RVT", "LVT"):
+        lib = f"asap7sc7p5t_{vt.lower()}"
+        models, _ = resolve_cell_models_for_cell_library(
+            lib, FunctionalVerificationError, variant="asap7", root=str(root)
+        )
+        # Dates come from the source names; TBUF has no Liberty twin, so no TBUF.
+        names = [f"asap7sc7p5t_{g}_{vt}_TT_{d}.v" for g, d in VERILOG_DATES.items()]
+        assert [Path(m).name for m in models] == names
+        for model, name in zip(models, names, strict=True):
+            assert Path(model) == root / "libs" / lib / "verilog" / name
+            origin = source / CELL_DIR / "Verilog" / name
+            digest = hashlib.sha256(origin.read_bytes()).hexdigest()
+            assert provenance["inputs"][origin.relative_to(source).as_posix()] == digest
+            assert (
+                provenance["outputs"][Path(model).relative_to(root).as_posix()]
+                == digest
+            )
+    assert not any("TBUF" in name for name in provenance["outputs"])
+
+
+def test_missing_or_ambiguous_verilog_fails_without_partial_root(source, tmp_path):
+    folder = source / CELL_DIR / "Verilog"
+    seq = next(folder.glob("*_SEQ_RVT_TT_*"))
+    seq.unlink()
+    result = _run(source, tmp_path / "missing")
+    assert result.returncode == 1 and "asap7sc7p5t_SEQ_RVT_TT_*.v" in result.stderr
+    assert not (tmp_path / "missing").exists()
+    _put(seq, "module SEQx1_RVT; endmodule\n")
+    _put(folder / "asap7sc7p5t_SEQ_RVT_TT_999999.v", "module SEQx1_RVT; endmodule\n")
+    result = _run(source, tmp_path / "ambiguous")
+    assert result.returncode == 1 and "ambiguous Verilog source" in result.stderr
+    assert seq.name in result.stderr and not (tmp_path / "ambiguous").exists()
 
 
 @pytest.mark.parametrize(

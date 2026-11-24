@@ -1116,10 +1116,8 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
         if layer is not None:
             if (
                 not isinstance(layer, dict)
-                or isinstance(layer.get("layer"), bool)
-                or not isinstance(layer.get("layer"), int)
-                or isinstance(layer.get("datatype"), bool)
-                or not isinstance(layer.get("datatype"), int)
+                or not is_int(layer.get("layer"))
+                or not is_int(layer.get("datatype"))
             ):
                 raise GenComposeError(
                     f"{at} (name '{name}').layer must be a JSON object with "

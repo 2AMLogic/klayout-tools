@@ -3852,6 +3852,10 @@ with the message the single-corner path gives, with no `corner_runs` and no
 `.klt/place-and-route/<corner>/` directory written. Only a corner-dependent
 failure — a liberty/LEF that cannot be resolved for that corner, or an engine
 failure inside that unit — is recorded in that corner's `corner_runs[].error`.
+`--backend batch` applies the same validation (issue #7583) before it packages
+or uploads anything, and it takes precedence over a packaging or fleet-config
+problem: a defective request is one `PlaceAndRouteError` with the same message
+and no job submitted, instead of one remote failure per unit.
 
 One failing unit does not stop the others. The command exits `1` when
 `status` is `"failed"` — the aggregated report is still printed on stdout.
@@ -3988,9 +3992,10 @@ job cannot succeed on such a runner. The fix is a rebuilt runner image.
 **There is never a local fallback.** A unit whose upload, launch, poll or run
 fails is a `failed` `corner_runs` entry with the error and job id, the other
 units still complete, and the command exits `1` with the aggregated report on
-stdout. A request-level problem (unresolvable fleet config, input outside the
-tree) is a normal error envelope (exit `1`, `error.code` when set) before any
-job is submitted. OpenROAD is never started on this host on the batch path.
+stdout. A request-level problem (a request defect the local backend also
+rejects, an unresolvable fleet config, input outside the tree) is a normal
+error envelope (exit `1`, `error.code` when set) before any job is submitted.
+OpenROAD is never started on this host on the batch path.
 
 ## Partial completion (`target_stage`)
 

@@ -52,7 +52,7 @@ from . import signoff_foundry_cell as foundry_cell
 from . import signoff_malformed_coverage as disclosure
 from . import signoff_nothing_checked as vacuous
 from ._git_tracked import is_untracked_working_tree_file
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from .build_identity import build_version, version_report
 from .coverage import (
@@ -2280,10 +2280,7 @@ def _functional_verification_passed(envelope: _FunctionalVerificationEnvelope) -
     """
     fields = ("test_count", "passed_count", "failed_count", "skipped_count")
     counts = {field: envelope.get(field) for field in fields}
-    if any(
-        not isinstance(value, int) or isinstance(value, bool) or value < 0
-        for value in counts.values()
-    ):
+    if any(not (is_int(value) and value >= 0) for value in counts.values()):
         return False
     if (
         envelope.get("status") != "pass"

@@ -38,6 +38,7 @@ import subprocess
 import time
 from typing import Any
 
+from ._jsonnum import is_int, is_number
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import resolve_tool_binary, validate_request_shape
 from ._provenance import (
@@ -266,7 +267,7 @@ def _validate_request(
         )
 
     depth = request_doc.get("depth", DEFAULT_DEPTH)
-    if not isinstance(depth, int) or isinstance(depth, bool) or depth < 1:
+    if not is_int(depth) or depth < 1:
         raise FormalError("request.depth must be a positive integer")
 
     solver = request_doc.get("solver", DEFAULT_SOLVER)
@@ -278,11 +279,7 @@ def _validate_request(
     effective_timeout_s = timeout_s
     if effective_timeout_s is None:
         effective_timeout_s = request_doc.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if (
-        not isinstance(effective_timeout_s, (int, float))
-        or isinstance(effective_timeout_s, bool)
-        or effective_timeout_s <= 0
-    ):
+    if not is_number(effective_timeout_s) or effective_timeout_s <= 0:
         raise FormalError("timeout_s must be a positive number")
 
     liberty = _resolve_optional_file(request_doc.get("liberty"), request_dir, "liberty")

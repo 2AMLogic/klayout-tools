@@ -1779,6 +1779,23 @@ listed in `sources` compiles once, in its dependency-order position.
 has no behaviour. The resolved files appear in `environment.sources` like
 any other source.
 
+**Descriptor-declared roots (issue #7695).** A root described by a
+`klt-pdk.json` (such as an ASAP7 root from `scripts/assemble-asap7-pdk-root.py`)
+may name the models itself with `views.<cell_library>.verilog`, an ordered
+list of files (see `docs/cli/pdk.md`). When the descriptor maps that key for
+the requested `cell_library`, the list is used **instead of** the
+`libs.ref/<cell_library>/verilog/` convention above: the files are prepended
+verbatim in their declared order, with no `primitives.v` probing, and
+`pdk_no_verilog_view` therefore no longer fires for that library. A library
+the descriptor does not give a `verilog` list falls back to the convention
+unchanged. A descriptor that cannot be loaded is a refusal, not a fallback.
+The assembled ASAP7 root maps the five `AO`, `INVBUF`, `OA`, `SEQ` and
+`SIMPLE` TT models per flavour (the same five groups its Liberty merges), so
+`pdk: {"variant": "asap7", "root": "<root>", "cell_library":
+"asap7sc7p5t_rvt"}` serves `klt synthesize`, `klt place-and-route`,
+`klt sta` and gate-level `klt functional-verification` from one root. The
+`pdk_cell_library_mismatch` check below applies on this route too.
+
 The CLI's `--pdk`/`--pdk-root` override `pdk.variant`/`pdk.root`
 respectively (the sibling-verb precedence); `cell_library` comes from the
 block alone, so the flags without a block are a request error rather than a

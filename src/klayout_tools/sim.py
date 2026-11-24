@@ -166,7 +166,7 @@ from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
 from . import sim_transient_noise as sim_tn
-from ._jsonnum import is_finite_number, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -2924,7 +2924,7 @@ def _prepare_sim_request(
     hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)
     )
-    if not isinstance(hosts, int) or isinstance(hosts, bool) or hosts < 1:
+    if not is_int(hosts) or hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
 
     # Issue #3873: opt-in `request.adapt` (private adapted copies, host-local).
@@ -3130,11 +3130,7 @@ def _prepare_sim_request(
 
     max_workers = max_workers if max_workers is not None else options.get("max_workers")
     if max_workers is not None:
-        if (
-            not isinstance(max_workers, int)
-            or isinstance(max_workers, bool)
-            or max_workers < 1
-        ):
+        if not is_int(max_workers) or max_workers < 1:
             raise SimError("options.max_workers must be a positive integer")
     threads_per_worker = _validate_threads_per_worker(options.get("threads_per_worker"))
     # Host worker cap (issue #2286): validated here, up front, so a malformed
@@ -5211,11 +5207,11 @@ def _validate_monte_carlo_spec(mc_spec: dict[str, Any]) -> tuple[int, int, str]:
         raise SimError("request.monte_carlo must be an object")
 
     n = mc_spec.get("n")
-    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+    if not is_int(n) or n < 1:
         raise SimError("request.monte_carlo.n must be a positive integer")
 
     seed = mc_spec.get("seed")
-    if not isinstance(seed, int) or isinstance(seed, bool):
+    if not is_int(seed):
         raise SimError("request.monte_carlo.seed must be an integer")
 
     vary = mc_spec.get("vary")
@@ -7115,7 +7111,7 @@ def _validate_threads_per_worker(value: Any) -> int | None:
     """Validate ``options.threads_per_worker`` (issue #2970)."""
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int(value) or value < 1:
         raise SimError("options.threads_per_worker must be a positive integer")
     return value
 

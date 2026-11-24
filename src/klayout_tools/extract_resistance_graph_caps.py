@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ._jsonnum import is_int
 from .extract_resistance_graph import (
     DEFAULT_MAX_DECOMPOSITION_CELLS,
     MAX_GRAPH_EDGES,
@@ -81,7 +82,7 @@ def _validate_cap_values(caps: Mapping[str, Any]) -> None:
     ``True == 1``), checked in cap order so the first offender is named."""
     for key in _given_caps(caps):
         value = caps[key]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if not is_int(value) or value < 1:
             raise ExtractError(
                 f"{RESISTANCE_GRAPH_CAP_FLAGS[key]} must be a positive integer "
                 f"(got {value!r})"

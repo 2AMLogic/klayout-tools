@@ -967,7 +967,7 @@ def extract_netlist_tuple(
     parasitics_deck: Any = None,
     **options: Any,
 ) -> tuple[Any, ...]:
-    """Return the planar extraction tuple with defaults for planar-only results."""
+    """Return ``extract._extract_netlist``'s 14-tuple; planar-only slots stay empty."""
     parasitics_options = {
         key: options[key]
         for key in (
