@@ -9291,7 +9291,7 @@ derived values are on that sample's `corners[]` entry, under
 `agauss`/`gauss`/`random()`-style draws only. ngspice's transient-noise
 sources (`trnoise()` / `trrandom()` on `V*`/`I*` sources) are not seeded by
 `.options seed=`; their generator defaults to the process id. Re-running the
-same request redraws their noise (see also
+same request without an explicit transient-noise seed redraws their noise (see also
 [#2490](https://github.com/2AMLogic/klayout-tools/issues/2490), per-engine-build
 reproducibility, and [#2937](https://github.com/2AMLogic/klayout-tools/issues/2937),
 the combined seed), and samples run in separate batch jobs or hosts can share
@@ -9301,7 +9301,11 @@ a noise stream. When the netlist (or its scanned `.include` closure, including
 and, if part of the closure could not be scanned,
 `unseeded_sources_not_scanned`; a warning is also printed to stderr. Requests
 without such sources keep their `environment.monte_carlo` shape unchanged.
-Seeding these sources per sample is not implemented. For what noise such a transient does and does not contain, see
+When `options.transient_noise_seed` is set, the note and stderr warning give
+the replay behavior for the source kinds listed. A `trrandom` source replays
+with that seed in each fresh corner process. A `trnoise` source redraws.
+The source list still includes both kinds because neither follows
+`monte_carlo.seed`. For the sources covered by a transient analysis, see
 "Transient noise coverage" under "Engine".
 
 **Seed scope (paired and split-stable draws).** By default
