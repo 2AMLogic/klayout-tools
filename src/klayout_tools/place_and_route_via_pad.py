@@ -63,6 +63,7 @@ from typing import Any
 
 from .pdk_families import pdk_variant_family
 from .place_and_route_def_drcfill import scan_def_drcfill
+from .place_and_route_via_enclosure import repair_m1_v1_enclosures
 from .place_and_route_via_tip import check_via_pad_tips
 from .place_and_route_via_tip_repair import repair_m1_landing_pairs
 
@@ -367,6 +368,9 @@ def trim_via_pads(
     if pdk_variant_family(variant) == _ASAP7_FAMILY:
         report["m1_landing_pairs_extended"] = repair_m1_landing_pairs(
             kdb, layout, top_cell, lef_to_gds, report=report
+        )
+        report["m1_v1_enclosures_repaired"], report["m1_v1_enclosures_remaining"] = (
+            repair_m1_v1_enclosures(kdb, layout, top_cell, lef_to_gds)
         )
     drcfill_regions, drcfill_scan = _drcfill_regions(
         kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
