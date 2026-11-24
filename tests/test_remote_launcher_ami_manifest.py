@@ -9,7 +9,11 @@ real `--emit-manifest-entry` path, not just the entry builder.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
+import zipfile
 
 import pytest
 
@@ -179,3 +183,45 @@ def test_packaged_manifest_lookup_exposes_the_recorded_klt_identity():
         assert (image["pdk"], image["region"]) == (pdk, region), ami_id
         assert image["klt_version"] == version, ami_id
         assert image["klt_ref"] == ref, ami_id
+
+
+def test_wheel_default_manifest_drives_the_remote_feature_check(built_wheel, tmp_path):
+    from test_sim_remote import _PLAIN_REQUEST, _TRANSFER_REQUEST
+
+    install = tmp_path / "installed"
+    with zipfile.ZipFile(built_wheel) as archive:
+        archive.extractall(install)
+    # Start outside the checkout, with no environment or user manifest override.
+    env = {**os.environ, "PYTHONPATH": str(install)}
+    env.pop(rl.AMI_MANIFEST_ENV_VAR, None)
+    probe = """
+import json, sys
+from pathlib import Path
+from klayout_tools import remote_launcher as rl, sim, sim_remote
+
+package = Path.cwd() / "installed" / "klayout_tools"
+assert Path(rl.__file__).resolve().parent == package
+rl.USER_MANIFEST_PATH = Path.cwd() / "missing-manifest.json"
+plain, transfer = json.load(sys.stdin)
+remote = {"region": "us-west-2"}
+sim_remote._assess_remote_runner_features(plain, "sky130A", remote)
+try:
+    sim_remote._assess_remote_runner_features(transfer, "sky130A", remote)
+except sim.SimError as error:
+    assert error.code == "batch_runner_feature_unsupported", error
+else:
+    raise AssertionError("wheel preflight accepted transfer on the sky130A 0.1.0 image")
+assert rl.DEFAULT_MANIFEST_PATH.is_relative_to(package)
+print(json.dumps(rl.load_ami_manifest()))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        input=json.dumps([_PLAIN_REQUEST, _TRANSFER_REQUEST]),
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == json.loads(rl.DEFAULT_MANIFEST_PATH.read_text())
