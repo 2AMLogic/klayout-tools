@@ -84,7 +84,6 @@ import re
 import signal
 import statistics
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -95,6 +94,7 @@ from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from . import (
+    _warn,
     env_provenance,
     output_lock,
     sim_ac_waveform,
@@ -163,6 +163,7 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
+from . import sim_transient_noise as sim_tn
 from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
@@ -347,7 +348,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
-from . import sim_regrade
+from . import sim_errors, sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -405,6 +406,7 @@ from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
+from .sim_population_limits import validate_k_sigma as _validate_k_sigma
 
 #: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
 #: without importing this runner; re-exported self-aliased for existing callers.
@@ -1609,20 +1611,20 @@ def _resolve_ngspice_binary(options: dict[str, Any], request_dir: str) -> str:
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sim`` request JSON file.
 
-    Raises :class:`SimError` if the file is missing/unreadable, not valid
-    JSON, or missing a required top-level field (``netlist``, and one of
-    ``analysis`` or -- issue #2482 -- ``analysis_steps``; which one, and
-    that not both are declared, is validated in :func:`run_sim`).
-    ``models`` is validated separately, in :func:`run_sim` -- it is only
-    required when the request declares a ``corners.process`` axis (see
-    ``_resolve_models_lib``). Does not require the request to carry a
-    ``schema`` field (see this module's docstring).
+    Raises :class:`SimError` if the file is missing/unreadable, invalid JSON,
+    not an object, or missing a required top-level field (``netlist``, one of
+    ``analysis`` or -- #2482 -- ``analysis_steps``; which one, and that not
+    both are declared, is validated in :func:`run_sim`). ``models`` is
+    validated in :func:`run_sim`, only for a ``corners.process`` axis (see
+    ``_resolve_models_lib``). No ``schema`` field is required.
     """
     request = _load_request_json(request_path, SimError)
-    # Command and deck lists have their own validators and no corner matrix.
-    if sim_commands.COMMANDS_FIELD in request:
-        return request
-    if "decks" in request:
+    if not isinstance(request, dict):  # #7720: guard before membership tests
+        raise SimError("request file must contain a JSON object")
+    if sim_commands.COMMANDS_FIELD in request or "decks" in request:
+        sim_errors.request_options(request)  # #7720: before first read
+        if sim_commands.COMMANDS_FIELD in request:
+            return request
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
@@ -1828,7 +1830,7 @@ def _attach_meas_lint(
     request alone, so it is identical for local, batch and remote runs."""
     lint = _meas_at_lint(analysis, measurements_spec)
     for diag in lint:
-        print(f"warning: {diag['message']}", file=sys.stderr)
+        _warn.warn(f"warning: {diag['message']}")
     for corner in corners:
         corner["diagnostics"].extend(dict(d) for d in lint)
 
@@ -2819,6 +2821,7 @@ class _ResolvedSimRequest:
     ngspice_binary: Any
     ngspice_init_lines: Any
     ngspice_options: Any
+    transient_noise_seed: int | None
     osdi_preload: Any
     osdi_runner_environment: Any
     param_file: Any
@@ -2990,6 +2993,10 @@ def _prepare_sim_request(
         _validate_spec_row(
             spec.get("spec_row"), f"request.measurements[{spec['name']!r}].spec_row"
         )
+        # Issue #6967: the per-measurement dispersion bound, validated (and
+        # normalised in place) before any corner is dispatched, like every
+        # other measurement field above.
+        sim_population_limits.validate_spec(spec, request.get("monte_carlo"))
 
     options = request.get("options") or {}
     # Issue #2493: validates and resolves both plausibility declarations into
@@ -3186,6 +3193,9 @@ def _prepare_sim_request(
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
     ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
+    transient_noise_seed = sim_tn.validate_seed(
+        options.get("transient_noise_seed"), engine
+    )
     # Issue #3036: the rule grammar is validated up front; the rules are
     # resolved onto points after expansion, before any dispatch.
     nodeset_rules = _validate_nodeset_rules(options.get("nodeset"))
@@ -3302,7 +3312,7 @@ def _prepare_sim_request(
         )
         # Issue #2963: disclose transient-noise sources the seed contract
         # does not cover, whatever `vary` asks for.
-        monte_carlo_info = _with_unseeded_noise(
+        monte_carlo_info = sim_tn.with_unseeded_noise(
             monte_carlo_info, netlist_path, request=request, repo_root=repo_root
         )
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
@@ -3501,6 +3511,7 @@ def _prepare_sim_request(
         ngspice_binary=ngspice_binary,
         ngspice_init_lines=ngspice_init_lines,
         ngspice_options=ngspice_options,
+        transient_noise_seed=transient_noise_seed,
         osdi_preload=osdi_preload,
         osdi_runner_environment=osdi_runner_environment,
         param_file=param_file,
@@ -3622,6 +3633,7 @@ def _run_sim_corners(
     ngspice_binary = resolved.ngspice_binary
     ngspice_init_lines = resolved.ngspice_init_lines
     ngspice_options = resolved.ngspice_options
+    transient_noise_seed = resolved.transient_noise_seed
     osdi_preload = resolved.osdi_preload
     osdi_runner_environment = resolved.osdi_runner_environment
     param_file = resolved.param_file
@@ -3679,6 +3691,7 @@ def _run_sim_corners(
         "save_vectors": save_vectors,
         "complex_vectors": complex_vectors,
         "ngspice_options": ngspice_options,
+        "transient_noise_seed": transient_noise_seed,
         "stimulus_lines": stimulus_lines,
     }
     # The checkpoint, run history and shard map share one digest of these inputs.
@@ -3826,6 +3839,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
         )
 
@@ -3896,6 +3910,7 @@ def _run_sim_corners(
             "waveform_max_bytes": waveform_max_bytes,
             "waveform_decimate": waveform_decimate,
             "ngspice_options": ngspice_options,
+            "transient_noise_seed": transient_noise_seed,
             "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
@@ -4316,8 +4331,9 @@ def _run_sim_corners(
     # resistor noise in `.tran`, so a transient that relies on declared
     # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
     environment.update(
-        _transient_noise_environment(
+        sim_tn.transient_noise_environment(
             netlist_path,
+            transient_noise_seed=transient_noise_seed,
             request=request,
             analysis=analysis,
             engine=engine,
@@ -5263,22 +5279,6 @@ def _mc_point_identity(point: CornerPoint) -> str:
     )
 
 
-def _validate_k_sigma(value: Any, field: str) -> float:
-    """Validate a sigma-multiple (``k``) field and return it as a float.
-
-    Shared by ``request.monte_carlo.k_sigma`` (the run-wide default) and
-    ``request.measurements[].k_sigma`` (the per-measurement override) so both
-    reject the same shapes with the same message style. Zero is allowed --
-    ``k=0`` degenerates the limit window to the mean itself, a legitimate
-    "is the *typical* part inside the window?" question.
-    """
-    if not is_number(value):
-        raise SimError(f"{field} must be a non-negative number (got {value!r})")
-    if value < 0:
-        raise SimError(f"{field} must be a non-negative number (got {value!r})")
-    return float(value)
-
-
 def _resolve_mismatch_scale(
     mc_spec: dict[str, Any], pdk: Any, **kwargs: Any
 ) -> sim_mismatch_scale.MismatchScale | None:
@@ -5935,6 +5935,7 @@ def _run_local(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
@@ -5985,6 +5986,7 @@ def _run_local(
             waveform_max_bytes=waveform_max_bytes,
             waveform_decimate=waveform_decimate,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
             stimulus_lines=stimulus_lines,
@@ -6131,7 +6133,7 @@ def _worker_cap_notice(message: str) -> None:
         if message in _WORKER_CAP_NOTICES_EMITTED:
             return
         _WORKER_CAP_NOTICES_EMITTED.add(message)
-    print(message, file=sys.stderr)
+    _warn.warn(message)
 
 
 def _reset_worker_cap_notices() -> None:
@@ -6375,133 +6377,6 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
     moved it out so this module keeps its size ratchet while the
     device-multiplier lint reads cards the same way)."""
     return _spice_text_logical_lines(netlist_text)
-
-
-_NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)
-
-
-def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
-    """``(lower-cased name, keyword)`` of every independent ``V*``/``I*``
-    source declaring a ``trnoise``/``trrandom`` waveform (issue #2963),
-    including inside ``.subckt`` bodies. Lexical, via
-    :func:`_logical_netlist_lines`."""
-    found: list[tuple[str, str]] = []
-    for line in _logical_netlist_lines(netlist_text):
-        if line[0].lower() not in ("v", "i"):
-            continue
-        match = _NOISE_SOURCE_RE.search(line)
-        if match:
-            found.append((line.split(None, 1)[0].lower(), match.group(1).lower()))
-    return found
-
-
-def _scan_noise_sources(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
-    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
-    declared in the netlist's scanned ``.include`` closure (issues #2963,
-    #2985), and what part of the closure could not be scanned."""
-    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
-    sources: set[tuple[str, str]] = set()
-    for _label, path in files:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                sources.update(_noise_sources_in_text(handle.read()))
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": _label, "reason": "unreadable"})
-    return sources, not_scanned
-
-
-def _unseeded_noise_report(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return None
-    report: dict[str, Any] = {
-        "unseeded_sources": [
-            {"name": name, "keyword": keyword} for name, keyword in sorted(sources)
-        ],
-        "unseeded_sources_note": _UNSEEDED_NOISE_NOTE,
-    }
-    if not_scanned:
-        report["unseeded_sources_not_scanned"] = not_scanned
-    return report
-
-
-def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
-    """Does the resolved analysis run a transient (scalar ``tran`` or an
-    ``analysis_steps[]`` tran step)?"""
-    if sim_steps.is_steps_analysis(analysis):
-        return any(
-            str(step.get("kind", "")).lower() == "tran"
-            for step in analysis.get("steps", [])
-        )
-    return str(analysis.get("kind", "")).lower() == "tran"
-
-
-def _transient_noise_environment(
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    analysis: dict[str, Any],
-    engine: str,
-    repo_root: str | None,
-) -> dict[str, Any]:
-    """Additive ``environment.transient_noise`` (issue #2985): what noise an
-    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
-    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
-    unless the engine is ngspice, a transient runs and a scanned file
-    declares such a source."""
-    if engine != "ngspice" or not _analysis_runs_tran(analysis):
-        return {}
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return {}
-    report: dict[str, Any] = {
-        "engine": engine,
-        "sources": [
-            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
-        ],
-        "intrinsic_device_noise": False,
-        "intrinsic_resistor_noise": False,
-    }
-    if not_scanned:
-        report["sources_not_scanned"] = not_scanned
-    return {"transient_noise": report}
-
-
-def _with_unseeded_noise(
-    monte_carlo_info: dict[str, Any],
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    repo_root: str | None,
-) -> dict[str, Any]:
-    """``monte_carlo_info`` plus the issue #2963 unseeded-noise disclosure
-    (and its stderr warning) when a scanned file declares such a source."""
-    noise_report = _unseeded_noise_report(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if noise_report is None:
-        return monte_carlo_info
-    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
-    return {**monte_carlo_info, **noise_report}
-
-
-_UNSEEDED_NOISE_NOTE = (
-    "trnoise()/trrandom() sources are not governed by monte_carlo.seed "
-    "(ngspice seeds them from the process id): re-running this request "
-    "redraws their noise, and samples run in separate batch jobs or hosts "
-    "may share a noise stream."
-)
 
 
 def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
@@ -6946,6 +6821,7 @@ def _prepare_corner_run(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
@@ -7004,6 +6880,7 @@ def _prepare_corner_run(
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
@@ -7316,6 +7193,7 @@ def _run_corner(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
@@ -7382,6 +7260,7 @@ def _run_corner(
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
@@ -8291,6 +8170,7 @@ def _write_corner_deck(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> None:
@@ -8394,6 +8274,7 @@ def _write_corner_deck(
             save_mode=save_mode,
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
+            transient_noise_seed=transient_noise_seed,
             corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
@@ -8461,6 +8342,7 @@ def _corner_deck_control_lines(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
+    transient_noise_seed: int | None = None,
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
@@ -8566,7 +8448,7 @@ def _corner_deck_control_lines(
     solves the corner the prefix set up. (``options.waveforms`` is refused
     for a step sequence, so ``raw_path`` is always ``None`` there.)
     """
-    lines = [".control"]
+    lines = [".control", *sim_tn.seed_lines(transient_noise_seed)]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
     # Issue #3035: the parameter reset must come first -- `reset` reloads the
@@ -9138,6 +9020,7 @@ def _run_calibration_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
@@ -9195,6 +9078,7 @@ def _run_calibration_probe(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
         )
         _write_spiceinit(probe_dir, ngspice_init)
@@ -9242,6 +9126,7 @@ def _run_fail_fast_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
@@ -9289,6 +9174,7 @@ def _run_fail_fast_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        transient_noise_seed=transient_noise_seed,
         stimulus_lines=stimulus_lines,
     )
     if probe["error"] is not None:
@@ -10440,6 +10326,9 @@ def _rollup_measurements(
                 # actually ran under `request.monte_carlo`, so a plain corner
                 # matrix keeps today's exact entry shape.
                 entry["monte_carlo"] = mc_stats
+                # Issue #6967: the declared dispersion bound, graded on the
+                # same `by_corner[]` populations (a no-op when undeclared).
+                sim_population_limits.grade(entry, mc_stats, spec, monte_carlo)
                 window = mc_stats["sigma_window"]
                 if monte_carlo.get("window_scope") == "per_corner":
                     # Issue #2960: every corner's own population is graded;

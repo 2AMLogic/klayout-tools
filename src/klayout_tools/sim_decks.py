@@ -95,7 +95,7 @@ from . import (
 )
 from ._jsonnum import is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
-from .sim_errors import SimError
+from .sim_errors import SimError, request_options
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -263,9 +263,7 @@ def plan_deck_units(
             "-- one off-host job runs the whole deck list across its own "
             "worker pool (options.max_workers)"
         )
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _deck_error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = DEFAULT_TIMEOUT_S
     if options.get("timeout_s") is not None:
         default_timeout = _validated_timeout(

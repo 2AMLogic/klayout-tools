@@ -15,7 +15,7 @@ rule, #2278). Additive: no ``schema_version`` bump.
 The record contract and its load-bearing rules -- quote, never
 re-derive; exact-string row matching; the minimum-relative-margin reduce
 with its status precedence; unreconciled ``limit_disagreement``; and the
-record states (``graded``, ``gap``, ``structural`` #6985, carrying its
+record states (``graded``, ``gap``, ``joint``, ``structural`` #6985, carrying its
 ``claim`` and hash-pinned ``artifact`` instead of measured values,
 ``no_evidence``, ``unattributable``) -- are documented in
 ``docs/cli/signoff.md`` ("The per-spec-row table"); that doc is the
@@ -26,12 +26,9 @@ contribute nothing here, as does an unreadable, malformed or
 unresolvable citation. Grading reports those on the item axis; this
 block never contradicts it.
 
-The module also hosts ``_members_rows_declared`` (moved here from
-``signoff.py`` as part of the size offset that pays for the hook lines;
-it is the spec-row naming rule the multi-citation grader applies, so
-this is its thematic home). ``klayout_tools.signoff`` re-imports it by
-name so ``signoff._members_rows_declared`` keeps resolving exactly as
-before (the #2313 ``signoff_envelopes.py`` precedent).
+The module also hosted ``_members_rows_declared`` from its start; issue
+#6969 moved it to :mod:`.signoff_joint_rows` with the ``joint_grid``
+reader, as the size offset for that form's hook lines here.
 """
 
 from __future__ import annotations
@@ -41,28 +38,15 @@ from collections.abc import Callable
 from typing import Any
 
 from ._jsonnum import is_number
+from .signoff_joint_rows import (
+    attribute_joint_rows,
+    citation_label,
+    joint_member_lines,
+    joint_table_detail,
+)
 from .signoff_row_extent import print_partial_rows
 
 __all__ = ["build_spec_row_records", "print_spec_row_table"]
-
-
-def _members_rows_declared(
-    members: list[tuple[dict[str, Any], list[str] | None]],
-    spec_rows: list[dict[str, Any]] | None,
-) -> bool:
-    """True unless a member names an undeclared (or declared-``gap`` --
-    either form, issue #5599 -- or ``structural``, issue #6985) row."""
-    if spec_rows is None:
-        return True
-    declared = {row["id"]: row for row in spec_rows}
-    return all(
-        row_id in declared
-        and declared[row_id]["gap"] is None
-        and declared[row_id]["justified_gap"] is None
-        and declared[row_id].get("structural") is None
-        for _, rows in members
-        for row_id in rows or []
-    )
 
 
 #: The house status precedence ``error > inconclusive > fail > pass`` --
@@ -308,11 +292,10 @@ def _collect_slot_state(
     """Per declared row of one slot: which citations name it, whether the
     envelopes they cite carry ``spec_row`` tags at all, and every tagged
     measurement matching it. A member naming an undeclared row is ignored
-    (#3778); a citation that is not file-backed, or that does not resolve
-    to a readable envelope, contributes nothing (grading reports those on
-    the item axis)."""
+    (#3778); a non-file-backed or unreadable citation contributes nothing
+    (grading reports those on the item axis)."""
     per_row: dict[str, dict[str, Any]] = {
-        row["id"]: {"untagged": False, "candidates": []} for row in rows
+        row["id"]: {"untagged": False, "candidates": [], "joint": None} for row in rows
     }
     raw_entry = lookup_evidence(evidence, item_id, suffix)
     members = []
@@ -320,13 +303,16 @@ def _collect_slot_state(
         members, _problem = parse_members(raw_entry)
         if members is None:
             members = []
+    envelopes: dict[str, dict[str, Any]] = {}
     for spec, member_rows in members or []:
         if spec.get("kind") != "file":
             continue  # command-backed: static projection only
         resolved = _resolved_envelope(spec, resolve_evidence, repo_root, resolved_cache)
         if resolved is None:
             continue  # unreadable/malformed citation: grading reports it
+        envelopes[citation_label(spec)] = resolved["envelope"]
         _attribute_rows(resolved, member_rows, per_row)
+    attribute_joint_rows(rows, per_row, envelopes)  # issue #6969
     return per_row
 
 
@@ -350,6 +336,7 @@ def _resolved_envelope(
                 "file_label": spec["file"],
                 "tagged": _envelope_has_tags(envelope),
                 "measurements": _envelope_measurements(envelope),
+                "envelope": envelope,
             }
         )
     return resolved_cache[key]
@@ -390,7 +377,8 @@ def _emit_slot_records(
 ) -> list[dict[str, Any]]:
     """One record per declared row, in declaration order, in the row's
     state: a disposition (``gap``, either form, or ``structural`` #6985)
-    outranks evidence (neither is ever covered), then any attributed
+    outranks evidence (neither is ever covered), then a ``joint_grid`` row
+    (#6969) takes its per-member ``joint`` record, then any attributed
     candidates grade the record, then the citation-named-but-untagged
     ``unattributable`` state, then ``no_evidence``. A partition-qualified
     slot marks its records with ``partition``."""
@@ -407,6 +395,12 @@ def _emit_slot_records(
             records.append(record)
         elif gap is not None:
             records.append(_base_record(row_id, item_id, "gap", gap))
+        elif row["joint_grid"] is not None:
+            record = _base_record(row_id, item_id, "joint", None)
+            # Issue #6969: no single measurement to quote -- the record
+            # carries the per-member joint projection instead.
+            record["joint"] = state["joint"] or {"covered": False, "members": []}
+            records.append(record)
         elif state["candidates"]:
             records.append(_graded_record(row_id, item_id, state["candidates"]))
         elif state["untagged"]:
@@ -463,6 +457,8 @@ def _state_marker_and_detail(
         return marker, colour, _graded_detail(record)
     if state == "gap":
         return "GAP  ", "", f"declared gap: {record['gap']}"
+    if state == "joint":
+        return "JOINT", "", joint_table_detail(record)
     if state == "structural":
         artifact = record["artifact"]
         return (
@@ -488,6 +484,8 @@ def print_spec_row_table(
         marker, colour, detail = _state_marker_and_detail(record, palette)
         reset = palette.reset if colour else ""
         print(f"[{colour}{marker}{reset}] {record['id']}: {detail}")
+        for line in joint_member_lines(record):
+            print(f"        {line}")
         for source in record["sources"]:
             print(f"        from: {source['file']} ({source['measurement']})")
     print_partial_rows(items)

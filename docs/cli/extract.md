@@ -3397,6 +3397,15 @@ is not a terminal, as in the runset). `params` are the gate region's `area_um2`
 `A` and `P` as `klt extract`. `klt deck devices --deck gf180mcu` lists the
 twelve classes (`kind: "mos_capacitor"`).
 
+With a resolved GF180 PDK, extraction writes the eight plain and `_b`
+classes as calls to their bias-dependent PDK subcircuits. The gate is the
+first pin and the strapped source/drain is the second. For example, the
+0.8 × 2.0 µm gate above emits
+`X$1 G SD cap_nmos_03v3_b c_length=2U c_width=0.8U`. The four `_dn`
+classes have no dedicated PDK subcircuit and keep their fixed-value `C`
+cards. Extraction without a selected PDK also writes fixed-value cards.
+In both cases the report's `c_f` is the nominal area-based capacitance.
+
 Approximations versus the runset: an island overlapping any `moscap_exclude`
 marker (resistor, ESD, SAB, `RES_MK`, `DIODE_MK`, `DRC_BJT`, native, `efuse_mk`,
 `plfuse`, `mvsd`/`mvpsd`, LDMOS, Schottky; the runset's `lvs_source` is not
@@ -6796,11 +6805,20 @@ klt extract routed.gds --deck sky130 --parasitics --spef routed.spef --format js
 **A format translation of already-computed data, not a new extraction
 pass** (`docs/design/post-route-sta-survey.md` §3.1/§4.1): every SPEF `*CAP`/
 `*RES` value is copied verbatim from `parasitics.nets[]` — the same
-star-topology model documented above, re-expressed as SPEF's `*D_NET`/
+star or distributed-ladder model documented above, re-expressed as SPEF's `*D_NET`/
 `*CONN`/`*CAP`/`*RES` block syntax instead of KLayout SPICE `R`/`C` device
 cards. Units are declared (`*C_UNIT 1 FF`, `*R_UNIT 1 OHM`) to match
 `parasitics`'s own units exactly, so no femtofarad/ohm conversion — and no
 conversion error — is introduced.
+
+With `--distributed-rc --critical-net <net>`, SPEF preserves the selected
+net's ladder: one `*RES` row per `segments[]` entry and one ground `*CAP`
+row per terminal node, using `terminals[].capacitance_ff`. The middle node
+(`pin_order`) reuses the net's primary SPEF node; other nodes use fresh
+`<net>:<N>` identifiers. Ground capacitance is distributed across the nodes
+instead of concentrated at the hub; the `*D_NET` total stays the same.
+Coupling capacitance still attaches at the middle node. Lumped nets keep
+their existing star/Gamma-shunt output. This changes no JSON report fields.
 
 **Net-name correlation by default; optional device-terminal correlation via
 `--def-net-connections` (issue #948, extended by #961).** Each `*D_NET`
