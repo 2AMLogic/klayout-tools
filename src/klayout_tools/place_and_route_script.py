@@ -907,15 +907,13 @@ def _repair_iterations(diode_cell: str | None, requested: int) -> int:
 
 
 def _global_placement_call(
-    density: float | None, default_density: float, seed: int
+    density: float | None, default_density: float, seed: int, *, unconstrained: bool
 ) -> str:
-    """The ``global_placement`` line; ``density=None`` uses ``default_density``
-    (issue #4716)."""
+    """Build the placement command using the requested or default density."""
     used = default_density if density is None else density
-    return (
-        f"global_placement -density {used} "
-        f"-routability_driven -timing_driven -random_seed {seed}"
-    )
+    timing = "" if unconstrained else " -timing_driven"
+    flags = f"-routability_driven{timing} -random_seed {seed}"
+    return f"global_placement -density {used} {flags}"
 
 
 def _global_route_congestion_flags(
@@ -967,10 +965,6 @@ def _stage_script_lines(
     multicycle: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
-
-    global_placement_call = _global_placement_call(
-        placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
-    )
 
     # Issue #2635: `request.macros[].lib`, resolved to this run's own
     # corner. Read immediately after the standard-cell `read_liberty` in
@@ -1059,7 +1053,12 @@ def _stage_script_lines(
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",
             *_wire_rc_lines(io_spec, library),
-            global_placement_call,
+            _global_placement_call(
+                placement_density,
+                _GLOBAL_PLACEMENT_DENSITY,
+                seed,
+                unconstrained=unconstrained,
+            ),
             "estimate_parasitics -placement",
         ]
         lines += resizer_pass_lines(unconstrained)

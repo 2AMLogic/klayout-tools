@@ -60,7 +60,8 @@ def test_place_stage_unconstrained_skips_resizer_passes():
     assert "create_clock" not in text
     assert "repair_design" not in text
     assert "repair_timing" not in text
-    assert "global_placement" in text
+    assert "global_placement -density 0.6 -routability_driven -random_seed 1" in text
+    assert "-timing_driven" not in text
     assert "detailed_placement" in text
     assert "estimate_parasitics -placement" in text
     assert "set_wire_rc" in text
@@ -68,6 +69,10 @@ def test_place_stage_unconstrained_skips_resizer_passes():
 
 def test_place_stage_constrained_keeps_resizer_passes():
     lines = _stage_lines("place", clock_period_ns=10.0)
+    assert (
+        "global_placement -density 0.6 -routability_driven"
+        " -timing_driven -random_seed 1" in lines
+    )
     assert lines.index("repair_design") < lines.index("repair_timing")
     assert lines.index("repair_timing") < lines.index("detailed_placement")
 
@@ -144,6 +149,7 @@ def test_unconstrained_warning_names_every_skipped_pass():
     warn = unconstrained_warnings
     route = " ".join(warn("route", None, None))
     for token in (
+        "global_placement -timing_driven",
         "repair_design",
         "repair_timing",
         "clock_tree_synthesis",
