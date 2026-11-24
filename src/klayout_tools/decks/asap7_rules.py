@@ -547,7 +547,7 @@ _LISD_EXACT_3 = (
     "opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells "
     "satisfy only the 'at least 3 nm' reading, so the exact check is not shipped"
 )
-_EXACT_W = "exact width across the metal track needs the metal routing direction"
+_EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
 _SADP_TRACK = (
     "defined against the routing tracks (adjacent tracks, parallel run "
     "length); the deck has no per-shape track assignment, and the DRM leaves "

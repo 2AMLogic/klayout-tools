@@ -260,8 +260,7 @@ def _request_resistance_paths(request: dict) -> list[list[str]] | None:
         if (
             not isinstance(entry, dict)
             or set(entry) != {"net_id", "from", "to"}
-            or isinstance(entry["net_id"], bool)
-            or not isinstance(entry["net_id"], int)
+            or not is_int(entry["net_id"])
             or not isinstance(entry["from"], str)
             or not isinstance(entry["to"], str)
         ):

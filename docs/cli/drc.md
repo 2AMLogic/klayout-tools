@@ -3592,13 +3592,13 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
 | `V0.LIG.EN.4` | Table 3.11.2 | V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT and SLVT library has 1,413 selected V0 wholly inside LIG. Figure 3.11.2(a) shows V0 protruding beyond LIG. Of the 6,312 selected cuts per library, 4,899 protrude by exactly 1 nm on both sides. The 1,413 fully covered cuts occupy 208 of 212 cell masters and have no LISD overlap. They include 18 nm square V0 centered in 22 nm square LIG. The rule needs clarification for V0 wholly inside LIG. | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
-| `V0.M1.AUX.3` | Table 3.11.2 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V0.M1.AUX.3` | Table 3.11.2 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. 5,395 V0 cut sites in each pinned library fit horizontal M1 and would fail a vertical-only width check. | #3147 |
 | `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V1.S.2`, `V1.S.3`, `V1.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V1.M2.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V1.M2.AUX.2` | Table 3.13.1 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. All 389 V1 cut sites in each pinned library span horizontal rectangular M2. This sample supplies no direction for square M2 landings. | #3147 |
 | `V2.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V2.S.2`, `V2.S.3`, `V2.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V2.M3.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V2.M3.AUX.2` | Table 3.13.1 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. The three pinned libraries contain no V2 cut sites to constrain the interpretation on M3. | #3147 |
 | `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `M4.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
@@ -4290,12 +4290,20 @@ for which skipped rules make a run partial and which do not.
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
 
-`layers_checked` and `layers_in_stream_without_rules` are computed from the
-input stream's own layer table (reusing the same per-layer enumeration
-`klt layers` uses — see [`klt layers`](layers.md)), not from shape counts: a
-layer present in the stream's layer table with zero shapes still counts as
-"in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
-semantics.
+`layers_checked` and `layers_in_stream_without_rules` share one per-layer
+presence test, and what counts as "in the stream" depends on `--top`:
+
+- **`--top` omitted:** presence is the input stream's own layer table, not
+  shape counts. A layer-table entry with zero shapes still counts as "in the
+  stream", matching `Layout.find_layer(...)`'s own semantics.
+- **`--top <cell>` (curated engine):** presence is shapes in the selected
+  hierarchy. A layer counts only if it carries at least one shape (text labels
+  included) in that cell or any of its descendants. A layer that is in the
+  stream's layer table but empty across that hierarchy, such as one drawn only
+  in a sibling top cell, is absent from both fields. Each rule uses the
+  selected hierarchy to determine applicability. For example, a contact in
+  that hierarchy can violate its enclosure rule when the enclosing metal
+  appears only in a sibling cell.
 
 #### `coverage.skipped` vs. `coverage.inapplicable`
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
 from ._sta_request_diag import extract_block as _extract_block
 from .post_route_sta_errors import PostRouteStaError
 from .post_route_sta_path_groups import _path_group_entry
@@ -40,7 +41,7 @@ def _validate_max_violating_endpoints(constraints: dict[str, Any]) -> int | None
     value = constraints.get("max_violating_endpoints")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if not is_int(value) or value <= 0:
         raise PostRouteStaError(f"{field} must be a positive integer")
     return value
 

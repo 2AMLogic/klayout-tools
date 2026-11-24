@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import GenError
 from .gen_compose_base import GenComposeError
+from .gen_compose_pad_notch import _pad_introduced_notches_dbu
 from .gen_compose_routing import (
     _pdk_family,
     _resolve_route_layer,
@@ -100,28 +101,29 @@ def _pad_self_notch(
     spacing_dbu: int,
     layer_region: Any,
 ) -> bool:
-    """Whether inserting the pad footprint at ``(x, y)`` into the *whole*
-    layer's merged metal leaves a same-polygon notch narrower than
+    """Whether inserting the pad footprint at ``(x, y)`` into the layer's
+    merged metal *introduces* a same-polygon notch narrower than
     ``spacing_dbu`` (#5608). A pad wider than the run it lands on protrudes
     past it, and the merged polygon's concave gap is a real ``klt drc``
     finding -- a deck ``space`` check is net-agnostic *and* intra-polygon --
     even though both facing edges are the port net's own metal. Overlap
     alone is never a violation: the pad is *meant* to merge with the net it
-    lands on. ``False`` when ``spacing_dbu <= 0`` (no ``space`` rule to
-    test, mirroring ``gen_compose_routing._pad_self_notch_violation_um``)
-    or when the pad touches no metal on this layer (nothing to notch)."""
+    lands on.
+
+    The decision is :func:`~.gen_compose_routing._pad_introduced_notches_dbu`,
+    shared with ``_pad_self_notch_violation_um`` (#6314): only the layer
+    polygons the pad touches are tested, so the cost per candidate follows
+    those rather than the whole layer, and a notch the layer already carries
+    away from the pad no longer rejects every candidate. A pad that touches
+    no metal on this layer introduces nothing. ``False`` when
+    ``spacing_dbu <= 0`` (no ``space`` rule to test, mirroring
+    ``_pad_self_notch_violation_um``)."""
     import klayout.db as kdb
 
     if spacing_dbu <= 0:
         return False
-    pad = kdb.Region(kdb.Box(x - half, y - half, x + half, y + half))
-    if (layer_region & pad).is_empty():
-        return False
-    combined = kdb.Region()
-    combined.insert(layer_region)
-    combined.insert(pad)
-    combined.merge()
-    return not combined.notch_check(spacing_dbu).is_empty()
+    pad = kdb.Box(x - half, y - half, x + half, y + half)
+    return bool(_pad_introduced_notches_dbu(layer_region, pad, spacing_dbu))
 
 
 def _pad_self_space(

@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 from . import env_provenance
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._provenance import build_provenance
 from .size import (
     _JOINT_WIDTH_STEP_EPS,
@@ -227,11 +227,7 @@ def _parse_topology_bias(bias: Any) -> dict[str, Any]:
 
 def _parse_max_joint_iterations(options: dict[str, Any]) -> int:
     value = options.get("max_joint_iterations", DEFAULT_MAX_JOINT_ITERATIONS)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value < MIN_JOINT_ITERATIONS
-    ):
+    if not is_int(value) or value < MIN_JOINT_ITERATIONS:
         raise SizeError(
             "request.options.max_joint_iterations must be an integer >= "
             f"{MIN_JOINT_ITERATIONS}"
