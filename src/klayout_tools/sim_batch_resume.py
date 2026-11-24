@@ -12,16 +12,15 @@ of work the map already accounted for.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
 from . import sim_batch
-from .sim_batch_shards import mismatch_error, shard_map_mismatch
-from .sim_errors import SimError
+from .sim_batch_shards import load_resume_shard_map
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
@@ -102,51 +101,36 @@ def _entry_unit_ids(
     return None
 
 
-def _load_resume_shard_map(
-    path: str, fingerprint: str, request: dict[str, Any]
-) -> tuple[dict[str, Any], list[dict[str, Any]], int] | None:
-    """Read + validate the retained shard map at ``path`` (issue #5775):
-    ``None`` when there is no map, or a well-formed one listing no shards --
-    an inert file, not a stale one. An unreadable map, or one written for a
-    different fingerprint/request, refuses with
-    :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
-    stale results."""
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-        entries = [dict(entry) for entry in document["shards"]]
-        hosts = int(document["hosts"])
-        map_fingerprint = str(document["fingerprint"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise SimError(
-            f"--resume: shard map {path} is unreadable ({exc}); delete it "
-            "or drop --resume",
-            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
-        ) from exc
-    if not entries:
-        return None
-    if map_fingerprint != fingerprint:
-        raise mismatch_error(path, document, fingerprint, False)
-    mismatch = shard_map_mismatch(document, request)
-    if mismatch is not None:
-        raise SimError(
-            f"--resume: shard map {path} was submitted from a different "
-            f"request ({mismatch}); re-run with exactly the request the "
-            "shards were submitted from",
-            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
-        )
-    return document, entries, hosts
+# A harvest's status probe re-reads an unreadable status this many times,
+# pausing between attempts (zero in tests; #7115).
+_STATUS_READ_ATTEMPTS = 3
+_STATUS_READ_BACKOFF_S = 2.0
 
 
 def _shard_status(config: sim_batch.BatchConfig, job_id: str) -> dict[str, Any] | None:
-    """One read of a shard job's remote ``status.json`` -- ``None`` when it
-    cannot be read (an unreadable status is "unknown", never an error)."""
-    try:
-        return sim_batch._read_status(config, job_id, sim_batch._run_subprocess)
-    except Exception:
-        return None
+    """A shard job's remote ``status.json``, re-read a small fixed number of
+    times when a read fails (issue #7115) -- ``None`` only when every
+    attempt fails (an unreadable status is "unknown", never an error)."""
+    for attempt in range(_STATUS_READ_ATTEMPTS):
+        if attempt:
+            time.sleep(_STATUS_READ_BACKOFF_S)
+        try:
+            status = sim_batch._read_status(config, job_id, sim_batch._run_subprocess)
+        except Exception:
+            status = None
+        if status is not None:
+            return status
+    return None
+
+
+def _skip_notice(entry: dict[str, Any], reason: str) -> None:
+    """One stderr line for a shard the harvest leaves for the dispatch
+    (issue #7115): a silent skip is indistinguishable from no probe."""
+    print(
+        f"klt sim: notice: --resume did not harvest shard "
+        f"{_entry_index(entry)} (job {entry.get('job_id')}): {reason}",
+        file=sys.stderr,
+    )
 
 
 def _collect_resume_entry(
@@ -165,25 +149,31 @@ def _collect_resume_entry(
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None, int] | None:
-    """One entry's disposition and collection (issue #5775). ``None`` unless
-    the entry is a terminal job whose units are genuinely outstanding: an
-    unrecoverable grouping, units the checkpoint already holds, a
-    never-launched (``submitted``) shard and a non-terminal status all stay
-    untouched for the dispatch. A terminal entry is collected through the
-    plain attach machinery -- read its status once, never wait, never launch
-    -- and its map index returned alongside the attached corners."""
-    unit_ids = _entry_unit_ids(entry, by_id, partition)
-    if unit_ids is None or all(unit in known for unit in unit_ids):
-        return None
+    """One entry's disposition and collection (issues #5775, #7115). ``None``
+    unless the entry is a terminal job whose units are genuinely
+    outstanding: an unrecoverable grouping, units the checkpoint already
+    holds, a never-launched (``submitted``) shard and a non-terminal status
+    all stay untouched for the dispatch, each skip but the deliberate
+    submitted/known ones announced on stderr. A terminal entry is collected
+    through the attach machinery: probe, never wait, never launch."""
     if entry.get("state") == "submitted":
         # Never launched: no results exist to harvest, and launching is the
         # dispatch's decision (`launch_if_unlaunched`), never a harvest's (a
         # shard the map says was submitted is launched, not re-minted, when
         # the partition is unchanged).
         return None
+    unit_ids = _entry_unit_ids(entry, by_id, partition)
+    if unit_ids is None:
+        _skip_notice(entry, "shard grouping not recoverable")
+        return None
+    if all(unit in known for unit in unit_ids):
+        return None
     job_id = str(entry["job_id"])
-    status = _shard_status(config, job_id) or {}
-    if str(status.get("state") or "unknown") not in sim_batch.BATCH_TERMINAL_STATES:
+    status = _shard_status(config, job_id)
+    state = str((status or {}).get("state") or "unknown")
+    if state not in sim_batch.BATCH_TERMINAL_STATES:
+        reason = "status unreadable" if status is None else f"remote state {state}"
+        _skip_notice(entry, reason)
         return None
     points = [by_id[unit] for unit in unit_ids]
     try:
@@ -271,10 +261,11 @@ def harvest_resume_shards(
     the corners of every shard whose remote job is already terminal, so the
     ordinary resume flow re-dispatches only what is genuinely outstanding.
 
-    One entry at a time -- read its remote ``status.json`` once, never wait,
-    never launch (a shard the map records ``submitted`` stays for the
-    dispatch, which launches it under the recorded id when the partition is
-    unchanged). A terminal entry is collected through the plain attach
+    One entry at a time -- probe its remote ``status.json`` (an unreadable
+    read is retried, #7115), never wait, never launch (a shard the map
+    records ``submitted`` stays for the dispatch, which launches it under
+    the recorded id when the partition is unchanged). A terminal entry is
+    collected through the plain attach
     machinery (:func:`sim_batch._run_batch_job` with ``attach=True``) and
     marked ``collected`` in the map; anything else is left alone. Returns
     ``(corners, engine_version, remote_environment)`` -- the corners
@@ -289,7 +280,7 @@ def harvest_resume_shards(
     stale results.
     """
     path = os.path.join(artifacts_dir, sim_batch.BATCH_SHARDS_FILENAME)
-    loaded = _load_resume_shard_map(path, fingerprint, request)
+    loaded = load_resume_shard_map(path, fingerprint, request)
     if loaded is None:
         return [], None, None
     document, entries, hosts = loaded
