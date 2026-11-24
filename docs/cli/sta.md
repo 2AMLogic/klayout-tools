@@ -322,6 +322,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `instance_paths` | object \| omitted | Additive field (issue #5754), present only when `constraints.report_instances` is given — on the single-corner response and on every `corners[]` entry. `{"<instance>": {"into": {"setup", "hold"}, "out_of": {"setup", "hold"}}}` in request order; the four records per instance are path records of the `worst_*_path` shape (`consistent_with_aggregate` always `null`). `into` is the worst path arriving at the instance's input pins; `out_of` is the worst path launching from its output pins. Output size is bounded by `entries × 4` records, never by design size or the instance's pin count. See "Per-instance path queries" below. |
 | `false_path_from` | array \| omitted | Additive field (issue #2968), present only when `constraints.false_path_from` is given: the exclusion list that was applied, in request order. On a multi-corner response it is hoisted to the top level (it is the same for every corner), not repeated in `corners[]`. |
+| `multicycle_engine_sessions` | integer, omitted without exceptions | Number of OpenROAD timing sessions used for this corner's multicycle analysis. A single-corner report carries it beside `multicycle_paths`; multi-corner reports carry it on each `corners[]` entry. |
 | `multicycle_paths` | array \| omitted | Additive field (issue #6921), present only when non-empty `constraints.multicycle_paths` was given — per `corners[]` entry on a multi-corner response (each corner's own sessions measured it), not hoisted. One record per request entry, in request order: `{index, from, through, to, setup, hold, matched_endpoints, setup_slack_ns: {with, without}, hold_slack_ns: {with, without}}`. Slacks are ns, worst of the **selected paths** only, `with` = all entries applied, `without` = one extra session with this entry omitted and every other entry kept (the unambiguous baseline). `matched_endpoints` counts the distinct endpoint pins the with-run timed. An unmeasurable side is `null` plus a `reason` key — never the global WNS and never `0`. See "Multicycle paths" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
@@ -336,6 +337,11 @@ bump. Reports without the field still verify, and `--check` treats
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
 
 ## Hard macros (`request.macros`)
+
+An ordinary macro requires `lef`. The synthesis-only `verilog_blackbox`
+shortcut (issue #5612) does not supply STA with a physical abstract.
+In Verilog mode, STA accepts a `macros[]` entry containing only `cell` to
+declare an untimed black box. DEF mode requires a LEF abstract.
 
 Issue #2635 adds an optional `macros` array — the same shared shape `klt
 synthesize` and `klt place-and-route` accept, documented once in
@@ -1985,6 +1991,11 @@ the single-cycle edge: `setup: 4, hold: 3` gives the capture flop four
 periods for setup while hold is still checked at the launch edge, so the
 recorded hold slacks with and without the entry are equal (that is what the
 pinned engine reports, and what the shipped test asserts).
+
+`multicycle_engine_sessions` reports the engine cost for a corner. A request
+with N exceptions uses one session with all exceptions and one comparison
+session per entry, for a total of 1 + N. Two exceptions use three sessions
+at each corner. An omitted or empty list leaves this field absent.
 
 **The measurement.** For each entry, in every corner, the response's
 `multicycle_paths[]` record carries:

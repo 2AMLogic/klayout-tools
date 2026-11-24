@@ -1,0 +1,1 @@
+- **PDK Git revision stamps ignore untracked files** and retain the `-dirty` suffix for staged changes and edits to tracked files (#7771, 2026-11-24).

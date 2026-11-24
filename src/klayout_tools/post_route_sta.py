@@ -1204,12 +1204,12 @@ def _dispatch_sta(
     ):
         if field in corner_fields:
             response[field] = corner_fields[field]
-    # Additive field (issue #2968): the applied exclusion list, present only
-    # when the request named `constraints.false_path_from`.
+    # Echo the exclusions only when requested (#2968).
     if run.constraints.false_path_from:
         response["false_path_from"] = list(run.constraints.false_path_from)
     if run.multicycle:  # additive (issue #6921): only when entries named
-        response["multicycle_paths"] = corner_fields["multicycle_paths"]
+        for field in ("multicycle_paths", "multicycle_engine_sessions"):
+            response[field] = corner_fields[field]
     # Required corner fields can carry null when a requested measurement is unavailable.
     for key in (
         "spef_annotation",
