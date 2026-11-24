@@ -8,6 +8,17 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-24
 
+- **PR #7804**: Document directional ambiguity for ASAP7 V0 edges at LIG
+- **PR #7832**: Skip timing-driven global placement for clockless routes
+- **PR #7828**: Repair ASAP7 M1 spacing at remote-via wire sides and routed notches
+- **PR #7827**: Cover missing observations in a limits-less derived measurement
+- **PR #7815**: feat: let an item-5 signoff citation assert the run scope it must cover
+- **PR #7821**: refactor: bundle klt pex extraction options into PexExtractOptions
+- **Issue #7796** (closed): place-and-route (asap7): post-repair re-route clears the stack-enclosure and landing-pair families; pad-vs-neighbour tip spacings and V1.M1.EN.1 landings survive with no covering repair
+- **Issue #7799** (closed): Repair remaining ASAP7 M1 pad-to-neighbor tip spacings on a routed slice
+- **Issue #7801** (closed): klt sim: no regression guards the limits-less derived observation's error skip reason
+- **Issue #7807** (closed): klt signoff: an evidence citation's content_hash pins a run-scope-invariant artifact, so a reduced-coverage run grades identically to the complete one
+- **Issue #7818** (closed): Bundle duplicated PEX extraction-option forwarding and share CLI dry-run kwargs
 - **PR #7745**: fix: point the case-alias merged-net warning at --rename-declared-pins
 - **PR #7749**: Allow batch simulations to select the simlong fleet profile
 - **PR #7746**: test: detect live gates reached only through a nested def in the STA lane guard
