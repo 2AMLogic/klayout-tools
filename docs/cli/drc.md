@@ -45,10 +45,10 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
   scope discipline, provenance citations) is documented in
   [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
-- `--top` — top cell to check when the stream has more than one; omit to
-  check every top cell (today's default, unchanged). `coverage` (see below)
-  is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
-  reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
+- `--top` — select a cell and its descendants. Omit it to check every top cell.
+  For the curated engine, this hierarchy determines rule applicability,
+  `layers_checked`, `layers_in_stream_without_rules`, `unchecked_rules` and
+  `marker_blind_layers_in_stream`. A named cell
   absent from the stream exits `1` with a clean error. With `--engine
   klayout`, a multi-top stream **requires** `--top` (see "Engine" →
   "klayout" below). The exact requested name is recorded on the report as
