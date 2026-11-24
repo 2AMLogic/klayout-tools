@@ -4026,19 +4026,18 @@ def _reconcile_top_pins(
     demote: bool,
     unresolved: Sequence[kdb.Net] = (),
 ) -> list[str]:
-    """Reconcile the top circuit's pins against ``below_top_labels`` (issue
-    #291), the label strings that name a net only from below an instance
-    boundary.
+    """Reconcile top pins promoted by ``make_top_level_pins()`` (#291, #7663).
 
-    ``make_top_level_pins()`` has already promoted every named net. This finds
-    the promoted pins whose net name is a below-top label and, when
-    ``demote`` is set, removes those pins (the net keeps its name and stays an
-    internal node). Returns the sorted, de-duplicated net names affected --
-    the input to the caller's ``warnings`` entry, whether or not they were
-    actually demoted.
+    ``below_top_labels`` names nets labeled only below an instance boundary.
+    Demotion removes promoted pins and keeps their named internal nets.
+    Return sorted, unique affected names for warnings even without demotion.
+    Substrate nets named by ``connect_global`` have no such labels and keep their pins.
 
-    Global/substrate nets (named by ``connect_global``, not by any drawn text)
-    are never in ``below_top_labels``, so a substrate pin is left untouched.
+    ``unresolved`` holds ``<instance>__<pin>`` nets minted by ``_wire_abstract_cells``
+    where an abstract pin touches no conductor. When demoting, remove their
+    pins by net identity before the early return, sparing same-named user
+    nets. Omit these names from the result because ``_wire_abstract_cells``
+    already emits per-instance "left unconnected" warnings.
     """
     if demote:
         for net in unresolved:
@@ -7596,6 +7595,8 @@ def _extract_netlist(
         l2n.connect(tap_substrate_outside, contact)
         for isolated_slice in tap_substrate_isolated:
             l2n.connect(isolated_slice, contact)
+    # Connect terminal poly and retain its probe layers for abstract-pin wiring (#7663).
+    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     # Re-join an abstracted macro's own well to the contact/metal stack its
     # tie was contacted up through (issue #2398) -- the `tap`/`nwell`/
     # `contact` triangle above, restricted to the well-tie geometry erasure
@@ -7604,7 +7605,6 @@ def _extract_netlist(
     # every other region registered above. Deliberately outside the
     # `tap_declared` gate: it is empty whenever the deck has no tap mechanism
     # at all, so the gate would be redundant.
-    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     _abstract_well_tie = _connect_abstract_well_tie(
         l2n, nwell, nwell_body_cover, contact, abstract_well_tie_cover
     )

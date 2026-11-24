@@ -68,6 +68,19 @@ def test_git_clean_and_dirty(tmp_path):
 
 
 @needs_git
+def test_git_stamp_distinguishes_untracked_and_indexed_files(tmp_path):
+    variant = _variant(tmp_path / "root" / "variant")
+    (variant / "model.lib").write_text("model", encoding="utf-8")
+    head = _commit_all(variant.parent)
+    extra = variant / "extra.lib"
+    extra.write_text("local model", encoding="utf-8")
+
+    assert pdk.read_version(str(variant)) == f"git:{head}"
+    _git(variant, "add", "extra.lib")
+    assert pdk.read_version(str(variant)) == f"git:{head}-dirty"
+
+
+@needs_git
 def test_git_at_pdk_root_parent(tmp_path):
     v = _variant(tmp_path / "root" / "v")
     (v / "f").write_text("a", encoding="utf-8")
