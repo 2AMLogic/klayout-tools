@@ -171,6 +171,7 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+    "analysis_steps[].measurements[].on_unreached": None,  # #7093, after v0.9.2
     # measurements[].search (#4121), after v0.7.0: a mandatory feature (an
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.

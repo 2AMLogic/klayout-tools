@@ -2409,6 +2409,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `analysis.op_check` | 0.9.2 |
 | `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
+| `analysis_steps[].measurements[].on_unreached` | unreleased |
 | `measurements[].search` | unreleased |
 | `measurements[].limits.exclusive_min / exclusive_max` | unreleased |
 | `lossless supply_v corner_id spelling` | unreleased |
@@ -5146,6 +5147,12 @@ data instead:
   measurement results graded `not_reached`, kept apart from `errored` (which
   counts corners). The key is **absent** unless some measurement declared
   `on_unreached`.
+
+For a measurement inside an analysis step, batch preflight checks the worker
+capability `step_on_unreached`. The first main build that grades these misses
+is `0.9.3.dev3412`. A `0.9.0` worker can report major/minor compatibility
+with a `0.9.3.devN` client and still lack this capability. Use a runner image
+built from a version that includes the step policy.
 
 The classification is deliberately narrow: it applies only when ngspice
 logged the reason `out of interval` together with `failed!` for that card

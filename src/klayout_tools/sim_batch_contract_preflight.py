@@ -25,6 +25,7 @@ from .sim_batch_contract import (
 )
 from .sim_batch_contract_spec import (
     _MANDATORY_RUNNER_FEATURES,
+    STEP_UNREACHED_FIRST_DEV,
     _feature_release_key,
     _missing_runner_features,
     _request_features,
@@ -296,6 +297,12 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
+    if "step_on_unreached" in features:
+        checks += (
+            " if [[ $rv =~ ^0[.]9[.]3[.]dev([0-9]+)([+]|$) ]] && "
+            f"(( 10#${{BASH_REMATCH[1]}} < {STEP_UNREACHED_FIRST_DEV} )); then "
+            'mmiss="${mmiss}${mmiss:+, }step_on_unreached"; fi;'
+        )
     if "_regrade" in features:
         # A pre-feature dev build can report the same release segment as a
         # capable worker. Check the worker command before starting the grid.
