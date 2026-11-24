@@ -142,6 +142,15 @@ def add_pex_parser(
         ),
     )
     pex_parser.add_argument(
+        "--timeout-s",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "override each testbench simulation corner's timeout on both sides "
+            "and the device-only leg"
+        ),
+    )
+    pex_parser.add_argument(
         "--measure-timeout-s",
         dest="measure_timeout_s",
         type=float,
