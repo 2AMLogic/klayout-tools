@@ -826,7 +826,7 @@ and `M4.W.3` on that fixture before the repair and none after, with no
 other rule family rising (`tests/test_place_and_route_m4_grid.py`,
 2026-11-24). Every non-ASAP7 PDK reports
 `m4_grid_repair: {"status": "skipped", ...}` and its GDS is
-byte-identical.
+byte-identical. The added metal must preserve the conductor's V3 and V4 connections and M4 pin labels.
 
 To narrow the search, re-run the same request with `power` omitted. A marker
 that persists shows the violation can occur without the generated PDN. A marker

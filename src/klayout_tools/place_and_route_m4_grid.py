@@ -42,8 +42,7 @@ repair_power_stack` (#6909) repairs what it owns:
   counted in ``left`` and stays exactly what ``klt drc --deck asap7``
   flags.
 
-It is a documented no-op for every other PDK family -- the GDS is not
-touched at all.
+Other PDK families skip this pass.
 """
 
 from __future__ import annotations
@@ -372,7 +371,8 @@ def _repair_polygon(
     m4_index: int,
     m4: Any,
     poly: Any,
-    v3: Any,
+    cuts: tuple[Any, Any],
+    labels: Any,
     dbu_um: float,
 ) -> Any | None:
     """Draw the first safe band for one target polygon and return the
@@ -398,12 +398,20 @@ def _repair_polygon(
         zone = kdb.Region(band_box.enlarged(along, across)) - poly_region
         if not (zone & others).is_empty():
             continue
+        if (
+            any(
+                not layer.interacting(patch).not_overlapping(poly_region).is_empty()
+                for layer in cuts
+            )
+            or not labels.interacting(patch).not_interacting(poly_region).is_empty()
+        ):
+            continue
         if _adds_family_violation(
             kdb,
             m4=m4,
             patch=patch,
             band_box=band_box,
-            v3=v3,
+            v3=cuts[0],
             dbu_um=dbu_um,
         ):
             continue
@@ -411,6 +419,23 @@ def _repair_polygon(
             top_cell.shapes(m4_index).insert(piece)
         return patch
     return None
+
+
+def _contacts(kdb, layout, top_cell, lef_to_gds):
+    def cut_layer(name, default):
+        index = layout.find_layer(*lef_to_gds.get(name, default))
+        if index is None:
+            return kdb.Region()
+        return kdb.Region(top_cell.begin_shapes_rec(index))
+
+    cuts = cut_layer("V3", (35, 0)), cut_layer("V4", (45, 0))
+    label_index = layout.find_layer(lef_to_gds["M4"][0], 251)
+    labels = (
+        kdb.Texts(top_cell.begin_shapes_rec(label_index))
+        if label_index is not None
+        else kdb.Texts()
+    )
+    return cuts, labels
 
 
 def repair_m4_grid(
@@ -421,18 +446,10 @@ def repair_m4_grid(
     variant: str,
     lef_to_gds: dict[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Repair the router's off-grid M4 geometry (``M4.AUX.1``/``AUX.2``
-    track-grid and ``M4.W.3`` even-multiple-width markers, issue #7817)
-    on the merged ASAP7 layout, and report what was drawn.
+    """Repair off-grid ASAP7 M4 and count repaired and remaining targets.
 
-    Returns ``status`` (``"violations"`` for any targets left,
-    ``"repaired"`` for all targets repaired, ``"clean"`` for no targets,
-    or ``"skipped"`` with a reason for a no-op), ``patches`` (total
-    polygons drawn), and the count triple ``targets`` (merged M4
-    polygons a family rule flags) / ``repaired`` / ``left`` (not safely
-    repairable -- most often an off-grid wire carrying its own V3, which
-    only via geometry could realign -- reported, never forced). Never
-    raises for absent input.
+    Each accepted band preserves clearance to other M4 conductors, existing
+    V3 and V4 connectivity and M4 pin membership.
     """
     if pdk_variant_family(variant) != _ASAP7_FAMILY:
         return _report("skipped", f"PDK family of '{variant}' is not ASAP7; no-op")
@@ -446,14 +463,8 @@ def repair_m4_grid(
     m4 = kdb.Region(top_cell.begin_shapes_rec(m4_index)).merged()
     if m4.is_empty():
         return _report("clean")
-    v3_gds = lef_to_gds.get("V3")
-    v3_index = layout.find_layer(*v3_gds) if v3_gds is not None else None
-    v3 = (
-        kdb.Region(top_cell.begin_shapes_rec(v3_index)).merged()
-        if v3_index is not None
-        else None
-    )
 
+    cuts, labels = _contacts(kdb, layout, top_cell, lef_to_gds)
     grid = _nm_to_dbu(_GRID_NM, layout.dbu)
     track = 2 * grid
     wmax = _nm_to_dbu(_MAX_WIDTH_NM, layout.dbu)
@@ -469,7 +480,8 @@ def repair_m4_grid(
             m4_index=m4_index,
             m4=m4,
             poly=poly,
-            v3=v3,
+            cuts=cuts,
+            labels=labels,
             dbu_um=layout.dbu,
         )
         if patch is None:

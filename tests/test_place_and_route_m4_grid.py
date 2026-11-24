@@ -390,3 +390,54 @@ def test_v3_carrying_target_is_left_without_raising_v3_m4_aux2(tmp_path):
     counts = _deck_counts(gds)
     assert counts.get("V3.M4.AUX.2", 0) == 0
     assert counts.get("M4.AUX.1", 0) > 0
+
+
+@pytest.mark.parametrize("contact", ["V3", "V4", "M4.pin"])
+def test_repair_preserves_foreign_contacts(contact, tmp_path):
+    from klayout_tools.extract import run_extract
+
+    b = _Builder()
+    b.box(M4, 0, 108, 300, 132)
+    child = b.layout.create_cell("NEIGHBOUR")
+    b.top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+    b.top.shapes(b.layout.layer(40, 251)).insert(kdb.Text("SIGNAL", _nm(240), _nm(120)))
+    if contact == "M4.pin":
+        child.shapes(b.layout.layer(40, 251)).insert(
+            kdb.Text("OTHER", _nm(108), _nm(100))
+        )
+    else:
+        via, other = (45, 50) if contact == "V4" else (35, 30)
+        child.shapes(b.layout.layer(via, 0)).insert(
+            kdb.Box(_nm(96), _nm(80), _nm(120), _nm(104))
+        )
+        b.box((other, 0), 96, 0, 120, 250)
+        child.shapes(b.layout.layer(other, 251)).insert(
+            kdb.Text("OTHER", _nm(108), _nm(40))
+        )
+    before = b.merged(M4)
+    assert b.run()["left"] == 1
+    assert b.merged(M4) == before
+    if contact == "V4":
+        # Flatten this tiny fixture so the extractor exposes both top pins.
+        b.top.flatten(-1, False)
+        path, netlist = tmp_path / "untouched.gds", tmp_path / "untouched.spi"
+        b.layout.write(str(path))
+        result = run_extract(str(path), "asap7", top="top", output=str(netlist))
+        assert result["warnings"] == []
+        pins = next(
+            line.split()[2:]
+            for line in netlist.read_text().splitlines()
+            if line.upper().startswith(".SUBCKT TOP ")
+        )
+        assert set(pins) == {"SIGNAL", "OTHER"}
+
+
+def test_repair_uses_a_band_clear_of_a_foreign_cut():
+    b = _Builder()
+    b.box(M4, 0, 108, 300, 132)
+    b.box((45, 0), 96, 68, 120, 92)
+    # The first candidate (72..144 nm) would reach that V4. The next
+    # band remains clear, and a different V4 already on M4 stays connected.
+    b.box((45, 0), 192, 108, 216, 132)
+    assert b.run()["repaired"] == 1
+    assert b.merged(M4) == [kdb.Box(_nm(0), _nm(96), _nm(300), _nm(168))]
