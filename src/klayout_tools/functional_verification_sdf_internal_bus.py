@@ -22,7 +22,6 @@ back by it, so the dependency stays one-directional.
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -34,6 +33,7 @@ from .functional_verification_sdf import (
     _read_verilog_source_texts,
     _sdf_interconnect_is_zero_delay,
 )
+from .functional_verification_sdf_steps import _write_sdf_drop_step
 
 # --------------------------------------------------------------------------- #
 # Issue #6075: the one-modpath-per-bit-selected-net cap recorded for #1619
@@ -307,15 +307,14 @@ def _apply_sdf_internal_bus_net_drop(
     Returns ``annotate_source_path`` unchanged when nothing was dropped, or
     a new normalized-copy path otherwise.
     """
-    drop = _drop_sdf_zero_delay_internal_bus_net_interconnects(
+    return _write_sdf_drop_step(
+        _drop_sdf_zero_delay_internal_bus_net_interconnects(
+            annotate_source_path,
+            _collect_sdf_internal_bus_net_pins(sources, hdl_toplevel),
+        ),
         annotate_source_path,
-        _collect_sdf_internal_bus_net_pins(sources, hdl_toplevel),
+        output_dir,
+        "klt_sdf_internal_bus_net_dropped.sdf",
+        SDF_INTERNAL_BUS_NET_DROPPED_CLASS,
+        sdf_pre_dropped_counts,
     )
-    if drop is None:
-        return annotate_source_path
-    text, count = drop
-    new_path = os.path.join(output_dir, "klt_sdf_internal_bus_net_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    sdf_pre_dropped_counts[SDF_INTERNAL_BUS_NET_DROPPED_CLASS] = count
-    return new_path

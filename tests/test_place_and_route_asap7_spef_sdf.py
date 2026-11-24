@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -94,7 +95,7 @@ def _gunzip(src: Path, dest: Path) -> None:
         shutil.copyfileobj(fin, fout)
 
 
-def _make_asap7_install(root: Path) -> None:
+def _make_asap7_install(root: Path, *, descriptor: bool) -> None:
     """Minimal open_pdks-shaped ``asap7A`` variant from the pinned lambdapdk."""
     lib = root / "asap7A/libs.ref" / _CELL_LIBRARY
     klayout_tech = root / "asap7A/libs.tech/klayout/tech"
@@ -103,10 +104,27 @@ def _make_asap7_install(root: Path) -> None:
     # sequential layer numbering, which the asap7 extraction deck cannot see
     # (issue #4705): extraction then finds no routed nets.
     shutil.copy(_LAYERMAP, klayout_tech / "asap7A.map")
-    # The INVBUF liberty is the one library group holding the inverter and
-    # the clock buffer; the other ASAP7 liberties are separate groups and
-    # cannot be concatenated into one file.
-    _gunzip(_LIB_GZ, lib / "lib" / f"{_CELL_LIBRARY}__TT.lib")
+    if descriptor:
+        # These two shipped groups share their timing defaults. SIMPLE has a
+        # different default_max_transition and cannot share this merged deck.
+        members = [_LIB_GZ, _RVT / "nldm/asap7sc7p5t_AO_RVT_TT_nldm.lib.gz"]
+        variant = root / "asap7A"
+        paths = []
+        for member in members:
+            deck = lib / "lib" / member.stem
+            _gunzip(member, deck)
+            paths.append(deck.relative_to(variant).as_posix())
+        (variant / "klt-pdk.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "assets": {"libs_ref": "libs.ref", "klayout": "libs.tech/klayout"},
+                    "liberty": {_CELL_LIBRARY: {"TT": paths}},
+                }
+            )
+        )
+    else:
+        _gunzip(_LIB_GZ, lib / "lib" / f"{_CELL_LIBRARY}__TT.lib")
     _gunzip(_CELL_GDS_GZ, lib / "gds" / f"{_CELL_LIBRARY}.gds")
     (lib / "lef").mkdir()
     (lib / "techlef").mkdir()
@@ -148,13 +166,17 @@ def _request() -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "descriptor", [False, True], ids=["conventional", "descriptor"]
+)
 def test_asap7_route_with_post_route_spef_and_sdf(
-    tmp_path, monkeypatch, record_property
+    tmp_path, monkeypatch, record_property, descriptor
 ):
     import time
 
     pdk_root = tmp_path / "pdkroot"
-    _make_asap7_install(pdk_root)
+    _make_asap7_install(pdk_root, descriptor=descriptor)
+    monkeypatch.setenv("KLT_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("PDK_ROOT", str(pdk_root))
     monkeypatch.setenv("PDK", "asap7A")
     work = tmp_path / "work"
@@ -172,6 +194,7 @@ def test_asap7_route_with_post_route_spef_and_sdf(
 
     assert report["status"] == "ok"
     assert report["stage_reached"] == "route"
+    assert [corner["name"] for corner in report["corners"]] == ["TT"]
 
     out_dir = Path(report["def_path"]).parent
     spef = out_dir / "top_route.spef"
@@ -193,3 +216,50 @@ def test_asap7_route_with_post_route_spef_and_sdf(
     sdf_instances = re.findall(r"\(INSTANCE\s+(\S+?)\)", sdf_text)
     assert sdf_instances, "SDF has no (INSTANCE ...) entries"
     assert {"u1", "u2"} & set(sdf_instances), sdf_instances
+
+
+def test_powered_asap7_route_uses_builtin_library(tmp_path, monkeypatch):
+    pdk_root = tmp_path / "pdkroot"
+    _make_asap7_install(pdk_root, descriptor=False)
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    monkeypatch.setenv("PDK", "asap7A")
+    monkeypatch.setenv("KLT_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    fixture = Path(__file__).parent / "fixtures/place_and_route_drcfill/request.json"
+    request = json.loads(fixture.read_text())
+    request["pdk"]["cell_library"] = _CELL_LIBRARY
+    del request["library"]
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+
+    # The fixture's 97 inverters give the M5 power straps room to cross the core.
+    wires = [f"n{i}" for i in range(96)]
+    nodes = ["a", *wires, "y"]
+    cells = [
+        f"{_INV} u{i} (.A({source}), .Y({sink}));"
+        for i, (source, sink) in enumerate(pairwise(nodes))
+    ]
+    (tmp_path / "top.v").write_text(
+        "\n".join(
+            [
+                "module top(input clk, input a, output y);",
+                f"wire {', '.join(wires)};",
+                *cells,
+                "endmodule",
+                "",
+            ]
+        )
+    )
+    report = run_place_and_route(str(request_path))
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["applied"]["signal_layers"] == "M2-M7"
+    placed = report["power"]["placed"]
+    nets = {net["name"]: net for net in placed["special_nets"]}
+    for name in ("VDD", "VSS"):
+        assert nets[name]["followpin_segments"] > 0
+        assert nets[name]["stripe_segments"] > 0
+        assert nets[name]["vias"] > 0
+    assert any(
+        "antenna repair did not run" in message for message in report["warnings"]
+    )

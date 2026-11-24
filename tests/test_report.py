@@ -15,6 +15,8 @@ import json
 import pytest
 
 from klayout_tools.cli import main
+from klayout_tools.coverage import build_check_coverage
+from klayout_tools.drc_crosscheck import _verdict_status
 from klayout_tools.report import ReportError, build_report
 
 DRC_VIOLATIONS_ENVELOPE = {
@@ -159,6 +161,7 @@ def test_drc_clean_envelope_renders_no_violations_message_not_empty_table(tmp_pa
     assert report["sections"][0]["item_count"] == 0
     assert "No violations found." in report["markdown"]
     assert "| Rule |" not in report["markdown"]
+    assert "Cross-check" not in report["markdown"] + report["text"]
     assert "No violations found." in report["text"]
 
 
@@ -279,6 +282,106 @@ def test_missing_schema_version_raises(tmp_path):
     path = _write(tmp_path, "no_version.json", {"foo": "bar"})
 
     with pytest.raises(ReportError, match="schema_version"):
+        build_report([path])
+
+
+def _crosscheck_envelope(curated: dict, native: dict | None) -> dict:
+    """Wrap the engine reports with the verdict used by ``klt drc --engine both``."""
+    return {
+        "schema_version": 2,
+        "mode": "crosscheck",
+        "file": "design.gds",
+        "status": _verdict_status(curated, native),
+        "identity": None if native is None else {"input_hash_match": True},
+        "comparison": None,
+        "reports": {"curated": curated, "native": native},
+    }
+
+
+@pytest.mark.parametrize(
+    ("curated", "native", "status"),
+    [
+        (DRC_CLEAN_ENVELOPE, DRC_CLEAN_ENVELOPE, "clean"),
+        (DRC_VIOLATIONS_ENVELOPE, DRC_CLEAN_ENVELOPE, "violations"),
+        (DRC_VIOLATIONS_ENVELOPE, DRC_VIOLATIONS_ENVELOPE, "violations"),
+        (DRC_CLEAN_ENVELOPE, DRC_VIOLATIONS_ENVELOPE, "violations"),
+        (
+            DRC_CLEAN_ENVELOPE,
+            {
+                **DRC_VIOLATIONS_ENVELOPE,
+                "deck": "sky130-native",
+                "violation_count": 7,
+                "rule_counts": {"poly.width.1": 7},
+            },
+            "violations",
+        ),
+        (DRC_CLEAN_ENVELOPE, None, "not_checked"),
+        (
+            {
+                **DRC_CLEAN_ENVELOPE,
+                "status": "clean_partial",
+                "coverage": build_check_coverage(
+                    checked=["poly.width.1"],
+                    skipped=[{"id": "metal1.width", "reason": "layer_absent"}],
+                ),
+            },
+            DRC_CLEAN_ENVELOPE,
+            "clean_partial",
+        ),
+        (
+            DRC_CLEAN_ENVELOPE,
+            {
+                **DRC_CLEAN_ENVELOPE,
+                "status": "coverage_unknown",
+                "coverage": build_check_coverage(
+                    checked=[], unknown=[{"id": "klayout", "reason": "uninstrumented"}]
+                ),
+            },
+            "coverage_unknown",
+        ),
+    ],
+    ids=["clean", "curated", "both", "native", "capped", "null", "partial", "unknown"],
+)
+def test_crosscheck_envelope_renders_as_drc_section(
+    tmp_path, capsys, curated, native, status
+):
+    path = _write(tmp_path, "cross.json", _crosscheck_envelope(curated, native))
+    assert main(["report", path, "--format", "json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    (section,) = result["sections"]
+    expected_rows = len(curated["violations"])
+    assert section == {
+        "kind": "drc",
+        "source": path,
+        "title": "DRC Report: design.gds",
+        "status": status,
+        "item_count": expected_rows,
+    }
+    assert "_drc_crosscheck_source" not in json.dumps(result)
+    assert f"Status: {status}" in result["text"].splitlines()
+    assert result["markdown"].splitlines()[1].endswith(f" {status}")
+    curated_result = f"curated {curated['status']} ({curated['violation_count']})"
+    native_result = (
+        f"native {native['status']} ({native['violation_count']})"
+        if native
+        else "native unavailable"
+    )
+    for output in (result["text"], result["markdown"]):
+        assert output.count("poly.width.1") == expected_rows
+        assert "No violations found." not in output
+        empty_table = "No curated violation rows to display." in output
+        assert empty_table == (expected_rows == 0)
+        assert f"Cross-check: {curated_result}, {native_result}\n" in output
+
+
+def test_malformed_crosscheck_still_raises_unrecognized_shape(tmp_path):
+    """`reports.curated` not DRC-shaped is not projected, so it keeps
+    falling through to the existing loud error rather than crashing."""
+    malformed = _crosscheck_envelope({"status": "clean"}, None)
+    path = _write(tmp_path, "bad-cross.json", malformed)
+
+    with pytest.raises(ReportError, match="unrecognized shape"):
         build_report([path])
 
 

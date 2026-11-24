@@ -6,43 +6,14 @@ subsystem: the post-route multi-corner setup/hold sweep
 (:func:`_run_corner_sweep`/:func:`_corner_sweep_script_lines`, issue #949)
 and the post-route SPEF-annotated STA pass
 (:func:`_post_route_spef_metrics`/:func:`_spef_sta_script_lines`, issue
-#948), including its own DEF-pin-name recovery helper
-(:func:`_def_pin_net_names`, issue #961). This mirrors the shape of the
-earlier ``extract.py``/``extract_abstract.py`` (#1303), ``gen.py``/
-``gen_pcells`` (#1698), and ``gen_compose.py``/``gen_compose_routing.py``
-(#1708) splits: a self-contained, single-purpose subsystem relocated
-verbatim out of a file that had grown past the point one module should hold
-stage orchestration *and* this.
+#948), including the DEF-pin-name recovery helper (:func:`_def_pin_net_names`,
+issue #961). Both public entry points are called by ``run_place_and_route``;
+stage orchestration stays in ``place_and_route.py``. This module owns Tcl
+generation, subprocess invocation and report parsing for these STA passes.
+Caller-supplied paths and corner names use the shared ``tcl_literal`` helper.
 
-Both public entry points into this module
-(:func:`_run_corner_sweep`/:func:`_post_route_spef_metrics`) are called from
-exactly two sites in ``place_and_route.py``'s own
-:func:`~klayout_tools.place_and_route.run_place_and_route` -- everything
-upstream of those two call sites stays in ``place_and_route.py``; only this
-subsystem's own Tcl-generation/subprocess/report-parsing concern moved here.
-
-Dependency surface is intentionally narrow and mostly one-directional, the
-same discipline ``gen_compose_routing.py`` documents for its own reverse
-dependency: this module's own already-shared helpers (``_run_openroad``/
-``_count_violations`` from ``_openroad_engine.py``, ``_tcl_net_list``/
-``_count_spef_nets_annotated`` from ``_paths.py``) are imported at module
-scope -- neither creates a cycle, since neither of those modules imports
-back from here or from ``place_and_route.py``. The handful of names that
-*are* still defined in ``place_and_route.py`` itself (``PlaceAndRouteError``,
-``_write_script``, ``_clock_lines``, ``_design_rule_constraint_lines``,
-``_design_rule_check_lines``, ``_metrics_report_lines``,
-``_violation_count_lines``, ``_read_metrics``, ``_engine_error_message``,
-``_EXTRACT_DECK_FOR_CELL_LIBRARY``, and the ``_SETUP_VIOLATIONS_*``/
-``_HOLD_VIOLATIONS_*``/``_MAX_TRANSITION_VIOLATIONS_*``/
-``_MAX_CAPACITANCE_VIOLATIONS_*``/``_MAX_TRANSITION_LIBRARY_VIOLATIONS_*``/
-``_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers,
-issue #2357) are imported *inside*
-the functions that use them, deferred rather than at module scope, because
-``place_and_route.py`` in turn imports this module's own public entry
-points back (module scope, no cycle -- this module never imports
-``place_and_route`` at its own module scope) purely to preserve
-``klayout_tools.place_and_route.<name>`` as a working import path for every
-name the test suite/callers used before this split.
+Tcl emitters come from the script module. The run-time hooks for engine
+errors and metrics are resolved from the orchestrator when a run needs them.
 """
 
 from __future__ import annotations
@@ -50,7 +21,9 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._openroad_engine import (
     _count_violations,
     _run_openroad,
@@ -58,6 +31,38 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
+from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_base import (
+    _HOLD_VIOLATIONS_BEGIN,
+    _HOLD_VIOLATIONS_END,
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_VIOLATIONS_END,
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+    _MAX_TRANSITION_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_VIOLATIONS_END,
+    _SETUP_VIOLATIONS_BEGIN,
+    _SETUP_VIOLATIONS_END,
+    _SPEF_NET_CHECK_BEGIN,
+    _SPEF_NET_CHECK_END,
+    _SPEF_NET_CHECK_RE,
+    PlaceAndRouteError,
+    _require_extract_deck_for_cell_library,
+)
+from .place_and_route_library_limits import library_limit_fields, prepare_reports
+from .place_and_route_script import (
+    _clock_lines,
+    _design_rule_check_lines,
+    _design_rule_constraint_lines,
+    _io_delay_lines,
+    _metrics_report_lines,
+    _violation_count_lines,
+    _wire_rc_lines,
+    _write_script,
+)
 
 
 def _corner_sweep_script_lines(
@@ -118,12 +123,11 @@ def _corner_sweep_script_lines(
     ``report_worst_slack_metric -setup``/``-hold`` (run here for the first
     and only time in this session, so no scoping concern applies) writes
     this invocation's own ``-metrics`` dump's ``timing__setup__ws``/
-    ``timing__hold__ws`` keys -- automatically the worst value across every
-    corner :func:`klayout_tools.pdk.list_lib_corners` enumerated (confirmed
-    live: setup slack worst-cases at the slowest loaded corner, hold slack
-    at the fastest, exactly the industrial "setup at slow PVT, hold at fast
-    PVT" convention this survey's section 3.3 describes -- no manual
-    slow/fast corner classification needed in Python).
+    ``timing__hold__ws`` keys. Each is the worst slack across the loaded
+    ``corners``. The route stage uses descriptor keys for mapped libraries
+    and :func:`klayout_tools.pdk_cells.list_lib_corners` for conventional
+    discovery. A requested ``pdk.sweep_corners`` subset limits both metrics.
+    OpenROAD selects the worst setup and hold corners independently.
 
     ``report_tns_metric -setup``/``-hold`` (issue #1866) rides alongside the
     two ``report_worst_slack_metric`` calls above, in the same session and
@@ -176,22 +180,15 @@ def _corner_sweep_script_lines(
     design-rule verdict's own count changes -- only *when* the constraint
     line is emitted relative to the new library-only pass.
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-        _clock_lines,
-        _design_rule_check_lines,
-        _design_rule_constraint_lines,
-        _io_delay_lines,
-        _wire_rc_lines,
-    )
 
-    lines = [f"read_db {checkpoint_in}"]
-    lines += ["define_corners " + " ".join(corner["name"] for corner in corners)]
+    lines = [f"read_db {_tcl_literal(checkpoint_in)}"]
     lines += [
-        f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
+        "define_corners " + " ".join(_tcl_literal(corner["name"]) for corner in corners)
+    ]
+    lines += [
+        f"read_liberty -corner {_tcl_literal(corner['name'])} "
+        f"{_tcl_literal(corner['path'])}"
+        for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
     # Issue #1865: the same `set_input_delay`/`set_output_delay` pair the
@@ -262,9 +259,8 @@ def _spef_sta_script_lines(
     net names?) runs **before** ``read_spef`` -- deliberately independent of
     whatever `read_spef` itself does with an unmatched name, so an uncaught
     Tcl error partway through that call cannot also silently skip this check.
-    It is measured in **both directions**, because they answer different
-    questions and only the second one decides whether the timing numbers
-    below are a real-parasitics measurement:
+    It is measured in **both directions**; only the second one decides
+    whether the timing numbers below are a real-parasitics measurement:
 
     - *SPEF-side* (``get_nets -quiet <name>`` per SPEF net): how many of the
       names the SPEF declares exist in the linked design. Flat extraction
@@ -273,10 +269,9 @@ def _spef_sta_script_lines(
       is expected to sit well below 1 even on a perfectly-correlated run.
       ``-quiet`` suppresses OpenSTA's own "not found" error, so a mismatched
       name degrades to "not annotated" rather than aborting the script.
-    - *design-side* (every ``get_nets *`` in the design, looked up in the
-      SPEF's own name set): how many of the design's nets the SPEF actually
-      names. **This** is the ratio that says whether every net OpenSTA times
-      got real routed parasitics.
+    - *design-side* (linked nets after excluding confirmed empty or
+      driver-only internal nets, as in standalone ``klt sta``):
+      how many timed nets the SPEF names; ``annotation_complete`` keys on it.
 
     Net names are embedded verbatim, not glob-escaped. ``_tcl_net_list``
     wraps each in Tcl braces, and brace-quoting performs no backslash
@@ -307,17 +302,11 @@ def _spef_sta_script_lines(
       triplet written with an empty typ member -- OpenSTA's default -- would
       leave the *default* Icarus corner selecting nothing.
     """
-    from .place_and_route import (
-        _SPEF_NET_CHECK_BEGIN,
-        _SPEF_NET_CHECK_END,
-        _clock_lines,
-        _design_rule_constraint_lines,
-        _io_delay_lines,
-        _metrics_report_lines,
-        _violation_count_lines,
-    )
 
-    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines = [
+        f"read_db {_tcl_literal(checkpoint_in)}",
+        f"read_liberty {_tcl_literal(liberty_path)}",
+    ]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
@@ -338,6 +327,7 @@ def _spef_sta_script_lines(
         "set klt_design_total 0",
         "set klt_design_annotated 0",
         "foreach klt_design_net [get_nets -quiet *] {",
+        *SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",
@@ -347,7 +337,7 @@ def _spef_sta_script_lines(
         'puts "$klt_spef_annotated [llength $klt_spef_nets]"',
         'puts "$klt_design_annotated $klt_design_total"',
         f'puts "{_SPEF_NET_CHECK_END}"',
-        f"read_spef {spef_path}",
+        f"read_spef {_tcl_literal(spef_path)}",
     ]
     if sdf_path is not None:
         lines.append(write_sdf_line(sdf_path))
@@ -482,7 +472,9 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -591,7 +583,7 @@ def _post_route_spef_metrics(
     flow's original names verbatim). Passed through as ``run_extract``'s
     ``def_net_connections``, this makes every real design pin on an
     unambiguously-named net a genuine, resolvable node in the written
-    SPEF's RC network -- see :func:`~klayout_tools.extract._write_spef`'s
+    SPEF's RC network -- see :func:`~klayout_tools.extract_spef._write_spef`'s
     docstring for the exact ``*CONN``/``*RES`` shape and the duplicate-net-
     name guard (a net name shared by several un-strapped islands, e.g.
     `gcd`'s 105 ``VGND`` islands, is skipped rather than asserting
@@ -624,20 +616,7 @@ def _post_route_spef_metrics(
     :data:`~klayout_tools.place_and_route._CTS_BUFFER_CELLS` and its call
     sites).
     """
-    from .place_and_route import (
-        _HOLD_VIOLATIONS_BEGIN,
-        _HOLD_VIOLATIONS_END,
-        _SETUP_VIOLATIONS_BEGIN,
-        _SETUP_VIOLATIONS_END,
-        _SPEF_NET_CHECK_BEGIN,
-        _SPEF_NET_CHECK_END,
-        _SPEF_NET_CHECK_RE,
-        PlaceAndRouteError,
-        _engine_error_message,
-        _read_metrics,
-        _require_extract_deck_for_cell_library,
-        _write_script,
-    )
+    from .place_and_route import _engine_error_message, _read_metrics
 
     extract_deck = _require_extract_deck_for_cell_library(cell_library)
 
@@ -648,22 +627,20 @@ def _post_route_spef_metrics(
 
     spice_path = os.path.join(output_dir, f"{hdl_toplevel}_route_parasitics.spice")
     spef_path = os.path.join(output_dir, f"{hdl_toplevel}_route.spef")
-    # Issue #961 defect 1: the DEF's own `PINS` section is the ground truth
-    # for which nets are genuine top-level design ports, independent of the
-    # `def_net_names=True` renaming below (which gives *every* routed net a
-    # real name, and would otherwise get all of them promoted to `*PORTS`).
-    # `None` (no parseable `PINS` section -- not expected for a real routed
-    # DEF) falls back to not passing `declared_pins` at all, never to
-    # declaring zero ports.
+    # Issue #961 defect 1: the DEF's own `PINS` section is the ground truth for which
+    # nets are genuine top-level design ports, independent of the `def_net_names=True`
+    # renaming below (which gives *every* routed net a real name, and would otherwise
+    # get all of them promoted to `*PORTS`). `None` (no parseable `PINS` section -- not
+    # expected for a real routed DEF) falls back to not passing `declared_pins` at all,
+    # never to declaring zero ports.
     declared_pins = _def_pin_net_names(def_path)
-    # Issue #961's own remaining scope (device-terminal `*CONN` pin
-    # correlation): the DEF's own `NETS` section names each net's real
-    # `(instance, pin)` connections, in the same instance/pin spelling the
-    # linked gate-level design uses -- see `def_net_instance_pins`'s own
-    # docstring for the exact `*I`/`*RES` shape this produces and the
-    # duplicate-net-name guard that skips it. `{}` (never `None`, matching
-    # `def_net_instance_pins`'s own "absence is not proof of zero" posture)
-    # for a DEF with no parseable `NETS` section.
+    # Issue #961's own remaining scope (device-terminal `*CONN` pin correlation): the
+    # DEF's own `NETS` section names each net's real `(instance, pin)` connections, in
+    # the same instance/pin spelling the linked gate-level design uses -- see
+    # `def_net_instance_pins`'s own docstring for the exact `*I`/`*RES` shape this
+    # produces and the duplicate-net-name guard that skips it. `{}` (never `None`,
+    # matching `def_net_instance_pins`'s own "absence is not proof of zero" posture) for
+    # a DEF with no parseable `NETS` section.
     net_instance_pins = def_net_instance_pins(def_path)
     try:
         extraction = run_extract(
@@ -673,19 +650,17 @@ def _post_route_spef_metrics(
             top=hdl_toplevel,
             parasitics=True,
             spef_output=spef_path,
-            # Issue #951: name every routed net from the DEF net name
-            # KLayout's LEF/DEF reader left on its geometry (GDS shape
-            # property 1) when `_merge_def_to_gds` produced this GDS, rather
-            # than from text labels -- which the merge only emits for
-            # top-level pins. This is what makes the SPEF's `*D_NET` names
-            # the same strings the OpenSTA session below has linked, and so
-            # what makes `read_spef` annotate anything at all.
+            # Issue #951: name every routed net from the DEF net name KLayout's LEF/DEF
+            # reader left on its geometry (GDS shape property 1) when
+            # `_merge_def_to_gds` produced this GDS, rather than from text labels --
+            # which the merge only emits for top-level pins. This is what makes the
+            # SPEF's `*D_NET` names the same strings the OpenSTA session below has
+            # linked, and so what makes `read_spef` annotate anything at all.
             def_net_names=True,
-            # Issue #961: restrict the promoted-pin set (and so the written
-            # SPEF's `*PORTS`/`*P` entries) to the DEF's own declared ports --
-            # see this function's docstring, "declared_pins" paragraph.
-            # `None` is `run_extract`'s own "no restriction" default, i.e.
-            # exactly the pre-#961 behaviour.
+            # Issue #961: restrict the promoted-pin set (and so the written SPEF's
+            # `*PORTS`/`*P` entries) to the DEF's own declared ports -- see this
+            # function's docstring, "declared_pins" paragraph. `None` is `run_extract`'s
+            # own "no restriction" default, i.e. exactly the pre-#961 behaviour.
             declared_pins=declared_pins,
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation --
             # see this function's docstring, "def_net_connections" paragraph.
@@ -725,7 +700,9 @@ def _post_route_spef_metrics(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
+        repo_root=repo_root,
     )
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
@@ -761,15 +738,14 @@ def _post_route_spef_metrics(
         nets_check if nets_check is not None else (0, len(net_names), 0, 0)
     )
 
-    # The loud half of issue #948's "do not silently drop annotation on
-    # unmatched nets": an incomplete correlation is stated in the response
-    # itself, in words, rather than left for a caller to notice by comparing
-    # two integers -- because the numbers next to it (`worst_slack_ns` &c.)
-    # look exactly like a real measurement whether or not any net was
-    # actually annotated. Keyed on the *design*-side ratio (issue #951): the
-    # SPEF-side one counts flat extraction's intra-standard-cell nodes, which
-    # a gate-level linked design never has and whose absence says nothing
-    # about the quality of the annotation.
+    # The loud half of issue #948's "do not silently drop annotation on unmatched nets":
+    # an incomplete correlation is stated in the response itself, in words, rather than
+    # left for a caller to notice by comparing two integers -- because the numbers next
+    # to it (`worst_slack_ns` &c.) look exactly like a real measurement whether or not
+    # any net was actually annotated. Keyed on the *design*-side ratio (issue #951): the
+    # SPEF-side one counts flat extraction's intra-standard-cell nodes, which a
+    # gate-level linked design never has and whose absence says nothing about the
+    # quality of the annotation.
     annotation_complete = (
         design_nets_total > 0 and design_nets_annotated == design_nets_total
     )
@@ -824,8 +800,10 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    threads: int = 1,
     engine_logs: list[dict[str, Any]] | None = None,
     library: dict[str, Any] | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> tuple[
     float | None,
     float | None,
@@ -834,6 +812,7 @@ def _run_corner_sweep(
     int | None,
     int | None,
     int | None,
+    str | None,
 ]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -843,15 +822,15 @@ def _run_corner_sweep(
     Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners,
     max_transition_violation_count, max_capacitance_violation_count,
     max_transition_violation_count_vs_library,
-    max_capacitance_violation_count_vs_library)``. The first two, each
-    rounded to 5 decimal places (matching
+    max_capacitance_violation_count_vs_library, library_limit_report_path)``.
+    The first two, each rounded to 5 decimal places (matching
     :func:`~klayout_tools.place_and_route._extract_stage_metrics`'s own
     ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
     ``-metrics`` dump didn't populate the corresponding key, are issue #949's
     original aggregate fields -- unchanged by issue #1092, still sourced from
     this same combined, every-``corners``-loaded-at-once session's own
     unscoped ``report_worst_slack_metric -setup``/``-hold`` calls.
-    ``(None, None, [], None, None, None, None)`` when ``corners`` is empty --
+    ``(None, None, [], None, None, None, None, None)`` when ``corners`` is empty --
     either the "should not happen in practice" case the original #949
     docstring named (a resolved ``liberty_path`` implies at least one
     shipped ``.lib``), or issue #1092's own explicit
@@ -937,23 +916,11 @@ def _run_corner_sweep(
     sweep would undermine the very multi-corner evidence claim they exist
     to support (T1 checklist item 5, ``docs/design-evidence-tiers.md``).
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_VIOLATIONS_END,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-        _MAX_TRANSITION_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_VIOLATIONS_END,
-        PlaceAndRouteError,
-        _engine_error_message,
-        _read_metrics,
-        _write_script,
-    )
+    from .place_and_route import _engine_error_message, _read_metrics
 
+    reports = prepare_reports(output_dir, hdl_toplevel)
     if not corners:
-        return None, None, [], None, None, None, None
+        return None, None, [], None, None, None, None, None
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -978,7 +945,9 @@ def _run_corner_sweep(
         script_path,
         metrics_path,
         error_cls=PlaceAndRouteError,
+        threads=threads,
         engine_logs=engine_logs,
+        repo_root=repo_root,
     )
     with completed.diagnostics(PlaceAndRouteError):
         if completed.returncode != 0:
@@ -991,11 +960,10 @@ def _run_corner_sweep(
     worst_hold_raw = metrics.get("timing__hold__ws")
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
     worst_hold = round(worst_hold_raw, 5) if worst_hold_raw is not None else None
-    # Issue #1866: the combined session's own TNS pair, read the same way as
-    # the worst-slack pair above -- used only in the `len(corners) == 1`
-    # branch below (the combined aggregate *is* that single corner's own
-    # value there); the `len(corners) > 1` loop below reads each corner's
-    # own single-corner invocation's TNS instead.
+    # Issue #1866: the combined session's own TNS pair, read the same way as the
+    # worst-slack pair above -- used only in the `len(corners) == 1` branch below (the
+    # combined aggregate *is* that single corner's own value there); the `len(corners) >
+    # 1` loop below reads each corner's own single-corner invocation's TNS instead.
     tns_setup_raw = metrics.get("timing__setup__tns")
     tns_hold_raw = metrics.get("timing__hold__tns")
     tns_setup = round(tns_setup_raw, 5) if tns_setup_raw is not None else None
@@ -1019,15 +987,8 @@ def _run_corner_sweep(
     # Issue #2357: the library-only pass -- same stdout, distinct markers
     # (`_corner_sweep_script_lines` runs this pass *before* any caller-stated
     # constraint is applied to the session).
-    max_transition_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-    )
-    max_capacitance_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    library_limits = library_limit_fields(
+        completed.stdout, reports, corners[0]["name"] if len(corners) == 1 else None
     )
 
     if len(corners) == 1:
@@ -1047,12 +1008,7 @@ def _run_corner_sweep(
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
                 # Issue #2357: this corner's own library-only counterpart.
-                "max_transition_violation_count_vs_library": (
-                    max_transition_violations_vs_library
-                ),
-                "max_capacitance_violation_count_vs_library": (
-                    max_capacitance_violations_vs_library
-                ),
+                **library_limits,
             }
         ]
         return (
@@ -1061,19 +1017,17 @@ def _run_corner_sweep(
             corner_breakdown,
             max_transition_violations,
             max_capacitance_violations,
-            max_transition_violations_vs_library,
-            max_capacitance_violations_vs_library,
+            library_limits["max_transition_violation_count_vs_library"],
+            library_limits["max_capacitance_violation_count_vs_library"],
+            library_limits["library_limit_report_path"],
         )
 
     corner_breakdown = []
     for corner in corners:
         corner_name = corner["name"]
-        corner_script_path = os.path.join(
-            output_dir, f"pnr_{hdl_toplevel}_route_corner_{corner_name}.tcl"
-        )
-        corner_metrics_path = os.path.join(
-            output_dir, f"{hdl_toplevel}_route_corner_{corner_name}_metrics.json"
-        )
+        stem = f"{hdl_toplevel}_route_corner_{quote(corner_name, safe='')}"
+        corner_script_path = os.path.join(output_dir, f"pnr_{stem}.tcl")
+        corner_metrics_path = os.path.join(output_dir, f"{stem}_metrics.json")
         corner_lines = _corner_sweep_script_lines(
             checkpoint_in=checkpoint_in,
             corners=[corner],
@@ -1094,7 +1048,9 @@ def _run_corner_sweep(
             corner_script_path,
             corner_metrics_path,
             error_cls=PlaceAndRouteError,
+            threads=threads,
             engine_logs=engine_logs,
+            repo_root=repo_root,
         )
         with corner_completed.diagnostics(PlaceAndRouteError):
             if corner_completed.returncode != 0:
@@ -1133,12 +1089,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* effective design-rule
-                # verdict, from its own single-corner invocation's stdout --
-                # the per-corner counterpart of the combined aggregates
-                # above, letting a caller see which deck's limits a pin
-                # actually breaks (exactly the per-corner attribution #1092
-                # added for slack).
+                # Per-corner Liberty verdicts in docs/cli/place-and-route.md (#1709).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,
@@ -1151,16 +1102,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #2357: this corner's own library-only counterpart,
                 # from the same single-corner invocation's stdout.
-                "max_transition_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-                ),
-                "max_capacitance_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-                ),
+                **library_limit_fields(corner_completed.stdout, reports, corner_name),
             }
         )
 
@@ -1170,6 +1112,7 @@ def _run_corner_sweep(
         corner_breakdown,
         max_transition_violations,
         max_capacitance_violations,
-        max_transition_violations_vs_library,
-        max_capacitance_violations_vs_library,
+        library_limits["max_transition_violation_count_vs_library"],
+        library_limits["max_capacitance_violation_count_vs_library"],
+        library_limits["library_limit_report_path"],
     )

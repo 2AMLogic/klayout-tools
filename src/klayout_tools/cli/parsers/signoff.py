@@ -14,7 +14,9 @@ from typing import Any
 
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
+from ...signoff_require_build import add_require_grading_ruleset_argument
 from .. import signoff_cmd
+from .._doc_paths import RawDescriptionDocHelpFormatter
 from ..color import add_color_args
 
 
@@ -29,7 +31,7 @@ def add_signoff_parser(
     """
     signoff_parser = subparsers.add_parser(
         "signoff",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=RawDescriptionDocHelpFormatter,
         epilog=(
             "Opt-in evidence kinds (non-native envelopes) and the T1 "
             "checklist items each may satisfy; any other item rejects them "
@@ -39,7 +41,8 @@ def add_signoff_parser(
         help=(
             "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
             "pass/fail verdict, render a T1-T4 tier-verdict report with "
-            "--manifest, or a fleet-wide tier roll-up with --fleet"
+            "--manifest, a fleet-wide tier roll-up with --fleet, or compare "
+            "two saved tier reports' checklists with --diff-reports"
         ),
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
@@ -110,6 +113,20 @@ def add_signoff_parser(
         ),
     )
     signoff_parser.add_argument(
+        "--artifact-manifest",
+        metavar="PATH",
+        action="append",
+        help=(
+            "an artifact-store manifest (`klt artifact`) to resolve "
+            "`artifact:<key>` citations against; repeatable. A cited "
+            "`artifact:` evidence path, or an envelope input path of that form, "
+            "is looked up by URI, fetched through the broker "
+            "($KLT_ARTIFACT_BROKER) and sha256-verified before it is read. "
+            "An unresolvable one grades `unmet`/`artifact_unavailable`. Only "
+            "meaningful with --manifest/--fleet. See docs/cli/signoff.md."
+        ),
+    )
+    signoff_parser.add_argument(
         "--allow-generator-exec",
         action="store_true",
         help=(
@@ -149,6 +166,26 @@ def add_signoff_parser(
             "mutually exclusive with <file>/--fleet/--attest/--check/"
             "--describe-grader/-o. See docs/cli/signoff.md's "
             "'Re-pinning a stale hash' section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--diff-reports",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        help=(
+            "two previously committed --manifest tier report JSON files -- "
+            "compares the checklist surfaces of the two snapshots (the "
+            "source doc + content hash, and each row's title/text/notes, "
+            "matched by (tier, id, partition)) instead of grading anything, "
+            "for an evidence reviewer who has the two reports but no longer "
+            "has the manifest, the evidence, or the grading build (issue "
+            "#6850). Reordering rows alone, or a verdict-only/build-only "
+            "change, compares as unchanged. Exits 0 whether or not anything "
+            "moved (the movement is the answer); 1 only for an unreadable "
+            "file, a non-tier report, or an ambiguous duplicate row key. "
+            "Mutually exclusive with <file>/--manifest/--fleet/--check and "
+            "every grading flag. See docs/cli/signoff.md's '--diff-reports' "
+            "section."
         ),
     )
     signoff_parser.add_argument(
@@ -275,6 +312,7 @@ def add_signoff_parser(
             "'Identifying the grading build' section."
         ),
     )
+    add_require_grading_ruleset_argument(signoff_parser)
     _add_format_arg(signoff_parser)
     # Issue #2227: `signoff` is the one verb that colours its `--format text`
     # rendering, and the rendering it colours is also a *committed* artifact.

@@ -23,6 +23,7 @@ import os
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from . import sim_raw
 from .sim_errors import SimError
 
 OutcomeT = TypeVar("OutcomeT")
@@ -101,3 +102,54 @@ def require_unique_measurement_names(
                 f"be unique when measurements[] declares {form}"
             )
         seen.add(key)
+
+
+def read_real_columns(
+    raw_path: str,
+    *,
+    name: str,
+    columns: int,
+    missing_error: str,
+    empty_error: str,
+    rawfile_label: str = "rawfile",
+) -> tuple[list[list[float]] | None, str | None]:
+    """Read the leading real columns with per-measurement failure messages."""
+    if not os.path.isfile(raw_path):
+        return None, missing_error
+    try:
+        waveform = sim_raw.parse_ascii_rawfile(raw_path)
+    except (SimError, ValueError) as exc:
+        return None, f"measurement '{name}': could not read its {rawfile_label}: {exc}"
+    points = waveform["points"]
+    if len(waveform["variables"]) < columns or not points:
+        return None, empty_error
+    return [[point[index] for point in points] for index in range(columns)], None
+
+
+def read_complex_rawfile(
+    raw_path: str,
+    *,
+    form: str,
+    columns: int,
+    vector_desc: str,
+    analysis_label: str,
+    expected_columns: str,
+) -> tuple[sim_raw.ComplexRawfile | None, tuple[str, str] | None]:
+    """Read one complex sweep with the exact set of columns the form requested."""
+    if not os.path.isfile(raw_path):
+        return None, (
+            f"{form}_vector_missing",
+            f"its {vector_desc} vector did not resolve against this {analysis_label} "
+            "analysis's saved vectors (no rawfile was written) -- check the node "
+            "names, and that options.save_mode does not omit them",
+        )
+    try:
+        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
+    except sim_raw.RawFileError as exc:
+        return None, (f"{form}_raw_invalid", f"could not read its rawfile: {exc}")
+    if len(raw.names) != columns or not raw.points:
+        return None, (
+            f"{form}_raw_invalid",
+            f"its rawfile must hold {expected_columns} with samples",
+        )
+    return raw, None

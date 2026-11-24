@@ -6,6 +6,8 @@ name: Tiny Tapeout DRC sample
 # includes dependency install and paced network fetch. No extract/LVS (#5893).
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   workflow_dispatch:
@@ -14,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tt-corpus-sample-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: tt-corpus-sample-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

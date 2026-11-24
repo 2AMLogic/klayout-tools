@@ -1,0 +1,2 @@
+- **LCOV artifact paths** (#6005, 2026-11-22).
+  Breaking change to `klt functional-verification` response schema 4. `coverage.info_path` now identifies the LCOV file by its request-repository-relative path, scope, and SHA-256 digest. Text output prints the local filename. With waveform tracing enabled, `trace.path` remains an absolute path and can trigger a provenance lint finding.

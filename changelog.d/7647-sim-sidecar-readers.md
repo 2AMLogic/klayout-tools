@@ -1,0 +1,1 @@
+- **`klt sim` shares raw waveform readers across ten sidecar measurement forms** (#7647, 2026-11-23).

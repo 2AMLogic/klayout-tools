@@ -46,11 +46,11 @@ warning -- passed in, exactly as ``_paths.py``'s helpers take
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
+from . import _warn
 from ._layout import region as _region
-from ._paths import _parse_layer_datatype, _reject_unknown_keys
+from ._paths import _reject_unknown_keys, parse_layer_datatype
 
 
 def _validate_device_entry(
@@ -72,7 +72,7 @@ def _validate_device_entry(
         if key not in entry:
             raise error_cls(f"spec '{spec_path}': devices[{index}] missing {key!r}")
 
-    body_layer = _parse_layer_datatype(
+    body_layer = parse_layer_datatype(
         str(entry["body_layer"]), spec_path, f"devices[{index}].body_layer", error_cls
     )
     on = str(entry["on"])
@@ -176,13 +176,12 @@ def _warn_device_body_missed_role(
     (JSON goes to stdout only -- ``docs/json-contract.md``). ``verb`` is the
     calling command (``"klt erc"``, ``"klt power"``), so the line names the
     tool the caller actually ran."""
-    print(
+    _warn.warn(
         f"{verb}: warning: devices[] entry {name!r} declares body_layer "
         f"{body_layer} on role {role!r}, but that marker layer carries "
         f"geometry which does not overlap the region drawn for {role!r} -- "
         "the carve-out subtracted nothing (body_area_um2: 0.0). Check the "
-        "'on' role and the marker's layer/datatype.",
-        file=sys.stderr,
+        "'on' role and the marker's layer/datatype."
     )
 
 
