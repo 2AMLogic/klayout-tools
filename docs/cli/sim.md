@@ -1780,6 +1780,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   a wait budget the pending wait is unbounded, as before.
 - **`--report-out`** writes the aggregate envelope to a file (also on a partial
   failure), in addition to stdout.
+- **`--portable-paths`** omits `environment.client_ngspice_binary` from
+  batch reports and preserves the worker binary and both build records.
+  In a batch set, resolve each non-null `requests[].report` from the
+  aggregate file's directory when using `--report-out`, including for the
+  copy on stdout. For stdout alone, use the directory containing
+  `set-manifest.json`. For example, `-o bundle/members --report-out
+  bundle/reports/set.json --portable-paths` records
+  `../members/amp/report.json` for a member named `amp.request.json`.
+  Moving the whole `bundle/` preserves this reference. Choose an aggregate
+  filename distinct from every member report.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
@@ -9290,7 +9300,7 @@ derived values are on that sample's `corners[]` entry, under
 `agauss`/`gauss`/`random()`-style draws only. ngspice's transient-noise
 sources (`trnoise()` / `trrandom()` on `V*`/`I*` sources) are not seeded by
 `.options seed=`; their generator defaults to the process id. Re-running the
-same request redraws their noise (see also
+same request without an explicit transient-noise seed redraws their noise (see also
 [#2490](https://github.com/2AMLogic/klayout-tools/issues/2490), per-engine-build
 reproducibility, and [#2937](https://github.com/2AMLogic/klayout-tools/issues/2937),
 the combined seed), and samples run in separate batch jobs or hosts can share
@@ -9300,7 +9310,11 @@ a noise stream. When the netlist (or its scanned `.include` closure, including
 and, if part of the closure could not be scanned,
 `unseeded_sources_not_scanned`; a warning is also printed to stderr. Requests
 without such sources keep their `environment.monte_carlo` shape unchanged.
-Seeding these sources per sample is not implemented. For what noise such a transient does and does not contain, see
+When `options.transient_noise_seed` is set, the note and stderr warning give
+the replay behavior for the source kinds listed. A `trrandom` source replays
+with that seed in each fresh corner process. A `trnoise` source redraws.
+The source list still includes both kinds because neither follows
+`monte_carlo.seed`. For the sources covered by a transient analysis, see
 "Transient noise coverage" under "Engine".
 
 **Seed scope (paired and split-stable draws).** By default
@@ -10035,9 +10049,12 @@ substitution is **reported rather than discarded**:
 
 - **PDK revision stamps** (issue #3070): `provenance.pdk.version` is
   `SOURCES` text for open_pdks installs, `fetched:<marker>` for a
-  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a git checkout, else
-  `null`. When the resolved model library lives in a *different* variant tree
-  (a cross-variant symlink), `provenance.pdk.linked_trees` lists
+  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a Git checkout,
+  or `store:<version>` for a stamped PDK bundle. Otherwise it is `null`.
+  Git adds `-dirty` for staged changes or edits to tracked files. Copying an
+  untracked model into the checkout leaves the stamp unchanged until it is
+  added to the index. When the resolved model library lives in a *different*
+  variant tree (a cross-variant symlink), `provenance.pdk.linked_trees` lists
   `[{name, version}]` for it; the key is absent otherwise. See
   [`docs/json-contract.md`](../json-contract.md).
 
