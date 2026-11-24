@@ -12,7 +12,6 @@ of work the map already accounted for.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -21,8 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import sim_batch
-from .sim_batch_shards import mismatch_error, shard_map_mismatch
-from .sim_errors import SimError
+from .sim_batch_shards import load_resume_shard_map
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
@@ -101,44 +99,6 @@ def _entry_unit_ids(
         if points and sim_batch._units_digest(points) == wanted:
             return [point.corner_id for point in points]
     return None
-
-
-def _load_resume_shard_map(
-    path: str, fingerprint: str, request: dict[str, Any]
-) -> tuple[dict[str, Any], list[dict[str, Any]], int] | None:
-    """Read + validate the retained shard map at ``path`` (issue #5775):
-    ``None`` when there is no map, or a well-formed one listing no shards --
-    an inert file, not a stale one. An unreadable map, or one written for a
-    different fingerprint/request, refuses with
-    :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
-    stale results."""
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-        entries = [dict(entry) for entry in document["shards"]]
-        hosts = int(document["hosts"])
-        map_fingerprint = str(document["fingerprint"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise SimError(
-            f"--resume: shard map {path} is unreadable ({exc}); delete it "
-            "or drop --resume",
-            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
-        ) from exc
-    if not entries:
-        return None
-    if map_fingerprint != fingerprint:
-        raise mismatch_error(path, document, fingerprint, False)
-    mismatch = shard_map_mismatch(document, request)
-    if mismatch is not None:
-        raise SimError(
-            f"--resume: shard map {path} was submitted from a different "
-            f"request ({mismatch}); re-run with exactly the request the "
-            "shards were submitted from",
-            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
-        )
-    return document, entries, hosts
 
 
 # A harvest's status probe re-reads an unreadable status this many times,
@@ -320,7 +280,7 @@ def harvest_resume_shards(
     stale results.
     """
     path = os.path.join(artifacts_dir, sim_batch.BATCH_SHARDS_FILENAME)
-    loaded = _load_resume_shard_map(path, fingerprint, request)
+    loaded = load_resume_shard_map(path, fingerprint, request)
     if loaded is None:
         return [], None, None
     document, entries, hosts = loaded
