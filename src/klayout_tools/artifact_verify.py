@@ -48,7 +48,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import IO, Any
+from typing import IO, Any, TypeGuard
 from urllib.parse import SplitResult, urlsplit
 
 #: Environment variable naming the broker's base URL (``http(s)://host:port``).
@@ -329,7 +329,7 @@ def _parse_headers(raw: Any, op: str) -> dict[str, str]:
     return dict(raw)
 
 
-def _is_int(value: Any) -> bool:
+def _is_int(value: Any) -> TypeGuard[int]:
     """A JSON integer, excluding ``bool`` (a Python int). Inlined from
     ``klayout_tools._jsonnum.is_int`` so this file runs standalone."""
     return not isinstance(value, bool) and isinstance(value, int)
@@ -532,7 +532,7 @@ def entry_problems(entry: Any) -> list[str]:
     if not isinstance(sha256, str) or not _SHA256_RE.match(sha256):
         problems.append("sha256 must be 64 lowercase hex digits")
     size = entry.get("size")
-    if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+    if not _is_int(size) or size < 1:
         problems.append("size must be a positive integer")
     if entry.get("kind") not in KINDS:
         problems.append(f"kind must be one of {', '.join(KINDS)}")

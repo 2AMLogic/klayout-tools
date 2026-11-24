@@ -13,6 +13,7 @@ from typing import Any
 
 from . import _warn
 from ._digest import normalize_sha256
+from ._jsonnum import is_int
 from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
 from .sim_batch_corner_libs import (
     _compare_corner_section_libs,
@@ -360,7 +361,7 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
     nothing rather than the wrong bytes.
     """
     index = entry.get("index")
-    if lifted is None or not isinstance(index, int) or isinstance(index, bool):
+    if lifted is None or not is_int(index):
         return None
     if not 0 <= index < len(lifted):
         return None

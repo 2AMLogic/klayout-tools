@@ -87,8 +87,12 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
     # A bare ``klt sim`` stays an argparse-style usage failure (stderr,
     # SystemExit(2)). The job-by-id modes (``--job-status`` #5810,
     # ``--cancel`` #4351) need no request; ``--op-lint`` does (it reads it).
-    job_id_mode = not (vars(args).get("job_status") or vars(args).get("cancel"))
-    if args.request is None and (getattr(args, "op_lint", False) or job_id_mode):
+    # Presence, not truthiness: an empty id (``--job-status ""``) must still
+    # reach the job-id validator and fail as ``batch_job_id_invalid`` (#7651).
+    in_job_id_mode = (
+        vars(args).get("job_status") is not None or vars(args).get("cancel") is not None
+    )
+    if args.request is None and (getattr(args, "op_lint", False) or not in_job_id_mode):
         sys.stderr.write(
             "klt sim: error: the following arguments are required: "
             "request (or --batch-set REQUEST...)\n"

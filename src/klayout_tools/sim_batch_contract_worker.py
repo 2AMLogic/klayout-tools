@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._digest import normalize_sha256
+from ._jsonnum import is_int
 from .sim_batch_contract import (
     _BATCH_PREFLIGHT_REJECT_EXIT,
     _DECKS_BASE_RELEASE,
@@ -138,7 +139,7 @@ def runner_threads_per_worker(report: dict[str, Any] | None) -> int | None:
     """The launch pin recorded by the worker's simulation report, when known."""
     env = report.get("environment") if isinstance(report, dict) else None
     pin = env.get("threads_per_worker") if isinstance(env, dict) else None
-    if isinstance(pin, int) and not isinstance(pin, bool) and pin > 0:
+    if is_int(pin) and pin > 0:
         return pin
     return None
 

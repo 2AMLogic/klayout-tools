@@ -93,7 +93,7 @@ from . import (
     sim_remote,
     sim_staging,
 )
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
 from .sim_errors import SimError, request_options
 
@@ -2162,6 +2162,7 @@ def run_deck_request(
         _validate_ngspice_init,
         apply_engine_host,
     )
+    from .sim_spiceinit import add_deck_init_hints
 
     if resume and (submit_only or attach_job_id is not None):
         raise SimError(
@@ -2169,11 +2170,7 @@ def run_deck_request(
             "--attach for a deck-list request -- the submitted job is one "
             "unit of work that is collected whole"
         )
-    if max_workers is not None and (
-        not isinstance(max_workers, int)
-        or isinstance(max_workers, bool)
-        or max_workers < 1
-    ):
+    if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
         request,
@@ -2207,7 +2204,7 @@ def run_deck_request(
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
-        return _run_decks_offhost(
+        report = _run_decks_offhost(
             request,
             units,
             pending,
@@ -2223,10 +2220,9 @@ def run_deck_request(
             collect_partial=collect_partial,
         )
 
-    if backend == "local":
-        workers = 1
-    else:
-        workers = _resolve_max_workers(max_workers)
+        return add_deck_init_hints(report, ngspice_init_lines)
+
+    workers = 1 if backend == "local" else _resolve_max_workers(max_workers)
     report = _run_decks_local(
         pending,
         staging_root=request_dir,
@@ -2241,4 +2237,4 @@ def run_deck_request(
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )
-    return report
+    return add_deck_init_hints(report, ngspice_init_lines)

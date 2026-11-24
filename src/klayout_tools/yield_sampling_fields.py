@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .yield_provenance import _yield_error
 
 #: Which fields each `analytic_cross_check.kind` accepts, mirroring
@@ -95,11 +95,7 @@ def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
 
     if strategy == "latin_hypercube":
         replicates = raw.get("replicates")
-        if (
-            isinstance(replicates, bool)
-            or not isinstance(replicates, int)
-            or replicates < 2
-        ):
+        if not is_int(replicates) or replicates < 2:
             raise _yield_error(
                 f"{where}: measurement '{name}' sampling.replicates must be an "
                 f"integer >= 2 (got {replicates!r})"

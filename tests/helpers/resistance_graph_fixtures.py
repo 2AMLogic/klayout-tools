@@ -84,3 +84,58 @@ def make_sg13g2_two_level_layout() -> kdb.Layout:
     _draw(top, layout, 29, 0, kdb.Box(2000, 0, 2300, 300))  # Via2: Metal2 term.
     _label(top, layout, 8, 25, "N", 1000, 150)
     return layout
+
+
+def make_sky130_trunk_stub_layout(
+    extra_unattached_terminal: bool = False,
+) -> kdb.Layout:
+    """The multi-terminal fixture of issue #6899: one sky130 net ``NT`` -- a
+    10 um x 0.7 um li1 trunk carrying two current-carrying resistor heads
+    (``R1``/``R2`` at the ends) and three dead stub heads (``S1``..``S3``)
+    in between, each head a poly resistor hanging below the trunk.
+
+    Every head is the canonical contacted-resistor shape: a poly bar
+    overlapped by one licon that also sits inside the trunk (a proper
+    poly<->li1 landing, not a terminal), a res marker over the bar's middle
+    (the device body), and a far licon + labelled li1 island on its own net.
+    Net ``NT`` therefore extracts with five device terminals, one per head,
+    and its resistance graph solves ``ok`` with the five matching
+    ``device@`` terminals -- the dead stubs contribute arms the reduced
+    terminal network keeps out of the R1-R2 current path, while the legacy
+    series sum charges them in full.
+
+    ``extra_unattached_terminal`` adds one licon box inside the trunk that
+    touches li1 only (no poly under it): a sixth ``via@`` graph terminal
+    with no device behind it, so the one-to-one device-terminal mapping
+    fails and the net must report ``terminal_mismatch`` and keep the star."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    li1, li1_lbl = (67, 20), (67, 5)
+    poly, marker, licon = (66, 20), (66, 13), (66, 44)
+    draw(*li1, kdb.Box(1000, 2000, 11000, 2700))
+    label(*li1_lbl, "NT", 6000, 2350)
+    for x, name in (
+        (1500, "R1"),
+        (10500, "R2"),
+        (4000, "S1"),
+        (6000, "S2"),
+        (8000, "S3"),
+    ):
+        draw(*poly, kdb.Box(x - 100, 1000, x + 100, 2370))
+        draw(*marker, kdb.Box(x - 100, 1200, x + 100, 1800))
+        draw(*licon, kdb.Box(x - 85, 2200, x + 85, 2370))
+        draw(*licon, kdb.Box(x - 85, 1000, x + 85, 1170))
+        draw(*li1, kdb.Box(x - 400, 1000, x + 400, 1600))
+        label(*li1_lbl, name, x, 1300)
+    if extra_unattached_terminal:
+        draw(*licon, kdb.Box(2915, 2200, 3085, 2370))
+    return layout

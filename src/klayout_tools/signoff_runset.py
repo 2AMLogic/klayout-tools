@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
 from ._provenance import sha256_file
 
 RUNSET_ENGINE = "klayout-runset"
@@ -165,7 +166,7 @@ def _folded_class_counts(counts: Any) -> dict[str, int] | None:
         return None
     folded: dict[str, int] = {}
     for name, count in counts.items():
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        if not is_int(count) or count < 0:
             return None
         key = str(name).upper()
         folded[key] = folded.get(key, 0) + count
