@@ -86,6 +86,50 @@ def _wire_end(kdb, edge, depth):
     return face + face.moved(across_x, across_y)
 
 
+def _facing_span(kdb, edge, pad):
+    """Clip a Manhattan wire edge to the part opposite the pad."""
+    x, y = edge.p1.x, edge.p1.y
+    if x == edge.p2.x:
+        return edge.clipped(kdb.Box(x, pad.bottom, x, pad.top))
+    return edge.clipped(kdb.Box(pad.left, y, pad.right, y))
+
+
+def _partial_landing_sides(kdb, landings):
+    """Index the recessed sides of single-cut landings with a cut-flush side."""
+    cut_flush_pads = {pad for pad, flush in landings.values() if flush}
+    sides = kdb.Shapes()
+    for side, (pad, flush) in landings.items():
+        if not flush and pad in cut_flush_pads:
+            sides.insert(kdb.Edge(side.p1, side.p2))
+    return sides
+
+
+def _notch_wire(kdb, pair, partial_sides, pad_sides, nearby, dbu):
+    """Grow the routed lip of an S.5 notch opposite an exposed part of a pad."""
+    wire, narrow = pair.first, pair.second
+    projection = _facing_span(kdb, wire, narrow.bbox())
+    if projection is None or projection.length() != narrow.length():
+        return None
+    if not (kdb.Edges(wire) & pad_sides).is_empty():
+        return None
+    strip = _wire_end(kdb, wire, _nm_to_dbu_ceil(18, dbu))
+    conductor = nearby.interacting(kdb.Region(strip))
+    if conductor.count() != 1 or not (kdb.Region(strip) - conductor).is_empty():
+        return None
+    # The pad and routed lip must bound the same conductor. A marker box
+    # merely touching a pad, or a second wire across a gap, is insufficient.
+    if not (kdb.Region(_wire_end(kdb, narrow, 1)) - conductor).is_empty():
+        return None
+    for shape in partial_sides.each_touching(narrow.bbox()):
+        side = shape.edge
+        if (
+            side.length() > narrow.length()
+            and (kdb.Edges(narrow) & kdb.Edges(side)).length() == narrow.length()
+        ):
+            return strip
+    return None
+
+
 def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, mode):
     first, second = pair.first, pair.second
     a, b = landings.get(first.bbox()), landings.get(second.bbox())
@@ -96,8 +140,10 @@ def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, mode):
     landing, wire_edge = (a, second) if a is not None else (b, first)
     if landing is None or not landing[1]:
         return
-    # A partial or wire-covered pad edge is not an independent wire face.
-    if not (kdb.Edges(wire_edge) & pad_sides).is_empty():
+    # S.2 grows only the landing. Another pad further along the long wire
+    # cannot affect this edit. When the wire can grow, check its whole face.
+    face = _facing_span(kdb, wire_edge, landing[0]) if mode == "s2" else wire_edge
+    if face is None or not (kdb.Edges(face) & pad_sides).is_empty():
         return
     yield (landing[0],), True
     if mode == "s2":
@@ -109,7 +155,9 @@ def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, mode):
         yield (landing[0], wire), True
 
 
-def _try_extensions(kdb, source, mixed, vertical, target, nearby, cuts, dbu, window):
+def _try_extensions(
+    kdb, source, mixed, vertical, target, nearby, protected, dbu, window
+):
     biases = [(bias,) * len(source) for bias in range(3)]
     if mixed and len(source) == 2:
         biases.extend(permutations(range(3), 2))
@@ -124,15 +172,18 @@ def _try_extensions(kdb, source, mixed, vertical, target, nearby, cuts, dbu, win
         for box in boxes:
             extended.insert(box)
         added = extended - nearby
-        if added.is_empty() or not added.interacting(cuts).is_empty():
+        if added.is_empty() or protected(added):
             continue
         if _m1_spacing_clear(kdb, (nearby + extended).merged(), dbu, window):
             return added
     return None
 
 
-def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, mode):
-    if pair.first.bbox() not in landings and pair.second.bbox() not in landings:
+def _repair_pair(
+    kdb, pair, landings, partial_sides, pad_sides, metal, protected, dbu, mode
+):
+    full_side = pair.first.bbox() in landings or pair.second.bbox() in landings
+    if not full_side and mode != "s5":
         return None
     if not pair.first.is_parallel(pair.second):
         return None
@@ -145,11 +196,16 @@ def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, mode):
     if pair.first not in boundary or pair.second not in boundary:
         return None
     vertical = pair.first.p1.x == pair.first.p2.x
-    for source, mixed in _trial_sources(
-        kdb, pair, landings, pad_sides, nearby, dbu, mode
-    ):
+    if full_side:
+        trials = _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, mode)
+    else:
+        wire = _notch_wire(kdb, pair, partial_sides, pad_sides, nearby, dbu)
+        if wire is None:
+            return None
+        trials = [((wire,), True)]
+    for source, mixed in trials:
         added = _try_extensions(
-            kdb, source, mixed, vertical, target, nearby, cuts, dbu, window
+            kdb, source, mixed, vertical, target, nearby, protected, dbu, window
         )
         if added is not None:
             return added, mixed
@@ -163,6 +219,26 @@ def _merge_repair(kdb, metal, extra):
     for shape in affected:
         metal.erase(shape)
     metal.insert(updated.merged())
+
+
+def _protected_contacts(kdb, layout, top, cut_index):
+    """Reject added metal meeting a cut, passive marker or M1 pin label."""
+    masks = kdb.Region(top.begin_shapes_rec(cut_index))
+    for layer in (18, 112, 113):
+        index = layout.find_layer(layer, 0)
+        if index is not None:
+            masks += kdb.Region(top.begin_shapes_rec(index))
+    label_index = layout.find_layer(19, 251)
+
+    def protected(added):
+        if not added.interacting(masks).is_empty():
+            return True
+        if label_index is None:
+            return False
+        labels = kdb.Texts(top.begin_shapes_rec_touching(label_index, added.bbox()))
+        return not labels.interacting(added).is_empty()
+
+    return protected
 
 
 def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
@@ -190,10 +266,8 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     # Even an ineligible landing (e.g. nested, V0-only or multi-cut) is via
     # metal and cannot supply the routed-wire face of a mixed repair.
     pad_sides = _placed_pads(kdb, layout, top, metal_index).edges()
-    cuts = kdb.Region(top.begin_shapes_rec(cut_index))
-    v0 = layout.find_layer(18, 0)
-    if v0 is not None:
-        cuts += kdb.Region(top.begin_shapes_rec(v0))
+    protected = _protected_contacts(kdb, layout, top, cut_index)
+    partial_sides = _partial_landing_sides(kdb, landings)
     # Keep the full merged conductor polygons available for later boundary checks.
     indexed_metal = kdb.Shapes()
     indexed_metal.insert(metal)
@@ -203,7 +277,15 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     for pairs, mode in ((narrow_pairs, "s4"), (tip_pairs, "s5"), (side_pairs, "s2")):
         for pair in sorted(pairs.each(), key=lambda item: item.bbox()):
             result = _repair_pair(
-                kdb, pair, landings, pad_sides, indexed_metal, cuts, layout.dbu, mode
+                kdb,
+                pair,
+                landings,
+                partial_sides,
+                pad_sides,
+                indexed_metal,
+                protected,
+                layout.dbu,
+                mode,
             )
             if result is not None:
                 extra, mixed = result
