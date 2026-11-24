@@ -3865,6 +3865,72 @@ These two fields are **purely additive** to the JSON contract — the existing
 — so this did not bump `drc`'s `schema_version` (see
 [`docs/json-contract.md`](../json-contract.md)).
 
+### Re-deriving a deck rule natively over a routed GDS (issue #7715)
+
+To attribute an `--engine klayout` marker you may rebuild the deck rule with
+native `klayout.db` primitives over the layout. On a GDS written by the
+DEF→GDS merge, **mind the shape properties**: each routed wire carries its
+DEF net name as a GDS shape property (`net_property_name`, default `1`; see
+[`place-and-route.md`](place-and-route.md), "What fixed it"), while library
+cell and via-cell shapes carry none. Merged semantics merges only shapes with
+equal properties, so a wire that ends inside a via pad stays a separate
+polygon, its end edge survives inside the pad, and a native check reports
+edge pairs the packaged deck does not.
+
+Whether a `Region` sees the properties depends on how it is built:
+
+- `kdb.Region(cell.shapes(layer_index))` **keeps** them — read the file with
+  `LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
+  properties) before rebuilding a rule this way.
+- `kdb.Region(cell.begin_shapes_rec(layer_index))` **never sees** them, however
+  the file was read. `klt drc`'s own curated engine builds its regions this
+  way, and the packaged deck is likewise unaffected (both measured below).
+
+Do not drop the properties in a shared reader: `klt extract --def-net-names`
+needs them.
+
+Minimal repro, one top cell (`tests/test_gds_net_property_native_checks.py`
+pins every number): a 24 × 24 nm V4 cut at the origin; an M4 pad
+`(-11, 0, 35, 24)` nm, i.e. 11 nm wider than the cut left and right and
+0 nm above and below; an M4 wire `(-100, 0, 24, 24)` nm that runs over the
+cut and ends at its right edge, inside the pad. The rule is the deck's
+`two_side_enclosure_violation(v4, m4, 11.nm)`, rebuilt as
+`vert(m4).enclosing_check(vert(v4), 11, projection)` and its `horz` twin
+(`via.interacting(….second_edges())`, AND-ed). A wire running *away* from the
+cut (`(24, 0, 200, 24)`) is a different edge configuration and does not
+reproduce it.
+
+| wire | read with properties | `Region(cell.shapes(…))`: violations | merged M4 polygons | `Region(cell.begin_shapes_rec(…))`: violations |
+|---|---|---:|---:|---:|
+| no property | either | 0 | 1 | 0 |
+| property `1` | yes | **1** | 2 | 0 |
+| property `1` | no (`properties_enabled = False`) | 0 | 1 | 0 |
+
+**What was measured.** The table above on the `klayout` module 0.30.13 and
+0.30.14 (identical numbers). Only the `Edges.enclosing_check` rebuild was
+re-measured; the reporter additionally saw `Region.grid_check` report the
+vertices of every wire–pad T-junction (the deck's `ongrid` does not), which
+was *not* re-measured here. **No claim is made for any other native
+primitive.**
+
+**`klt drc`'s own engines are not affected** — measured on this layout, tagged
+vs. untagged:
+
+- The curated engine (`--engine curated`) reads with properties enabled
+  (`load_layout`) but builds every `Region` with `begin_shapes_rec`, so a
+  synthetic M4-encloses-V4 11 nm rule returns identical `violations` and
+  `rule_counts` for the tagged and the untagged file. Its one
+  `LayoutToNetlist` rule (`check: "net_space"`, sg13cmos5l `nwell.space.2`)
+  was measured too, with a Metal1 wire that bridges two NWell taps and ends
+  inside both Metal1 pads: tagged or untagged, the wells read as one net and
+  the rule is clean, while with no wire it flags both sides (so the rule is
+  live on that geometry).
+- The packaged `asap7.drc` (`--engine klayout`, standalone KLayout 0.30.12)
+  reports no `V4.M4.EN.1` marker for either file.
+
+If a future change makes either engine property-sensitive, file a separate
+issue rather than changing `load_layout`.
+
 ## Abutment context (`--tile`, issue #4226)
 
 `klt drc` judges each top cell on its own, so a tileable leaf (filler, rail
