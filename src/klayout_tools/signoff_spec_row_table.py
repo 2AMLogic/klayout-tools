@@ -41,6 +41,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._jsonnum import is_number
+from .signoff_row_extent import print_partial_rows
 
 __all__ = ["build_spec_row_records", "print_spec_row_table"]
 
@@ -475,11 +476,10 @@ def _state_marker_and_detail(
     return "MISS ", "", "no cited evidence names this row"
 
 
-def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> None:
-    """Render the ``spec_rows[]`` block for ``--format text`` -- one line
-    per record plus its sources, after the item rows it qualifies. Silent
-    for a report without the block, so a non-declaring manifest's text
-    rendering is byte-identical to before."""
+def print_spec_row_table(
+    records: list[dict[str, Any]] | None, palette: Any, items: list[dict] | None = None
+) -> None:
+    """Print the spec row measurements and any partial sweep coverage."""
     if not records:
         return
     print()
@@ -490,3 +490,4 @@ def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> 
         print(f"[{colour}{marker}{reset}] {record['id']}: {detail}")
         for source in record["sources"]:
             print(f"        from: {source['file']} ({source['measurement']})")
+    print_partial_rows(items)

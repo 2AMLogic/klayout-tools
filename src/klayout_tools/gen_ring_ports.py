@@ -1,5 +1,8 @@
 """Reported ring ``ports[]`` entries for ``klt gen``'s describe side (#5656).
 
+Split out of ``gen_describe.py`` (#5656) because that file was at its
+per-file size ratchet ceiling.
+
 Ring openings use the shared plain-layer deck lookup for spacing insets
 and the minimum strap width, also used by the composition layer rules.
 
@@ -38,15 +41,14 @@ def _min_spacing_um_for_layer(
     """Resolve the tightest applicable minimum same-*spacing* DRC rule for
     ``layer`` from the resolved PDK family's own curated deck.
 
-    Mirrors
-    :func:`klayout_tools.gen_compose_layer_rules._min_width_um_for_layer`,
-    generalised to ``"space"`` rules -- the exact lookup ``compose()`` runs
-    through its own ``_min_spacing_um_for_layer`` closure (issue #1386) for
-    the same deck, so ``klt gen``'s reported ring-opening strap window
-    (``_ring_ports`` below, issue #5656) can inset by the identical
-    threshold ``klt drc`` will judge a strap with. See
-    :func:`_min_rule_um_for_layer` for the ``(threshold_um, rule_id)`` /
-    ``None`` contract.
+    Resolves the variant, then delegates to the shared plain-rule helper
+    :func:`klayout_tools.decks.plain_rules.largest_plain_rule_um` with
+    ``"space"``: the exact lookup ``compose()`` runs through its own
+    ``_min_spacing_um_for_layer`` closure (issue #1386) for the same deck,
+    so ``klt gen``'s reported ring-opening strap window (``_ring_ports``
+    below, issue #5656) can inset by the identical threshold ``klt drc``
+    will judge a strap with. The ``(threshold_um, rule_id)`` / ``None``
+    return contract lives on :func:`largest_plain_rule_um`.
     """
     return _min_rule_um_for_layer(variant, layer, "space")
 

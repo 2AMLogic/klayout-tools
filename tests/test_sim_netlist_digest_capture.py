@@ -18,6 +18,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -40,6 +41,13 @@ from test_sim_batch import (
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
 )
+
+
+@pytest.fixture
+def fingerprint_calls(monkeypatch):
+    probe = Mock(wraps=sim._checkpoint_fingerprint)
+    monkeypatch.setattr(sim, "_checkpoint_fingerprint", probe)
+    return probe
 
 
 def _stub_subprocess_run_editing_netlist(monkeypatch, edits, remove=()):
@@ -158,7 +166,9 @@ def test_checkpoint_fingerprint_payload_is_stable(tmp_path):
     )
 
 
-def test_run_sim_attach_reports_client_at_collection_scope(tmp_path, monkeypatch):
+def test_run_sim_attach_reports_client_at_collection_scope(
+    tmp_path, monkeypatch, fingerprint_calls
+):
     """A collection-only `--attach` did not stage this job's inputs (#5569):
     the submission happened in another process, so the report's netlist
     digest describes the file as *this* process found it -- disclosed as
@@ -173,6 +183,7 @@ def test_run_sim_attach_reports_client_at_collection_scope(tmp_path, monkeypatch
 
     report = sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
 
+    assert fingerprint_calls.call_count == 0
     assert report["environment"]["netlist_sha256_scope"] == "client-at-collection"
 
 
@@ -188,10 +199,12 @@ def _lost_job_id(artifacts_dir: Path, launches: list[list[str]], hosts: int) -> 
     return next(entry["job_id"] for entry in shards["shards"] if entry["index"] == 1)
 
 
-@pytest.mark.parametrize("hosts", [1, 2])
+@pytest.mark.parametrize(
+    ("hosts", "split_automatically"), [(1, False), (2, False), (2, True)]
+)
 @pytest.mark.parametrize("replace_job", [False, True])
 def test_run_sim_resume_reports_scope_from_batch_dispatch(
-    tmp_path, monkeypatch, hosts, replace_job
+    tmp_path, monkeypatch, hosts, split_automatically, replace_job, fingerprint_calls
 ):
     """Resume can collect every prior job or submit a replacement."""
     runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
@@ -202,29 +215,31 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
         uploaded = uploaded_request_of(argv)
         if uploaded is not None:
             request, job_id = uploaded
-            corner_ids = [
-                sim.CornerPoint("tt", {"vdd": 1.8}, point["temperature_c"]).corner_id
-                for point in request.get("_explicit_points", [])
-            ]
-            if corner_ids:
-                runner.outputs_by_job[job_id] = {"report.json": _sim_report(corner_ids)}
+            if "_explicit_points" in request:
+                points = sim._corner_points_from_wire(request["_explicit_points"])
+            else:
+                points = sim._expand_corners(request["corners"], [])
+            runner.outputs_by_job[job_id] = {
+                "report.json": _sim_report([point.corner_id for point in points])
+            }
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", register_shard_report)
     _write_body(tmp_path)
     (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
-    path = _write_request(
+    request = _batch_request(
         tmp_path,
-        _batch_request(
-            tmp_path,
-            models={"lib": "models.lib"},
-            corners={
-                "process": ["tt"],
-                "supply_v": {"vdd": [1.8]},
-                "temperature_c": [27, 85][:hosts],
-            },
-        ),
+        models={"lib": "models.lib"},
+        corners={
+            "process": ["tt"],
+            "supply_v": {"vdd": [1.8]},
+            "temperature_c": [27, 85][:hosts],
+        },
     )
+    if split_automatically:
+        request["batch"]["max_units_per_job"] = 1
+    path = _write_request(tmp_path, request)
+    requested_hosts = 1 if split_automatically else hosts
 
     def stop_polling(*args, **kwargs):
         raise sb.BatchPollTimeout("client stopped polling", last_state="running")
@@ -232,8 +247,10 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
     # Leave the prior jobs running, with a receipt or shard map to resume from.
     with monkeypatch.context() as interrupted:
         interrupted.setattr(sb, "_poll_status_interruptibly", stop_polling)
-        first = _run(path, tmp_path, hosts=hosts)
+        first = _run(path, tmp_path, hosts=requested_hosts)
     assert first["environment"]["netlist_sha256_scope"] == "staged"
+    assert fingerprint_calls.call_count == (1 if hosts == 2 else 0)
+    fingerprint_calls.reset_mock()
     launches = _launches(runner)
     assert len(launches) == hosts
     if replace_job:
@@ -242,9 +259,52 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
             fake_completed(returncode=1),
         )
 
-    resumed = _run(path, tmp_path, hosts=hosts, resume=True)
+    resumed = _run(path, tmp_path, hosts=requested_hosts, resume=True)
 
+    # Checkpoint restoration, history and shard dispatch use the same identity.
+    assert fingerprint_calls.call_count == 1
     assert len(_launches(runner)) == hosts + replace_job
     assert [corner["status"] for corner in resumed["corners"]] == ["pass"] * hosts
     expected_scope = "staged" if replace_job else "client-at-collection"
     assert resumed["environment"]["netlist_sha256_scope"] == expected_scope
+
+
+@pytest.mark.parametrize("split", ["none", "automatic", "explicit"])
+def test_submit_and_manifest_attach_fingerprint_only_shards(
+    tmp_path, monkeypatch, fingerprint_calls, split
+):
+    runner = _FakeRunner()
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    netlist = _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    request = _batch_request(
+        tmp_path,
+        models={"lib": "models.lib"},
+        corners={
+            "process": ["tt"],
+            "supply_v": {"vdd": [1.8]},
+            "temperature_c": [27, 85],
+        },
+    )
+    if split == "automatic":
+        request["batch"]["max_units_per_job"] = 1
+    path = _write_request(tmp_path, request)
+    result = sim.run_sim(
+        str(path), submit_only=True, hosts=2 if split == "explicit" else 1
+    )
+    if split == "none":
+        assert "manifest_path" not in result
+        assert fingerprint_calls.call_count == 0
+        return
+    assert len(result["shards"]) == 2
+    assert fingerprint_calls.call_count == 1
+
+    # The request JSON still matches the map, but the named file has changed.
+    # A manifest attach takes the single-host entry point and must re-hash it.
+    with netlist.open("a") as handle:
+        handle.write("* changed after submission\n")
+    fingerprint_calls.reset_mock()
+    with pytest.raises(sim.SimError) as error:
+        sim.run_sim(str(path), attach_job_id=result["manifest_path"])
+    assert error.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert fingerprint_calls.call_count == 1

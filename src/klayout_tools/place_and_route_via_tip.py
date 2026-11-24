@@ -13,9 +13,9 @@ the very geometry the router inserted -- the disagreement issue #4495 asks
 this stage to surface.
 
 The sibling landing repair can remove redundant pads, shrink protrusions, and
-lengthen a pair of placed M1 landings when their complete facing sides cause
-M1.S.4. This checker measures the resulting geometry, including residual
-wire tips and unsafe landing pairs. It only reads geometry.
+lengthen facing M1 edges at a pair of placed landings or between a
+cut-flush landing and a wire. This checker measures the resulting geometry,
+including residual wire tips and unsafe landing pairs. It only reads geometry.
 
 What it measures
 ----------------
@@ -54,6 +54,14 @@ together say whether a non-zero deck result is the router's landing
 geometry, the router's patch metal, or the design's own routing, with the
 totals ``via_pad_violations`` and ``router_fill_violations`` alongside
 ``violations``.
+
+Each rule entry also carries ``markers`` (issue #7405): one marker per hit,
+sorted by box and capped at :data:`_MARKERS_PER_RULE` per rule, so a
+consumer can attribute a residual without rebuilding the checks. A marker
+is the edge pair's own bounding box as ``box_um`` -- in microns, in
+top-cell coordinates -- plus that pair's ``via_pad``/``router_fill``
+flags; ``markers_truncated`` says when the cap cut the list, while
+``violations`` and the subset counts stay full and uncapped.
 
 This is a targeted measurement, not a deck run: it loads no ``.drc`` script
 and needs no ``klayout`` *binary*, only the ``klayout.db`` module the merge
@@ -127,6 +135,13 @@ _TIP_RULES: tuple[tuple[str, str, str, float], ...] = (
     ("S.5", "tip", "narrow", 31.0),
 )
 
+#: Cap on each rule entry's ``markers`` list (issue #7405): a bounded,
+#: sorted sample of the per-hit marker boxes, so the report stays bounded on
+#: a block with hundreds of hits. ``violations`` and the attribution subsets
+#: stay full and uncapped; ``markers_truncated`` says when this cap cut the
+#: list.
+_MARKERS_PER_RULE = 200
+
 
 def _report(status: str, reason: str | None = None) -> dict[str, Any]:
     return {
@@ -148,6 +163,21 @@ def _nm_to_dbu_ceil(nm: float, dbu_um: float) -> int:
 
 def _nm_to_dbu(nm: float, dbu_um: float) -> int:
     return int(round(nm / (dbu_um * 1000.0)))
+
+
+def _pair_box_um(pair: Any, dbu_um: float) -> list[float]:
+    """``pair``'s marker box in microns, in top-cell coordinates.
+
+    The box is the edge pair's own bounding box -- the check's projection
+    metric has already clipped both edges to the fragments that face each
+    other, so it spans exactly the gap between them. Rounded to 1e-9 um so
+    the same geometry built at two dbus yields the same box.
+    """
+    box = pair.bbox()
+    return [
+        round(coordinate * dbu_um, 9)
+        for coordinate in (box.left, box.bottom, box.right, box.top)
+    ]
 
 
 def _edge_classes(edges: Any, dbu_um: float) -> dict[str, Any]:
@@ -212,16 +242,32 @@ def _check_layer(
         total = pairs.count()
         if not total:
             continue
+        # The attribution subsets, held as sets so a marker's via_pad /
+        # router_fill flags are membership tests against the very
+        # collections the subset counts come from: the per-marker flags and
+        # the counts cannot disagree (issue #7405).
+        pad_pairs = set(pairs.interacting(pads).each()) if pads is not None else set()
+        fill_pairs = (
+            set(pairs.interacting(fills).each()) if fills is not None else set()
+        )
+        hits = sorted(pairs.each(), key=lambda pair: _pair_box_um(pair, dbu_um))
         entries.append(
             {
                 "rule": f"{lef_layer}.{suffix}",
                 "layer": [gds[0], gds[1]],
                 "threshold_nm": threshold_nm,
                 "violations": total,
-                "via_pads": pairs.interacting(pads).count() if pads is not None else 0,
-                "router_fill": (
-                    pairs.interacting(fills).count() if fills is not None else 0
-                ),
+                "via_pads": len(pad_pairs),
+                "router_fill": len(fill_pairs),
+                "markers": [
+                    {
+                        "box_um": _pair_box_um(pair, dbu_um),
+                        "via_pad": pair in pad_pairs,
+                        "router_fill": pair in fill_pairs,
+                    }
+                    for pair in hits[:_MARKERS_PER_RULE]
+                ],
+                "markers_truncated": total > _MARKERS_PER_RULE,
             }
         )
     return entries
@@ -256,8 +302,11 @@ def check_via_pad_tips(
     non-ASAP7 PDK reports ``"skipped"``), ``reason``, ``violations``,
     ``via_pad_violations`` and ``router_fill_violations`` (totals over every
     rule), and ``rules``: one entry per deck rule id with a non-zero count,
-    carrying its ``layer``, ``threshold_nm``, ``violations`` and the
-    ``via_pads``/``router_fill`` subsets. Never raises for absent input.
+    carrying its ``layer``, ``threshold_nm``, ``violations``, the
+    ``via_pads``/``router_fill`` subsets, and -- per hit, capped at
+    ``_MARKERS_PER_RULE`` and flagged by ``markers_truncated`` -- the
+    ``markers`` list of ``box_um`` boxes with the pair's own attribution
+    flags. Never raises for absent input.
     """
     if pdk_variant_family(variant) != _ASAP7_FAMILY:
         return _report("skipped", f"PDK family of '{variant}' is not ASAP7; no-op")

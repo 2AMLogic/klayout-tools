@@ -1619,13 +1619,10 @@ def _grade_power_delivery(
     partition_kind: str,
     power_port_policy: dict[str, Any] | None = None,
     repo_root: str | Path | None = None,
-    failed_parts_citation: bool = False,
+    group_provenance: dict[str, Any] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
-    """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
-    the **set** of evidence entries cited for it, and return ``(status,
-    reason, citation, failure_detail)`` in the same shape
-    :func:`~klayout_tools.signoff._grade_evidence`
-    returns.
+    """Grade T1 item 11's compound power-delivery evidence (issue #2025).
+    Return (status, reason, citation, failure_detail) as in _grade_evidence.
 
     Unlike every other T1 item, no single artifact proves this one. The
     cited set must contain:
@@ -1738,13 +1735,10 @@ def _grade_power_delivery(
     those unrelated findings
     newly fatal.
 
-    ``failed_parts_citation`` (issue #5597) is the multi-citation
-    aggregation's opt-in: on every ``"unmet"`` verdict reached *after* the
-    cited set resolved, the returned ``citation`` carries the resolved
-    ``parts`` (and nothing more -- ``power_delivery`` states facts about a
-    proven grid, and an unmet group has none), so a grouped report accounts
-    for every cited envelope even when a group's own rules failed. The
-    default keeps a failing single-group citation at ``citation: null``."""
+    In grouped mode, fill ``group_provenance`` with the first named part's
+    provenance once the group resolves. A subsequent grid failure still
+    discloses its resolved parts (#5597). A failing single group retains
+    its null citation."""
     from .signoff import _citation
     from .signoff_grouped_citations import (
         missing_parts_verdict as _missing_parts_verdict,
@@ -1757,7 +1751,7 @@ def _grade_power_delivery(
     if by_kind is None:
         return "unmet", reason, None, {}
 
-    parts_citation = parts_citation_or_none(by_kind) if failed_parts_citation else None
+    parts_citation = parts_citation_or_none(by_kind, group_provenance)
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
