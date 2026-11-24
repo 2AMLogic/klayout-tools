@@ -319,7 +319,9 @@ from .signoff_power_delivery import (
 from .signoff_row_extent import has_covers, invalid_covers, label_list
 from .signoff_runset import (
     PINNED_RUNSETS,
+    REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
     check_runset,
+    mirrored_inductor_limitation,
     runset_disclosure,
     unrecognised_device_gaps,
 )
@@ -329,11 +331,17 @@ from .signoff_runset import (
 from .signoff_spec_row_table import build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
-    sta_annotation_refusal,
     sta_citation_detail,
-    sta_constraint_refusal,
     sta_exception_disclosure,
     sta_item_exception_detail,
+)
+from .signoff_sta_geometry import (
+    STA_BOOL_OPTIONS,
+    sta_manifest_fields,
+    sta_opt_in_refusal,
+    sta_status_detail,
+    sta_status_ok,
+    sta_timing_shape,
 )
 
 # The store-pin companion resolution (issue #5963): a `klt yield` citation
@@ -1614,26 +1622,23 @@ def _type_label(annotation: Any) -> str:
     )
 
 
-def _validate_envelope(kind: str, envelope: Mapping[str, Any], source: str) -> None:
+def _validate_envelope(
+    kind: str,
+    envelope: Mapping[str, Any],
+    source: str,
+    sta_fields: frozenset[str] = frozenset(),
+) -> None:
     """Validate an envelope :func:`_classify` has already matched to ``kind``
     against that kind's declared shape (:data:`_ENVELOPE_SHAPES`), raising
     :class:`SignoffError` if it does not (issue #2033).
 
-    Checks every *required* key of the shape: present, and of the declared
-    type. Optional keys are not type-checked when present -- an unexpected
-    type there is already handled defensively by each reader
-    (``.get(...) or {}``, ``isinstance`` guards) and hard-failing on one
-    would retroactively reject committed evidence over a field this
-    boundary only reports.
-
-    Raising (rather than downgrading the check to "failed") is deliberate
-    and matches how every other unreadable input is handled here: a
-    malformed envelope means the verdict is unknown, not negative.
-    ``--manifest`` grading converts that into an explicit ``"unmet"`` /
-    ``"unrecognized_envelope"`` item -- see :func:`_grade_evidence`.
+    Required fields must be present and have their declared type. Manifest
+    grading validates its own STA fields so the refusal can report their
+    original values. Optional fields are checked by their readers.
     """
     hints = _shape_hints(kind)
-    for field in sorted(_ENVELOPE_SHAPES[kind].__required_keys__):
+    required = _ENVELOPE_SHAPES[kind].__required_keys__
+    for field in sorted(required - sta_fields if kind == "sta" else required):
         if field not in envelope:
             raise SignoffError(
                 f"envelope '{source}' matches the klt {kind} shape but is "
@@ -1815,14 +1820,28 @@ _STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] =
 )
 
 
-def _structural_kind(envelope: Mapping[str, Any]) -> str | None:
-    """The first :data:`_STRUCTURAL_KINDS` kind ``envelope`` matches."""
-    return next(
-        (kind for kind, matches in _STRUCTURAL_KINDS if matches(envelope)), None
-    )
+def _structural_kind(
+    envelope: Mapping[str, Any], sta_fields: frozenset[str]
+) -> str | None:
+    for kind, matches in _STRUCTURAL_KINDS:
+        if matches(envelope):
+            return kind
+    # Only strict STA grading diagnoses missing geometry on a timing report.
+    if (
+        "geometry_source" in sta_fields
+        and "stage_reached" not in envelope
+        and sta_timing_shape(envelope)
+    ):
+        return "sta"
+    return None
 
 
-def _classify(envelope: Mapping[str, Any], source: str) -> str:
+def _classify(
+    envelope: Mapping[str, Any],
+    source: str,
+    *,
+    sta_fields: frozenset[str] = frozenset(),
+) -> str:
     """Detect an envelope's kind from its own structural shape. Raises
     :class:`SignoffError` for an envelope that matches none of them.
 
@@ -1935,21 +1954,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     ):
         kind = "power"
 
-    # `klt sta` (issue #1959; docs/cli/sta.md): a top-level
-    # `geometry_source` string ("routed"/"placement_estimate"/
-    # "netlist_estimate") is unique to this verb's response -- no other klt
-    # verb emits that field at the top level -- and is always present, never
-    # null. It is paired with a shape discriminator so a future response
-    # carrying the field alone still fails loudly rather than being graded
-    # as timing evidence: `timing_status` (the flat, single-corner shape) or
-    # a `corners` list (the multi-corner `pdk.corners` shape). `klt
-    # place-and-route`'s response also carries `worst_slack_ns`/
-    # `timing_status`/`corners`, but no `geometry_source` -- it is a
-    # different verb with a different (unrestricted) corner-sweep contract
-    # and stays deliberately unrecognised, see this module's "Digital-flow
-    # evidence" docstring section.
-    elif isinstance(envelope.get("geometry_source"), str) and (
-        "timing_status" in envelope or isinstance(envelope.get("corners"), list)
+    # Ordinary STA recognition requires the verb's geometry marker and timing
+    # shape. A citation with malformed geometry gets a diagnostic only after
+    # other known shapes have been checked below.
+    elif isinstance(envelope.get("geometry_source"), str) and sta_timing_shape(
+        envelope
     ):
         kind = "sta"
 
@@ -1968,7 +1977,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # (`_STRUCTURAL_KINDS`, which carries each shape's own recognition
     # rationale) so a new kind is one table entry rather than another branch
     # here (issue #2839).
-    elif (structural_kind := _structural_kind(envelope)) is not None:
+    elif (structural_kind := _structural_kind(envelope, sta_fields)) is not None:
         kind = structural_kind
 
     else:
@@ -1980,10 +1989,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
         # it. See :func:`_raise_unclassified`.
         _raise_unclassified(envelope, source)
 
-    # Issue #2033: recognised is not the same as well-formed -- see
-    # :func:`_validate_envelope` and this module's "Typed, runtime-validated
-    # evidence ingestion" docstring section.
-    _validate_envelope(kind, envelope, source)
+    _validate_envelope(kind, envelope, source, sta_fields)
     return kind
 
 
@@ -2183,6 +2189,8 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
     `klt signoff` never widens a claim to corners the claimant did not run,
     and never narrows one to a nominal corner the claimant did run.
     """
+    if not sta_status_ok(envelope):  # #7711: a present non-"ok" status fails
+        return False
     corners = envelope.get("corners")
     if isinstance(corners, list):
         if not corners:
@@ -2575,12 +2583,9 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
       it is surfaced informationally in :func:`_detail` instead.
-    - ``sta`` (issue #1959) carries no pass/fail ``status`` of its own at
-      all (``docs/cli/sta.md``: ``status`` is always ``"ok"``), so this
-      derives a verdict from the reported timing -- see
-      :func:`_sta_timing_passed`: every reported corner must be
-      ``timing_status == "constrained"`` with non-negative setup and hold
-      slack.
+    - ``sta`` requires a successful top-level status and constrained timing
+      with non-negative setup and hold slack at every reported corner
+      (:func:`_sta_timing_passed`, issues #1959 and #7711).
     - ``functional-verification`` passes on ``status == "pass"`` with
       consistent per-test counts, at least one passing test and no failures
       (skips are allowed) -- see :func:`_functional_verification_passed`.
@@ -2749,12 +2754,10 @@ def _non_passing_reason(
     """Why a non-passing envelope of a kind this item accepts is not
     evidence: :data:`_REASON_NOTHING_CHECKED` (issue #5479),
     :data:`_REASON_PARTIAL_COVERAGE` or :data:`_REASON_CHECK_FAILED`
-    (issue #2109).
-
-    :data:`_REASON_NOTHING_CHECKED` is decided here as well as in
-    :func:`_kind_gated_check` because an envelope reporting the rollup's
-    zero-coverage token fails :func:`_check_passed` and so never reaches that
-    function -- see :mod:`klayout_tools.signoff_nothing_checked`.
+    (issue #2109). The zero-coverage reason is decided here as well as in
+    :func:`_kind_gated_check`: such an envelope fails
+    :func:`_check_passed`, so it never reaches that function (see
+    :mod:`klayout_tools.signoff_nothing_checked`).
 
     Real failures keep precedence over both the zero-coverage and the partial
     token, by two different mechanisms -- only one of which is structural
@@ -2763,15 +2766,14 @@ def _non_passing_reason(
     - *Producer-side*, by construction: a run that found a defect reports
       its *failure* token, never the partial one
       (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
-      before it ever consults coverage), so those two tokens are disjoint
-      at the producer and reading which one was reported is enough.
+      before it ever consults coverage), so reading which one was reported
+      is enough.
     - *Signoff-side*, by the ordering below: :func:`_check_passed` fails an
       envelope off :func:`_critical_metric_blockers` (issue #1850)
       regardless of what its ``status`` says, so a partial token and a
-      failing registered ``critical: true`` metric can and do co-occur on
-      one envelope. That case is decided **here**, not at the producer --
-      the blocker is a real, mechanically-detected defect, so it must not
-      be reported as a mere coverage gap, and the check for it therefore
+      failing ``critical: true`` metric can co-occur on one envelope. That
+      case is decided **here**: the blocker is a real, mechanically-detected
+      defect that must not read as a mere coverage gap, so the check for it
       runs *before* the status token is read.
     """
     if _critical_metric_blockers(envelope):
@@ -2779,10 +2781,9 @@ def _non_passing_reason(
     # Issue #5479: a run whose own rollup token says it covered nothing, its
     # `coverage` block agreeing (never `coverage_unknown`/`malformed_coverage`
     # /`no_limits_checked`, each of which keeps its own reason) and the item
-    # accepting the kind, so a wrong artifact is not relabelled as a thin one.
-    # Directly after the blocker gate and nowhere earlier: a detected defect
-    # outranks a coverage statement, while every reason below reads a
-    # *different* status token, so none can co-occur with this one.
+    # accepting the kind, so a wrong artifact is not relabelled as a thin
+    # one. Directly after the blocker gate: a detected defect outranks a
+    # coverage statement, and every reason below reads a *different* token.
     if (
         vacuous.reports_zero_coverage(envelope)
         and _kind_is_accepted(kind, allowed_kinds)
@@ -2792,14 +2793,17 @@ def _non_passing_reason(
     # Issue #2870: a runset report that matched only the devices it knew.
     if (
         kind == "lvs"
+        and envelope.get("engine") == "klayout-runset"
         and envelope.get("status") == "match"
         and unrecognised_device_gaps(envelope)
-        and envelope.get("engine") == "klayout-runset"
     ):
         return _REASON_RUNSET_UNRECOGNISED_DEVICE
+    # Issue #6903: a runset report failing with the mirrored-inductor2
+    # terminal-order limit names it, not a bare check_failed.
+    if kind == "lvs" and mirrored_inductor_limitation(envelope) is not None:
+        return REASON_RUNSET_INDUCTOR_TERMINAL_ORDER
     # Issue #2873: a `klt yield` run whose only shortfall is evidence
-    # (`min_converged_samples` unmet, or a `target_sigma` that could not be
-    # evaluated) is "draw more / fix the sample set", not a design defect.
+    # (`min_converged_samples` unmet, a `target_sigma` unevaluable).
     if kind == "yield" and envelope.get("status") == "insufficient_evidence":
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
@@ -2807,12 +2811,9 @@ def _non_passing_reason(
     if _generic_overstates_coverage(kind, cast(_EvidenceEnvelope, envelope)):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
-    # rules it deliberately omitted is a coverage gap, not a defect.
-    if (
-        kind == "drc"
-        and envelope.get("status") == "clean"
-        and _drc_rule_subset(envelope)
-    ):
+    # rules it omitted is a coverage gap, not a defect.
+    drc_clean = envelope.get("status") == "clean" and _drc_rule_subset(envelope)
+    if kind == "drc" and drc_clean:
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
 
@@ -4226,8 +4227,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     malformed (degrading this one item to ``invalid_evidence``) rather than
     silently reading as "off" -- an opt-in requirement must never fail open.
 
-    ``require_annotation_complete`` is issue #3258;
-    ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
+    The ``sta`` booleans (:data:`.signoff_sta_geometry.STA_BOOL_OPTIONS`; issues
+    #3258/#5234/#7711) are boolean-only; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
     ``coverage_disclosed`` (issue #5789) is validated lazily by
     :mod:`.signoff_coverage_disclosure`, so it is read only when the
@@ -4235,11 +4236,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     name the committed store manifest and optional member for a yield samples
     pin. Both must be strings when present, and the manifest path must be non-empty.
     """
-    require_annotation = raw.get("require_annotation_complete", False)
-    if not isinstance(require_annotation, bool):
-        return None
-    require_constraints = raw.get("require_complete_constraints", False)
-    if not isinstance(require_constraints, bool):
+    flags = {key: raw.get(key, False) for key in STA_BOOL_OPTIONS}
+    if not all(isinstance(value, bool) for value in flags.values()):
         return None
     cell_exceptions = foundry_cell.normalize_exceptions(
         raw.get("foundry_cell_exceptions")
@@ -4252,8 +4250,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         if key in raw and not isinstance(raw[key], str):
             return None
     return {
-        "require_annotation_complete": require_annotation,
-        "require_complete_constraints": require_constraints,
+        **flags,
         "foundry_cell_exceptions": cell_exceptions,
         "coverage_disclosed": raw.get("coverage_disclosed"),
         "artifact_manifest": raw.get("artifact_manifest"),
@@ -4744,7 +4741,7 @@ def _grade_evidence(
     artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
     named artifact must re-hash to the pinned hash -- see that constant.
     """
-    resolution, reason = _resolve_evidence(spec, repo_root)
+    resolution, reason = _resolve_evidence(spec, repo_root, grade_sta=True)
     if resolution is None:
         return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
@@ -4771,9 +4768,7 @@ def _grade_evidence(
         )
         return unmet
 
-    sta_refusal = sta_annotation_refusal(
-        check_kind, spec, envelope
-    ) or sta_constraint_refusal(check_kind, spec, envelope)
+    sta_refusal = sta_opt_in_refusal(check_kind, spec, envelope)
     if sta_refusal is not None:
         return sta_refusal
 
@@ -4866,6 +4861,7 @@ def _grade_check_outcome(
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
+    failure_detail.update(sta_status_detail(kind, envelope))
     exceptions = spec.get("foundry_cell_exceptions")
     if exceptions and _foundry_cell_exception_eligible(kind, envelope):
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
@@ -5558,6 +5554,8 @@ def _fold_kind_inputs(
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
+    *,
+    grade_sta: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve one normalized evidence ``spec`` to the envelope it names,
     without grading it -- returns ``(resolution, None)`` on success, or
@@ -5670,12 +5668,10 @@ def _resolve_evidence(
     envelope = crosscheck_project(envelope) or envelope
 
     try:
-        check_kind = _classify(envelope, source_label)
+        fields = sta_manifest_fields(spec, envelope) if grade_sta else frozenset()
+        check_kind = _classify(envelope, source_label, sta_fields=fields)
     except SignoffError as exc:
-        # Issue #2198: an envelope from a `klt` predating a marker field
-        # `_classify` now requires is refused like any unrecognised shape,
-        # but reported distinguishably -- the remedy ("re-run under a newer
-        # klt") is not the remedy for a foreign document.
+        # Keep version skew distinct from an unrecognized document.
         return None, _classify_failure_reason(exc)
 
     provenance = envelope.get("provenance") or {}

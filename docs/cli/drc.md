@@ -3013,7 +3013,7 @@ Pick a pin from this table, not from the unreleased examples in this page.
 | `0.7.0` | 106 rule categories, FEOL + MOL only (no M1-M9 / V1-V9) | refused: `klt lvs` with `layout.deck: asap7` errors "does not yet compare FinFET devices" (#2813) | `asap7` FinFET extraction deck |
 | `0.8.0` | 263 rule categories, FEOL + MOL + BEOL M1-M9 / V0-V9 | supported (`options.finfet_bulk`) | `asap7` FinFET extraction deck |
 
-`--expect-rule-categories` in the example below (271 on the current deck; 263
+`--expect-rule-categories` in the example below (272 on the current deck; 263
 on `0.8.0`), and FinFET LVS, need `0.8.0` or later; on `0.7.0` use the 106-category deck and expect `klt lvs`
 to refuse FinFET devices.
 
@@ -3024,7 +3024,7 @@ packaged `asap7.drc` as separate artifacts (`content_hash` vs
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file "$(klt deck path --deck asap7 --format json | jq -r .path)" \
-    --expect-rule-categories 271 --format json
+    --expect-rule-categories 272 --format json
 ```
 
 `klt deck path --deck asap7` ([`docs/cli/deck.md`](deck.md)) prints the
@@ -3195,7 +3195,7 @@ placements are the consumer's to own.
 
 `FIN.S.1` and `GATE.S.1` judge neighbour spacing only, so a cell whose shapes
 all moved by the same off-grid offset is still reported `clean`. Two opt-in
-rules check the absolute origin. They are not among the 271 default ids; they
+rules check the absolute origin. They are not among the 272 default ids; they
 run only when a `--deck-var` declares the origin (nanometres, the drawn 1x
 scale), and with neither set the deck output, categories and coverage are
 unchanged:
@@ -3215,7 +3215,7 @@ declare (a cell drawn like the shipped `INVx1`, with gates at x = 17 + 54k nm
 and fins at y = 10 + 27k nm, passes with `17` / `10`; the same cell with `0` /
 `0` fails). Only the FIN lower edge and GATE left edge are held to the grid,
 so a fin or gate whose width is wrong is `FIN.W.1` / `GATE.W.1`, not a second
-grid report. `--expect-rule-categories` stays `271` for the default run;
+grid report. `--expect-rule-categories` stays `272` for the default run;
 add the opt-in ids to the count when you set the vars.
 
 ### Rule ids (the contract)
@@ -3224,10 +3224,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 271 ids are declared once, in
+substitutes the layer name. These 272 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 271` so that a deck
+Pass `--expect-rule-categories 272` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -3269,7 +3269,7 @@ the generated fixtures do, each with a no-SRAMDRC control.
 | Table 3.11.1 | `V0.W.1`, `V0.M1.EN.1` |
 | Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
 | Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
-| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V1.M1.EN.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2`, `V1.M2.EN.2`, `V2.M3.EN.2` |
+| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V1.M1.EN.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2`, `V3.M4.AUX.2`, `V1.M2.EN.2`, `V2.M3.EN.2` |
 | Table 3.14.1 | `M4.W.1`, `M4.W.2`, `M4.W.3`, `M4.W.5`, `M4.S.1`, `M4.S.2`, `M5.W.1`, `M5.W.2`, `M5.W.3`, `M5.W.5`, `M5.S.1`, `M5.S.2` |
 | Table 3.14.2 | `M4.AUX.1`, `M4.AUX.2`, `M4.AUX.3`, `M5.AUX.1`, `M5.AUX.2`, `M5.AUX.3` |
 | Table 3.15.1 | `V4.S.1`, `V4.S.3`, `V4.AUX.1`, `V5.S.1`, `V5.S.3`, `V5.AUX.1`, `V4.W.1`, `V5.W.1`, `V4.M5.AUX.2`, `V5.M6.AUX.2`, `V4.M4.EN.1`, `V4.M5.EN.2`, `V5.M5.EN.1`, `V5.M6.EN.2` |
@@ -3394,6 +3394,10 @@ Related notes:
   width classes `M8.S.5` (80-120 nm wide needs 80 nm) contradicts `M8.S.1`
   (two shapes of 80 nm or more need 40 nm), so the DRM supports no
   consistent reading; they are not checked (#3156).
+- **V3 width across M4.** Section 3.14 specifies horizontal M4 routing.
+  `V3.M4.AUX.2` checks that both horizontal edges of an overlapping V3 lie
+  on the local M4 boundary along their entire length. `V3.AUX.1` covers
+  cuts that miss M4 or only touch its edge.
 - **Via enclosure.** `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` and the
   V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
   when its enclosure is short on the left/right pair *and* on the top/bottom
@@ -3586,7 +3590,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
-| `V0.LIG.EN.4` | Table 3.11.2 | 'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG past V0) needs the LIG routing direction to pick the side pair | #3147 |
+| `V0.LIG.EN.4` | Table 3.11.2 | V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT and SLVT library has 1,413 selected V0 wholly inside LIG. Figure 3.11.2(a) shows V0 protruding beyond LIG. Of the 6,312 selected cuts per library, 4,899 protrude by exactly 1 nm on both sides. The 1,413 fully covered cuts occupy 208 of 212 cell masters and have no LISD overlap. They include 18 nm square V0 centered in 22 nm square LIG. The rule needs clarification for V0 wholly inside LIG. | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
 | `V0.M1.AUX.3` | Table 3.11.2 | exact width across the metal track needs the metal routing direction | #3147 |
 | `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
@@ -3597,7 +3601,6 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V2.M3.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
 | `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
-| `V3.M4.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
 | `M4.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
 | `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
 | `M4.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
@@ -3789,7 +3792,7 @@ The gate has two parts, run for each library:
    ```bash
    klt drc <cells.gds> --engine klayout \
        --deck-file src/klayout_tools/decks/asap7.drc \
-       --expect-rule-categories 271 --format json
+       --expect-rule-categories 272 --format json
    ```
 
    and requires exit 0, `status: "clean"`, no violations, a satisfied

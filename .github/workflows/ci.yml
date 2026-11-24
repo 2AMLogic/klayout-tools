@@ -187,6 +187,16 @@ jobs:
         # klayout_tools. GATES -- do not add continue-on-error.
         run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
 
+      - name: Changelog fragment shape
+        # scripts/check_changelog_fragments.py (issue #7619): every pending
+        # changelog.d/*.md fragment must be a `- ` bullet carrying a `#<issue>`
+        # reference, the format changelog.d/README.md documents.
+        # scripts/release_prep.py concatenates fragments verbatim, so without
+        # this gate a bare paragraph or an unreferenced bullet would land in
+        # CHANGELOG.md untraceable. Stdlib-only; reads just changelog.d/. GATES
+        # -- do not add continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_changelog_fragments.py
+
       - name: Canary manifest matches the forge
         # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
         # 2AMLogic canary repo is missing from blocks/canaries.json, or a listed

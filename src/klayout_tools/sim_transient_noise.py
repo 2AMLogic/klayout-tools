@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
-from . import sim_steps
+from . import _warn, sim_steps
 from ._spice_text import logical_lines
 from .sim_errors import SimError
 
@@ -180,11 +179,19 @@ def _unseeded_noise_report(
     )
     if not sources:
         return None
+    note = _UNSEEDED_NOISE_NOTE
+    seed = (request.get("options") or {}).get("transient_noise_seed")
+    if seed is not None:
+        kinds = {kind for _name, kind in sources}
+        note = (
+            "These sources are not governed by monte_carlo.seed. "
+            + _reproducibility_note(kinds, seed=seed)
+        )
     report: dict[str, Any] = {
         "unseeded_sources": [
             {"name": name, "keyword": keyword} for name, keyword in sorted(sources)
         ],
-        "unseeded_sources_note": _UNSEEDED_NOISE_NOTE,
+        "unseeded_sources_note": note,
     }
     if not_scanned:
         report["unseeded_sources_not_scanned"] = not_scanned
@@ -305,5 +312,5 @@ def with_unseeded_noise(
     )
     if noise_report is None:
         return monte_carlo_info
-    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
+    _warn.warn(f"warning: {noise_report['unseeded_sources_note']}")
     return {**monte_carlo_info, **noise_report}
