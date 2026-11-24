@@ -336,8 +336,11 @@
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_resistance_graph_caps",
+        "klayout_tools.extract_resistance_network",
+        "klayout_tools.extract_terminal_topology",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
+        "klayout_tools.extract_spef_rc",
         "klayout_tools.extract_split_terminal",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
@@ -595,6 +598,7 @@
         "klayout_tools.lvs_runset_reference",
         "klayout_tools.lvs_runset_census",
         "klayout_tools.lvs_runset_findings",
+        "klayout_tools.lvs_runset_ports",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
         "klayout_tools.lvs_supply_universe",
@@ -717,8 +721,10 @@
         "klayout_tools.pex_binding",
         "klayout_tools.pex_errors",
         "klayout_tools.pex_merged_leg",
+        "klayout_tools.pex_merged_pins",
         "klayout_tools.pex_net_correspondence",
         "klayout_tools.pex_netlist_text",
+        "klayout_tools.pex_probe_regions",
         "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_body_bias",
@@ -750,10 +756,12 @@
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_fences",
+        "klayout_tools.place_and_route_merge_only",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layer_map",
         "klayout_tools.place_and_route_library_limits",
+        "klayout_tools.place_and_route_multicycle",
         "klayout_tools.place_and_route_layers",
         "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
@@ -903,6 +911,7 @@
         "klayout_tools.evidence_canonicalize",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
+        "klayout_tools.macro_blackbox",
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
@@ -955,6 +964,7 @@
         "klayout_tools.signoff_characterization",
         "klayout_tools.signoff_composition",
         "klayout_tools.signoff_coverage_disclosure",
+        "klayout_tools.signoff_derived_bounds",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_disclosed_evidence",
@@ -986,6 +996,7 @@
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
+        "klayout_tools.signoff_sta_geometry",
         "klayout_tools.signoff_store_pin",
         "klayout_tools.signoff_unmet_reasons",
         "klayout_tools.signoff_upstream_source",
@@ -1077,6 +1088,8 @@
         "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
+        "klayout_tools.sim_derive",
+        "klayout_tools.sim_derive_rollup",
         "klayout_tools.sim_echo_checks",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
@@ -1153,6 +1166,7 @@
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_transient_noise",
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
@@ -2158,6 +2172,12 @@
   ],
   "shared_private_permissions": [
     {
+      "consumer": "klayout_tools.pex_merged_pins",
+      "exporter": "klayout_tools.extract_report_canonicalize",
+      "symbol": "_normalized_netlist_sha256",
+      "reason": "Issue #7787: after binding declared ports, merged PEX must recompute the same connectivity digest as the runset extractor from the effective device and net records."
+    },
+    {
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._yosys_error_messages",
       "symbol": "_yosys_error_message",
@@ -2400,12 +2420,6 @@
     {
       "consumer": "klayout_tools.equiv_sequential",
       "exporter": "klayout_tools._provenance",
-      "symbol": "_combined_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.equiv_sequential",
-      "exporter": "klayout_tools._provenance",
       "symbol": "_yosys_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
@@ -2522,6 +2536,24 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Request-shape validation of the outputs object, mirroring klt synthesize (issue #4231); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #7721: the --from-def entry point loads the same request envelope (same error handling) as load_request; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Issue #7721: the --from-def entry point rejects unknown request keys against the same allowed-key list as load_request; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools.pdk_cells",
+      "symbol": "_default_variant_shipping",
+      "reason": "Issue #7721: the --from-def entry point resolves its PDK install with the full flow's own issue-#4204 default-variant substitution (first installed variant shipping the cell library when no explicit variant was chosen), so both entry points always merge from the same install; promote to a public name when pdk_cells is next reworked."
     },
     {
       "consumer": "klayout_tools.synthesize",
