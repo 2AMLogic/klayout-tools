@@ -1878,8 +1878,7 @@ def _collect_decks_batch(
             message=str(exc),
             outdir=outdir,
             environment={
-                "provider": "aws-batch-fleet",
-                "job_id": job_id,
+                **sim_batch._batch_job_environment(config, job_id),
                 "region": config.region,
                 "state": exc.last_state,
                 **(

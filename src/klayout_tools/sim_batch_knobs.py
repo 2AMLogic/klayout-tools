@@ -35,6 +35,7 @@ from typing import Any
 
 from ._jsonnum import is_finite_number
 from .sim_batch_contract import (
+    BATCH_IMAGE_PROFILE_CODE,
     BATCH_MAX_CONCURRENT_CODE,
     DEFAULT_BATCH_MAX_JOB_SECONDS,
     DEFAULT_INTERRUPTED_GRACE_S,
@@ -42,6 +43,7 @@ from .sim_batch_contract import (
     FLEET_MAX_JOB_SECONDS_KEY,
     MAX_JOB_SECONDS_ENV,
     RUNNER_VERSION_CHECK_MODES,
+    SIM_IMAGE_PROFILES,
 )
 from .sim_batch_job_timeout import (
     _resolve_job_ceiling_check,
@@ -51,19 +53,63 @@ from .sim_batch_job_timeout import (
 from .sim_errors import SimError
 
 
+def _read_fleet_config(provision_script: str) -> dict[str, str]:
+    """Best-effort read of 2am's ``batch-fleet.env`` sitting beside the
+    resolved provision script.
+
+    Deliberately *not* a shell evaluation: only literal ``KEY=value`` /
+    ``KEY="value"`` lines are honored, anything interpolated (``$``/backtick)
+    or malformed is skipped, and an unreadable/absent file yields ``{}``.
+    This is a convenience source for non-secret fleet identifiers
+    (bucket, jobs prefix, region, submit profile), never a credential path.
+    """
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(provision_script)), FLEET_CONFIG_FILENAME
+    )
+    values: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key.startswith("BATCH_") or "$" in value or "`" in value:
+            continue
+        values[key] = value
+    return values
+
+
+def _resolve_image_profile(batch_spec: dict[str, Any]) -> str:
+    """An omitted selector preserves the fleet's default PDK-based image selection."""
+    value = batch_spec.get("image_profile", "sim")
+    if not isinstance(value, str) or value not in SIM_IMAGE_PROFILES:
+        raise SimError(
+            "request.batch.image_profile must be one of "
+            f"{', '.join(SIM_IMAGE_PROFILES)} (got {value!r})",
+            code=BATCH_IMAGE_PROFILE_CODE,
+        )
+    return value
+
+
 def _resolve_max_job_seconds(
-    batch_spec: dict[str, Any], fleet: dict[str, str]
+    batch_spec: dict[str, Any], fleet: dict[str, str], image_profile: str | None = None
 ) -> tuple[float, str]:
     """The fleet's whole-job ceiling and its provenance (issue #2833).
 
     Resolution order: ``request.batch.max_job_seconds`` (``"request"``),
-    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), ``BATCH_MAX_JOB_SECONDS`` in
+    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), the selected profile’s ceiling in
     the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
     the value 2am's ``launch`` tags the instance with), else
     :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
     fallback). A present but not positive-finite number is a SimError
     naming its source, raised before any S3 write, never a silent fall
-    through to a less specific source.
+    through to a less specific source. An opt-in profile requires its fleet key.
 
     Moved from :mod:`klayout_tools.sim_batch` (issue #6437) so its size
     ratchet stays green; re-imported there under the same name. Unchanged
@@ -72,13 +118,22 @@ def _resolve_max_job_seconds(
     :func:`~klayout_tools._jsonnum.is_finite_number` (issue #6115) rather
     than the pre-#6115 four-clause ``math.isfinite`` test.
     """
+    fleet_key = FLEET_MAX_JOB_SECONDS_KEY
+    if image_profile == "simlong":
+        fleet_key = f"BATCH_{image_profile.upper()}_MAX_JOB_SECONDS"
+        if not fleet.get(fleet_key, "").strip():
+            raise SimError(
+                f"request.batch.image_profile {image_profile!r} requires {fleet_key} "
+                f"in {FLEET_CONFIG_FILENAME} beside the provision script",
+                code=BATCH_IMAGE_PROFILE_CODE,
+            )
     candidates: tuple[tuple[str, str, Any], ...] = (
         ("request", "request.batch.max_job_seconds", batch_spec.get("max_job_seconds")),
         ("env", f"${MAX_JOB_SECONDS_ENV}", os.environ.get(MAX_JOB_SECONDS_ENV)),
         (
             "fleet_config",
-            f"{FLEET_MAX_JOB_SECONDS_KEY} in {FLEET_CONFIG_FILENAME}",
-            fleet.get(FLEET_MAX_JOB_SECONDS_KEY),
+            f"{fleet_key} in {FLEET_CONFIG_FILENAME}",
+            fleet.get(fleet_key),
         ),
     )
     for source, label, raw in candidates:
@@ -92,7 +147,10 @@ def _resolve_max_job_seconds(
                 value = None
         if not is_finite_number(value) or value <= 0:
             raise SimError(
-                f"{label} must be a positive number of seconds (got {raw!r})"
+                f"{label} must be a positive number of seconds (got {raw!r})",
+                code=BATCH_IMAGE_PROFILE_CODE
+                if source == "fleet_config" and image_profile == "simlong"
+                else None,
             )
         return float(value), source
     return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
@@ -207,6 +265,7 @@ def _validate_batch_request_knobs(batch_spec: dict[str, Any]) -> None:
     """
     resolve_capacity_wait_s(batch_spec)
     _resolve_runner_version_check(batch_spec)
+    _resolve_image_profile(batch_spec)
     raw_max_job_seconds = batch_spec.get("max_job_seconds")
     if raw_max_job_seconds is not None and not (
         isinstance(raw_max_job_seconds, str) and not raw_max_job_seconds.strip()

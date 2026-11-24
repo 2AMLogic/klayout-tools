@@ -266,6 +266,8 @@ DEFAULT_BATCH_MAX_JOB_SECONDS = 3600.0
 #: 2am's ``batch-fleet.env`` key for the whole-job ceiling -- the value its
 #: ``launch`` tags the instance with and its harness kills the job at.
 FLEET_MAX_JOB_SECONDS_KEY = "BATCH_MAX_JOB_SECONDS"
+SIM_IMAGE_PROFILES = ("sim", "simlong")
+BATCH_IMAGE_PROFILE_CODE = "batch_image_profile_invalid"
 
 #: ``request.batch.job_ceiling_check`` values (issue #2833): ``"warn"``
 #: (default) submits and reports a structured warning; ``"enforce"`` refuses

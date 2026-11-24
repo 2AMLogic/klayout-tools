@@ -551,10 +551,9 @@ def run_approved_generator(
     committed_hash: str,
     artifact: str,
 ) -> GeneratorOutcome:
-    """Run ``approval`` on the batch runner and compare its output with the
-    committed artifact (``committed_hash`` is what ``artifact`` just
-    re-hashed to). Never raises for an execution problem: every failure is a
-    ``failed`` outcome, and no path here runs the generator on this host.
+    """Run the approved generator on the fleet and compare its output to the
+    committed artifact. ``committed_hash`` is the freshly computed artifact hash.
+    Execution problems return a failed outcome.
     """
     evidence: dict[str, Any] = {
         "backend": "batch",
@@ -572,6 +571,7 @@ def run_approved_generator(
             {"models": {"pdk": approval.pdk}},
             corner_count=1,
             timeout_s=approval.timeout_s,
+            sim_image_profiles=False,
         )
     except Exception as exc:  # SimError / BatchError: unresolvable fleet config
         return _fail(FAIL_CONFIG, f"batch backend not usable: {exc}", evidence)

@@ -1,0 +1,1 @@
+- **Simulation batch requests can select the longer-running `simlong` fleet profile with `batch.image_profile`** (#5578, 2026-11-24).
