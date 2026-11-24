@@ -206,6 +206,19 @@ def liberty_source(source: Path, group: str, vt: str, corner: str) -> Path:
     raise ValueError(f"missing Liberty source {plain} or {archived}")
 
 
+def verilog_source(source: Path, group: str, vt: str) -> Path:
+    """The one TT behavioural model for ``group``/``vt``; its date is the file's."""
+    folder = source / CELLS / "Verilog"
+    pattern = f"asap7sc7p5t_{group}_{vt}_TT_*.v"
+    found = sorted(folder.glob(pattern))
+    if not found:
+        raise ValueError(f"missing Verilog source {folder / pattern}")
+    if len(found) > 1:
+        names = ", ".join(path.name for path in found)
+        raise ValueError(f"ambiguous Verilog source {folder / pattern}: {names}")
+    return found[0]
+
+
 def unpack(source: Path, data: bytes, scratch: Path) -> bytes:
     if source.suffix != ".7z":
         return data
@@ -284,6 +297,12 @@ def assemble(
                 "tech_lef": {
                     "nom": copy(physical / TECH_LEF, f"{base}/techlef/{lib}__nom.tlef")
                 },
+                # Corner-independent, in GROUPS order so assemblies repeat
+                # byte for byte (the groups do not instantiate one another).
+                "verilog": [
+                    copy(path, f"{base}/verilog/{path.name}")
+                    for path in (verilog_source(source, group, vt) for group in GROUPS)
+                ],
             }
             liberty[lib] = {}
             for corner in corners:
