@@ -34,11 +34,10 @@ whose message starts with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_measurement_kind, sim_raw, sim_transfer
+from . import sim_measurement_kind, sim_transfer
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
@@ -267,26 +266,17 @@ def _analyze_pair(raw_path: str, want_margins: bool) -> _PairAnalysis | Transfer
     """Metrics for one pair's rawfile, or a pair-level failure outcome (the
     caller prefixes the measurement name). ``analyze_margins`` runs only when
     an entry on the pair asks for a margin metric."""
-    if not os.path.isfile(raw_path):
-        return TransferOutcome(
-            code="transfer_vector_missing",
-            error=(
-                "its num or den vector did not resolve against this AC "
-                "analysis's saved vectors (no rawfile was written) -- check "
-                "the node names, and that options.save_mode does not omit them"
-            ),
-        )
-    try:
-        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
-    except sim_raw.RawFileError as exc:
-        return TransferOutcome(
-            code="transfer_raw_invalid", error=f"could not read its rawfile: {exc}"
-        )
-    if len(raw.names) != 3 or not raw.points:
-        return TransferOutcome(
-            code="transfer_raw_invalid",
-            error="its rawfile must hold a frequency axis, num and den with samples",
-        )
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="transfer",
+        columns=3,
+        vector_desc="num or den",
+        analysis_label="AC",
+        expected_columns="a frequency axis, num and den",
+    )
+    if error is not None:
+        return TransferOutcome(code=error[0], error=error[1])
+    assert raw is not None
     freqs = [z.real for z in raw.column(0)]
     try:
         metrics = sim_transfer.analyze_transfer(freqs, raw.column(1), raw.column(2))

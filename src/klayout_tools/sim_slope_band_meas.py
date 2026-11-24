@@ -34,12 +34,11 @@ token from :data:`ERROR_CODES` -- never a silent pass or a substituted value.
 from __future__ import annotations
 
 import math
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_measurement_kind, sim_raw, sim_slope_band
+from . import sim_measurement_kind, sim_slope_band
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_measurement_grading import _vector_measurement_result
@@ -279,26 +278,17 @@ class SlopeBandOutcome:
 def _read_pair(raw_path: str) -> _Pair | SlopeBandOutcome:
     """One pair's ``(xs, ys)`` from its rawfile, or a pair-level failure
     outcome (the caller prefixes the measurement name)."""
-    if not os.path.isfile(raw_path):
-        return SlopeBandOutcome(
-            code="slope_band_vector_missing",
-            error=(
-                "its x or y vector did not resolve against this DC analysis's "
-                "saved vectors (no rawfile was written) -- check the node "
-                "names, and that options.save_mode does not omit them"
-            ),
-        )
-    try:
-        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
-    except sim_raw.RawFileError as exc:
-        return SlopeBandOutcome(
-            code="slope_band_raw_invalid", error=f"could not read its rawfile: {exc}"
-        )
-    if len(raw.names) != 3 or not raw.points:
-        return SlopeBandOutcome(
-            code="slope_band_raw_invalid",
-            error="its rawfile must hold a sweep axis, x and y with samples",
-        )
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="slope_band",
+        columns=3,
+        vector_desc="x or y",
+        analysis_label="DC",
+        expected_columns="a sweep axis, x and y",
+    )
+    if error is not None:
+        return SlopeBandOutcome(code=error[0], error=error[1])
+    assert raw is not None
     return [z.real for z in raw.column(1)], [z.real for z in raw.column(2)]
 
 
