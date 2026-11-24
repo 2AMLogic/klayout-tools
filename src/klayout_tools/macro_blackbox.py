@@ -32,13 +32,17 @@ def verilog_declared_modules(text: str) -> list[str]:
     names = []
     in_attribute = False
     expect_name = False
+    previous = ""
     for match in _VERILOG_TOKEN_RE.finditer(text):
         kind = match.lastgroup
         token = match.group()
         if kind == "comment":
             continue
+        after_at = previous == "@"
+        previous = token
         if kind == "attribute":
-            in_attribute = token == "(*"
+            # In @(*) the star denotes the implicit sensitivity list.
+            in_attribute = token == "(*" and not after_at
             continue
         if in_attribute:
             continue

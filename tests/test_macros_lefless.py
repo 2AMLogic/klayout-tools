@@ -112,3 +112,19 @@ def test_blackbox_module_identity_ignores_quoted_parameter_text(tmp_path):
     request[0]["cell"] = "diagnostic"
     with pytest.raises(_Err, match=r"'diagnostic'.*\['real_cell'\]"):
         _validate_lefless(request, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "event", ["@(*)", "@*", "@ ( * )", "@ /* all */ (* /* signals */ )"]
+)
+def test_wildcard_event_preserves_modules_after_the_process(tmp_path, event):
+    request = _lefless(
+        tmp_path,
+        '(* note = "module phantom" *) module auxiliary(input A, output reg Z);\n'
+        f"  always {event} Z=A; endmodule\n"
+        "module chosen(input A, output Z); endmodule\n",
+    )
+    with pytest.raises(_Err, match=r"declares 2 modules \['auxiliary', 'chosen'\]"):
+        _validate_lefless(request, tmp_path)
+    request[0]["cell"] = "chosen"
+    assert _validate_lefless(request, tmp_path)[0]["cell"] == "chosen"
