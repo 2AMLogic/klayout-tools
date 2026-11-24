@@ -335,9 +335,11 @@ from .signoff_sta_constraints import (
 )
 from .signoff_sta_geometry import (
     STA_BOOL_OPTIONS,
+    sta_manifest_fields,
     sta_opt_in_refusal,
     sta_status_detail,
     sta_status_ok,
+    sta_timing_shape,
 )
 
 # The store-pin companion resolution (issue #5963): a `klt yield` citation
@@ -1618,26 +1620,23 @@ def _type_label(annotation: Any) -> str:
     )
 
 
-def _validate_envelope(kind: str, envelope: Mapping[str, Any], source: str) -> None:
+def _validate_envelope(
+    kind: str,
+    envelope: Mapping[str, Any],
+    source: str,
+    sta_fields: frozenset[str] = frozenset(),
+) -> None:
     """Validate an envelope :func:`_classify` has already matched to ``kind``
     against that kind's declared shape (:data:`_ENVELOPE_SHAPES`), raising
     :class:`SignoffError` if it does not (issue #2033).
 
-    Checks every *required* key of the shape: present, and of the declared
-    type. Optional keys are not type-checked when present -- an unexpected
-    type there is already handled defensively by each reader
-    (``.get(...) or {}``, ``isinstance`` guards) and hard-failing on one
-    would retroactively reject committed evidence over a field this
-    boundary only reports.
-
-    Raising (rather than downgrading the check to "failed") is deliberate
-    and matches how every other unreadable input is handled here: a
-    malformed envelope means the verdict is unknown, not negative.
-    ``--manifest`` grading converts that into an explicit ``"unmet"`` /
-    ``"unrecognized_envelope"`` item -- see :func:`_grade_evidence`.
+    Required fields must be present and have their declared type. Manifest
+    grading validates its own STA fields so the refusal can report their
+    original values. Optional fields are checked by their readers.
     """
     hints = _shape_hints(kind)
-    for field in sorted(_ENVELOPE_SHAPES[kind].__required_keys__):
+    required = _ENVELOPE_SHAPES[kind].__required_keys__
+    for field in sorted(required - sta_fields if kind == "sta" else required):
         if field not in envelope:
             raise SignoffError(
                 f"envelope '{source}' matches the klt {kind} shape but is "
@@ -1819,14 +1818,28 @@ _STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] =
 )
 
 
-def _structural_kind(envelope: Mapping[str, Any]) -> str | None:
-    """The first :data:`_STRUCTURAL_KINDS` kind ``envelope`` matches."""
-    return next(
-        (kind for kind, matches in _STRUCTURAL_KINDS if matches(envelope)), None
-    )
+def _structural_kind(
+    envelope: Mapping[str, Any], sta_fields: frozenset[str]
+) -> str | None:
+    for kind, matches in _STRUCTURAL_KINDS:
+        if matches(envelope):
+            return kind
+    # Only strict STA grading diagnoses missing geometry on a timing report.
+    if (
+        "geometry_source" in sta_fields
+        and "stage_reached" not in envelope
+        and sta_timing_shape(envelope)
+    ):
+        return "sta"
+    return None
 
 
-def _classify(envelope: Mapping[str, Any], source: str) -> str:
+def _classify(
+    envelope: Mapping[str, Any],
+    source: str,
+    *,
+    sta_fields: frozenset[str] = frozenset(),
+) -> str:
     """Detect an envelope's kind from its own structural shape. Raises
     :class:`SignoffError` for an envelope that matches none of them.
 
@@ -1939,21 +1952,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     ):
         kind = "power"
 
-    # `klt sta` (issue #1959; docs/cli/sta.md): a top-level
-    # `geometry_source` string ("routed"/"placement_estimate"/
-    # "netlist_estimate") is unique to this verb's response -- no other klt
-    # verb emits that field at the top level -- and is always present, never
-    # null. It is paired with a shape discriminator so a future response
-    # carrying the field alone still fails loudly rather than being graded
-    # as timing evidence: `timing_status` (the flat, single-corner shape) or
-    # a `corners` list (the multi-corner `pdk.corners` shape). `klt
-    # place-and-route`'s response also carries `worst_slack_ns`/
-    # `timing_status`/`corners`, but no `geometry_source` -- it is a
-    # different verb with a different (unrestricted) corner-sweep contract
-    # and stays deliberately unrecognised, see this module's "Digital-flow
-    # evidence" docstring section.
-    elif isinstance(envelope.get("geometry_source"), str) and (
-        "timing_status" in envelope or isinstance(envelope.get("corners"), list)
+    # Ordinary STA recognition requires the verb's geometry marker and timing
+    # shape. A citation with malformed geometry gets a diagnostic only after
+    # other known shapes have been checked below.
+    elif isinstance(envelope.get("geometry_source"), str) and sta_timing_shape(
+        envelope
     ):
         kind = "sta"
 
@@ -1972,7 +1975,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # (`_STRUCTURAL_KINDS`, which carries each shape's own recognition
     # rationale) so a new kind is one table entry rather than another branch
     # here (issue #2839).
-    elif (structural_kind := _structural_kind(envelope)) is not None:
+    elif (structural_kind := _structural_kind(envelope, sta_fields)) is not None:
         kind = structural_kind
 
     else:
@@ -1984,10 +1987,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
         # it. See :func:`_raise_unclassified`.
         _raise_unclassified(envelope, source)
 
-    # Issue #2033: recognised is not the same as well-formed -- see
-    # :func:`_validate_envelope` and this module's "Typed, runtime-validated
-    # evidence ingestion" docstring section.
-    _validate_envelope(kind, envelope, source)
+    _validate_envelope(kind, envelope, source, sta_fields)
     return kind
 
 
@@ -2584,11 +2584,9 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
       it is surfaced informationally in :func:`_detail` instead.
-    - ``sta`` (issue #1959) has no pass/fail ``status`` of its own
-      (``docs/cli/sta.md``: always ``"ok"``; a present non-``"ok"`` one fails,
-      #7711), so this derives a verdict from the reported timing -- see
-      :func:`_sta_timing_passed`: every reported corner must be
-      ``timing_status == "constrained"`` with non-negative setup and hold slack.
+    - ``sta`` requires a successful top-level status and constrained timing
+      with non-negative setup and hold slack at every reported corner
+      (:func:`_sta_timing_passed`, issues #1959 and #7711).
     - ``functional-verification`` passes on ``status == "pass"`` with
       consistent per-test counts, at least one passing test and no failures
       (skips are allowed) -- see :func:`_functional_verification_passed`.
@@ -4748,7 +4746,7 @@ def _grade_evidence(
     artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
     named artifact must re-hash to the pinned hash -- see that constant.
     """
-    resolution, reason = _resolve_evidence(spec, repo_root)
+    resolution, reason = _resolve_evidence(spec, repo_root, grade_sta=True)
     if resolution is None:
         return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
@@ -5561,6 +5559,8 @@ def _fold_kind_inputs(
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
+    *,
+    grade_sta: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve one normalized evidence ``spec`` to the envelope it names,
     without grading it -- returns ``(resolution, None)`` on success, or
@@ -5673,12 +5673,10 @@ def _resolve_evidence(
     envelope = crosscheck_project(envelope) or envelope
 
     try:
-        check_kind = _classify(envelope, source_label)
+        fields = sta_manifest_fields(spec, envelope) if grade_sta else frozenset()
+        check_kind = _classify(envelope, source_label, sta_fields=fields)
     except SignoffError as exc:
-        # Issue #2198: an envelope from a `klt` predating a marker field
-        # `_classify` now requires is refused like any unrecognised shape,
-        # but reported distinguishably -- the remedy ("re-run under a newer
-        # klt") is not the remedy for a foreign document.
+        # Keep version skew distinct from an unrecognized document.
         return None, _classify_failure_reason(exc)
 
     provenance = envelope.get("provenance") or {}

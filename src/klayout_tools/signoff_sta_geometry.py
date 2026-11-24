@@ -44,6 +44,20 @@ STA_BOOL_OPTIONS = (
 )
 
 
+def sta_timing_shape(envelope: Mapping[str, Any]) -> bool:
+    return "timing_status" in envelope or isinstance(envelope.get("corners"), list)
+
+
+def sta_manifest_fields(
+    spec: Mapping[str, Any], envelope: Mapping[str, Any]
+) -> frozenset[str]:
+    """Fields whose original values receive a specific STA manifest verdict."""
+    fields = {"status"} if "status" in envelope else set()
+    if spec.get("require_routed_geometry") is True:
+        fields.add("geometry_source")
+    return frozenset(fields)
+
+
 def sta_status_ok(envelope: Mapping[str, Any]) -> bool:
     """Whether the envelope's own top-level ``status`` leaves it gradable: it
     is absent, or the literal string ``"ok"`` (``null`` and every other value

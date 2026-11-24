@@ -5,8 +5,11 @@ Kept out of ``test_signoff.py`` (file-size ratchet); reuses its fixtures.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.signoff import build_signoff
 from klayout_tools.signoff_sta_geometry import (
     sta_geometry_refusal,
@@ -14,6 +17,7 @@ from klayout_tools.signoff_sta_geometry import (
     sta_status_ok,
 )
 from test_signoff import (
+    FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
     STA_MULTI_CORNER_CLEAN_ENVELOPE,
     STA_SINGLE_CORNER_CLEAN_ENVELOPE,
     _grade_sta_item_5,
@@ -51,15 +55,17 @@ def test_non_ok_status_grades_unmet_without_any_opt_in(tmp_path, base, status):
 
 
 @_ENVELOPES
-def test_absent_or_non_string_status_is_refused_as_before(tmp_path, base):
-    # `status: str` is a required key of the `sta` envelope shape, so these
-    # never reach the status guard: they were `unrecognized_envelope` before
-    # #7711 and still are (the guard changes no verdict here).
+def test_absent_status_keeps_shape_refusal(tmp_path, base):
     absent = {k: v for k, v in base.items() if k != "status"}
-    for envelope in (absent, {**base, "status": None}, {**base, "status": 0}):
-        item = _grade_sta_item_5(tmp_path, envelope)
-        assert item["status"] == "unmet"
-        assert item["reason"] == "unrecognized_envelope"
+    assert _grade_sta_item_5(tmp_path, absent)["reason"] == "unrecognized_envelope"
+
+
+@_ENVELOPES
+@pytest.mark.parametrize("status", [None, 0, False, []])
+def test_non_string_status_reports_value(tmp_path, base, status):
+    item = _grade_sta_item_5(tmp_path, {**base, "status": status})
+    assert (item["status"], item["reason"]) == ("unmet", "check_failed")
+    assert item["detail"]["sta_status"] == status
 
 
 @pytest.mark.parametrize(
@@ -165,18 +171,86 @@ def test_geometry_refusal_is_off_unless_literally_true():
     assert sta_geometry_refusal("sta", spec, {"geometry_source": "routed"}) is None
 
 
-@pytest.mark.parametrize("value", [None, 5])
-def test_unrecognisable_geometry_source_is_unmet_even_before_the_opt_in(
-    tmp_path, value
+@_ENVELOPES
+@pytest.mark.parametrize(
+    "field", [{}, {"geometry_source": None}, {"geometry_source": 5}]
+)
+def test_strict_geometry_reason_on_otherwise_valid_sta(tmp_path, base, field):
+    envelope = {k: v for k, v in base.items() if k != "geometry_source"} | field
+    assert _grade_sta_item_5(tmp_path, envelope)["reason"] == "unrecognized_envelope"
+    item = _grade_sta_item_5(tmp_path, envelope, require_routed_geometry=True)
+    assert (item["status"], item["reason"]) == ("unmet", "check_failed")
+    assert item["detail"]["sta_geometry_not_routed"] == {
+        "geometry_source": field.get("geometry_source")
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "strict", "expected"),
+    [
+        (
+            {"geometry_source": None},
+            True,
+            {"sta_geometry_not_routed": {"geometry_source": None}},
+        ),
+        (
+            {"geometry_source": 5},
+            True,
+            {"sta_geometry_not_routed": {"geometry_source": 5}},
+        ),
+        ({}, True, {"sta_geometry_not_routed": {"geometry_source": None}}),
+        ({"status": None}, False, {"sta_status": None}),
+    ],
+)
+def test_cli_manifest_reports_original_sta_value(
+    tmp_path, capsys, overrides, strict, expected
 ):
-    # A missing / null / non-string `geometry_source` is not a `klt sta`
-    # envelope at all (classification needs the string), so it never reaches
-    # the opt-in: it fails closed one step earlier, with or without the key.
-    envelope = {**_MULTI, "geometry_source": value}
-    for extra in ({}, {"require_routed_geometry": True}):
-        item = _grade_sta_item_5(tmp_path, envelope, **extra)
+    envelope = dict(_MULTI)
+    if strict:
+        del envelope["geometry_source"]
+    sta_file = _write(tmp_path, "sta.json", envelope | overrides)
+    fv_file = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    spec = {"file": sta_file, "require_routed_geometry": strict}
+    manifest = _write(
+        tmp_path,
+        "manifest.json",
+        {
+            "block": "scratch",
+            "kind": "digital",
+            "evidence": {"5.digital": [spec, fv_file]},
+        },
+    )
+    code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 3
+    report = json.loads(capsys.readouterr().out)
+    item = next(item for item in report["items"] if item["id"] == 5)
+    assert (item["status"], item["reason"]) == ("unmet", "check_failed")
+    for key, value in expected.items():
+        assert item["detail"][key] == value
+
+
+def test_strict_geometry_preserves_other_kinds_and_unrelated_shape_errors(tmp_path):
+    envelope = {k: v for k, v in _MULTI.items() if k != "geometry_source"}
+    for other in (
+        {"stage_reached": "route", "power": {}},
+        {"stage_reached": "route"},
+        {"schema_version": []},
+    ):
+        item = _grade_sta_item_5(
+            tmp_path, {**envelope, **other}, require_routed_geometry=True
+        )
         assert item["status"] == "unmet"
-        assert item["reason"] == "unrecognized_envelope"
+        assert "sta_geometry_not_routed" not in (item.get("detail") or {})
 
 
 @pytest.mark.parametrize("value", ["yes", "true", 1, 0, None, []])

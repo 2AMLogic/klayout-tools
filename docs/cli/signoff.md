@@ -4665,15 +4665,12 @@ proves nothing.
 
 **The envelope's own `status` is graded (issue #7711).** `klt sta` always
 emits `status: "ok"` and a failed run never emits the envelope
-([`sta.md`](sta.md)), so a present top-level `status` that is any other
-string can only come from a hand-edited or foreign envelope declaring its own
-run not-ok. That envelope grades `unmet` with reason `check_failed` and
-`detail.sta_status` naming the value, whatever its per-corner timing says,
-in both `--manifest` and envelope-aggregation mode. This changes no verdict
-for a real `klt sta` envelope. `status` is a required key of the `sta` shape,
-so an envelope with `status` absent or not a string is refused earlier as
-`unrecognized_envelope`, exactly as before. Only the top level is graded;
-per-corner entries carry no `status`.
+([`sta.md`](sta.md)). In manifest mode, a present top-level `status` with
+any other value grades `unmet` with reason `check_failed`. The value appears in
+`detail.sta_status`, including JSON `null`. An absent `status` still gives
+`unrecognized_envelope`. In envelope-aggregation mode, a non-ok string fails
+the check and a missing or non-string status fails envelope validation.
+Per-corner entries carry no `status`.
 
 **`geometry_source` is *not* part of the default predicate (issue #7711).** It
 is a caller-supplied label — `"routed"`, `"placement_estimate"` or
@@ -4693,9 +4690,10 @@ the item is `unmet` with reason `check_failed` and
 - Absent or `false` → grading is unchanged (the default).
 - `"placement_estimate"`, `"netlist_estimate"` and any other string → unmet.
   The check is an exact string match, with no case folding.
-- A missing, `null` or non-string `geometry_source` is not a `klt sta`
-  envelope at all, so it is refused as `unrecognized_envelope` before the
-  opt-in is read, whether or not it is set.
+- An otherwise valid STA timing citation with a missing, `null` or non-string
+  `geometry_source` gives `check_failed` under this option. The diagnostic
+  carries the original JSON value, or `null` for an absent key. The default
+  still reports `unrecognized_envelope` for these shapes.
 - A non-boolean value makes the entry malformed (`invalid_evidence`).
 - It composes with the two opt-ins below on one entry; when several fail,
   the first of annotation, constraints, geometry is the one reported.
