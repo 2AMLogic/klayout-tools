@@ -134,7 +134,12 @@ def _diff_pair_describe(
     )
 
     family = _pdk_family(pdk_info["variant"])
-    strap_grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("metal2"))
+    # The strap geometry is drawn on the grid `_device_layer_params` threads
+    # to the PCell (`pcell.mfg_grid_um`, resolved from the *contact* role),
+    # and the ports reported here must sit on that drawn metal -- so this must
+    # be the same source, not the metal2 role's own grid, which differs on
+    # some families (sg13g2: contact 0.005, metal2 none).
+    strap_grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact"))
     info = _diff_pair_layout(
         params["w_um"],
         params["l_um"],

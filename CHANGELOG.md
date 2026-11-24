@@ -737,7 +737,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   group resolving `splits > 1` at a strap-fitting width (explicit
   `params.strap_splits` override wins, divergence warned), so the plan's
   connectivity binds the device-level ports with no change to its
-  k-th-device ↔ k-th-candidate binding rule. DRC-clean and
+  k-th-device ↔ k-th-candidate binding rule. A plan too narrow to strap
+  derives nothing and says so in a `warnings[]` entry (the unstrapped
+  binding leaves `splits - 1` sub-instances per device floating), never
+  silently. DRC-clean and
   extract-verified (one net per leg, six pairwise-distinct nets) on sky130
   for `splits` in {2, 3, 8}, nfet and pfet, with and without the
   automatically-sized guard ring.

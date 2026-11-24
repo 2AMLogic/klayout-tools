@@ -14,6 +14,36 @@ def strap_splits_warning(group_id: str) -> str:
     )
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def strap_declined_warning(
+    group_id: str, unit_w: float | None, splits: float, min_w_um: float
+) -> str:
+    """The ``warnings[]`` entry for a plan whose width cannot fit the strap.
+
+    Declining the strap keeps today's unstrapped, sub-instance-level
+    binding, which leaves ``splits - 1`` sub-instances per device floating --
+    exactly the failure mode issue #5557 exists to remove -- so the
+    deviation must never be silent."""
+    width = (
+        f"the resolved unit w_um ({unit_w})"
+        if unit_w is not None
+        else "the unit w_um (unset: no usable netlist W and no params.w_um, "
+        "so the generator default applies)"
+    )
+    return (
+        f"device_groups (id '{group_id}'): params.strap_splits was NOT "
+        f"derived although the resolved splits is {splits} -- {width} is "
+        f"below the strap's width floor STRAP_MIN_W_UM ({min_w_um}). The "
+        f"group keeps the unstrapped sub-instance-level ports, so "
+        f"{int(splits) - 1} of the {int(splits)} sub-instances per device "
+        "stay unbound and floating (issue #5557); raise the unit w_um to at "
+        "least the floor, or set params.strap_splits explicitly to opt out"
+    )
+
+
 def apply_strap_splits(
     resolved: dict[str, Any],
     derived: dict[str, Any],
@@ -37,16 +67,17 @@ def apply_strap_splits(
     ``splits``, or the explicit override's value taken as already-unit. A
     plan whose width cannot fit the strap derives nothing and keeps
     today's unstrapped behaviour (sub-instance-level ports, k-th-device
-    binding), never a rejected request the caller did not ask for; a
-    caller who wants the strap regardless sets ``params.strap_splits``
-    explicitly and hears about it from the generator's own validation."""
+    binding), never a rejected request the caller did not ask for -- but it
+    says so in a ``warnings[]`` entry (:func:`strap_declined_warning`),
+    because that behaviour leaves all but one sub-instance per device
+    floating. A caller who wants the strap regardless sets
+    ``params.strap_splits`` explicitly and hears about it from the
+    generator's own validation; an explicit ``params.strap_splits`` of any
+    value is already a deliberate choice, so it draws no extra warning."""
     if group["generator"] != "diff_pair":
         return []
     splits = overrides.get("splits", 2)
-    is_valid = (
-        isinstance(splits, (int, float)) and not isinstance(splits, bool) and splits > 1
-    )
-    if not is_valid:
+    if not (_is_number(splits) and splits > 1):
         return []
     from .gen_diff_pair_strap import STRAP_MIN_W_UM
 
@@ -58,21 +89,25 @@ def apply_strap_splits(
     # override too understated the unit width by a factor of `splits`, so a
     # plan whose per-unit width fit the strap silently derived nothing --
     # #5557's floating-sub-instances failure mode.
+    unit_w: float | None
     if "w_um" in overrides:
         unit_w = overrides["w_um"]
+        if not (_is_number(unit_w) and unit_w > 0):
+            return []  # the generator's own validator rejects it
     else:
         whole_w = derived.get("w_um")
-        unit_w = (
-            whole_w / splits
-            if isinstance(whole_w, (int, float)) and not isinstance(whole_w, bool)
-            else None
-        )
-    if not (
-        isinstance(unit_w, (int, float)) and not isinstance(unit_w, bool) and unit_w > 0
-    ):
-        return []
-    if unit_w < STRAP_MIN_W_UM:
-        return []
+        if whole_w is None:
+            # No netlist W and no override: the PCell's own default
+            # (0.42 um) applies, which is under the floor.
+            unit_w = None
+        elif _is_number(whole_w) and whole_w > 0:
+            unit_w = whole_w / splits
+        else:
+            return []
+    if unit_w is None or unit_w < STRAP_MIN_W_UM:
+        if "strap_splits" in overrides:
+            return []
+        return [strap_declined_warning(group["id"], unit_w, splits, STRAP_MIN_W_UM)]
     derived["strap_splits"] = True
     resolved["strap_splits"] = True
     if "strap_splits" in overrides:

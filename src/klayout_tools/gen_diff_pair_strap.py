@@ -38,10 +38,13 @@ designed out two ways:
 met1 crosses foreign li1 pads, the guard-ring band and tap pads without
 connecting (only an mcon joins li1 to met1, dropped only on the strap's own
 pads), so the margins need no clearance but their fellow trunks'. The gate
-landing pad grows upward (:data:`_STRAP_GATE_PAD_GROWTH_UM`) to host the
-gate tracks' mcons; the grown ``bbox_height_um``/core then grow the row
-pitch, guard ring, tap pads, well box and ``bbox_um`` through the existing
-arithmetic.
+landing pad grows symmetrically about its (fixed) centre
+(:data:`_STRAP_GATE_PAD_GROWTH_UM`, half each way -- see
+``_mos_unit_layout``'s ``gate_pad_growth_um``) to host the gate tracks'
+mcons. The *downward* half narrows the li1 gap to the S/D pads below it;
+see the constant for the rule that bounds it. The grown
+``bbox_height_um``/core then grow the row pitch, guard ring, tap pads, well
+box and ``bbox_um`` through the existing arithmetic.
 """
 
 from __future__ import annotations
@@ -107,13 +110,23 @@ _STRAP_GATE_BLOCK_UM = _STRAP_TRACK_PITCH_UM + _STRAP_RAIL_H_UM
 #: S/D pads and the request is rejected (never silently under-strapped).
 STRAP_MIN_W_UM = _STRAP_SD_BLOCK_UM + 2 * _STRAP_EDGE_INSET_UM
 
-#: Upward growth of the gate landing pad's metal in strap mode: the gate
+#: Total growth of the gate landing pad's metal in strap mode: the gate
 #: pad's li1 is ``CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM`` = 0.42um tall
 #: by default, whose mcon window (height minus two insets = 0.19um) is too
 #: short for the 0.86um two-track block; this growth widens the window to
 #: exactly the block. Folded into ``_mos_unit_layout``'s new
 #: ``gate_pad_growth_um``, so the row pitch, well box, guard ring and
 #: ``bbox_um`` all follow it.
+#:
+#: The pad grows *symmetrically* (``growth / 2`` each way), so its bottom
+#: edge drops by ``growth / 2`` into the clearance stem that keeps it off
+#: the S/D li1 pads: the gap is ``gate_pad_clearance + stem - growth / 2``
+#: (sky130: ``0.15 + 0.4 - 0.335 = 0.215um``) and must stay at or above the
+#: deck's ``li1.space.1`` (0.17um) -- 0.045um of headroom today. Nothing
+#: derives this constant from that rule; it is held by the sky130 DRC runs
+#: of ``test_strapped_cell_is_drc_clean_and_extracts_two_legs``, so a third
+#: gate track, or a family whose ``_gate_pad_clearance_um`` is smaller than
+#: sky130's, must re-check that gap rather than assume it.
 _STRAP_GATE_PAD_GROWTH_UM = _STRAP_GATE_BLOCK_UM - (0.42 - 2 * _STRAP_EDGE_INSET_UM)
 
 #: Lane distance (um) from the pad-zone right edge to the nearest S/D trunk

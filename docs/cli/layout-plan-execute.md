@@ -468,7 +468,11 @@ already-unit) is at least the strap's track floor — an unstrapped
 and `gen-compose` cannot strap the interleaved splits itself (measured,
 issue #5557). A plan whose width cannot fit the strap derives nothing and
 keeps the unstrapped sub-instance-level binding rather than failing a
-request the caller never made; a caller who wants the strap regardless sets
+request the caller never made — but that binding leaves `splits - 1`
+sub-instances per device floating, so `execute` says so in one `warnings[]`
+entry naming the resolved unit `w_um`, the floor (`STRAP_MIN_W_UM`, 2.35 µm)
+and how many sub-instances stay unbound (a decline is never silent). A
+caller who wants the strap regardless sets
 `params.strap_splits` explicitly and hears about an unmet width from the
 generator's own validation. An explicit `device_groups[].params.strap_splits`
 override always wins, with the same divergence warning any other

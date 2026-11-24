@@ -108,11 +108,32 @@ def test_explicit_strap_splits_false_override_wins_and_warns(tmp_path, pdk_root)
     assert "Q1_1_S" in ports, f"expected unstrapped sub-instance ports, got {ports}"
 
 
-def test_narrow_width_plan_does_not_derive_strap(tmp_path, pdk_root):
+def _narrow_pair_netlist(tmp_path) -> dict:
+    """A matched pair whose whole-device W (2U) is too narrow for the strap
+    at any `splits >= 2`."""
+    path = _write(
+        tmp_path,
+        "narrow_pair_shared.spice",
+        ".subckt narrow_pair D1 G1 S1 D2 G2 S2\n"
+        "M1 D1 G1 S1 VSS nfet L=0.28U W=2U\n"
+        "M2 D2 G2 S2 VSS nfet L=0.28U W=2U\n"
+        ".ends\n",
+    )
+    return {"path": path, "top": "narrow_pair"}
+
+
+def _strap_declined_warnings(response):
+    return [w for w in response["warnings"] if "strap_splits was NOT derived" in w]
+
+
+def test_narrow_width_plan_does_not_derive_strap_but_warns(tmp_path, pdk_root):
     """A plan whose resolved unit width cannot fit the strap tracks derives
     nothing -- it keeps today's unstrapped behaviour rather than failing a
     request the caller never made (the generator's own validation would
-    reject an explicit `strap_splits` at this width)."""
+    reject an explicit `strap_splits` at this width) -- but it must say so:
+    the unstrapped binding leaves `splits - 1` sub-instances per device
+    floating, which is #5557's own failure mode, so a silent decline would
+    recreate it with a success status."""
     netlist = """
 .subckt narrow_pair D1 G1 S1 D2 G2 S2
 M1 D1 G1 S1 VSS nfet L=0.28U W=2U
@@ -138,7 +159,80 @@ M2 D2 G2 S2 VSS nfet L=0.28U W=2U
 
     group = response["device_groups"][0]
     assert group["resolved_params"].get("strap_splits") is None
-    assert not any("strap_splits" in warning for warning in response["warnings"])
+    # Netlist W=2U over splits=2 resolves a 1.0 um unit, under the 2.35 floor.
+    (warning,) = _strap_declined_warnings(response)
+    assert "'dp'" in warning
+    assert "resolved unit w_um (1.0)" in warning
+    assert "STRAP_MIN_W_UM (2.35)" in warning
+    assert "1 of the 2 sub-instances per device" in warning
+
+
+def test_narrow_width_warning_counts_unbound_sub_instances(tmp_path, pdk_root):
+    """The warning's consequence tracks the resolved `splits`: at
+    `splits=4` and W=2U (unit 0.5 um) three of the four sub-instances per
+    device stay unbound -- the measured case from the review of this PR,
+    where `execute` returned success with six of eight sub-instances
+    floating and no warning."""
+    request = _two_fet_request(tmp_path, pdk_root, {"splits": 4}, "dp_narrow_splits4")
+    request["netlist"] = _narrow_pair_netlist(tmp_path)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"]["splits"] == 4
+    assert group["resolved_params"].get("strap_splits") is None
+    (warning,) = _strap_declined_warnings(response)
+    assert "resolved unit w_um (0.5)" in warning
+    assert "3 of the 4 sub-instances per device" in warning
+
+
+def test_explicit_strap_splits_false_at_narrow_width_is_silent(tmp_path, pdk_root):
+    """An explicit `params.strap_splits: false` is the caller's deliberate
+    opt-out, so a narrow plan that also declines the strap on width draws no
+    extra "not derived" warning -- only a *silent* decline is the defect."""
+    request = _two_fet_request(
+        tmp_path, pdk_root, {"strap_splits": False}, "dp_narrow_off"
+    )
+    request["netlist"] = _narrow_pair_netlist(tmp_path)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["device_groups"][0]["resolved_params"]["strap_splits"] is False
+    assert _strap_declined_warnings(response) == []
+
+
+def test_unresolved_width_declines_with_a_warning():
+    """No netlist-derived `w_um` and no override: the PCell default (0.42 um)
+    applies, which is under the floor, so the decline is warned about too
+    (the width in the message says it is unset, not a number)."""
+    from klayout_tools.layout_plan_diff_pair import apply_strap_splits
+
+    resolved: dict = {}
+    derived: dict = {}
+    group = {"id": "dp", "generator": "diff_pair"}
+    warnings = apply_strap_splits(resolved, derived, group, {"splits": 3})
+
+    assert "strap_splits" not in resolved and "strap_splits" not in derived
+    (warning,) = warnings
+    assert "strap_splits was NOT derived" in warning
+    assert "unset" in warning
+    assert "2 of the 3 sub-instances per device" in warning
+
+
+@pytest.mark.parametrize("bad_w_um", [0, -1.0, "wide", None])
+def test_invalid_explicit_w_um_is_left_to_the_generator(bad_w_um):
+    """A non-numeric/non-positive explicit `w_um` is the generator
+    validator's to reject, not a width-floor decline: no derivation and no
+    strap warning from this helper."""
+    from klayout_tools.layout_plan_diff_pair import apply_strap_splits
+
+    resolved: dict = {}
+    derived: dict = {}
+    group = {"id": "dp", "generator": "diff_pair"}
+    warnings = apply_strap_splits(
+        resolved, derived, group, {"splits": 2, "w_um": bad_w_um}
+    )
+
+    assert warnings == []
+    assert "strap_splits" not in resolved
 
 
 def test_explicit_strap_splits_true_passes_through(tmp_path, pdk_root):
@@ -177,7 +271,9 @@ def test_explicit_unit_w_um_override_fits_strap_check(tmp_path, pdk_root):
 def test_explicit_unit_w_um_override_below_floor_does_not_derive(tmp_path, pdk_root):
     """Symmetric negative: an explicit per-unit `w_um` below the strap
     floor derives nothing -- the override is *not* divided by `splits`, so
-    the floor comparison is apples-to-apples on both sides."""
+    the floor comparison is apples-to-apples on both sides -- and the
+    decline is warned about, naming the override's own value (2.0, not
+    2.0 / splits)."""
     request = _two_fet_request(
         tmp_path, pdk_root, {"w_um": 2.0}, "dp_explicit_w_um_narrow"
     )
@@ -185,4 +281,5 @@ def test_explicit_unit_w_um_override_below_floor_does_not_derive(tmp_path, pdk_r
 
     group = response["device_groups"][0]
     assert group["resolved_params"].get("strap_splits") is None
-    assert not any("strap_splits" in warning for warning in response["warnings"])
+    (warning,) = _strap_declined_warnings(response)
+    assert "resolved unit w_um (2.0)" in warning

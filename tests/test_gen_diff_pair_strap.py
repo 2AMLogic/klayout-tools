@@ -97,8 +97,10 @@ def test_strap_splits_default_leaves_output_unchanged(tmp_path, pdk_root):
 def test_strapped_report_carries_one_port_triple_per_device(tmp_path, pdk_root, splits):
     """With `strap_splits: true` the report carries exactly the six
     device-level ports, device 1 first, with no per-sub-instance
-    `Q<d>_<n>_*` ports; `device_count` stays `2 * splits` and the guard
-    ring's TAP ports are untouched."""
+    `Q<d>_<n>_*` ports; `device_count` stays `2 * splits`. (The guard
+    ring's TAP ports are covered by
+    `test_strapped_guard_ring_tap_ports_keep_name_layer_and_width`; this
+    test runs without a ring.)"""
     report = generate(
         _strap_request(
             tmp_path, pdk_root, {"strap_splits": True, "splits": splits}, f"dp{splits}"
@@ -111,6 +113,45 @@ def test_strapped_report_carries_one_port_triple_per_device(tmp_path, pdk_root, 
     for p in report["ports"]:
         if p["name"] in _DEVICE_PORTS:
             assert p["layer"] == met1, f"{p['name']} must report the strap metal"
+
+
+@pytest.mark.parametrize("splits", [2, 3])
+def test_strapped_guard_ring_tap_ports_keep_name_layer_and_width(
+    tmp_path, pdk_root, splits
+):
+    """Strapping must not touch the guard ring's TAP ports (issue #5557
+    acceptance criterion): same names, same layer, same width as the
+    unstrapped cell. Only their *coordinates* move -- the ring correctly
+    follows the strap's grown core -- so those are asserted to differ,
+    which also proves the comparison is not vacuous."""
+    plain = generate(
+        _strap_request(
+            tmp_path,
+            pdk_root,
+            {"splits": splits, "add_guard_ring": True},
+            f"dp_ring_plain{splits}",
+        )
+    )
+    strapped = generate(
+        _strap_request(
+            tmp_path,
+            pdk_root,
+            {"splits": splits, "add_guard_ring": True, "strap_splits": True},
+            f"dp_ring_strap{splits}",
+        )
+    )
+
+    def taps(report):
+        return [p for p in report["ports"] if p["name"].startswith("TAP_")]
+
+    plain_taps, strapped_taps = taps(plain), taps(strapped)
+    assert plain_taps, "the ring must report TAP ports for this test to mean anything"
+    assert [p["name"] for p in strapped_taps] == [p["name"] for p in plain_taps]
+    assert [p["layer"] for p in strapped_taps] == [p["layer"] for p in plain_taps]
+    assert [p["width_um"] for p in strapped_taps] == [p["width_um"] for p in plain_taps]
+    assert [(p["x_um"], p["y_um"]) for p in strapped_taps] != [
+        (p["x_um"], p["y_um"]) for p in plain_taps
+    ], "the ring follows the grown core, so the TAP coordinates must move"
 
 
 def test_strapped_ports_sit_on_drawn_strap_metal(tmp_path, pdk_root):

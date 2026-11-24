@@ -427,8 +427,8 @@ def _resolve_group_params(
 
     # `diff_pair`'s netlist-derived `w_um` is the *whole matched device's*
     # width but its PCell param is the *unit sub-instance* width -- divide by
-    # the resolved splits (see `apply_diff_pair_unit_w_um`; moved beside the
-    # other derived-param helpers in `layout_plan_ports.py`).
+    # the resolved splits (see `apply_diff_pair_unit_w_um`; moved to
+    # `layout_plan_diff_pair.py`, beside `apply_strap_splits`).
     warnings.extend(apply_diff_pair_unit_w_um(resolved, derived, group, overrides))
 
     return resolved, warnings
