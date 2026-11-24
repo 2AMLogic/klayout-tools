@@ -749,6 +749,7 @@
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_fences",
+        "klayout_tools.place_and_route_merge_only",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layer_map",
@@ -2519,6 +2520,24 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Request-shape validation of the outputs object, mirroring klt synthesize (issue #4231); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #7721: the --from-def entry point loads the same request envelope (same error handling) as load_request; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Issue #7721: the --from-def entry point rejects unknown request keys against the same allowed-key list as load_request; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_merge_only",
+      "exporter": "klayout_tools.pdk_cells",
+      "symbol": "_default_variant_shipping",
+      "reason": "Issue #7721: the --from-def entry point resolves its PDK install with the full flow's own issue-#4204 default-variant substitution (first installed variant shipping the cell library when no explicit variant was chosen), so both entry points always merge from the same install; promote to a public name when pdk_cells is next reworked."
     },
     {
       "consumer": "klayout_tools.synthesize",

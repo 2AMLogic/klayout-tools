@@ -38,6 +38,9 @@ Like `klt synthesize`/`klt lvs`/`klt sim`, `klt place-and-route` takes a
   search order.
 - `--backend` — where a `pdk.rebuild_corners` request's units run:
   `local` or `batch` (the Spot batch fleet). See "Backend selection".
+- `--from-def <DEF>` — run *only* the DEF→GDS merge on an existing routed
+  DEF (no OpenROAD stage). See
+  [Merging a committed routed DEF (`--from-def`)](#merging-a-committed-routed-def---from-def).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -546,6 +549,75 @@ that produced it. See [OpenROAD threads](#openroad-threads).
   `pdk.rebuild_corners` (each corner re-runs in full; resume is not applied
   per corner), and `--resume` together with `--check`.
 * Out of scope: resuming inside a stage, and the `--backend batch` path.
+
+## Merging a committed routed DEF (`--from-def`, issue #7721)
+
+The merge-time repair family — `min_area_repair`, `via_pad_trim` (with its
+`tip_check` and the nested `router_fill_scan`), `power_stack_repair` — runs
+inside the DEF→GDS merge, so a plain `klt drc` re-grade of an old stream
+never invokes it, and `--resume` reuses the merge only when the stage
+`.odb` checkpoints and `*.commit.json` records are still on disk with
+matching input hashes — artifacts a committed result set does not carry
+alongside its GDS/DEF. Every evidence set committed before a repair
+therefore stays red on every later pin, with no way to tell "the repairs
+would clear this stream" from "they don't cover it".
+
+`--from-def` closes that gap with a local, no-OpenROAD entry point:
+
+```
+klt place-and-route request.json --from-def <routed.def>
+```
+
+It resolves the tech/cell LEF, standard-cell GDS view and macro views from
+the request exactly as a placement run does (`--pdk`/`--pdk-root` honored),
+runs *only* the existing DEF→GDS merge — repairs included, byte-for-byte
+the same code path — on the supplied routed DEF, and writes its GDS to
+`<stage_root>/<hdl_toplevel>_from_def.gds` (`outputs.dir` honored). The
+distinct `_from_def` name means a re-merge never overwrites the committed
+`<hdl_toplevel>.gds` it is being compared against; a populated
+`outputs.dir` is allowed (that is the whole point), and the caller's input
+DEF is only ever read. No OpenROAD process is launched, no stage ODB or
+commit record is read or written, and the output directory is taken under
+the same advisory lock every cooperating `klt` writer holds.
+
+**Request shape.** The same request document the original run took, with
+only the fields the merge consumes required: `hdl_toplevel` and
+`pdk.cell_library`. `netlist`, `floorplan` and `seed` may be omitted —
+or left in from the original request, untouched and unread. A request
+setting `post_route_spef` is refused by name: that pass needs the route
+stage's own OpenSTA checkpoint, which only a placement run produces.
+
+**Response.** `status`, `hdl_toplevel`, `def_path` (the supplied DEF),
+`gds_path`, `gds_dbu_um`, and the merge's own report fields — `layer_map`,
+`def_net_names`, `min_area_repair`, `via_pad_trim` (with
+`tip_check.router_fill_scan`), `power_stack_repair`, `pin_conductor` —
+all in the same shape a route-stage run reports them. The additive
+`from_def` block reports the actual merge inputs (`tech_lef`, `cell_lef`,
+`cell_gds`, `macro_lefs`, `macro_gds`) together with the supplied DEF's
+`def_content_hash`, so a consumer can pin which committed routing a report
+graded. Routing, stage timing and ODB metrics are absent: they exist only
+when a placement run produced them.
+
+**Errors** (exit 1, existing checks): a missing `--from-def` file, an
+unresolvable PDK/LEF pair, a missing standard-cell GDS view, or a DEF that
+does not define the request's `hdl_toplevel` top cell. `--from-def` is
+mutually exclusive with `--check`, `--rerun`, `--resume` and `--backend`.
+
+**Comparing the original and regenerated stream with the same deck** — the
+post-hoc repair-validation workflow:
+
+```
+# original committed stream
+klt drc --engine klayout --deck <deck> artifacts/gcd.gds --format json > old.json
+# same routing, merged under the current pin's repair passes
+klt place-and-route request.json --from-def artifacts/gcd.def
+klt drc --engine klayout --deck <deck> artifacts/gcd_from_def.gds --format json > new.json
+```
+
+Success is running the current repair passes on the same routing and
+reporting what they did (`min_area_repair`, `via_pad_trim.tip_check`,
+`power_stack_repair` in the response above) — an arbitrary consumer design
+can still have violations afterwards.
 
 ## Floorplan methods
 
