@@ -1641,15 +1641,13 @@ def _stack(
     upper: tuple[float, float, float, float] | str | None = "track",
     via_y0: float = 0,
 ) -> list[Shape]:
-    """A ``w`` x 18 nm via at ``(0, via_y0)`` on a vertical lower-metal bar
-    and a horizontal upper-metal bar (``None`` omits that metal). Both bars
-    are 18 nm wide and flush with the via across their track, except M4
-    above V3, drawn as a legal minimum-width M4 track: 24 nm tall on track
-    0 (M4.W.1, M4.AUX.1, M4.AUX.2)."""
+    """A via flush across its upper track (24 nm for M4, else 18 nm).
+    The lower bar runs vertically and the upper bar runs horizontally."""
     lo, up = _VIA_METALS[via]
+    height = 24 if up == "M4" else 18
     if upper == "track":
-        upper = (-50, 0, 68, 24 if up == "M4" else 18)
-    shapes: list[Shape] = [box(via, 0, via_y0, w, via_y0 + 18)]
+        upper = (-50, 0, 68, height)
+    shapes: list[Shape] = [box(via, 0, via_y0, w, via_y0 + height)]
     if lower is not None:
         shapes.append(box(lo, *lower))
     if upper is not None:
@@ -1669,29 +1667,24 @@ def _via_cases() -> list[Case]:
         ]
         # Partly off the upper metal: the via sticks out 1 nm across it. An
         # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
-        # Where it sticks out the metal does not enclose it, so the metal's
-        # "(5 & 5) | (5 & 0)" end-cap rule fires as well.
+        # This also breaks V3/M4 width alignment or the V1/V2 end cap.
         off = (
             _stack(via, via_y0=-1)
             if via == "V3"
             else _stack(via, upper=(-50, 1, 68, 19))
         )
-        end_cap = () if via == "V3" else (enclosure.END_CAP_RULES[via],)
+        other = "V3.M4.AUX.2" if via == "V3" else enclosure.END_CAP_RULES[via]
         c += [
             _fail(f"{via}.AUX.1", _stack(via, upper=None)),
             _fail(f"{via}.AUX.1", _stack(via, lower=None)),
-            _fail(f"{via}.AUX.1", off, also=end_cap),
+            _fail(f"{via}.AUX.1", off, also=[other]),
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
     c += enclosure.two_side_cases()
 
-    # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
-    # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
-    # the two ends share 26 nm: one end exactly 11 nm passes, one dbu less
-    # at either end fails. (A vertically enclosing M4 would be 72 nm tall
-    # and at least 44 nm wide, i.e. >= 13 nm past the via on both pairs, so
-    # no M4-legal shape fails in that orientation.)
+    # V3 is flush across its 24 nm M4 track. M4.W.5 requires at least
+    # 44 nm along it, leaving 26 nm to distribute between the two ends.
     def m4_capped(e0: float, e1: float) -> list[Shape]:
         return _stack("V3", upper=(-e0, 0, 18 + e1, 24))
 
@@ -1701,7 +1694,7 @@ def _via_cases() -> list[Case]:
         _pass("V3.M4.EN.2", m4_capped(11, 15)),
         _pass("V3.M4.EN.2", m4_capped(15, 11)),
     ]
-    return [*c, *enclosure.end_cap_cases()]
+    return [*c, *enclosure.end_cap_cases(), *enclosure.v3_m4_width_cases()]
 
 
 def _transpose(shapes: Iterable[Shape]) -> list[Shape]:
