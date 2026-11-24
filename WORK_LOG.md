@@ -8,6 +8,21 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-24
 
+- **PR #7846**: Reuse SPICE geometry resolution for capacitors and diodes
+- **PR #7841**: fix(lvs): write native Q/M cards for SG13G2 bipolar and MOS calls under klayout-runset
+- **PR #7839**: Document facing-end ambiguity for ASAP7 V0 corner spacing
+- **PR #7837**: feat(sim): list active batch jobs and fleet capacity
+- **PR #7835**: refactor: share the signoff attestation error class
+- **PR #7833**: fix: preserve the SDF instance inventory across bus assignments
+- **PR #7829**: feat(extract): record klayout_version_mismatch and warn on engine drift
+- **PR #7825**: feat: accept part-select operands in assign concatenations and convert gate-level references before extraction
+- **PR #7823**: feat(place-and-route): repair ASAP7 router off-grid M4 after the DEF-GDS merge
+- **Issue #7845** (closed): Reuse the SPICE geometry resolver for capacitor and diode cards
+- **Issue #7836** (closed): klt lvs klayout-runset + form subckt-call: reference npn cards missing from device_census; generic nfet/pfet classes unmapped to runset classes
+- **Issue #7834** (closed): Consolidate six duplicated lazy AttestationError _error helpers in signoff_attest_* modules
+- **Issue #7824** (closed): Warn when klt extract uses a different KLayout engine than the release was tested with
+- **Issue #7822** (closed): lvs: gate-level-verilog reference rejects part-select operand inside an assign concatenation (0.9.0), after a full extraction
+- **Issue #7817** (closed): place-and-route (asap7): router-emitted M4 can land off the deck's track grid (M4.AUX.1/2 vertices at half-pitch, M4.W.3 non-integer-multiple widths) and no request field reaches it
 - **PR #7804**: Document directional ambiguity for ASAP7 V0 edges at LIG
 - **PR #7832**: Skip timing-driven global placement for clockless routes
 - **PR #7828**: Repair ASAP7 M1 spacing at remote-via wire sides and routed notches
