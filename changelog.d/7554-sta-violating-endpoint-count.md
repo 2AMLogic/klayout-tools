@@ -1,0 +1,1 @@
+- `klt sta` reports `violating_endpoints.status` as `"inconsistent"` when the engine returns more rows than the violation count, even when the endpoint list is truncated (#7554).
