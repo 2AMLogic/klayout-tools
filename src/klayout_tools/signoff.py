@@ -100,7 +100,9 @@ from .signoff_base import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
     _HASH_KIND_BYTES,
     _HASH_KIND_GEOMETRY,
+    _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     _REGENERATED_HASH_RE,
+    ATTESTATION_INPUT_FLAGS,
     DESCRIBE_GRADER_SCHEMA_VERSION,
     SCHEMA_VERSION,
     TIER_REPORT_SCHEMA_VERSION,
@@ -253,10 +255,20 @@ from .signoff_generator_batch import (
     match_approval,
     run_approved_generator,
 )
+
+# The joint-grid spec-row form (issue #6969), hooked into
+# `_grade_multi_citation` below; moved names are for this file's ceiling.
+from .signoff_joint_rows import (
+    JointOutcome,
+    _members_rows_declared,
+    _multi_citation_rows,
+    evaluate_joint_rows,
+)
 from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
     _check_justified_gap_rationales,
     _check_structural_artifacts,
+    _declared_artifact_outcome,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -267,6 +279,7 @@ from .signoff_justified_gap import (
 # for its size-ratchet ceiling.
 from .signoff_multi_member import (
     _entry_problem,
+    failed_members,
     graded_input_provenance,
     with_member_coverage,
 )
@@ -313,7 +326,7 @@ from .signoff_runset import (
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
-from .signoff_spec_row_table import _members_rows_declared, build_spec_row_records
+from .signoff_spec_row_table import build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
@@ -561,25 +574,6 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
 
-#: T1 item ids whose **only** accepted evidence is an artifact-anchored
-#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
-#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
-#: native envelope of any recognised kind satisfied them, topical relevance
-#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
-#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
-#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
-#: restricts them to ``{"generic"}``, so a native citation renders
-#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
-#:
-#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
-#: and keeps accepting any passing native envelope as before.
-#:
-#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
-#: decides :func:`_is_structurally_ungradeable_item` and
-#: :func:`_is_graded_by_build`, and moving these ids into it would silently
-#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
-#: behaviour change this tightening does not make.
-_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: Native kinds a **digital** partition may cite for an otherwise
 #: attested-only item, in addition to ``"generic"`` (issue #4015): item 1's
@@ -1034,6 +1028,10 @@ def describe_grader() -> dict[str, Any]:
         "grading_ruleset_id": report["grading_ruleset_id"],
         "source_doc": CANONICAL_DOC_LABEL,
         "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+        "attestable_items": {
+            str(item): {"input_flag": flag, "envelope_kind": "generic"}
+            for item, flag in sorted(ATTESTATION_INPUT_FLAGS.items())
+        },
         # Additive (issue #2655): derived from the grader's own table.
         "opt_in_evidence_kinds": opt_in_kind_scopes(),
         "opt_in_kinds_by_item": opt_in_kinds_by_item(),
@@ -6202,6 +6200,13 @@ def _grade_multi_citation(
     A ``check_failed`` sim member still credits its passing tagged rows as
     derived. Its own verdict and failing rows retain their reasons (#6027).
     Each graded entry copies its own resolved input provenance (#7598).
+
+    Issue #6969: a ``joint_grid`` row is covered only when every named
+    member graded ``met`` and proved the declared grid plus a condition
+    probe (:func:`.signoff_joint_rows.evaluate_joint_rows`); otherwise it
+    lands in ``uncovered_rows`` with per-member shortfalls under
+    ``detail.joint_rows``. A member no citation names, or a Monte Carlo
+    member, is ``invalid_evidence`` (see ``_post_member_outcome``).
     """
 
     def invalid(
@@ -6222,11 +6227,16 @@ def _grade_multi_citation(
         return invalid(problem or "malformed evidence entry")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
-    failed = [g for g in graded if g[2][0] != "met"]
+    failed = failed_members(graded)
     # Rows each member is credited with, whether that was machine-derived,
     # and the issue-#5490 `reported` case (needs kind + the unratified set).
     credited = member_credited_rows(graded, met_envelopes, spec_rows)
-    row_info = multi_row_info(graded, failed, spec_rows, credited)
+    # Issue #6969: the joint-grid rows; a member no citation names, or a Monte
+    # Carlo one, is invalid evidence (decided in `_post_member_outcome`).
+    joint = evaluate_joint_rows(graded, spec_rows, met_envelopes)
+    row_info = multi_row_info(
+        graded, failed, spec_rows, credited, joint.covered, joint.rows
+    )
     slices = row_info.pop("row_slices", {})
     extra: dict[str, Any] = {
         **({"row_coverage": {"row_slices": slices}} if slices else {}),
@@ -6256,7 +6266,7 @@ def _grade_multi_citation(
         return corner_box.grade(met_envelopes or {}, graded, extra)
     # Check artifact hashes and timing margins before grading partial coverage.
     post_member = _post_member_outcome(
-        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
+        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra, joint
     )
     if post_member is not None:
         return post_member
@@ -6348,22 +6358,6 @@ def _grade_required_kinds(
     )
 
 
-def _declared_artifact_outcome(
-    failure: tuple[str, dict[str, Any]] | None,
-    row_info: dict[str, Any],
-    extra: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet`` outcome for a failing declared-artifact hash check (a
-    justified gap's rationale, issue #5599, or a structural row's artifact,
-    #6985); ``None`` when it passed. A broken declaration is a distinct
-    documented reason -- never silently demoted to a lesser form, whose
-    reason would be ``partial_coverage``."""
-    if failure is None:
-        return None
-    reason, detail = failure
-    return "unmet", reason, None, {**row_info, **detail}, extra
-
-
 def _post_member_outcome(
     spec_rows: list[dict[str, Any]] | None,
     required_kind_pair: tuple[str, ...] | None,
@@ -6371,11 +6365,14 @@ def _post_member_outcome(
     met_envelopes: dict[int, dict[str, Any]] | None,
     row_info: dict[str, Any],
     extra: dict[str, Any],
+    joint: JointOutcome | None = None,
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
-    before partial coverage: the declared-artifact hash checks (justified-gap
-    rationale #5599, structural artifact #6985) first, then the timing-margin
-    rule (issue #4314). ``None`` when none applies."""
+    before partial coverage: the joint-grid declaration, declared-artifact
+    hashes and timing margin, in that order. Return ``None`` if none applies."""
+    problem = joint.problem if joint is not None else None
+    if problem is not None:
+        return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
     for check in (_check_justified_gap_rationales, _check_structural_artifacts):
         declared_unmet = _declared_artifact_outcome(check(spec_rows), row_info, extra)
         if declared_unmet is not None:
@@ -6483,16 +6480,6 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if best is None or len(lacking) < len(best):
             best = lacking
     return best or []
-
-
-def _multi_citation_rows(
-    report_list: bool,
-    spec_rows: list[dict[str, Any]] | None,
-    spec_rows_invalid: bool,
-) -> tuple[list[dict[str, Any]] | None, bool]:
-    """``(spec_rows, spec_rows_invalid)`` as :func:`_grade_multi_citation`
-    sees them: a plain per-cell report list ignores ``spec_rows`` entirely."""
-    return (None, False) if report_list else (spec_rows, spec_rows_invalid)
 
 
 def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:

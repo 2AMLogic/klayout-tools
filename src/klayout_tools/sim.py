@@ -347,7 +347,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
-from . import sim_regrade
+from . import sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -405,6 +405,7 @@ from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
+from .sim_population_limits import validate_k_sigma as _validate_k_sigma
 
 #: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
 #: without importing this runner; re-exported self-aliased for existing callers.
@@ -2990,6 +2991,10 @@ def _prepare_sim_request(
         _validate_spec_row(
             spec.get("spec_row"), f"request.measurements[{spec['name']!r}].spec_row"
         )
+        # Issue #6967: the per-measurement dispersion bound, validated (and
+        # normalised in place) before any corner is dispatched, like every
+        # other measurement field above.
+        sim_population_limits.validate_spec(spec, request.get("monte_carlo"))
 
     options = request.get("options") or {}
     # Issue #2493: validates and resolves both plausibility declarations into
@@ -5261,22 +5266,6 @@ def _mc_point_identity(point: CornerPoint) -> str:
         sort_keys=True,
         default=str,
     )
-
-
-def _validate_k_sigma(value: Any, field: str) -> float:
-    """Validate a sigma-multiple (``k``) field and return it as a float.
-
-    Shared by ``request.monte_carlo.k_sigma`` (the run-wide default) and
-    ``request.measurements[].k_sigma`` (the per-measurement override) so both
-    reject the same shapes with the same message style. Zero is allowed --
-    ``k=0`` degenerates the limit window to the mean itself, a legitimate
-    "is the *typical* part inside the window?" question.
-    """
-    if not is_number(value):
-        raise SimError(f"{field} must be a non-negative number (got {value!r})")
-    if value < 0:
-        raise SimError(f"{field} must be a non-negative number (got {value!r})")
-    return float(value)
 
 
 def _resolve_mismatch_scale(
@@ -10440,6 +10429,9 @@ def _rollup_measurements(
                 # actually ran under `request.monte_carlo`, so a plain corner
                 # matrix keeps today's exact entry shape.
                 entry["monte_carlo"] = mc_stats
+                # Issue #6967: the declared dispersion bound, graded on the
+                # same `by_corner[]` populations (a no-op when undeclared).
+                sim_population_limits.grade(entry, mc_stats, spec, monte_carlo)
                 window = mc_stats["sigma_window"]
                 if monte_carlo.get("window_scope") == "per_corner":
                     # Issue #2960: every corner's own population is graded;
