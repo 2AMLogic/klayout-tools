@@ -39,6 +39,7 @@ from typing import Any
 from . import signoff_attest_canonical_yaml as canonical_yaml
 from ._provenance import sha256_file
 from .signoff_attest_glob import is_glob_entry
+from .signoff_base import AttestationError
 
 #: The mapping-entry keys a path-list entry accepts.
 ENTRY_KEYS = frozenset({"path", "attest", "select"})
@@ -55,13 +56,6 @@ PRESENCE_FIELDS: dict[int, frozenset[str]] = {10: frozenset({"hygiene"})}
 YAML_FIELDS: dict[int, frozenset[str]] = {10: frozenset({"hygiene"})}
 
 
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
-
-
 def _validated_select(entry: Mapping[str, Any], where: str) -> str | None:
     """The entry's ``select``: a non-empty dotted path without empty
     segments, or ``None`` when absent. Only meaningful with
@@ -70,9 +64,13 @@ def _validated_select(entry: Mapping[str, Any], where: str) -> str | None:
     if select is None:
         return None
     if not isinstance(select, str) or not select.strip():
-        raise _error(f"'{where}.select' must be a non-empty dotted path string")
+        raise AttestationError(
+            f"'{where}.select' must be a non-empty dotted path string"
+        )
     if any(not segment.strip() for segment in select.split(".")):
-        raise _error(f"'{where}.select' must have no empty segment: got {select!r}")
+        raise AttestationError(
+            f"'{where}.select' must have no empty segment: got {select!r}"
+        )
     return select
 
 
@@ -84,12 +82,12 @@ def _check_mode(
     item-10-``hygiene``-only restriction both non-default modes share
     (elsewhere the file's bytes are the attested property)."""
     if mode not in ATTEST_VALUES:
-        raise _error(
+        raise AttestationError(
             f"'{where}.attest' must be one of "
             f"{', '.join(repr(v) for v in ATTEST_VALUES)}, got {mode!r}"
         )
     if select is not None and mode != "yaml":
-        raise _error(
+        raise AttestationError(
             f"'{where}.select' is only accepted with 'attest': 'yaml', not {mode!r}"
         )
     if mode == "content":
@@ -98,7 +96,7 @@ def _check_mode(
         item, frozenset()
     )
     if field not in fields:
-        raise _error(
+        raise AttestationError(
             f"'{where}.attest' = {mode!r} is only accepted on an item 10 "
             "'hygiene' entry -- elsewhere the file's bytes are the "
             "attested property"
@@ -142,12 +140,12 @@ def split_entries(
             where = f"{field}[{index}]"
             unknown = sorted(set(entry) - ENTRY_KEYS)
             if unknown:
-                raise _error(
+                raise AttestationError(
                     f"'{where}' has unknown field(s): {', '.join(unknown)} "
                     f"(accepted: {', '.join(sorted(ENTRY_KEYS))})"
                 )
             if "path" not in entry:
-                raise _error(f"'{where}' must declare 'path'")
+                raise AttestationError(f"'{where}' must declare 'path'")
             mode = entry.get("attest", "content")
             select = _validated_select(entry, where)
             _check_mode(mode, select, where, item, field)
@@ -188,7 +186,7 @@ def _yaml_check(root: str, path: str, role: str, select: str | None) -> dict[str
     try:
         content = canonical_yaml.content_digest(data, select, where)
     except canonical_yaml.CanonicalYamlError as exc:
-        raise _error(f"cannot attest {exc}") from exc
+        raise AttestationError(f"cannot attest {exc}") from exc
     check["passed"] = True
     check["content_hash"] = content
     check["raw_content_hash"] = f"sha256:{hashlib.sha256(data).hexdigest()}"
