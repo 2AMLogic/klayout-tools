@@ -80,13 +80,17 @@ the script marks exactly that clock propagated
 (``set_propagated_clock [get_clocks <clock_port>]`` -- the clock object
 ``_clock_lines`` itself created) and then, after any SPEF annotation and
 before any timing/power metric is collected, dumps
-``report_clock_latency`` so the response carries machine-readable evidence
-of what propagation actually reached: the clock pins the clock network
-reaches (``clock_propagation.clock_sinks``) and the worst network latency
-among them. On a pinned-build session a routed tree moves a boundary hold
-check from met to violated exactly as the issue describes -- which is the
-point: ideal timing can call an input hold check MET that the propagated
-analysis calls VIOLATED.
+``report_clock_latency`` plus a dedicated sink-count query
+(:func:`_clock_sink_count_lines`, issue #7417) so the response carries
+machine-readable evidence of what propagation actually reached: the number
+of clock sink pins the clock network reaches
+(``clock_propagation.clock_sinks``, from OpenSTA's own
+``all_registers -clock_pins`` enumeration -- live-verified on the pinned
+build to follow the clock through the CTS buffers), and the worst network
+latency among the pins the latency report names. On a pinned-build session
+a routed tree moves a boundary hold check from met to violated exactly as
+the issue describes -- which is the point: ideal timing can call an input
+hold check MET that the propagated analysis calls VIOLATED.
 
 The option is **opt-in, and ``"ideal"`` remains the default and the
 backward-compatible behavior byte-for-byte**, because a bare DEF carries no
@@ -255,7 +259,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from . import _liberty_warnings, _sta_wire_load, env_provenance
+from . import _liberty_warnings, _sta_spef_inputs, _sta_wire_load, env_provenance
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
@@ -341,6 +345,22 @@ from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .post_route_sta_clock_propagation import (  # noqa: F401 -- re-exported names
+    _CLOCK_LATENCY_BEGIN,
+    _CLOCK_LATENCY_END,
+    _CLOCK_SECTION_RE,
+    _CLOCK_SINK_COUNT_BEGIN,
+    _CLOCK_SINK_COUNT_END,
+    _CLOCK_SINK_COUNT_RE,
+    _CLOCK_SINK_SAMPLE_LIMIT,
+    _NETWORK_LATENCY_RE,
+    _clock_latency_lines,
+    _clock_latency_rows,
+    _clock_sink_count_lines,
+    _max_network_latency,
+    _parse_clock_latency,
+    _parse_clock_sink_count,
+)
 from .post_route_sta_electrical import (
     _ELECTRICAL_NET_PREFIX,
     _ELECTRICAL_OK,
@@ -527,28 +547,6 @@ _PORT_CHECK_END = "===KLT_STA_PORT_CHECK_END==="
 #: map named a missing/ambiguous/wrong-direction port, *before* any timing is
 #: reported -- so a typo can never silently constrain no ports.
 _PORT_CHECK_EXIT_CODE = 3
-
-#: Issue #2739: brackets the ``report_clock_latency -digits 6`` dump a
-#: ``propagated_clock`` request emits after ``set_propagated_clock`` (and,
-#: when present, after ``read_spef``) -- the machine-readable evidence of
-#: what propagation actually reached. Per clock: a ``Clock <name>`` header
-#: line, then one (min-column) and one continuation (max-column)
-#: ``network latency <pin>`` row per clock sink per transition pair. A clock
-#: whose network reaches no clock pin prints the header and nothing else --
-#: the explicit "propagation could not be established" signal
-#: :func:`_parse_clock_latency` turns into ``clock_sinks: 0``.
-_CLOCK_LATENCY_BEGIN = "===KLT_STA_CLOCK_LATENCY_BEGIN==="
-_CLOCK_LATENCY_END = "===KLT_STA_CLOCK_LATENCY_END==="
-#: ``report_clock_latency``'s per-clock section header (``Clock clk``).
-_CLOCK_SECTION_RE = re.compile(r"^Clock (\S+)$")
-#: One ``network latency <pin>`` row: the min-column value on the row
-#: OpenSTA prints for the sink, and the max-column value on the continuation
-#: line it indents under the same pin -- one regex captures both.
-_NETWORK_LATENCY_RE = re.compile(r"^\s*([-+0-9.eE]+)\s+network latency (.+?)\s*$")
-#: Upper bound on how many clock-sink pin names the parsed evidence echoes
-#: into ``clock_propagation.clock_sinks_sample`` -- a diagnostic sample, not
-#: an exhaustive list (a real CTS tree reaches thousands of clock pins).
-_CLOCK_SINK_SAMPLE_LIMIT = 20
 
 #: Issue #2780: brackets the per-session constraint-completeness query
 #: (:func:`_constraint_completeness_lines`). One ``CHECK\t<check>\t<total>``
@@ -751,10 +749,10 @@ def run_sta(
             # Issue #3228: the map form (`{"min"|"nom"|"max": path}`) is the
             # interconnect axis of a liberty x interconnect matrix; there is
             # no single hoistable `spef_path` for it.
-            spef_map = _resolve_spef_map(spef_field, request_dir)
+            spef_map = _sta_spef_inputs.resolve_spef_map(spef_field, request_dir)
             spef_path = None
         else:
-            spef_path = _resolve_spef(spef_field, request_dir)
+            spef_path = _sta_spef_inputs.resolve_spef(spef_field, request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
     write_sdf = _validate_sdf(
         request.get("sdf"),
@@ -775,10 +773,8 @@ def run_sta(
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
 
-    # Issue #2879: the absolute `def_path`/`verilog_path`/`spef_path` above
-    # are *engine* paths -- what `read_def`/`read_verilog`/`read_spef` and
-    # the hashing below consume. What the response persists is derived from
-    # them exactly once, here, and never fed back to the engine.
+    # Build the report's path envelopes once. Hashing and OpenROAD use the
+    # original absolute paths, including when the report redacts them.
     report_paths = _ReportPaths.build(
         def_path=def_path,
         verilog_path=verilog_path,
@@ -786,7 +782,10 @@ def run_sta(
         spef_map=spef_map,
         repo_root=env_provenance.find_repo_root(request_dir),
     )
-    with report_paths.scrubbing_errors():
+    with (
+        report_paths.scrubbing_errors(),
+        _sta_spef_inputs.stable_input_hashes(spef_path, spef_map) as spef_hashes,
+    ):
         response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,
@@ -819,6 +818,7 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        _sta_spef_inputs.attach_hashes(response, spef_hashes)
         if constraints.boundary and "clock_driving_cell" in constraints.boundary:
             response["clock_driving_cell"] = constraints.boundary["clock_driving_cell"]
         if multicycle:
@@ -1951,53 +1951,6 @@ def _resolve_verilog(verilog_field: Any, request_dir: str) -> str:
     return os.path.abspath(path)
 
 
-_INTERCONNECT_CORNERS = ("min", "nom", "max")
-
-
-def _resolve_spef_map(spef_field: dict[str, Any], request_dir: str) -> dict[str, str]:
-    """Issue #3228: validate map-form ``request.spef`` and return the engine
-    paths keyed by interconnect corner in canonical min/nom/max order."""
-    if not spef_field:
-        raise PostRouteStaError(
-            "request.spef must be a non-empty object when given as a map"
-        )
-    unknown = [key for key in spef_field if key not in _INTERCONNECT_CORNERS]
-    if unknown:
-        raise PostRouteStaError(
-            f"request.spef has unknown interconnect corner '{unknown[0]}' "
-            f"-- allowed keys are {', '.join(_INTERCONNECT_CORNERS)}"
-        )
-    resolved: dict[str, str] = {}
-    for key in _INTERCONNECT_CORNERS:
-        if key not in spef_field:
-            continue
-        value = spef_field[key]
-        if not isinstance(value, str) or not value:
-            raise PostRouteStaError(
-                f"request.spef.{key} must be a non-empty string when given"
-            )
-        path = value if os.path.isabs(value) else os.path.join(request_dir, value)
-        if not os.path.isfile(path):
-            raise PostRouteStaError(f"spef not found for request.spef.{key}: {value}")
-        resolved[key] = os.path.abspath(path)
-    return resolved
-
-
-def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
-    if spef_field is None:
-        return None
-    if not isinstance(spef_field, str) or not spef_field:
-        raise PostRouteStaError("request.spef must be a non-empty string when given")
-    path = (
-        spef_field
-        if os.path.isabs(spef_field)
-        else os.path.join(request_dir, spef_field)
-    )
-    if not os.path.isfile(path):
-        raise PostRouteStaError(f"spef not found: {spef_field}")
-    return os.path.abspath(path)
-
-
 def _validate_constraints(
     constraints: Any,
 ) -> tuple[str, float | dict[str, float], float | None, float | None]:
@@ -2793,24 +2746,6 @@ def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
     )
 
 
-def _clock_latency_lines() -> list[str]:
-    """Marker-delimited ``report_clock_latency -digits 6`` (issue #2739) --
-    the machine-readable evidence of what propagation actually reached: one
-    ``Clock <name>`` section per clock, ``network latency <pin>`` rows per
-    clock sink. Emitted after any ``read_spef`` and before the timing
-    metrics, so the latencies it reports reflect the same parasitics the
-    timing numbers do. A clock whose network reaches no clock pin prints
-    the header and nothing else (:func:`_parse_clock_latency` -> ``sinks:
-    0``). Wrapped in ``catch`` so an OpenSTA build without the command
-    degrades the evidence to ``unknown`` rather than aborting the run (the
-    same degradation :func:`_parasitic_annotation_lines` established)."""
-    return [
-        f'puts "{_CLOCK_LATENCY_BEGIN}"',
-        "catch {report_clock_latency -digits 6} klt_clock_latency_msg",
-        f'puts "{_CLOCK_LATENCY_END}"',
-    ]
-
-
 def _io_delay_lines(
     clock_port: str,
     input_delay_ns: float | None,
@@ -3558,7 +3493,9 @@ def _sta_script_lines(
     fingerprints and the timing metrics) is the propagated analysis. The
     evidence dump (:func:`_clock_latency_lines`) runs *after* ``read_spef``
     so its network latencies reflect the same parasitics the timing
-    numbers do.
+    numbers do, and is followed by the sink-count query
+    (:func:`_clock_sink_count_lines`, issue #7417) that
+    ``clock_propagation.clock_sinks`` is parsed from.
 
     ``sdf_path`` (issue #2886; requires ``spef_path``) appends the shared
     ``write_sdf`` command (:func:`~klayout_tools._openroad_engine.write_sdf_line`)
@@ -3619,6 +3556,7 @@ def _sta_script_lines(
         lines += _parasitic_annotation_lines()
     if propagated_clock:
         lines += _clock_latency_lines()
+        lines += _clock_sink_count_lines(clock_port)
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
@@ -3971,90 +3909,6 @@ def _normalize_delay_block(block: str) -> list[str]:
     lines -- so trailing-whitespace or blank-line churn between two
     otherwise-identical reports cannot be mistaken for a delay change."""
     return [line.rstrip() for line in block.splitlines() if line.strip()]
-
-
-def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
-    """The ``clock_propagation`` evidence block (issue #2739), parsed from
-    one session's :data:`_CLOCK_LATENCY_BEGIN`/:data:`_CLOCK_LATENCY_END`
-    ``report_clock_latency`` dump for the request's clock:
-
-    - ``clock_sinks`` -- distinct clock pins the clock network reaches
-      (deduplicated across the per-transition rise/fall tables OpenSTA
-      prints). ``0`` is the explicit "propagation could not be established"
-      signal: the section header printed but no ``network latency`` row
-      under it. ``None`` means unknown -- the clock's section never appeared
-      (an OpenSTA build whose ``catch``-wrapped ``report_clock_latency``
-      produced nothing, or a marker-less stdout from an older stub/capture).
-    - ``max_network_latency_ns`` -- the worst ``network latency`` value the
-      section reports (the max-column continuation values included);
-      ``None`` when there are no sinks (or the section is absent).
-    - ``clock_sinks_sample`` -- the sink names in report order, capped at
-      :data:`_CLOCK_SINK_SAMPLE_LIMIT` (a diagnostic sample, mirroring the
-      SPEF missing-nets sample, not an exhaustive list).
-
-    A request clock whose section is absent is ``unknown``, never ``0``:
-    ``create_clock`` already failed the session for a missing clock port,
-    so absence here means the evidence command itself did not run -- not
-    that the tree is empty.
-    """
-    block = _extract_block(stdout, _CLOCK_LATENCY_BEGIN, _CLOCK_LATENCY_END)
-    section_seen, rows = (
-        _clock_latency_rows(block, clock_name) if block is not None else (False, [])
-    )
-    seen: set[str] = set()
-    sample: list[str] = []
-    for _latency_s, pin in rows:
-        if pin not in seen:
-            seen.add(pin)
-            if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
-                sample.append(pin)
-    max_latency = _max_network_latency(rows)
-    return {
-        "clock_sinks": len(seen) if section_seen else None,
-        "max_network_latency_ns": (
-            round(max_latency, 6) if max_latency is not None else None
-        ),
-        "clock_sinks_sample": sample,
-    }
-
-
-def _clock_latency_rows(
-    block: str, clock_name: str
-) -> tuple[bool, list[tuple[str, str]]]:
-    """``(section_seen, rows)`` for *clock_name* in a ``report_clock_latency``
-    block: whether the clock's section header appeared at all, and the
-    ``(latency, pin)`` string pairs of every ``network latency`` row under
-    it, in report order (duplicates across rise/fall tables kept)."""
-    rows: list[tuple[str, str]] = []
-    section_seen = False
-    current_section: str | None = None
-    for line in block.splitlines():
-        header = _CLOCK_SECTION_RE.match(line.rstrip())
-        if header:
-            current_section = header.group(1)
-            section_seen = section_seen or current_section == clock_name
-            continue
-        if current_section != clock_name:
-            continue
-        row = _NETWORK_LATENCY_RE.match(line.rstrip())
-        if row is not None:
-            latency_s, pin = row.groups()
-            rows.append((latency_s, pin))
-    return section_seen, rows
-
-
-def _max_network_latency(rows: list[tuple[str, str]]) -> float | None:
-    """The largest parseable latency among *rows* (see
-    :func:`_clock_latency_rows`), or ``None`` when none parses."""
-    max_latency: float | None = None
-    for latency_s, _pin in rows:
-        try:
-            latency = float(latency_s)
-        except ValueError:
-            continue
-        if max_latency is None or latency > max_latency:
-            max_latency = latency
-    return max_latency
 
 
 def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
