@@ -100,7 +100,9 @@ from .signoff_base import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
     _HASH_KIND_BYTES,
     _HASH_KIND_GEOMETRY,
+    _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     _REGENERATED_HASH_RE,
+    ATTESTATION_INPUT_FLAGS,
     DESCRIBE_GRADER_SCHEMA_VERSION,
     SCHEMA_VERSION,
     TIER_REPORT_SCHEMA_VERSION,
@@ -125,6 +127,7 @@ from .signoff_characterization import (
     attach_characterization_attestation as _attach_characterization_attestation,
 )
 from .signoff_composition import compose_rows, composed_count_field
+from .signoff_corner_box import CornerBox, corner_member_outcome, read_corner_box
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -252,10 +255,20 @@ from .signoff_generator_batch import (
     match_approval,
     run_approved_generator,
 )
+
+# The joint-grid spec-row form (issue #6969), hooked into
+# `_grade_multi_citation` below; moved names are for this file's ceiling.
+from .signoff_joint_rows import (
+    JointOutcome,
+    _members_rows_declared,
+    _multi_citation_rows,
+    evaluate_joint_rows,
+)
 from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
     _check_justified_gap_rationales,
     _check_structural_artifacts,
+    _declared_artifact_outcome,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -266,6 +279,7 @@ from .signoff_justified_gap import (
 # for its size-ratchet ceiling.
 from .signoff_multi_member import (
     _entry_problem,
+    failed_members,
     graded_input_provenance,
     with_member_coverage,
 )
@@ -305,21 +319,29 @@ from .signoff_power_delivery import (
 from .signoff_row_extent import has_covers, invalid_covers, label_list
 from .signoff_runset import (
     PINNED_RUNSETS,
+    REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
     check_runset,
+    mirrored_inductor_limitation,
     runset_disclosure,
     unrecognised_device_gaps,
 )
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
-from .signoff_spec_row_table import _members_rows_declared, build_spec_row_records
+from .signoff_spec_row_table import build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
-    sta_annotation_refusal,
     sta_citation_detail,
-    sta_constraint_refusal,
     sta_exception_disclosure,
     sta_item_exception_detail,
+)
+from .signoff_sta_geometry import (
+    STA_BOOL_OPTIONS,
+    sta_manifest_fields,
+    sta_opt_in_refusal,
+    sta_status_detail,
+    sta_status_ok,
+    sta_timing_shape,
 )
 
 # The store-pin companion resolution (issue #5963): a `klt yield` citation
@@ -355,6 +377,7 @@ from .signoff_unmet_reasons import (
     _REASON_NO_EVIDENCE,
     _REASON_NOT_POST_LAYOUT,
     _REASON_NOTHING_CHECKED,
+    _REASON_PARTIAL_COVERAGE,
     _REASON_STALE_ARTIFACT,
     _REASON_STALE_EVIDENCE,
     _REASON_TIER_NOT_SUPPORTED,
@@ -559,25 +582,6 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
 #: for relevance, rather than by an item-bound artifact.
 _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
 
-#: T1 item ids whose **only** accepted evidence is an artifact-anchored
-#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
-#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
-#: native envelope of any recognised kind satisfied them, topical relevance
-#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
-#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
-#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
-#: restricts them to ``{"generic"}``, so a native citation renders
-#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
-#:
-#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
-#: and keeps accepting any passing native envelope as before.
-#:
-#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
-#: decides :func:`_is_structurally_ungradeable_item` and
-#: :func:`_is_graded_by_build`, and moving these ids into it would silently
-#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
-#: behaviour change this tightening does not make.
-_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
 
 #: Native kinds a **digital** partition may cite for an otherwise
 #: attested-only item, in addition to ``"generic"`` (issue #4015): item 1's
@@ -1032,6 +1036,10 @@ def describe_grader() -> dict[str, Any]:
         "grading_ruleset_id": report["grading_ruleset_id"],
         "source_doc": CANONICAL_DOC_LABEL,
         "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+        "attestable_items": {
+            str(item): {"input_flag": flag, "envelope_kind": "generic"}
+            for item, flag in sorted(ATTESTATION_INPUT_FLAGS.items())
+        },
         # Additive (issue #2655): derived from the grader's own table.
         "opt_in_evidence_kinds": opt_in_kind_scopes(),
         "opt_in_kinds_by_item": opt_in_kinds_by_item(),
@@ -1126,35 +1134,6 @@ _REASON_UNDERSIZED_SAMPLE = "undersized_sample"
 #: entirely: a mechanically-observed negative result, like a failing
 #: registered ``critical: true`` metric.
 _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
-
-#: Issue #2109: the evidence resolved to a readable, recognised envelope of a
-#: kind this item accepts, whose producer applied the common rollup rule
-#: (:func:`~klayout_tools.coverage.coverage_rollup`) and reported its
-#: **partial** status token -- ``"clean_partial"``, ``"pass_partial"``, the
-#: per-kind spelling in :data:`_PARTIAL_STATUS_BY_KIND`. Every check it ran
-#: passed, and it also skipped requested work, so its result is real but not
-#: unconditional.
-#:
-#: It *names* the same class of problem as the "no runnable check proves
-#: this item" reasons (:data:`_REASON_WRONG_KIND`,
-#: :data:`_REASON_NOT_POST_LAYOUT`, :data:`_REASON_NOTHING_CHECKED`), per
-#: issue #826's invariant: the cited check did not fail on its own terms,
-#: and the fix is to re-run it over the work it skipped, not to fix a defect
-#: it found. Reporting it as ``check_failed`` -- which is what happened
-#: before this constant existed, since a partial token simply is not the
-#: kind's success token -- sent a reader looking for a violation that does
-#: not exist.
-#:
-#: It is *ordered* like :data:`_REASON_CHECK_FAILED` rather than like those
-#: three, because it replaces that reason on the same code path: it is
-#: decided from the envelope's own verdict, before :func:`_build_tier_item`'s
-#: kind gate (which only ever downgrades a would-be ``"met"``). So a partial
-#: report cited for an item that does not accept its kind reports
-#: ``partial_coverage``, exactly as a *failing* report of that kind reports
-#: ``check_failed`` rather than ``wrong_kind`` today. The three gated
-#: refusals differ because they apply to an envelope that *passed*, where
-#: "cite a different artifact" really is the more actionable answer.
-_REASON_PARTIAL_COVERAGE = "partial_coverage"
 
 # --- Justified declared gaps (issue #5599) ---------------------------------- #
 # The manifest's `spec_rows` reader, the justified object form of `gap`, and
@@ -1643,26 +1622,23 @@ def _type_label(annotation: Any) -> str:
     )
 
 
-def _validate_envelope(kind: str, envelope: Mapping[str, Any], source: str) -> None:
+def _validate_envelope(
+    kind: str,
+    envelope: Mapping[str, Any],
+    source: str,
+    sta_fields: frozenset[str] = frozenset(),
+) -> None:
     """Validate an envelope :func:`_classify` has already matched to ``kind``
     against that kind's declared shape (:data:`_ENVELOPE_SHAPES`), raising
     :class:`SignoffError` if it does not (issue #2033).
 
-    Checks every *required* key of the shape: present, and of the declared
-    type. Optional keys are not type-checked when present -- an unexpected
-    type there is already handled defensively by each reader
-    (``.get(...) or {}``, ``isinstance`` guards) and hard-failing on one
-    would retroactively reject committed evidence over a field this
-    boundary only reports.
-
-    Raising (rather than downgrading the check to "failed") is deliberate
-    and matches how every other unreadable input is handled here: a
-    malformed envelope means the verdict is unknown, not negative.
-    ``--manifest`` grading converts that into an explicit ``"unmet"`` /
-    ``"unrecognized_envelope"`` item -- see :func:`_grade_evidence`.
+    Required fields must be present and have their declared type. Manifest
+    grading validates its own STA fields so the refusal can report their
+    original values. Optional fields are checked by their readers.
     """
     hints = _shape_hints(kind)
-    for field in sorted(_ENVELOPE_SHAPES[kind].__required_keys__):
+    required = _ENVELOPE_SHAPES[kind].__required_keys__
+    for field in sorted(required - sta_fields if kind == "sta" else required):
         if field not in envelope:
             raise SignoffError(
                 f"envelope '{source}' matches the klt {kind} shape but is "
@@ -1844,14 +1820,28 @@ _STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] =
 )
 
 
-def _structural_kind(envelope: Mapping[str, Any]) -> str | None:
-    """The first :data:`_STRUCTURAL_KINDS` kind ``envelope`` matches."""
-    return next(
-        (kind for kind, matches in _STRUCTURAL_KINDS if matches(envelope)), None
-    )
+def _structural_kind(
+    envelope: Mapping[str, Any], sta_fields: frozenset[str]
+) -> str | None:
+    for kind, matches in _STRUCTURAL_KINDS:
+        if matches(envelope):
+            return kind
+    # Only strict STA grading diagnoses missing geometry on a timing report.
+    if (
+        "geometry_source" in sta_fields
+        and "stage_reached" not in envelope
+        and sta_timing_shape(envelope)
+    ):
+        return "sta"
+    return None
 
 
-def _classify(envelope: Mapping[str, Any], source: str) -> str:
+def _classify(
+    envelope: Mapping[str, Any],
+    source: str,
+    *,
+    sta_fields: frozenset[str] = frozenset(),
+) -> str:
     """Detect an envelope's kind from its own structural shape. Raises
     :class:`SignoffError` for an envelope that matches none of them.
 
@@ -1964,21 +1954,11 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     ):
         kind = "power"
 
-    # `klt sta` (issue #1959; docs/cli/sta.md): a top-level
-    # `geometry_source` string ("routed"/"placement_estimate"/
-    # "netlist_estimate") is unique to this verb's response -- no other klt
-    # verb emits that field at the top level -- and is always present, never
-    # null. It is paired with a shape discriminator so a future response
-    # carrying the field alone still fails loudly rather than being graded
-    # as timing evidence: `timing_status` (the flat, single-corner shape) or
-    # a `corners` list (the multi-corner `pdk.corners` shape). `klt
-    # place-and-route`'s response also carries `worst_slack_ns`/
-    # `timing_status`/`corners`, but no `geometry_source` -- it is a
-    # different verb with a different (unrestricted) corner-sweep contract
-    # and stays deliberately unrecognised, see this module's "Digital-flow
-    # evidence" docstring section.
-    elif isinstance(envelope.get("geometry_source"), str) and (
-        "timing_status" in envelope or isinstance(envelope.get("corners"), list)
+    # Ordinary STA recognition requires the verb's geometry marker and timing
+    # shape. A citation with malformed geometry gets a diagnostic only after
+    # other known shapes have been checked below.
+    elif isinstance(envelope.get("geometry_source"), str) and sta_timing_shape(
+        envelope
     ):
         kind = "sta"
 
@@ -1997,7 +1977,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     # (`_STRUCTURAL_KINDS`, which carries each shape's own recognition
     # rationale) so a new kind is one table entry rather than another branch
     # here (issue #2839).
-    elif (structural_kind := _structural_kind(envelope)) is not None:
+    elif (structural_kind := _structural_kind(envelope, sta_fields)) is not None:
         kind = structural_kind
 
     else:
@@ -2009,10 +1989,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
         # it. See :func:`_raise_unclassified`.
         _raise_unclassified(envelope, source)
 
-    # Issue #2033: recognised is not the same as well-formed -- see
-    # :func:`_validate_envelope` and this module's "Typed, runtime-validated
-    # evidence ingestion" docstring section.
-    _validate_envelope(kind, envelope, source)
+    _validate_envelope(kind, envelope, source, sta_fields)
     return kind
 
 
@@ -2212,6 +2189,8 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
     `klt signoff` never widens a claim to corners the claimant did not run,
     and never narrows one to a nominal corner the claimant did run.
     """
+    if not sta_status_ok(envelope):  # #7711: a present non-"ok" status fails
+        return False
     corners = envelope.get("corners")
     if isinstance(corners, list):
         if not corners:
@@ -2607,12 +2586,9 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
       it is surfaced informationally in :func:`_detail` instead.
-    - ``sta`` (issue #1959) carries no pass/fail ``status`` of its own at
-      all (``docs/cli/sta.md``: ``status`` is always ``"ok"``), so this
-      derives a verdict from the reported timing -- see
-      :func:`_sta_timing_passed`: every reported corner must be
-      ``timing_status == "constrained"`` with non-negative setup and hold
-      slack.
+    - ``sta`` requires a successful top-level status and constrained timing
+      with non-negative setup and hold slack at every reported corner
+      (:func:`_sta_timing_passed`, issues #1959 and #7711).
     - ``functional-verification`` passes on ``status == "pass"`` with
       consistent per-test counts, at least one passing test and no failures
       (skips are allowed) -- see :func:`_functional_verification_passed`.
@@ -2781,12 +2757,10 @@ def _non_passing_reason(
     """Why a non-passing envelope of a kind this item accepts is not
     evidence: :data:`_REASON_NOTHING_CHECKED` (issue #5479),
     :data:`_REASON_PARTIAL_COVERAGE` or :data:`_REASON_CHECK_FAILED`
-    (issue #2109).
-
-    :data:`_REASON_NOTHING_CHECKED` is decided here as well as in
-    :func:`_kind_gated_check` because an envelope reporting the rollup's
-    zero-coverage token fails :func:`_check_passed` and so never reaches that
-    function -- see :mod:`klayout_tools.signoff_nothing_checked`.
+    (issue #2109). The zero-coverage reason is decided here as well as in
+    :func:`_kind_gated_check`: such an envelope fails
+    :func:`_check_passed`, so it never reaches that function (see
+    :mod:`klayout_tools.signoff_nothing_checked`).
 
     Real failures keep precedence over both the zero-coverage and the partial
     token, by two different mechanisms -- only one of which is structural
@@ -2795,15 +2769,14 @@ def _non_passing_reason(
     - *Producer-side*, by construction: a run that found a defect reports
       its *failure* token, never the partial one
       (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
-      before it ever consults coverage), so those two tokens are disjoint
-      at the producer and reading which one was reported is enough.
+      before it ever consults coverage), so reading which one was reported
+      is enough.
     - *Signoff-side*, by the ordering below: :func:`_check_passed` fails an
       envelope off :func:`_critical_metric_blockers` (issue #1850)
       regardless of what its ``status`` says, so a partial token and a
-      failing registered ``critical: true`` metric can and do co-occur on
-      one envelope. That case is decided **here**, not at the producer --
-      the blocker is a real, mechanically-detected defect, so it must not
-      be reported as a mere coverage gap, and the check for it therefore
+      failing ``critical: true`` metric can co-occur on one envelope. That
+      case is decided **here**: the blocker is a real, mechanically-detected
+      defect that must not read as a mere coverage gap, so the check for it
       runs *before* the status token is read.
     """
     if _critical_metric_blockers(envelope):
@@ -2811,10 +2784,9 @@ def _non_passing_reason(
     # Issue #5479: a run whose own rollup token says it covered nothing, its
     # `coverage` block agreeing (never `coverage_unknown`/`malformed_coverage`
     # /`no_limits_checked`, each of which keeps its own reason) and the item
-    # accepting the kind, so a wrong artifact is not relabelled as a thin one.
-    # Directly after the blocker gate and nowhere earlier: a detected defect
-    # outranks a coverage statement, while every reason below reads a
-    # *different* status token, so none can co-occur with this one.
+    # accepting the kind, so a wrong artifact is not relabelled as a thin
+    # one. Directly after the blocker gate: a detected defect outranks a
+    # coverage statement, and every reason below reads a *different* token.
     if (
         vacuous.reports_zero_coverage(envelope)
         and _kind_is_accepted(kind, allowed_kinds)
@@ -2824,14 +2796,17 @@ def _non_passing_reason(
     # Issue #2870: a runset report that matched only the devices it knew.
     if (
         kind == "lvs"
+        and envelope.get("engine") == "klayout-runset"
         and envelope.get("status") == "match"
         and unrecognised_device_gaps(envelope)
-        and envelope.get("engine") == "klayout-runset"
     ):
         return _REASON_RUNSET_UNRECOGNISED_DEVICE
+    # Issue #6903: a runset report failing with the mirrored-inductor2
+    # terminal-order limit names it, not a bare check_failed.
+    if kind == "lvs" and mirrored_inductor_limitation(envelope) is not None:
+        return REASON_RUNSET_INDUCTOR_TERMINAL_ORDER
     # Issue #2873: a `klt yield` run whose only shortfall is evidence
-    # (`min_converged_samples` unmet, or a `target_sigma` that could not be
-    # evaluated) is "draw more / fix the sample set", not a design defect.
+    # (`min_converged_samples` unmet, a `target_sigma` unevaluable).
     if kind == "yield" and envelope.get("status") == "insufficient_evidence":
         return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
@@ -2839,12 +2814,9 @@ def _non_passing_reason(
     if _generic_overstates_coverage(kind, cast(_EvidenceEnvelope, envelope)):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
-    # rules it deliberately omitted is a coverage gap, not a defect.
-    if (
-        kind == "drc"
-        and envelope.get("status") == "clean"
-        and _drc_rule_subset(envelope)
-    ):
+    # rules it omitted is a coverage gap, not a defect.
+    drc_clean = envelope.get("status") == "clean" and _drc_rule_subset(envelope)
+    if kind == "drc" and drc_clean:
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
 
@@ -3257,9 +3229,9 @@ def _check_input_hashes(
     comparison exactly as before instead of dropping into a bucket of its
     own and quietly weakening the gate.
 
-    A merged sim report compares on its common shard digest. Mixed or
-    missing shard hashes produce a mismatch even within one report.
-    The mismatch preserves the original values and their artifact role.
+    Mixed or missing shard hashes in a merged sim report also produce a
+    mismatch. Each disagreeing role gets one entry with ``field`` set to
+    ``"input.content_hash"``, that ``role``, and its original ``values``.
     """
     by_role: dict[str, list[dict[str, Any]]] = {}
     for check in checks:
@@ -3990,6 +3962,7 @@ def build_tier_report(
                     ),
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
+                    corner_box=read_corner_box(manifest, t1_item["id"], partition),
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     na_scope=na_scope
                     if t1_item["id"] == 6 and partition == "digital"
@@ -4257,8 +4230,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     malformed (degrading this one item to ``invalid_evidence``) rather than
     silently reading as "off" -- an opt-in requirement must never fail open.
 
-    ``require_annotation_complete`` is issue #3258;
-    ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
+    The ``sta`` booleans (:data:`.signoff_sta_geometry.STA_BOOL_OPTIONS`; issues
+    #3258/#5234/#7711) are boolean-only; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
     ``coverage_disclosed`` (issue #5789) is validated lazily by
     :mod:`.signoff_coverage_disclosure`, so it is read only when the
@@ -4266,11 +4239,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     name the committed store manifest and optional member for a yield samples
     pin. Both must be strings when present, and the manifest path must be non-empty.
     """
-    require_annotation = raw.get("require_annotation_complete", False)
-    if not isinstance(require_annotation, bool):
-        return None
-    require_constraints = raw.get("require_complete_constraints", False)
-    if not isinstance(require_constraints, bool):
+    flags = {key: raw.get(key, False) for key in STA_BOOL_OPTIONS}
+    if not all(isinstance(value, bool) for value in flags.values()):
         return None
     cell_exceptions = foundry_cell.normalize_exceptions(
         raw.get("foundry_cell_exceptions")
@@ -4283,8 +4253,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         if key in raw and not isinstance(raw[key], str):
             return None
     return {
-        "require_annotation_complete": require_annotation,
-        "require_complete_constraints": require_constraints,
+        **flags,
         "foundry_cell_exceptions": cell_exceptions,
         "coverage_disclosed": raw.get("coverage_disclosed"),
         "artifact_manifest": raw.get("artifact_manifest"),
@@ -4668,6 +4637,7 @@ def _grade_evidence(
     repo_root: str | Path | None = None,
     generator_exec: GeneratorExecution | None = None,
     envelope_sink: list[dict[str, Any]] | None = None,
+    corner_box: CornerBox | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -4774,7 +4744,7 @@ def _grade_evidence(
     artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
     named artifact must re-hash to the pinned hash -- see that constant.
     """
-    resolution, reason = _resolve_evidence(spec, repo_root)
+    resolution, reason = _resolve_evidence(spec, repo_root, grade_sta=True)
     if resolution is None:
         return "unmet", reason, None, _unresolved_evidence_detail(spec, reason)
 
@@ -4794,15 +4764,14 @@ def _grade_evidence(
         resolution=resolution,
         allowed_kinds=allowed_kinds,
     )
+    unmet = corner_member_outcome(corner_box, spec, check_kind, envelope, unmet)
     if unmet is not None:
         _maybe_record_failed_sim(
             envelope_sink, unmet, check_kind, envelope, spec, resolution, allowed_kinds
         )
         return unmet
 
-    sta_refusal = sta_annotation_refusal(
-        check_kind, spec, envelope
-    ) or sta_constraint_refusal(check_kind, spec, envelope)
+    sta_refusal = sta_opt_in_refusal(check_kind, spec, envelope)
     if sta_refusal is not None:
         return sta_refusal
 
@@ -4895,6 +4864,7 @@ def _grade_check_outcome(
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
+    failure_detail.update(sta_status_detail(kind, envelope))
     exceptions = spec.get("foundry_cell_exceptions")
     if exceptions and _foundry_cell_exception_eligible(kind, envelope):
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
@@ -5587,6 +5557,8 @@ def _fold_kind_inputs(
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
+    *,
+    grade_sta: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve one normalized evidence ``spec`` to the envelope it names,
     without grading it -- returns ``(resolution, None)`` on success, or
@@ -5699,12 +5671,10 @@ def _resolve_evidence(
     envelope = crosscheck_project(envelope) or envelope
 
     try:
-        check_kind = _classify(envelope, source_label)
+        fields = sta_manifest_fields(spec, envelope) if grade_sta else frozenset()
+        check_kind = _classify(envelope, source_label, sta_fields=fields)
     except SignoffError as exc:
-        # Issue #2198: an envelope from a `klt` predating a marker field
-        # `_classify` now requires is refused like any unrecognised shape,
-        # but reported distinguishably -- the remedy ("re-run under a newer
-        # klt") is not the remedy for a foreign document.
+        # Keep version skew distinct from an unrecognized document.
         return None, _classify_failure_reason(exc)
 
     provenance = envelope.get("provenance") or {}
@@ -5897,6 +5867,7 @@ def _build_tier_item(
     require_derived_rows_invalid: bool = False,
     require_coverage_disclosure: bool = False,
     require_coverage_disclosure_invalid: bool = False,
+    corner_box: CornerBox | None = None,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -5999,6 +5970,7 @@ def _build_tier_item(
             repo_root=repo_root,
             generator_exec=generator_exec,
             envelope_sink=sink,
+            corner_box=corner_box,
         )
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
@@ -6035,7 +6007,9 @@ def _build_tier_item(
     item5_require_derived_invalid = (
         require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
     )
-    report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
+    report_list = corner_box is not None or (
+        item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
+    )
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif (
@@ -6079,6 +6053,7 @@ def _build_tier_item(
         status, reason, citation, failure_detail, extra = _grade_multi_citation(
             raw_entry,
             grade_spec,
+            corner_box=corner_box,
             spec_rows=multi_rows,
             spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
@@ -6181,6 +6156,7 @@ def _grade_multi_citation(
     required_kind_pair: tuple[str, ...] | None = None,
     require_derived: bool = False,
     check_slices: bool = True,
+    corner_box: CornerBox | None = None,
     require_derived_invalid: bool = False,
     require_coverage_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
@@ -6220,6 +6196,13 @@ def _grade_multi_citation(
     A ``check_failed`` sim member still credits its passing tagged rows as
     derived. Its own verdict and failing rows retain their reasons (#6027).
     Each graded entry copies its own resolved input provenance (#7598).
+
+    Issue #6969: a ``joint_grid`` row is covered only when every named
+    member graded ``met`` and proved the declared grid plus a condition
+    probe (:func:`.signoff_joint_rows.evaluate_joint_rows`); otherwise it
+    lands in ``uncovered_rows`` with per-member shortfalls under
+    ``detail.joint_rows``. A member no citation names, or a Monte Carlo
+    member, is ``invalid_evidence`` (see ``_post_member_outcome``).
     """
 
     def invalid(
@@ -6227,21 +6210,29 @@ def _grade_multi_citation(
     ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
 
-    if require_derived_invalid:
-        return invalid("'require_derived_rows' must be a boolean")
-
     members, problem = _checked_multi_members(
-        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid, check_slices
+        raw_entry,
+        spec_rows,
+        spec_rows_invalid,
+        require_coverage_invalid,
+        check_slices,
+        require_derived_invalid=require_derived_invalid,
+        corner_box=corner_box,
     )
     if members is None:
         return invalid(problem or "malformed evidence entry")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
-    failed = [g for g in graded if g[2][0] != "met"]
+    failed = failed_members(graded)
     # Rows each member is credited with, whether that was machine-derived,
     # and the issue-#5490 `reported` case (needs kind + the unratified set).
     credited = member_credited_rows(graded, met_envelopes, spec_rows)
-    row_info = multi_row_info(graded, failed, spec_rows, credited)
+    # Issue #6969: the joint-grid rows; a member no citation names, or a Monte
+    # Carlo one, is invalid evidence (decided in `_post_member_outcome`).
+    joint = evaluate_joint_rows(graded, spec_rows, met_envelopes)
+    row_info = multi_row_info(
+        graded, failed, spec_rows, credited, joint.covered, joint.rows
+    )
     slices = row_info.pop("row_slices", {})
     extra: dict[str, Any] = {
         **({"row_coverage": {"row_slices": slices}} if slices else {}),
@@ -6253,6 +6244,7 @@ def _grade_multi_citation(
                 "reason": g[1],
                 **graded_input_provenance(g[2] or g[3].get("cited_evidence")),
                 **graded_entry_campaign(g[2]),
+                **(corner_box.member_disclosure(spec, g[0]) if corner_box else {}),
             }
             for spec, rows, g in graded
         ],
@@ -6266,9 +6258,11 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
+    if corner_box is not None:
+        return corner_box.grade(met_envelopes or {}, graded, extra)
     # Check artifact hashes and timing margins before grading partial coverage.
     post_member = _post_member_outcome(
-        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
+        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra, joint
     )
     if post_member is not None:
         return post_member
@@ -6306,10 +6300,17 @@ def _checked_multi_members(
     spec_rows_invalid: bool,
     require_coverage_invalid: bool = False,
     check_slices: bool = True,
+    *,
+    require_derived_invalid: bool = False,
+    corner_box: CornerBox | None = None,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
     naming is invalid."""
+    if corner_box and corner_box.problem:
+        return None, corner_box.problem
+    if require_derived_invalid:
+        return None, "'require_derived_rows' must be a boolean"
     if require_coverage_invalid:  # issue #5789: item 3's malformed key
         return None, "'require_coverage_disclosure' must be a boolean"
     if spec_rows_invalid:
@@ -6353,22 +6354,6 @@ def _grade_required_kinds(
     )
 
 
-def _declared_artifact_outcome(
-    failure: tuple[str, dict[str, Any]] | None,
-    row_info: dict[str, Any],
-    extra: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet`` outcome for a failing declared-artifact hash check (a
-    justified gap's rationale, issue #5599, or a structural row's artifact,
-    #6985); ``None`` when it passed. A broken declaration is a distinct
-    documented reason -- never silently demoted to a lesser form, whose
-    reason would be ``partial_coverage``."""
-    if failure is None:
-        return None
-    reason, detail = failure
-    return "unmet", reason, None, {**row_info, **detail}, extra
-
-
 def _post_member_outcome(
     spec_rows: list[dict[str, Any]] | None,
     required_kind_pair: tuple[str, ...] | None,
@@ -6376,11 +6361,14 @@ def _post_member_outcome(
     met_envelopes: dict[int, dict[str, Any]] | None,
     row_info: dict[str, Any],
     extra: dict[str, Any],
+    joint: JointOutcome | None = None,
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
-    before partial coverage: the declared-artifact hash checks (justified-gap
-    rationale #5599, structural artifact #6985) first, then the timing-margin
-    rule (issue #4314). ``None`` when none applies."""
+    before partial coverage: the joint-grid declaration, declared-artifact
+    hashes and timing margin, in that order. Return ``None`` if none applies."""
+    problem = joint.problem if joint is not None else None
+    if problem is not None:
+        return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
     for check in (_check_justified_gap_rationales, _check_structural_artifacts):
         declared_unmet = _declared_artifact_outcome(check(spec_rows), row_info, extra)
         if declared_unmet is not None:
@@ -6488,16 +6476,6 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if best is None or len(lacking) < len(best):
             best = lacking
     return best or []
-
-
-def _multi_citation_rows(
-    report_list: bool,
-    spec_rows: list[dict[str, Any]] | None,
-    spec_rows_invalid: bool,
-) -> tuple[list[dict[str, Any]] | None, bool]:
-    """``(spec_rows, spec_rows_invalid)`` as :func:`_grade_multi_citation`
-    sees them: a plain per-cell report list ignores ``spec_rows`` entirely."""
-    return (None, False) if report_list else (spec_rows, spec_rows_invalid)
 
 
 def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:

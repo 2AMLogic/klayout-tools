@@ -342,16 +342,13 @@ SDF_BUILD_ARGS = ("-gspecify", "-ginterconnect", "-s", SDF_ANNOTATE_MODULE)
 #: ``INTERCONNECT`` entries removed before annotation because they run from
 #: a bit-selected top-level input port onto a pin of a *physical-only*
 #: instance -- a router-inserted antenna diode (or any filler/tapcell whose
-#: model is timing-empty), whose elaborated Verilog has no ``specify`` block
-#: and no output pin at all, so no modpath the entry could annotate exists.
-#: Issue #2363's counted exemption, kept distinct from
-#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` because the mechanism, the matched
-#: endpoint, and the condition all differ -- a caller reading
-#: ``environment.sdf.dropped`` needs to tell the two apart. Like the alias
-#: class (and unlike ``timingcheck``) it is not derived from a diagnostic
-#: substring: the entries are dropped from the SDF text up front
-#: (:func:`_drop_sdf_zero_delay_physical_only_interconnects`), so Icarus
-#: never emits a diagnostic for them at all.
+#: model is timing-empty), whose Verilog has no ``specify`` block or output
+#: pin. Icarus can annotate only the last-declared load on the port bit's net
+#: (#5705). Zero delay at every corner makes the drop timing-neutral even
+#: when the physical-only load is the survivor. Issue #2363's exemption
+#: counts the entries removed from the SDF text up front
+#: (:func:`_drop_sdf_zero_delay_physical_only_interconnects`) separately from
+#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS`.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
@@ -422,17 +419,15 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "same destination is left in place and still fails loudly"
     ),
     SDF_PHYSICAL_ONLY_DROPPED_CLASS: (
-        "Icarus Verilog cannot insert an intermodpath for an INTERCONNECT "
-        "entry that runs from a bit-selected top-level input port onto a pin "
-        "of a physical-only instance (a router-inserted antenna diode, or a "
-        "filler/tapcell whose model carries no timing) -- such an entry "
-        "fails with 'Could not find intermodpath!'. The destination's "
-        "elaborated model has no specify block and no output pin at all, so "
-        "there is no modpath the entry could ever annotate and no logic that "
-        "observes the pin; entries whose every min:typ:max delay value is "
-        "zero are therefore removed before annotation and counted here "
-        "instead of failing the run -- a non-zero-delay entry on the same "
-        "destination is left in place and still fails loudly"
+        "Icarus Verilog can insert an intermodpath only for the last-declared "
+        "load on a bit-selected top-level input port net. INTERCONNECT entries "
+        "for other loads fail with 'Could not find intermodpath!'. A physical-only "
+        "destination (such as a router-inserted antenna diode or a timing-empty "
+        "filler/tapcell) has no specify block or output pin and can be the "
+        "surviving load. Its entries are removed before annotation only when "
+        "every min:typ:max delay value is zero, which preserves simulated "
+        "timing at every corner. Non-zero entries remain subject to the "
+        "annotation diagnostic gate"
     ),
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS: (
         "Icarus Verilog can fail to insert an intermodpath for an "
@@ -1967,9 +1962,10 @@ def _apply_sdf_physical_only_drop(
     site): a zero-delay ``INTERCONNECT`` entry from a bit-selected top-level
     input port onto a pin of a *physical-only* instance (a router-inserted
     antenna diode, or any filler/tapcell whose model has no ``specify``
-    block and no output pin) cannot be annotated by Icarus at all, so it is
-    removed from the SDF text before ``$sdf_annotate`` and counted under
-    :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS` instead of failing the run.
+    block and no output pin) is removed before ``$sdf_annotate`` and counted
+    under :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`. Icarus can annotate only the
+    last-declared load (#5705). Zero delay at every corner makes the drop
+    timing-neutral even when that load is physical-only.
 
     Returns the path :func:`run_functional_verification` should hand to
     ``$sdf_annotate`` next -- ``annotate_source_path`` unchanged when
@@ -2315,7 +2311,7 @@ def run_functional_verification(
         # survivor, so the drop rests on timing emptiness, not "no modpath
         # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run; a non-zero-delay entry still fails.
+        # before annotation. Non-zero entries stay in the SDF.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,

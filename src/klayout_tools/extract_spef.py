@@ -18,10 +18,11 @@ The writer and its callers share :class:`~klayout_tools.extract_base.ExtractErro
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from typing import Any
 
 from .extract_base import ExtractError as ExtractError
+from .extract_spef_rc import _spef_rc_lines
 
 #: Standard Parasitic Exchange Format version this writer declares in its
 #: ``*SPEF`` header line (``klt extract --spef``, issue #948, Epic #700
@@ -463,14 +464,18 @@ def _def_spef(name: str) -> str:
 def _def_net_spellings(
     net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None,
     port_name_set: frozenset[str],
+    renamed_ports: Container[str] = (),
 ) -> dict[str, str]:
-    """Issue #2969: net name -> the SPEF spelling its DEF used (bare ``/`` =
-    hierarchy divider vs escaped ``\\/`` = literal slash). Port nets are left
-    out so they keep :func:`_spef_name` and ``*PORTS``/``*P`` agree."""
+    """Preserve DEF spelling for internal nets (#2969) and remapped dotted
+    nets with distinct port pins (#7694). Other ports keep their writer spelling."""
     return {
         str(name): name.spef
         for name in (net_instance_pins or {})
-        if isinstance(name, DefName) and name not in port_name_set
+        if isinstance(name, DefName)
+        and (
+            name not in port_name_set
+            or (name in renamed_ports and "." not in name and "." in name.spef)
+        )
     }
 
 
@@ -538,9 +543,7 @@ def _port_conn_lines(
     is_port: bool,
     renamed_ports: Mapping[str, Sequence[str]],
 ) -> list[str]:
-    """The ``*P`` entries a net's ``*CONN`` block opens with: one per DEF PIN
-    for a renamed port (issue #3257 gap B), else one under the net's own name
-    when it is a port."""
+    """Emit ``*P`` for each attached DEF pin (#3257), or for the ordinary port net."""
     if net in renamed_ports:
         return [f"*P {_def_spef(pin)} B" for pin in renamed_ports[net]]
     return [f"*P {spef_net} B"] if is_port else []
@@ -549,8 +552,7 @@ def _port_conn_lines(
 def _port_spellings(
     port_name_set: Iterable[str], renamed_ports: Mapping[str, Sequence[str]]
 ) -> dict[str, str]:
-    """``*PORTS`` names for ``port_name_set``, using the DEF PIN name(s) for
-    each renamed port (issue #3257 gap B)."""
+    """Spell ``*PORTS`` with the attached DEF pin names for renamed ports (#3257)."""
     spellings: dict[str, str] = {}
     for name in port_name_set:
         if name in renamed_ports:
@@ -580,7 +582,7 @@ def _write_spef(
     **A format translation of already-computed data, not a new extraction
     pass** (the survey's own §4.1 scoping): every R/C value written here
     comes straight from ``parasitics_report["nets"]`` -- the exact
-    star-topology model ``docs/cli/extract.md``'s "Parasitic (RC)
+    star or distributed-ladder model ``docs/cli/extract.md``'s "Parasitic (RC)
     extraction" section documents for the written SPICE ``R``/``C`` device
     cards -- re-expressed as SPEF's ``*D_NET``/``*CAP``/``*RES`` block
     syntax instead. Nothing here re-derives or re-measures a single R or C
@@ -662,7 +664,7 @@ def _write_spef(
     model's own internal net names.** :func:`_spef_net_topology_nodes` plans
     each block's ``net_node`` (where device-terminal legs, DEF-instance-pin
     legs, and the Gamma-shunt resistor all originate) and ``hub_node`` (where
-    self- and coupling-capacitance attach); every device terminal's own
+    self- and coupling-capacitance attach); each lumped net's device terminal's
     ``leg_net`` (a KLayout-internal net name, e.g. ``_031___t0``, that no
     ``*CONN`` entry anywhere ever declares) becomes one further ``<net>:<N>``
     node of its own, bridged to ``net_node`` by one ``*RES`` card -- the
@@ -670,7 +672,10 @@ def _write_spef(
     topology" section documents, expressed as SPEF resistor cards instead of
     SPICE ``R`` device cards, but with SPEF-legal node identifiers instead of
     the model's own (SPICE-legal, SPEF-illegal-as-a-two-node-endpoint)
-    internal net names.
+    internal net names. Distributed nets instead reuse ``net_node`` for the
+    middle terminal, number the other ladder nodes, and emit the reported
+    ``segments[]`` and per-terminal ground capacitances. Coupling still
+    attaches to the middle node.
 
     **Coupling ``*CAP`` entries reference the coupled net's own ``hub_node``
     (issue #961 defect 2), which is the coupled port's own bare name when it
@@ -710,14 +715,11 @@ def _write_spef(
     below is copied through unchanged -- no femtofarad/ohm rescaling, and
     therefore no unit-conversion error to introduce.
 
-    **A port whose PIN name differs from its NET name (issue #3257 gap B).**
-    A DEF ``- PortA + NET netA`` record makes the design port ``PortA`` while
-    the routed net -- and so the ``*D_NET`` -- is ``netA``. OpenSTA resolves a
-    bare node through the design's top-level *pin* names, so naming
-    ``netA`` in ``*PORTS``/``*P`` or as the RC hub is a non-existent port pin
-    (``STA-1656``). When ``net_instance_pins`` is a :class:`DefNetConnections`
-    whose ``port_pins`` names such a pin, ``*PORTS`` and the net's ``*P``
-    entries use the PIN name(s) and the hub is the internal ``<net>:1`` node.
+    **A port whose PIN name differs from its net (#3257 gap B, #7694).**
+    DEF connects `( PIN PortA )` to netA. Emit PortA in `*PORTS` and `*P`,
+    use the net spelling in `*D_NET`, and tie each pin to the net hub through
+    a zero-ohm resistor. A remapped dotted net keeps its DEF spelling here.
+    Matching pin and net names retain their usual port representation.
 
     **Floating duplicate-named nets are skipped (issue #3257 gap C).** With
     ``net_instance_pins`` given, a non-port net name that appears on several
@@ -764,7 +766,10 @@ def _write_spef(
     port_names = [_unescape_spice_safe_net_name(name) for name in port_names]
 
     port_name_set = frozenset(port_names)
-    def_net_spellings = _def_net_spellings(net_instance_pins, port_name_set)
+    renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
+    def_net_spellings = _def_net_spellings(
+        net_instance_pins, port_name_set, renamed_ports
+    )
 
     net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
         net_instance_pins or {}
@@ -797,7 +802,6 @@ def _write_spef(
             "(STA-1670). Check that the layout's routed shapes use the "
             "deck's layers (e.g. the PDK ships a LEF/DEF layer map)."
         )
-    renamed_ports = _renamed_ports(net_instance_pins, port_name_set)
 
     # One two-terminal coupling `*CAP` card per distinct coupled net pair
     # (issue #760's `coupled[]`), emitted exactly once -- `coupled[]` reports
@@ -871,7 +875,6 @@ def _write_spef(
     for entry in parasitics_report["nets"]:
         net = entry["net"]
         hub = entry["hub_net"]
-        terminals = entry.get("terminals", [])
         own_coupling = coupling_by_net.get(net, [])
         total_cap_ff = entry["capacitance_ff"] + sum(
             coupled["capacitance_ff"] for coupled in own_coupling
@@ -926,8 +929,10 @@ def _write_spef(
             lines.append("*CONN")
             lines += conn_lines
 
-        cap_lines: list[str] = [f"1 {hub_node} {entry['capacitance_ff']:.6f}"]
-        for i, coupled in enumerate(own_coupling, start=2):
+        cap_lines, res_lines = _spef_rc_lines(
+            entry, spef_net, net_node, hub_node, next_node_idx
+        )
+        for i, coupled in enumerate(own_coupling, start=len(cap_lines) + 1):
             # Issue #961 defect 2: reference the coupled net's own hub
             # *node* (a SPEF-legal identifier), not its bare name -- see
             # this function's docstring, "Coupling `*CAP` entries"
@@ -939,32 +944,7 @@ def _write_spef(
                 f"{i} {hub_node} {coupled_hub_node} {coupled['capacitance_ff']:.6f}"
             )
 
-        res_lines: list[str] = []
-        next_res_idx = 1
-        node_idx = next_node_idx
-        if terminals:
-            for terminal in terminals:
-                # Each device terminal's own `leg_net` (a KLayout-internal
-                # name, e.g. `_031___t0`, that no `*CONN` entry ever
-                # declares) becomes a fresh `<net>:<N>` internal node rather
-                # than being referenced by its own bare name -- issue #961's
-                # root-cause fix, see this function's docstring.
-                leg_node = f"{spef_net}:{node_idx}"
-                node_idx += 1
-                res_lines.append(
-                    f"{next_res_idx} {net_node} {leg_node} "
-                    f"{terminal['resistance_ohm']:.6f}"
-                )
-                next_res_idx += 1
-        elif hub_differs:
-            # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
-            # "The model: a star topology" section): a single resistor from
-            # the net's own node to its (now internal-node-numbered) hub --
-            # the only case where `hub_node` differs from `net_node`.
-            res_lines.append(
-                f"{next_res_idx} {net_node} {hub_node} {entry['resistance_ohm']:.6f}"
-            )
-            next_res_idx += 1
+        next_res_idx = len(res_lines) + 1
         for inst, pin in instance_pins:
             # Zero-ohm connectivity leg from the net's own primary node to
             # this real design pin -- see this function's docstring,

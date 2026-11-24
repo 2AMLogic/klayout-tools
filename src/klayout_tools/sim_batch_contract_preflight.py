@@ -118,16 +118,23 @@ def _runner_preflight_script(
         'rmsg="the fleet runner runs klt $rv but the submitting client is '
         + client_version
         + '"; fi',
-        'printf \'{"runner_klt_version": %s, "client_klt_version": "'
-        + client_version
-        + '"}\\n\' "$rj" >'
-        + identity_path,
     ]
     if required_features:
         lines.append(_feature_gate_shell(required_features, client_version))
     mandatory = tuple(
         name for name in required_features if name in _MANDATORY_RUNNER_FEATURES
     )
+    if mandatory:
+        lines.append(_mandatory_feature_probe_shell(mandatory).removesuffix("; "))
+    step_field = (
+        ', "step_on_unreached": "%s"' if "step_on_unreached" in mandatory else ""
+    )
+    step_arg = ' "$step_probe"' if step_field else ""
+    identity_format = (
+        f'{{"runner_klt_version": %s, "client_klt_version": "{client_version}"'
+        f"{step_field}}}"
+    )
+    lines.append(f"""printf '{identity_format}\\n' "$rj"{step_arg} >{identity_path}""")
     if mandatory:
         lines.append(
             _mandatory_feature_gate_shell(
@@ -171,8 +178,7 @@ def _mandatory_feature_gate_shell(
             f'"$mmsg" >{report_path}; '
         )
     return (
-        _mandatory_feature_probe_shell(features)
-        + 'if [ -n "$mmiss" ]; then '
+        'if [ -n "$mmiss" ]; then '
         + 'mmsg="the worker runs klt ${rv:-<unknown>}, which is not known '
         + "to support the request feature(s) $mmiss -- the request was not run "
         + '(rebuild the runner image from a release that has the feature)"; '
@@ -199,6 +205,7 @@ def remote_feature_preflight(request: dict[str, Any]) -> str:
     return (
         "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
         " | cut -c1-80); rv=${rv#klt }; rv=${rv# }; "
+        + _mandatory_feature_probe_shell(features)
         + _mandatory_feature_gate_shell(features)
     )
 
@@ -286,6 +293,53 @@ KLT_OSDI_PROBE
 )"""
 
 
+# Validate grading, not just parsing: both historical workers accept the request.
+# The selected executable only replays a completed step and never runs a solver.
+_STEP_UNREACHED_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$probe"' EXIT
+    cd "$probe" || exit 1
+    echo 'V1 x 0 1' > body.sp || exit 1
+    cat > replay <<'KLT_STEP_REPLAY' || exit 1
+#!/bin/sh
+case "$1" in --version|-v) echo 'ngspice-47'; exit 0;; esac
+while [ "$#" -gt 1 ]; do
+    if [ "$1" = -o ]; then
+        cat > "$2" <<'LOG'
+Circuit: * klt
+klt_step_begin 0 const
+klt_step_end 0 tran1
+edge__hit = 1.000000e+00
+Error: measure  miss  when(WHEN) : out of interval
+ meas tran miss when v(x)=2 failed!
+LOG
+        exit 0
+    fi
+    shift
+done
+exit 1
+KLT_STEP_REPLAY
+    chmod +x replay || exit 1
+    cat > request.json <<'KLT_STEP_REQUEST' || exit 1
+{"netlist":"body.sp","options":{"ngspice_binary":"./replay"},
+ "analysis_steps":[{"name":"edge","analysis":{"kind":"tran","args":"1n 4n"},
+ "measurements":[{"name":"hit","spice":".meas tran hit find v(x) at=1n"},
+ {"name":"miss","spice":".meas tran miss when v(x)=2","on_unreached":"null"}]}]}
+KLT_STEP_REQUEST
+    klt sim request.json --backend local --format json > result.json 2>/dev/null || :
+    python3 - <<'KLT_STEP_RESULT' 2>/dev/null
+import json
+with open("result.json") as handle:
+    hit, miss = json.load(handle)["corners"][0]["measurements"]
+if (hit["name"], hit["status"], hit["value"]) != ("edge.hit", "pass", 1):
+    raise SystemExit(1)
+if miss["name"] != "edge.miss" or miss["value"] is not None:
+    raise SystemExit(1)
+print({"not_reached": "supported", "error": "unsupported"}[miss["status"]])
+KLT_STEP_RESULT
+)"""
+
+
 def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
     """Shell setting ``$mmiss`` to the ``features`` the runner is not known
     to support, from ``$rv`` (the runner's ``klt --version`` string). It
@@ -296,6 +350,17 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
+    step_default = ""
+    if "step_on_unreached" in features:
+        step_default = "step_probe=unknown; "
+        floor = _feature_release_key("step_on_unreached")
+        checks += (
+            f' if [ "$mk" -eq {floor} ] && [ "${{rv%%+*}}" != "$mr" ]; then '
+            f"_klt_step_unreached_probe() {_STEP_UNREACHED_PROBE}; "
+            "step_probe=$(_klt_step_unreached_probe) || step_probe=unknown; "
+            'if [ "$step_probe" != supported ]; then '
+            'mmiss="${mmiss}${mmiss:+, }step_on_unreached"; fi; fi;'
+        )
     if "_regrade" in features:
         # A pre-feature dev build can report the same release segment as a
         # capable worker. Check the worker command before starting the grid.
@@ -317,7 +382,7 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
             )
     names = ", ".join(features)
     return (
-        "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "
+        step_default + "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "
         'case "$mr" in ""|.*|*..*) mr= ;; esac; '
         'if [ -z "$mr" ]; then '
         f'mmiss="{names}"; else '

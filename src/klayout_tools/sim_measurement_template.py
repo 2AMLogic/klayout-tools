@@ -46,6 +46,7 @@ import re
 from typing import Any
 
 from .sim_errors import SimError
+from .sim_windowed import expand_windowed
 
 #: The option's request field: ``options.measurement_cases``.
 OPTION = "measurement_cases"
@@ -94,6 +95,11 @@ def placeholder_fields(spec: dict[str, Any]) -> list[str]:
 
 
 def expand_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Expand client-side measurement forms before local or off-host dispatch."""
+    return expand_windowed(_expand_cases(request))
+
+
+def _expand_cases(request: dict[str, Any]) -> dict[str, Any]:
     """Validate ``options.measurement_cases`` plus the templated
     ``measurements[]`` entries and rewrite ``request["measurements"]`` to the
     expanded per-case specs.
