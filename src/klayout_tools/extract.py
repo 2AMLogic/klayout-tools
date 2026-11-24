@@ -401,10 +401,12 @@ from .extract_report_canonicalize import (
 from .extract_spef import (
     DefNetConnections,
     _renamed_def_name,
-    _unescape_spice_safe_net_name,
 )
 from .extract_spef import ExtractError as ExtractError
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
+from .extract_spef_block import (
+    _spef_missing_conn_warnings as _spef_missing_conn_warnings,
+)
 from .extract_spef_block import write_spef_block
 from .extract_validate import _attach_resistance_paths as _attach_resistance_paths
 from .extract_validate import _require_parasitics as _require_parasitics
@@ -2660,6 +2662,7 @@ def run_extract(
     )
 
     spef_path = write_spef_block(
+        circuit=circuit,
         spef_output=spef_output,
         parasitics_report=parasitics_report,
         def_net_connections=def_net_connections,
@@ -5154,71 +5157,33 @@ def _remap_def_net_connections(
     after_by_before: dict[str, str] = {}
     for _circuit, before, after in renames:
         after_by_before.setdefault(before, after)
-    remapped: dict[str, Sequence[tuple[str, str]]] = {}
-    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
-    for key, pins in def_net_connections.items():
-        target = after_by_before.get(key)
-        if target is None:
-            remapped[key] = pins
-        else:
-            # Issue #3900: the key carries the DEF's own SPEF spelling, so
-            # the SPEF a linked design reads still names the net as the DEF
-            # does; only the SPICE/JSON spelling is the renamed one.
-            renamed_items[_renamed_def_name(target, key)] = pins
-    # The renamed net is what actually exists, so it wins any key clash.
-    remapped.update(renamed_items)
-    # Keep the DEF's renamed-port map (issue #3257 gap B), re-keyed the same way.
+    targets = set(after_by_before.values())
+
+    def remap_key(key: str) -> str:
+        return (
+            _renamed_def_name(after_by_before[key], key)
+            if key in after_by_before
+            else key
+        )
+
+    # Keep the observed net's DEF spelling, instance pins and port pins together.
+    # An absent DEF net with the same normalized spelling has no layout island.
+    remapped = {
+        remap_key(key): pins
+        for key, pins in def_net_connections.items()
+        if key in after_by_before or key not in targets
+    }
     port_pins = getattr(def_net_connections, "port_pins", None)
     if port_pins is None:
         return remapped
     return DefNetConnections(
         {net: tuple(pins) for net, pins in remapped.items()},
-        {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
+        {
+            remap_key(key): pins
+            for key, pins in port_pins.items()
+            if key in after_by_before or key not in targets
+        },
     )
-
-
-def _spef_missing_conn_warnings(
-    parasitics_report: Mapping[str, Any],
-    original: Mapping[str, Sequence[tuple[str, str]]] | None,
-    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
-) -> list[str]:
-    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
-    correspond to a ``--def-net-connections`` net yet get no instance
-    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
-    those port-only), or a dotted DEF net whose rewritten spelling did not
-    reach the key lookup."""
-    if not remapped:
-        return []
-    names = [
-        _unescape_spice_safe_net_name(entry["net"])
-        for entry in parasitics_report["nets"]
-    ]
-    counts: dict[str, int] = {}
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-    stale = {
-        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
-        for key in (original or {})
-        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
-    }
-    missing = sorted(
-        name
-        for name in counts
-        if (remapped.get(name) and counts[name] > 1)
-        or (name in stale and not remapped.get(name))
-    )
-    if not missing:
-        return []
-    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
-    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
-    return [
-        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
-        f"net but were written without instance *CONN pins ({shown}"
-        + (f", +{more} more" if more > 0 else "")
-        + ") -- duplicated net names stay port-only, and a DEF net name the "
-        "extractor did not rename cannot be matched; downstream `klt sta` "
-        "will report these nets as partially unannotated"
-    ]
 
 
 def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
