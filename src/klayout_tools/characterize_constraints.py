@@ -72,11 +72,7 @@ def resolve_constraint_options(spec: dict[str, Any]) -> dict[str, Any]:
     """``options.constraint_degradation`` / ``constraint_window_ns`` /
     ``constraint_tolerance_ns``."""
     degradation = spec.get("constraint_degradation", DEFAULT_DEGRADATION)
-    if (
-        isinstance(degradation, bool)
-        or not isinstance(degradation, (int, float))
-        or not 0 < degradation <= 1
-    ):
+    if not is_number(degradation) or not 0 < degradation <= 1:
         raise ConstraintError(
             "request.options.constraint_degradation must be a number in (0, 1]"
         )
@@ -92,11 +88,7 @@ def resolve_constraint_options(spec: dict[str, Any]) -> dict[str, Any]:
             "with low < 0 < high"
         )
     tolerance = spec.get("constraint_tolerance_ns", DEFAULT_TOLERANCE_NS)
-    if (
-        isinstance(tolerance, bool)
-        or not isinstance(tolerance, (int, float))
-        or tolerance <= 0
-    ):
+    if not is_number(tolerance) or tolerance <= 0:
         raise ConstraintError(
             "request.options.constraint_tolerance_ns must be a positive number"
         )
