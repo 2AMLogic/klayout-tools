@@ -902,6 +902,7 @@
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
+        "klayout_tools._verilog_text",
         "klayout_tools._verilog_top",
         "klayout_tools._warn",
         "klayout_tools._yosys_error_messages",

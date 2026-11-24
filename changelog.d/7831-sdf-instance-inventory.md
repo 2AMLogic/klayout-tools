@@ -1,0 +1,1 @@
+- SDF preflight now checks cell and interconnect instance names in gate-level netlists that assign concatenations to bus slices (#7831).
