@@ -17,6 +17,7 @@ import pytest
 
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_image import read_batch_runner_images
 from test_sim_batch import (
     _PRELAUNCH_CLIENT,
     FAKE_BUCKET,
@@ -174,15 +175,35 @@ def _overrides_request(tmp_path, policy):
 
 
 @pytest.mark.parametrize("policy", ["enforce", "warn"])
-def test_unknown_manifest_warns_on_batch_dry_run(tmp_path, monkeypatch, policy):
+def test_unreadable_image_pointer_warns_on_batch_dry_run(tmp_path, monkeypatch, policy):
     _pin_client_version(monkeypatch, "0.9.2")
-    _publish_manifest(tmp_path, monkeypatch, [])
+    calls = []
+
+    def denied(argv, timeout_s):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 254, "", "AccessDenied")
+
+    monkeypatch.setattr(
+        sb.sim_batch_image, "read_batch_runner_images", read_batch_runner_images
+    )
+    monkeypatch.setattr(sb, "_run_subprocess", denied)
     path = _write_request(tmp_path, _overrides_request(tmp_path, policy))
     report = sim.run_sim(str(path), dry_run=True)
+    (call,) = calls
+    assert call[call.index("s3api") : -1] == [
+        "s3api",
+        "get-object",
+        "--bucket",
+        FAKE_BUCKET,
+        "--key",
+        "images/eda-batch-runner/current.json",
+    ]
     (warning,) = [d for d in report["diagnostics"] if d["code"] == _UNVERIFIED]
     assert warning["severity"] == "warning"
     assert warning["features"] == ["analysis_overrides"]
     assert "before launch" in warning["message"]
+    assert "published batch runner image identity is unknown" in warning["message"]
+    assert "worker will check" in warning["message"]
     published = report["published_runner"]
     assert published["status"] == "unknown" and published["images"] == []
     assert report["status"] == "valid"
@@ -211,6 +232,7 @@ def test_unknown_manifest_warns_before_submission(
     assert submitted["status"] == "submitted"
     (stderr,) = first_upload
     assert "analysis_overrides" in stderr and "before launch" in stderr
+    assert "published batch runner image identity is unknown" in stderr
 
 
 @pytest.mark.parametrize(("version", "overrides"), [(None, False), ("0.9.2", True)])

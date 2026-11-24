@@ -39,8 +39,7 @@ actually defined -- none creates a cycle, since none of those modules
 imports back from here or from ``place_and_route.py``, and none is ever
 monkeypatched through ``place_and_route.<name>``. The handful of names still
 defined in (or re-exported through) ``place_and_route.py`` itself
-(``PlaceAndRouteError``,
-``read_lef_header``, ``_resolve_gds_view``) are
+(``read_lef_header``, ``_resolve_gds_view``) are
 imported *inside* the function that uses them, deferred rather than at
 module scope, both because ``place_and_route.py`` in turn imports this
 module's own :func:`_merge_def_to_gds` back (module scope, no cycle -- this
@@ -65,6 +64,7 @@ from typing import Any
 from ._c_stdout import native_stdout_to_stderr
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
+from .place_and_route_base import PlaceAndRouteError
 from .place_and_route_min_area import repair_min_area
 from .place_and_route_pin_conductor import (
     _lef_net_layer_gds_map,
@@ -170,7 +170,6 @@ def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
     if scratch.dbu != main_layout.dbu:
         scratch.transform(kdb.ICplxTrans(scratch.dbu / main_layout.dbu))
         scratch.dbu = main_layout.dbu
-    from .place_and_route import PlaceAndRouteError
 
     # Temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
     # the in-memory byte API is 0.30-only (issue #5768).
@@ -400,9 +399,6 @@ def _output_dbu_factor(current_dbu_um: float, output_dbu_um: float | None) -> in
     than snapping geometry."""
     if output_dbu_um is None:
         return 1
-    # Deferred like the other helpers here: place_and_route imports this module.
-    from .place_and_route import PlaceAndRouteError
-
     ratio = current_dbu_um / output_dbu_um
     factor = round(ratio)
     if factor < 1 or abs(ratio - factor) > 1e-6 * factor:
@@ -491,11 +487,7 @@ def _merge_def_to_gds(
     import klayout.db as kdb
 
     from .pdk import resolve_klayout_layer_map
-    from .place_and_route import (
-        PlaceAndRouteError,
-        _resolve_gds_view,
-        read_lef_header,
-    )
+    from .place_and_route import _resolve_gds_view, read_lef_header
 
     cell_gds = _resolve_gds_view(pdk_info, cell_library)
     layer_map_path, layer_map_resolution = resolve_klayout_layer_map(pdk_info)

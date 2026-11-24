@@ -24,6 +24,7 @@ from . import (
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
+    sim_supply_relative,
     sim_transfer_meas,
     sim_twoport,
 )
@@ -203,7 +204,7 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``crossings_value_from`` (``measurements[].crossings.value_from``, #6913)
 #: likewise first ships in ``0.9.3``; an older runner would reject the unknown
 #: key (at best) or grade the raw crossing count, hence mandatory.
-#: Scanned mismatch_params (#5486) likewise require a post-v0.9.2 runner.
+#: Scanned mismatch_params (#5486) and exclusive_bounds (#7645) require 0.9.3.
 def _uses_extended_eye(request: dict[str, Any]) -> bool:
     for step in request.get("analysis_steps") or []:
         if isinstance(step, dict) and any(
@@ -249,6 +250,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "eye_step_or_phase": ((0, 9, 3), _uses_extended_eye),
     "osdi_pdk_relative": ((0, 9, 3), _uses_pdk_relative_osdi),
+    "exclusive_bounds": ((0, 9, 3), sim_supply_relative.request_uses_exclusive_bounds),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
@@ -333,12 +335,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
 #: -- mandatory membership mirrors that severity, moving the identical
 #: refusal from after the grid ran to before anything is launched.
-#: ``lossless supply_v corner_id spelling`` is mandatory because its
-#: post-run ``supply_precision_unsupported_worker`` echo check
-#: hard-fails the request (#5870); its registry version is still ``None``
-#: (unreleased), so it has no detector row yet and the pre-launch gates
-#: engage only once a release pins the version -- until then the echo
-#: check is the gate.
+#: ``lossless supply_v corner_id spelling`` (#5870) hard-fails on a post-run
+#: ``supply_precision_unsupported_worker`` echo. Its unreleased registry version
+#: is ``None``, so only that echo applies until a release pins the pre-launch gate.
+#: ``exclusive_bounds`` stops older workers from passing equality at a strict bound.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "mismatch_params",
@@ -347,6 +347,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "snm",
         "slope_band",
         "crossings_value_from",
+        "exclusive_bounds",
         "osdi_pdk_relative",
         "search",
         "search_param",

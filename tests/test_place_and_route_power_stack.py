@@ -307,11 +307,34 @@ def test_m5_cut_with_a_blocked_short_side_is_left_not_repaired():
     b.box(M4, 0, 192, 216, 216)
     b.box(M5, 0, 240, 216, 280)  # inside the top strip's 40 nm along ring
     report = b.run()
+    assert report["status"] == "violations"
+    assert report["patches"] > 0
     assert report["v4_m5_enclosure"] == {"targets": 1, "repaired": 0, "left": 1}
     assert b.merged(M5) == [
         kdb.Box(0, _nm(180), _nm(216), _nm(216)),
         kdb.Box(0, _nm(240), _nm(216), _nm(280)),
     ]
+
+
+def test_power_stack_reports_violations_when_all_targets_are_blocked():
+    b = _Builder()
+    for layer in (M4, M5, V4):
+        b.box(layer, 0, 192, 216, 216)
+    b.box(M4, -36, 192, -20, 216)
+    b.box(M4, 236, 192, 252, 216)
+    b.box(M5, 0, 240, 216, 280)
+    b.box(M5, 0, 132, 216, 172)
+    report = b.run()
+    assert report["status"] == "violations"
+    assert report["patches"] == 0
+    assert report["v4_m4_enclosure"] == {"targets": 1, "repaired": 0, "left": 1}
+    assert report["v4_m5_enclosure"] == {"targets": 1, "repaired": 0, "left": 1}
+
+
+def test_power_stack_with_no_targets_is_clean():
+    report = _Builder().run()
+    assert report["status"] == "clean"
+    assert report["patches"] == 0
 
 
 def test_non_asap7_pdk_is_a_byte_identical_no_op(tmp_path):

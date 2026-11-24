@@ -16,6 +16,11 @@
     "schema_version": {"type": "integer", "const": 3},
     "engine": {"enum": ["klayout", "netgen"], "description": "Echo of the request's engine (default klayout)."},
     "layout": {"$ref": "#/$defs/path_value", "description": "Resolved layout.file or layout.netlist used for the layout digest. By default, reports encode it as {path, scope}, with a repository-relative path for scope 'repo' or a null path for scope 'external'. Legacy reports can carry the request path as a string."},
+    "join_same_named_nets": {
+      "type": "boolean",
+      "const": true,
+      "description": "Inline extraction implicitly connected same-named top-level nets. Omitted when disabled."
+    },
     "label_layers": {
       "type": "object",
       "description": "Present only when a non-empty layout.label_layers override was applied: {role: [layer, datatype] | null}.",

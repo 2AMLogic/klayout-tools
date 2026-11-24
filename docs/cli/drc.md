@@ -26,9 +26,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   `.gz`; `--format text` still writes JSON to the file). The file is written
   for clean and violating runs alike (exit `3` included) and for
   `--engine both`; stdout and exit codes are unchanged. An unwritable `PATH`
-  is the standard error envelope (exit `1`). Rejected with `--check` and
-  `--list-rules`, which emit no run report. Mirrors `klt sim --report-out`
-  (issue #4393).
+  is the standard error envelope (exit `1`). The report is staged as a
+  sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Rejected with `--check` and `--list-rules`, which emit no run report.
+  Mirrors `klt sim --report-out` (issue #4393).
 - `--max-violations N` — `--engine klayout` only (issue #4464): serialize at
   most `N` entries in `violations[]`, the first `N` in the report's
   deterministic sort order; `0` is summary-only (no polygons, `coverage`
@@ -45,10 +47,10 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
   scope discipline, provenance citations) is documented in
   [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
-- `--top` — top cell to check when the stream has more than one; omit to
-  check every top cell (today's default, unchanged). `coverage` (see below)
-  is scoped along with it — `layers_in_stream_without_rules`/`layers_checked`
-  reflect only `<cell>`'s own hierarchy, not the whole stream. A named cell
+- `--top` — select a cell and its descendants. Omit it to check every top cell.
+  For the curated engine, this hierarchy determines rule applicability,
+  `layers_checked`, `layers_in_stream_without_rules`, `unchecked_rules` and
+  `marker_blind_layers_in_stream`. A named cell
   absent from the stream exits `1` with a clean error. With `--engine
   klayout`, a multi-top stream **requires** `--top` (see "Engine" →
   "klayout" below). The exact requested name is recorded on the report as
@@ -919,6 +921,17 @@ deck and avoids maintaining a second implementation or patching the PDK.
 An explicit stack such as `--deck-var metal_level=4LM` takes precedence over
 the variant preset.
 Other stacks and explicit `--deck-file` runs load the original script directly.
+
+The empty Metal4 layer is not inert in the deck. `metal4_drawn` has exactly
+one use site in `mslot.rb` — `mim_bottom_under_fusetop`, the only one of the
+four terms unioned into `dont_slot` that does not derive from `top_metal` —
+so on 3LM that term is always empty while the other three stay populated.
+Both rules that read `dont_slot` shift accordingly: `MSLOT<n>.1` subtracts
+less from `metal_large_slotted` and so checks a slightly larger region
+(possible over-report, never a missed slotting violation), and `MSLOT<n>.9`
+measures separation from `dont_slot` without the MIM-under-fusetop
+contribution — the check is not vacuous, but it cannot see a
+slot-to-MIM-bottom-under-fusetop separation.
 
 On KLayout 0.30.12 with the `f6eeac7dad08` PDK, a 40 µm square of unslotted
 Metal1 on 34/0 produced one `MSLOT1.1` violation (exit 3). The deck logged

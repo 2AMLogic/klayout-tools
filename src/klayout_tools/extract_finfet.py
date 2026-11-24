@@ -843,6 +843,7 @@ def _extract_with_parasitics(
     *,
     def_net_names: bool = False,
     declared_pins: frozenset[str] | None = None,
+    join_same_named_nets: bool = False,
     **parasitics_options: Any,
 ) -> tuple[
     kdb.Netlist, list[str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
@@ -853,6 +854,7 @@ def _extract_with_parasitics(
 
     from .extract import (
         _apply_declared_pins,
+        _extract_connected_netlist,
         _promote_orphan_named_nets,
         _purge_preserving_named_nets,
     )
@@ -873,7 +875,7 @@ def _extract_with_parasitics(
     def_net_name_probes = (
         _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
     )
-    l2n.extract_netlist()
+    _extract_connected_netlist(l2n, join_same_named_nets)
     netlist = l2n.netlist()
     pin_warnings: list[str] = []
     if def_net_names:
@@ -965,11 +967,7 @@ def extract_netlist_tuple(
     parasitics_deck: Any = None,
     **options: Any,
 ) -> tuple[Any, ...]:
-    """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
-    planar-only option was already refused by :func:`refuse_layout_options`;
-    the planar-only result slots are their documented empty values. Only the
-    ``--parasitics`` pass (issue #4558) and the DEF-driven net naming
-    (``--def-net-names``, ``--pins``; issue #4559) are honoured."""
+    """Return the planar extraction tuple with defaults for planar-only results."""
     parasitics_options = {
         key: options[key]
         for key in (
@@ -988,6 +986,7 @@ def extract_netlist_tuple(
         parasitics_deck,
         def_net_names=bool(options.get("def_net_names", False)),
         declared_pins=options.get("declared_pins"),
+        join_same_named_nets=options.get("join_same_named_nets", False),
         **parasitics_options,
     )
     return (
