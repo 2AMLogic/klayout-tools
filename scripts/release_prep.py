@@ -26,9 +26,15 @@ version changes nothing):
 - ``docs/cli/signoff.md``, each pending ``changelog.d/`` fragment, and the
   ``## Unreleased`` body of ``CHANGELOG.md``: "first release after `vPREV`"
   availability notes become "`klt X.Y.Z`" (PREV is the version being
-  superseded). A placeholder anchored on a release older than PREV can never
-  be resolved again; the prep run refuses (``PrepError``) naming the source
-  file and its physical line rather than let it ship stale. Historical
+  superseded). A note may be hand-wrapped: its words are separated by spaces
+  or one line break plus indentation, never a blank line. A placeholder
+  anchored on a release older than PREV can never be resolved again; the prep
+  run refuses (``PrepError``) naming the source file and the physical line the
+  note starts on rather than let it ship stale. An anchor newer than PREV is
+  a note for a later cut: it is left alone in ``docs/cli/signoff.md``, whose
+  text persists, but refused in a fragment or the ``## Unreleased`` body
+  (also the late inputs ``refresh`` collects), because those are consumed into
+  a published release section and no later run could resolve it. Historical
   ``CHANGELOG.md`` sections are left untouched.
 
 The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
@@ -66,8 +72,13 @@ _MERGE_SUBJECT_RE = re.compile(
     rf"^Merge pull request #\d+ from \S+?/release/v({_VERSION})(?:\s|$)"
 )
 _UNRELEASED_RE = re.compile(r"^## Unreleased[ \t]*$", re.MULTILINE)
+# The words of a note are separated by spaces/tabs or by one soft wrap (a single
+# line break plus indentation), as hand-wrapped Markdown prose has it. Never a
+# blank line: two paragraphs must not combine into a placeholder (issue #7493).
+_NOTE_GAP = r"(?:[ \t]+|[ \t]*\n[ \t]*)"
 _NOTE_PLACEHOLDER_RE = re.compile(
-    rf"(?:the )?(?:first|next) release after `?v?({_VERSION})`?"
+    rf"(?:the{_NOTE_GAP})?(?:first|next){_NOTE_GAP}release{_NOTE_GAP}after{_NOTE_GAP}"
+    rf"`?v?({_VERSION})`?"
 )
 
 
@@ -167,8 +178,17 @@ def update_signoff_notes(text: str, previous: str, new: str) -> str:
 def _resolve_notes(
     text: str, previous: str, new: str, source: str, start_line: int = 1
 ) -> str:
-    """Check anchors at their original lines before resolving this release."""
-    check_signoff_note_anchors(text, previous, source=source, start_line=start_line)
+    """Resolve notes in text that lands in a release section and is then gone.
+
+    Every caller passes a changelog fragment or changelog body: once its notes
+    are written into a release section no later cut can revisit them, so the
+    guard also refuses an anchor newer than ``previous`` here. Anchors are
+    checked against the original text, at their original lines, before any
+    substitution can collapse a wrapped note's line break.
+    """
+    check_signoff_note_anchors(
+        text, previous, source=source, start_line=start_line, consumed=True
+    )
     return update_signoff_notes(text, previous, new)
 
 
@@ -178,23 +198,44 @@ def check_signoff_note_anchors(
     *,
     source: str = "docs/cli/signoff.md",
     start_line: int = 1,
+    consumed: bool = False,
 ) -> None:
     """Refuse availability-note placeholders the resolver can never match again.
 
     A placeholder is only resolvable for the release being bumped *from*
     (``previous``); once ``base-version`` moves past its anchor it is orphaned
     for good. Raise instead of letting it ship silently stale (issue #5582).
+
+    An anchor newer than ``previous`` is a note for a later cut. That is right
+    for ``docs/cli/signoff.md``, whose text persists, so it passes. With
+    ``consumed=True`` the text is a fragment or changelog body that is written
+    into a published release section and never read again, so a newer anchor is
+    orphaned too and is refused (issue #7493).
+
+    The scan covers the whole text so a note wrapped across lines is found, and
+    the reported line is the physical line the note starts on (``\\n`` counts
+    only; ``str.splitlines`` would also split on form feeds and the like).
     """
 
-    for lineno, line in enumerate(text.splitlines(), start=start_line):
-        for match in _NOTE_PLACEHOLDER_RE.finditer(line):
-            if parse_version(match.group(1)) < parse_version(previous):
-                raise PrepError(
-                    f"{source}:{lineno}: availability note anchored"
-                    f" on v{match.group(1)}, older than the previous release"
-                    f" {previous} -- the note resolver can never match it again;"
-                    " resolve it by hand (e.g. '`klt X.Y.Z`')"
-                )
+    previous_version = parse_version(previous)
+    for match in _NOTE_PLACEHOLDER_RE.finditer(text):
+        anchor = match.group(1)
+        lineno = start_line + text.count("\n", 0, match.start())
+        if parse_version(anchor) < previous_version:
+            raise PrepError(
+                f"{source}:{lineno}: availability note anchored"
+                f" on v{anchor}, older than the previous release"
+                f" {previous} -- the note resolver can never match it again;"
+                " resolve it by hand (e.g. '`klt X.Y.Z`')"
+            )
+        if consumed and parse_version(anchor) > previous_version:
+            raise PrepError(
+                f"{source}:{lineno}: availability note anchored"
+                f" on v{anchor}, newer than the previous release"
+                f" {previous} -- this text is written into a release section"
+                " and not read again, so the note would ship unresolved;"
+                " resolve it by hand or remove it"
+            )
 
 
 def release_version_from_subject(subject: str) -> str | None:
@@ -240,10 +281,11 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     # On an idempotent re-run `current == new`; the notes were already resolved.
     new_signoff_text = None
     if signoff.exists() and current != new:
-        new_signoff_text = update_signoff_notes(
-            signoff.read_text(encoding="utf-8"), current, new
-        )
-        check_signoff_note_anchors(new_signoff_text, current)
+        # Check the original text: substituting a wrapped note collapses its
+        # line break, which would shift the line a later refusal reports.
+        signoff_text = signoff.read_text(encoding="utf-8")
+        check_signoff_note_anchors(signoff_text, current)
+        new_signoff_text = update_signoff_notes(signoff_text, current, new)
 
     pyproject.write_text(new_py_text, encoding="utf-8")
     changelog.write_text(new_log_text, encoding="utf-8")
