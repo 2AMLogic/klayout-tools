@@ -128,6 +128,14 @@ def build_fleet_report(
                     "block": "sky130-bandgap",
                     "source": "manifests/sky130-bandgap.json",
                     "kind": "analog",
+                    # Issue #6972: present only when this block's manifest
+                    # declared one -- the upstream repository and pinned
+                    # commit its design sources were consumed at, echoed
+                    # verbatim from the block's tier report.
+                    "upstream_source": {
+                        "repository": "https://github.com/2AMLogic/example-blocks",
+                        "commit": "0123456789abcdef0123456789abcdef01234567",
+                    },
                     "tier": "T1",
                     "t1_item_count": 11,
                     # What this build's own doc would have rendered
@@ -261,7 +269,8 @@ def build_fleet_report(
     field. Also propagates :class:`SignoffError` /
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     from :func:`build_tier_report` for a structurally invalid per-block
-    manifest (e.g. a missing/invalid ``kind``) -- a malformed block is a
+    manifest (e.g. a missing/invalid ``kind``, or a malformed
+    ``upstream_source`` pin) -- a malformed block is a
     fleet-manifest authoring error, not a "no evidence yet" grading outcome,
     so it aborts the whole roll-up rather than rendering that one block as
     silently unmet.
@@ -314,6 +323,18 @@ def build_fleet_report(
                 "block": block_name,
                 "source": source,
                 "kind": tier_report["kind"],
+                # Issue #6972: the block's declared upstream pin, echoed
+                # verbatim from its tier report -- present only when the
+                # block's manifest declared one. The row's own `source`
+                # above stays what it always was: the local manifest path
+                # (or `None` for an inline manifest) -- a locator for the
+                # *pin record*, while this is the locator for the *design
+                # sources the pin names*. Never graded.
+                **(
+                    {"upstream_source": tier_report["upstream_source"]}
+                    if tier_report.get("upstream_source")
+                    else {}
+                ),
                 "tier": tier_report["tier"],
                 "t1_item_count": tier_report["t1_item_count"],
                 # Issue #2202: carried here too, unlike per-item
