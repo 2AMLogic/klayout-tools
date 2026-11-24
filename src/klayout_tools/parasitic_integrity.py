@@ -498,18 +498,18 @@ def _check_open(
     terminals through its emitted segment resistors (``reps`` -- the net's
     connectivity from :func:`_net_connectivity`, computed once per net).
 
-    ``distributed`` nets get the real check. ``lumped`` nets report
+    ``distributed`` nets, and ``reduced`` nets (issue #6899: terminals
+    joined *only* by the emitted pair resistors, so connectivity is not
+    true by construction), get the real check. ``lumped`` nets report
     ``not_applicable``: the star/Gamma-shunt topology hangs every terminal
     leg off the hub with its own dedicated resistor *by construction*, so
     the emitted model carries no measurable terminal-to-terminal evidence
-    for a union-find to evaluate (and a missing-leg bug there is out of
-    this model's contract -- see ``docs/cli/extract.md``'s model-limits
-    note). Zero required terminals cannot support the check either
-    (nothing to connect); a single required terminal is vacuously
-    connected (``pass`` -- there is no other terminal to be disconnected
-    from).
+    for a union-find to evaluate (a missing-leg bug there is out of this
+    model's contract -- see ``docs/cli/extract.md``'s model-limits note).
+    Zero required terminals cannot support the check either (nothing to
+    connect); one required terminal is vacuously connected (``pass``).
     """
-    if net.rc_model != "distributed":
+    if net.rc_model not in ("distributed", "reduced"):
         return {
             "status": "not_applicable",
             "reason": "lumped model: terminal legs attach to the hub by "

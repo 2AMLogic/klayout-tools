@@ -62,11 +62,11 @@ the same ceiling: it exists to feed the derived-row check.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from .coverage import coverage_refusal_reason, work_id
+from .signoff_derived_bounds import derived_bounds_checked, limit_work_names
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
@@ -138,23 +138,6 @@ def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
     return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
-def _limit_work_names(ids: Iterable[Any]) -> set[str]:
-    """Measurement names behind the ``limit`` work ids in ``ids`` -- the
-    identities :func:`~.coverage.work_id` gives `klt sim`'s per-corner bound
-    checks (``limit:[corner_index, corner_id, name, key]``)."""
-    names: set[str] = set()
-    for raw in ids:
-        if not (isinstance(raw, str) and raw.startswith("limit:")):
-            continue
-        try:
-            parts = json.loads(raw[len("limit:") :])
-        except ValueError:
-            continue
-        if isinstance(parts, list) and len(parts) == 4 and isinstance(parts[2], str):
-            names.add(parts[2])
-    return names
-
-
 def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] | None:
     """Checked work IDs and measurement names with a skipped limit.
 
@@ -168,7 +151,7 @@ def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] |
         {key for key in checked if isinstance(key, str)}
         if isinstance(checked, list)
         else set(),
-        _limit_work_names(
+        limit_work_names(
             r.get("id")
             for r in (skipped if isinstance(skipped, list) else [])
             if isinstance(r, dict)
@@ -201,6 +184,8 @@ def _bounds_checked(
     keys = _limit_keys(measurement.get("limits"))
     if not isinstance(name, str) or not name or not keys:
         return False
+    if isinstance(measurement.get("derive"), dict):
+        return derived_bounds_checked(measurement, record, keys)
     if record is None:
         return True
     checked, skipped = record
@@ -426,6 +411,8 @@ def multi_row_info(
     failed: list[Any],
     spec_rows: list[dict[str, Any]] | None,
     credited: dict[int, tuple[list[str] | None, bool]] | None = None,
+    joint_covered: frozenset[str] = frozenset(),
+    joint_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
@@ -447,16 +434,17 @@ def multi_row_info(
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
 
-    Issue #6985: a row carrying the ``structural`` disposition is listed
-    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
-    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
-    covered nor a gap: its claim is evidenced by inspecting the pinned
-    artifact, not by a measurement). The key is omitted when no structural
-    row is declared, keeping a disposition-free report byte-identical.
+    Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
+    ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
+
+    Structural rows (#6985) appear separately in optional ``structural_rows``
+    entries with their id, claim and pinned artifact. They do not contribute
+    measured coverage, gaps or uncovered rows.
     """
     if spec_rows is None:
         return {}
     row_sources, slices, partial = row_credits(graded, credited or {}, spec_rows)
+    row_sources.update(dict.fromkeys(joint_covered, "derived"))
     failed_rows = sorted(
         {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
     )
@@ -491,4 +479,5 @@ def multi_row_info(
         **({"row_slices": slices} if slices else {}),
         **({"partial_rows": partial} if partial else {}),
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
+        **({"joint_rows": joint_rows} if joint_rows else {}),
     }

@@ -266,6 +266,7 @@ def run(args: argparse.Namespace) -> int:
                 distributed_rc=args.distributed_rc,
                 resistance_graph=args.resistance_graph,
                 resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+                resistance_network=args.resistance_network,
                 resistance_graph_caps=parse_resistance_graph_caps(args),
                 parasitic_variants=args.parasitic_variants,
                 substrate_tie_ohms=args.substrate_tie_ohms,
@@ -277,6 +278,7 @@ def run(args: argparse.Namespace) -> int:
                 reference_netlist=args.reference_netlist,
                 measure_timeout_s=args.measure_timeout_s,
                 flatten_schematic=args.flatten_schematic,
+                schematic_top=args.schematic_top,
                 device_only_leg=args.device_only_leg,
                 extract_only=args.extract_only,
                 submit_only=args.submit_only,
@@ -344,10 +346,13 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
-            # `--resistance-graph[-r-cut]` (issue #4037): `False`/`None` when
-            # never given, unchanged from every call site that predates them.
+            # `--resistance-graph[-r-cut]` (issue #4037) and
+            # `--resistance-network` (issue #6899): `False`/`None` when
+            # never given, unchanged from every call site that predates
+            # them.
             resistance_graph=args.resistance_graph,
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            resistance_network=args.resistance_network,
             # `--resistance-graph-max-*` (issue #6964): the explicit caps as
             # `{builder keyword: value}`; `None` when never given.
             resistance_graph_caps=parse_resistance_graph_caps(args),
@@ -379,6 +384,7 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            schematic_top=args.schematic_top,
             # `--device-only-leg` (issue #3298): a parasitic-free third leg
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.

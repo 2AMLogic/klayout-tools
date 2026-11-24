@@ -90,7 +90,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import sim_eye, sim_step_evidence
+from . import sim_derive, sim_eye, sim_step_evidence
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
@@ -464,8 +464,6 @@ def _resolve_step_measurements(
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
-    from .sim_validate import _validate_measurement_form
-
     specs = raw.get("measurements", [])  # an explicit null is refused too (#6412)
     if not isinstance(specs, list) or not all(isinstance(s, dict) for s in specs):
         raise SimError(
@@ -477,7 +475,7 @@ def _resolve_step_measurements(
     # new name can cause against them (illegal, duplicate, shadowing #5446).
     local_names: dict[str, str] = {}
     for spec in specs:
-        _validate_measurement_form(spec)
+        sim_derive.validate_step_form(spec, step["name"])
         _refuse_unsupported(spec)
         _check_intermediate(spec, f"step {step['name']!r}")
         local = spec["name"]
@@ -741,8 +739,9 @@ def _resolve_derived_measurements(
     # Only an absent key defaults (#6412); `or []` read null/{}/""/false/0 as absent.
     specs = request.get("measurements", [])
     _validate_measurement_forms(specs)
+    derive, specs = sim_derive.top_level_split(specs)
     derived_names = [str(spec["name"]) for spec in specs]
-    resolved: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = [dict(spec) for spec in derive]
     intermediates: dict[str, list[str]] = {}
     for position, spec in enumerate(specs):
         name = spec["name"]
@@ -839,7 +838,7 @@ def _check_log_keys_unique(specs: list[dict[str, Any]]) -> None:
     measurement, the name of each derived one -- must be unique, or two
     results would be read back from the same printed line."""
     seen: dict[str, str] = {}
-    for spec in specs:
+    for spec in sim_derive.per_corner_measurements(specs):
         key = spec["log_key"]
         if key in seen:
             raise SimError(

@@ -85,15 +85,15 @@ def test_malformed_slope_band_is_rejected(body, message):
 
 
 @pytest.mark.parametrize("other", sim_slope_band_meas._FORMS)
-def test_conflicting_forms_are_rejected(other):
+def test_slope_band_validator_names_conflicting_forms(other):
     spec = {"name": "s", "slope_band": _BODY, other: {"x": 1}}
     with pytest.raises(sim.SimError, match=f"'slope_band' together with '{other}'"):
-        sim._validate_measurement_forms([spec])
+        sim_slope_band_meas.validate_form_exclusive(spec)
 
 
 def test_every_other_form_also_refuses_slope_band_beside_it():
     """Exclusivity must not depend on which validator happens to run first."""
-    for other in ("snm", "eye", "settled", "step_resolution", "search", "transfer"):
+    for other in sim_slope_band_meas._FORMS:
         spec = {"name": "s", other: {"x": 1}, "slope_band": _BODY}
         with pytest.raises(sim.SimError, match="declare exactly one"):
             sim._validate_measurement_forms([spec])

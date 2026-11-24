@@ -213,6 +213,23 @@ def add_pex_extraction_args(
         ),
     )
     pex_parser.add_argument(
+        "--resistance-network",
+        dest="resistance_network",
+        action="store_true",
+        help=(
+            "write the Kron-reduced terminal network of --resistance-graph "
+            "in place of the star for every net whose graph solved ok with "
+            "3+ terminals and whose device terminals map one-to-one onto "
+            "its graph terminals, so tree-routed stub arms stop adding "
+            "series resistance to the current path (issue #6899); other "
+            "nets keep their established model, listed per net under "
+            "`extraction.resistance_graph.nets[].network`. Requires "
+            "--resistance-graph; cannot be combined with --distributed-rc "
+            "(inherited) or --engine klayout-runset. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
         "--resistance-graph-r-cut",
         dest="resistance_graph_r_cut",
         type=float,

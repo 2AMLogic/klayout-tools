@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .sim_corner_point import _supply_value_needs_full_precision
 from .sim_echo_messages import echo_unsupported_message
 from .sim_errors import SimError
+from .sim_transient_noise import check_transient_noise_seed_echo
 
 if TYPE_CHECKING:
     from .sim_corner_point import CornerPoint
@@ -259,3 +260,9 @@ def check_ngspice_options_echo(request: dict[str, Any], report: dict[str, Any]) 
             f"{json.dumps(echoed, sort_keys=True)}, which differs from the "
             f"declared {json.dumps(declared, sort_keys=True)}"
         )
+
+
+def check_runner_option_echoes(request: dict[str, Any], report: dict[str, Any]) -> None:
+    """Verify declared simulator options against the collected worker report."""
+    check_ngspice_options_echo(request, report)
+    check_transient_noise_seed_echo(request, report)
