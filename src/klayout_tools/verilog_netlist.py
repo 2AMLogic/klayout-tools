@@ -99,10 +99,12 @@ simple `assign <net> = <net>;` alias, and a plain concatenation `assign
 a vector alias or tie-off padding), expanded MSB-first into one per-bit
 alias using the module's own `wire`/`input`/`output`/`inout` declared
 widths; the two sides' total widths must agree exactly. A concatenation
-operand must be a plain net, single-index bit-select, nested concatenation
-or replication with a literal positive count (`{N{x}}`, issue #4117);
-literals (`1'b0`) and part-selects (`a[7:4]`) inside a concatenation stay
-rejected. A Verilog escaped identifier
+operand must be a plain net, single-index bit-select, fixed part-select of
+a declared bus in its declared direction (`a[7:4]`, issue #7822), nested
+concatenation or replication with a literal positive count (`{N{x}}`,
+issue #4117); literals (`1'b0`) inside a concatenation stay rejected. A
+part-select operand on the left-hand side of a concatenation `assign`
+stays rejected too. A Verilog escaped identifier
 (`\\name`) is accepted wherever a name is, as the single atomic token
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
@@ -886,7 +888,13 @@ def _concat_operand_bits(
     statement: str, operand: str, net_widths: dict[str, list[str]]
 ) -> list[str]:
     """Resolve one side of a concatenation assign (the LHS, or one RHS
-    operand) to its MSB-first list of single-bit net names."""
+    operand) to its MSB-first list of single-bit net names.
+
+    On the RHS (issue #7822) this is only the fallback of last resort:
+    :func:`_flatten_concat` resolves a fixed part-select leaf through
+    :func:`_range_slice_bits` first, so the part-select rejection below
+    fires for an LHS part-select, or for an RHS leaf whose bounds are not
+    plain integers."""
     operand = operand.strip()
     if "{" in operand or "}" in operand:
         raise _unsupported_assign(
@@ -945,7 +953,8 @@ def _flatten_concat(
     """Flatten a brace-delimited concatenation ``{ ... }`` to its MSB-first
     single-bit list (issue #4117). An element is a nested concatenation
     (``{a, b}``), a replication with a literal positive integer count
-    (``2{a}`` / ``2{a, b}``), or a plain operand resolved by
+    (``2{a}`` / ``2{a, b}``), a fixed part-select of a declared bus
+    (``a[7:0]``, issue #7822), or a plain operand resolved by
     :func:`_concat_operand_bits`, whose brace rejection backstops malformed
     input."""
     if not (expr.startswith("{") and _closes_at_end(expr)):
@@ -972,7 +981,23 @@ def _flatten_concat(
         elif element.startswith("{"):
             bits.extend(_flatten_concat(statement, element, net_widths))
         else:
-            bits.extend(_concat_operand_bits(statement, element, net_widths))
+            # Issue #7822: an RHS leaf may be a fixed part-select
+            # (`a[7:0]`, `\bus [7:0]`), resolved through
+            # `_range_slice_bits` -- which already checks declaration,
+            # bounds and declared direction -- before the plain-operand
+            # fallback. `_concat_operand_bits` keeps rejecting
+            # part-selects for its LHS callers, and for an RHS leaf whose
+            # bounds are not plain integers (which no slice grammar here
+            # matches, so it falls through to that rejection).
+            stripped = element.strip()
+            try:
+                sliced = _range_slice_bits(stripped, net_widths)
+            except VerilogNetlistError as exc:
+                raise _unsupported_assign(statement, str(exc)) from exc
+            if sliced is not None:
+                bits.extend(sliced)
+            else:
+                bits.extend(_concat_operand_bits(statement, stripped, net_widths))
     return bits
 
 
@@ -990,9 +1015,11 @@ def _expand_concat_assign(
     Verilog concatenation is MSB-first: the first operand supplies the
     most-significant bits. Both sides are expanded to MSB-first bit lists
     from the module's own declarations and zipped. Operands may be plain
-    nets, single-index bit-selects, nested concatenations and replications
+    nets, single-index bit-selects, fixed part-selects of a declared bus
+    (``a[7:4]``, in its declared direction -- issue #7822), nested
+    concatenations and replications
     with a literal positive count (``{N{x}}``, issue #4117); literals
-    (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
+    (``1'b0``) are rejected with the
     same "only a plain ... is supported" error as any other unsupported
     ``assign``, as is a width mismatch between the two sides (Verilog would
     silently zero-extend or truncate; a sign-off converter must not).
