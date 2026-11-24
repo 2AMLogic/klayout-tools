@@ -6,7 +6,9 @@ monotonic, so growth moved here instead. The toy-PDK fixtures live in
 `test_gen_pdk_pcell`; see its module docstring for how they are fabricated.
 """
 
-from klayout_tools.pdk_pcell import generate_pdk_pcell
+import pytest
+
+from klayout_tools.pdk_pcell import PdkPCellError, generate_pdk_pcell
 from test_gen_pdk_pcell import _toy_pdk
 
 
@@ -72,27 +74,16 @@ def test_generate_pdk_pcell_child_name_is_independent_of_cell_name(tmp_path):
     assert children == {cell}
 
 
-def test_generate_pdk_pcell_cell_name_equal_to_vendor_name_collides(tmp_path):
-    """Observed behavior (issue #5933 edge case), pinned rather than endorsed.
-
-    With no ``__core`` suffix, ``--cell-name`` equal to the vendor PCell name
-    collides with the child: KLayout uniquifies the *top* to ``<name>$1`` while
-    the report's ``cell_name`` still says ``<name>``. Tracked separately; if it
-    is fixed (#6128), update this test and the docs clause together.
-    """
+def test_generate_pdk_pcell_refuses_cell_name_equal_to_vendor_name(tmp_path):
     root, _package, library, cell = _toy_pdk(tmp_path)
     output = tmp_path / "collide.gds"
-
-    report = generate_pdk_pcell(
-        {
-            "pdk_pcell": f"{library}/{cell}",
-            "pdk": {"variant": "sky130A", "root": str(root)},
-            "options": {"cell_name": cell, "output": str(output)},
-        }
-    )
-
-    assert _read_hierarchy(output) == {
-        cell: (False, []),
-        f"{cell}$1": (True, [cell]),
-    }
-    assert report["cell_name"] == cell
+    with pytest.raises(PdkPCellError, match="--cell-name") as caught:
+        generate_pdk_pcell(
+            {
+                "pdk_pcell": f"{library}/{cell}",
+                "pdk": {"variant": "sky130A", "root": str(root)},
+                "options": {"cell_name": cell, "output": str(output)},
+            }
+        )
+    assert cell in str(caught.value)
+    assert not output.exists()

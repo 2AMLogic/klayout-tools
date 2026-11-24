@@ -30,7 +30,6 @@ import pytest
 
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
-from klayout_tools import sim_batch_contract_worker as sbp
 from klayout_tools import sim_decks as sd
 from klayout_tools.sim import SimError
 
@@ -1642,12 +1641,12 @@ class TestBatchAsync:
             ),
             (
                 {"attach_job_id": "klt-sim-1", "backend": "local"},
-                "--attach requires backend 'batch'",
+                "backend 'local'.*--backend batch",
                 None,
             ),
             (
                 {"attach_job_id": "klt-sim-1", "hosts": 2},
-                "--attach requires backend 'batch'",
+                "single job .*hosts = 1.*batch-shards.json",
                 None,
             ),
             (
@@ -2062,7 +2061,7 @@ def _publish_runner(monkeypatch, *versions):
         dict(pdk="sky130A", region="r", ami_id=str(n), klt_version=v, klt_ref=None)
         for n, v in enumerate(versions)
     ]
-    monkeypatch.setattr(sbp, "published_runner_identities", lambda *a: images)
+    monkeypatch.setattr(sb.BatchConfig, "runner_identities", lambda *a: images)
 
 
 class TestRunnerDecksGate:

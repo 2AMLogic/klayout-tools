@@ -47,6 +47,7 @@ from .sim_batch_receipt import COLLECTED_NETLIST_MISMATCH
 from .sim_batch_worker_engine_build import portable_batch_report
 from .sim_set_runtime import (
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
+    REPORT_FILENAME,
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
     _MemberScheduler,
@@ -58,9 +59,6 @@ SET_SCHEMA_VERSION = 1
 
 #: Default bound on requests in flight at once (``--max-in-flight``).
 DEFAULT_MAX_IN_FLIGHT = 4
-
-#: Name of the per-request report written into each request's own directory.
-REPORT_FILENAME = "report.json"
 
 #: Name of the incrementally-updated request -> directory/job map (issue #3520).
 MANIFEST_FILENAME = "set-manifest.json"

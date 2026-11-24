@@ -139,6 +139,17 @@ def declare_ring_implant_params(pcell: Any, kdb: Any) -> None:
     )
 
 
+def declare_device_well_enclosure(pcell: Any, default_margin_um: float) -> None:
+    """Declare the device well margin separately from the guard ring well."""
+    pcell.param(
+        "device_well_enclosure_um",
+        pcell.TypeDouble,
+        "NWell enclosure of device active (µm)",
+        default=default_margin_um,
+        hidden=True,
+    )
+
+
 def declare_ring_well_margin(pcell: Any, default_margin_um: float) -> None:
     """Declare ``ring_well_margin_um``; the default is the caller's
     ``WELL_ENCLOSURE_MARGIN_UM`` (passed in, like ``esd_device``'s own

@@ -17,6 +17,7 @@ import pytest
 
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_image import read_batch_runner_images
 from test_sim_batch import (
     _PRELAUNCH_CLIENT,
     FAKE_BUCKET,
@@ -174,15 +175,35 @@ def _overrides_request(tmp_path, policy):
 
 
 @pytest.mark.parametrize("policy", ["enforce", "warn"])
-def test_unknown_manifest_warns_on_batch_dry_run(tmp_path, monkeypatch, policy):
+def test_unreadable_image_pointer_warns_on_batch_dry_run(tmp_path, monkeypatch, policy):
     _pin_client_version(monkeypatch, "0.9.2")
-    _publish_manifest(tmp_path, monkeypatch, [])
+    calls = []
+
+    def denied(argv, timeout_s):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 254, "", "AccessDenied")
+
+    monkeypatch.setattr(
+        sb.sim_batch_image, "read_batch_runner_images", read_batch_runner_images
+    )
+    monkeypatch.setattr(sb, "_run_subprocess", denied)
     path = _write_request(tmp_path, _overrides_request(tmp_path, policy))
     report = sim.run_sim(str(path), dry_run=True)
+    (call,) = calls
+    assert call[call.index("s3api") : -1] == [
+        "s3api",
+        "get-object",
+        "--bucket",
+        FAKE_BUCKET,
+        "--key",
+        "images/eda-batch-runner/current.json",
+    ]
     (warning,) = [d for d in report["diagnostics"] if d["code"] == _UNVERIFIED]
     assert warning["severity"] == "warning"
     assert warning["features"] == ["analysis_overrides"]
     assert "before launch" in warning["message"]
+    assert "published batch runner image identity is unknown" in warning["message"]
+    assert "worker will check" in warning["message"]
     published = report["published_runner"]
     assert published["status"] == "unknown" and published["images"] == []
     assert report["status"] == "valid"
@@ -211,6 +232,7 @@ def test_unknown_manifest_warns_before_submission(
     assert submitted["status"] == "submitted"
     (stderr,) = first_upload
     assert "analysis_overrides" in stderr and "before launch" in stderr
+    assert "published batch runner image identity is unknown" in stderr
 
 
 @pytest.mark.parametrize(("version", "overrides"), [(None, False), ("0.9.2", True)])
@@ -356,3 +378,69 @@ def test_crossings_preflight_checks_the_worker_parser(
     if not accepts_selector:
         assert "crossings_value_from" in result.stderr
     assert not list(tmp_path.glob("*/probe.json"))
+
+
+@pytest.mark.parametrize(
+    "feature", ["crossings_value_from", "eye_step_or_phase", "osdi_pdk_relative"]
+)
+@pytest.mark.parametrize("supported", [True, False], ids=["accept", "refuse"])
+def test_same_release_runner_probes_the_requested_sim_feature(
+    tmp_path, feature, supported
+):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _mandatory_feature_probe_shell,
+    )
+
+    # Validate the files inside the stub, while the generated shell's temporary
+    # directory still exists. Record validation separately from the chosen exit
+    # status so a broken fixture cannot masquerade as a deliberate refusal.
+    worker = tmp_path / "klt"
+    worker.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+assert sys.argv[1] == "sim"
+assert sys.argv[3:] == ["--backend", "local", "--dry-run", "--format", "json"]
+request = Path(sys.argv[2])
+doc = json.loads(request.read_text())
+assert (request.parent / doc["netlist"]).read_text().strip()
+feature = os.environ["PROBE_FEATURE"]
+if feature == "crossings_value_from":
+    assert doc["measurements"][0]["crossings"]["value_from"] == "period.mean"
+elif feature == "eye_step_or_phase":
+    assert doc["analysis_steps"][0]["measurements"][0]["eye"]["phase"] == "500p"
+elif feature == "osdi_pdk_relative":
+    preload, = doc["options"]["osdi_preload"]
+    relative = Path(preload["pdk_relative"])
+    assert not relative.is_absolute()
+    models = doc["models"]
+    assert (request.parent / models["pdk_root"] / models["pdk"] / relative).is_file()
+else:
+    raise AssertionError(feature)
+with Path(os.environ["PROBE_LOG"]).open("a") as log:
+    print(feature, file=log)
+sys.exit(int(os.environ["PROBE_EXIT"]))
+"""
+    )
+    worker.chmod(0o755)
+    log = tmp_path / "validated"
+    shell = "rv=0.9.3.dev10; " + _mandatory_feature_probe_shell((feature,))
+    proc = subprocess.run(
+        ["bash", "-c", shell + 'printf "%s" "$mmiss"'],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PROBE_FEATURE": feature,
+            "PROBE_LOG": str(log),
+            "PROBE_EXIT": "0" if supported else "1",
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert log.read_text().splitlines() == [feature]
+    assert proc.stdout == ("" if supported else feature)

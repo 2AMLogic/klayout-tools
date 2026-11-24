@@ -5,6 +5,7 @@ and converts the reference before the runset sees it. Split from
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -176,3 +177,61 @@ def test_matching_or_absent_tops_leave_reference_unrenamed(tmp_path, fake_klayou
     request["reference"].pop("top")
     _, seen = _capture_reference(request)
     assert seen["path"] == str(tmp_path / "ref.sp")
+
+
+def _sg13g2_text(tmp_path, text, **reference_options):
+    from klayout_tools.lvs_runset_reference import convert_reference
+
+    source = tmp_path / "ref.sp"
+    source.write_text(text)
+    deck = tmp_path / "sg13g2.lvs"
+    deck.write_text("# IHP native runset\n")
+    request = {
+        "reference": {"form": "subckt-call", "top": "SCHEM", **reference_options},
+        "layout": {"top": "LAYOUT"},
+    }
+    return Path(
+        convert_reference(str(source), request, str(tmp_path), str(deck))
+    ).read_text()
+
+
+@pytest.mark.parametrize(
+    ("call", "element"),
+    [
+        (
+            "Xcoil la lb sub inductor W=5.3u S=8.9u NR_R=1",
+            "Lcoil la lb sub inductor W=5.3u S=8.9u NR_R=1",
+        ),
+        (
+            "XC1 g1 w g2 sub SG13_HV_SVARICAP\n+ PARAMS: Nx=2 W=3.74u",
+            "CC1 g1 w g2 sub SG13_HV_SVARICAP Nx=2 W=3.74u",
+        ),
+    ],
+)
+def test_sg13g2_native_reader_receives_passive_element(tmp_path, call, element):
+    converted = _sg13g2_text(tmp_path, f".subckt SCHEM\n{call}\n.ends SCHEM\n")
+    assert element in converted.splitlines()
+    assert ".subckt LAYOUT" in converted
+
+
+@pytest.mark.parametrize(
+    "call", ["Xcoil a b inductor W=1u", "Xvar a b c sg13_hv_svaricap W=2u"]
+)
+def test_sg13g2_native_passive_requires_all_terminals(tmp_path, call):
+    with pytest.raises(LvsError, match="terminals"):
+        _sg13g2_text(tmp_path, f".subckt SCHEM\n{call}\n.ends SCHEM\n")
+
+
+def test_sg13g2_explicit_mapping_and_defined_rf_subcircuit_take_precedence(tmp_path):
+    call = "Xcoil a b sub inductor W=5u"
+    text = f".subckt SCHEM\n{call}\n.ends SCHEM\n"
+    converted = _sg13g2_text(
+        tmp_path,
+        text,
+        device_map={"inductor": {"kind": "inductor", "class": "my_coil"}},
+    )
+    assert "Xcoil a b sub my_coil" in converted
+    (tmp_path / "cells.sp").write_text(
+        ".subckt inductor a b sub\nR1 a b 10\n.ends inductor\n"
+    )
+    assert call in _sg13g2_text(tmp_path, ".include cells.sp\n" + text)

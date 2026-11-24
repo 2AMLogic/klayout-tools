@@ -16,6 +16,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from .pex_errors import PexError
 from .sim_errors import SimError
 
 #: File name of the submit manifest, written under the pex artifact root.
@@ -45,8 +46,6 @@ def validate_async_flags(
 ) -> None:
     """Refuse every combination the async forms cannot represent, by name,
     before anything is extracted or written."""
-    from .pex import PexError
-
     if not submit_only and attach is None:
         return
     flag = "--submit-only" if submit_only else "--attach"
@@ -75,7 +74,6 @@ def validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -
     resolver ``klt sim`` applies per leg."""
     if capacity_wait_s is None:
         return
-    from .pex import PexError
     from .sim_batch import resolve_capacity_wait_s
 
     try:
@@ -97,8 +95,6 @@ def load_request(manifest_path: str) -> dict[str, Any]:
     """The ``klt pex`` request a ``--submit-only`` run recorded in its
     manifest, for a bare ``--attach`` (issue #4692). A manifest without one
     (written before schema 2) is refused by name."""
-    from .pex import PexError
-
     manifest = AsyncLegs._load(manifest_path)
     request = manifest.get("request")
     if not isinstance(request, dict):
@@ -138,6 +134,7 @@ class AsyncLegs:
         self._legs: list[dict[str, Any]] = []
         self._recorded: dict[tuple[str, str], dict[str, Any]] = {}
         self._manifest: dict[str, Any] = {}
+        self._schematic_top: str | None = None
         self._extracted_netlist_sha256: str | None = None
         self._request_sha256: dict[str, str] = {}
         # Issue #4686: a re-run of an interrupted --submit-only replays the
@@ -157,8 +154,6 @@ class AsyncLegs:
 
     @staticmethod
     def _load(path: str | None, *, flag: str = "--attach") -> dict[str, Any]:
-        from .pex import PexError
-
         try:
             with open(path or "", encoding="utf-8") as handle:
                 manifest = json.load(handle)
@@ -174,17 +169,27 @@ class AsyncLegs:
         return manifest
 
     def verify(
-        self, *, extracted_netlist_sha256: str | None, request_sha256: Mapping[str, str]
+        self,
+        *,
+        extracted_netlist_sha256: str | None,
+        request_sha256: Mapping[str, str],
+        schematic_top: str | None = None,
     ) -> None:
         """Refuse a manifest recorded for different inputs than this
         invocation extracted/loaded (the sim ``--attach`` precedent), and an
         ``--attach`` of a manifest whose submit never finished."""
-        from .pex import PexError
-
+        self._schematic_top = (
+            schematic_top.lower() if schematic_top is not None else None
+        )
         self._extracted_netlist_sha256 = extracted_netlist_sha256
         self._request_sha256 = dict(request_sha256)
         if not self._manifest:
             return
+        if self._manifest.get("schematic_top") != self._schematic_top:
+            raise PexError(
+                f"{self._flag()}: schematic DUT selection differs from the manifest",
+                code=FINGERPRINT_MISMATCH_CODE,
+            )
         recorded = {
             tb["label"]: tb["request_sha256"] for tb in self._manifest["testbenches"]
         }
@@ -225,8 +230,6 @@ class AsyncLegs:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """One leg. Blocking mode is exactly the plain ``run_sim`` call."""
-        from .pex import PexError
-
         if self.mode is None:
             return run_sim(request_path, artifacts_dir=artifacts_dir, **kwargs)
         if self.mode == "attach":
@@ -300,6 +303,11 @@ class AsyncLegs:
     def _write(self, *, complete: bool) -> None:
         payload: dict[str, Any] = {
             "schema_version": ASYNC_SCHEMA_VERSION,
+            **(
+                {"schematic_top": self._schematic_top}
+                if self._schematic_top is not None
+                else {}
+            ),
             "complete": complete,
             "extracted_netlist_sha256": self._extracted_netlist_sha256,
             "testbenches": [
@@ -335,8 +343,6 @@ class AsyncLegs:
             if (label, side) not in recorded
         ]
         if missing:
-            from .pex import PexError
-
             raise PexError(
                 "--submit-only: refusing to mark the manifest complete -- "
                 f"missing legs: {', '.join(missing)}",

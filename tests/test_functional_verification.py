@@ -163,7 +163,6 @@ error_msg="gcd(48, 18): got 6, want 999 (deliberate failure)" />
   </testsuite>
 </testsuites>
 """
-
 _GCD_RTL = "module gcd(input wire clk); endmodule\n"
 _TESTBENCH = "# stub testbench module -- never imported by these tests\n"
 
@@ -376,11 +375,11 @@ def test_testbench_search_path_relative_resolves_against_request_dir(tmp_path):
     shared = tmp_path / "shared-testbenches"
     shared.mkdir()
     _write(shared / "test_gcd.py", _TESTBENCH)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd", "search_path": "shared-testbenches"}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(shared.resolve())
+    assert module_dirs == [str(shared.resolve())]
 
 
 def test_testbench_search_path_absolute(tmp_path):
@@ -388,11 +387,11 @@ def test_testbench_search_path_absolute(tmp_path):
     shared = tmp_path / "elsewhere"
     shared.mkdir()
     _write(shared / "test_gcd.py", _TESTBENCH)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd", "search_path": str(shared)}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(shared.resolve())
+    assert module_dirs == [str(shared.resolve())]
 
 
 def test_testbench_search_path_missing_module_names_resolved_location(tmp_path):
@@ -418,11 +417,11 @@ def test_testbench_search_path_omitted_resolves_next_to_request(tmp_path):
     """Omitting `search_path` is fully additive -- behavior is byte-for-byte
     unchanged from before this key existed."""
     _setup_inputs(tmp_path)
-    module, module_dir, _testcase = fv._resolve_testbench(
+    module, module_dirs, _testcase = fv._resolve_testbench(
         {"module": "test_gcd"}, str(tmp_path)
     )
     assert module == "test_gcd"
-    assert module_dir == str(tmp_path.resolve())
+    assert module_dirs == [str(tmp_path.resolve())]
 
 
 @pytest.mark.parametrize("testcase", [7, [], [""], ""])
@@ -802,7 +801,7 @@ def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
         env={"X": "1"},
         build_log=str(tmp_path / "b.log"),
         module="m",
-        module_dir=str(tmp_path),
+        module_dirs=[str(tmp_path)],
         testcase=None,
         random_seed=None,
         test_dir=str(tmp_path),
@@ -3950,11 +3949,7 @@ def test_collect_sdf_alias_port_bits_finds_a_tie_cell_aliased_output_bit(tmp_pat
     assert fv._collect_sdf_alias_port_bits([source], "tie_alias_top") == {"uio_oe[0]"}
 
 
-def test_collect_sdf_alias_port_bits_is_empty_when_the_top_is_not_gate_level(tmp_path):
-    """A top module outside `verilog_netlist`'s narrow gate-level subset (an
-    ANSI-style header here) yields no alias map -- and must degrade to an
-    empty set rather than raising, since this is a normalization pass and
-    failing to normalize has to be no worse than never having tried."""
+def test_collect_sdf_alias_port_bits_in_ansi_gate_level_module(tmp_path):
     source = _write(
         tmp_path / "ansi_top.v",
         "module ansi_top (input wire a, output wire [1:0] y);\n"
@@ -3965,7 +3960,7 @@ def test_collect_sdf_alias_port_bits_is_empty_when_the_top_is_not_gate_level(tmp
         "endmodule\n",
     )
 
-    assert fv._collect_sdf_alias_port_bits([source], "ansi_top") == set()
+    assert fv._collect_sdf_alias_port_bits([source], "ansi_top") == {"y[0]", "y[1]"}
 
 
 def test_collect_sdf_alias_port_bits_is_empty_when_the_module_is_absent(tmp_path):
@@ -3991,35 +3986,13 @@ def test_drop_sdf_zero_delay_alias_port_interconnects_drops_only_that_entry(tmp_
     assert "(INTERCONNECT u2.out uio_oe[1] (2.000:2.000:2.000)" in text
 
 
-def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_entry(tmp_path):
-    """Acceptance criterion #2, at the unit level: a non-zero-delay entry on
-    the *identical* aliased destination is not dropped, so it reaches Icarus,
-    fails to annotate, and still raises through the diagnostic gate. Dropping
-    it would silently change simulated timing -- exactly what this exemption
-    must never do."""
-    sdf_path = _write(
-        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="1.000:1.000:1.000")
-    )
-
-    assert (
+@pytest.mark.parametrize("delay", ["1.000:1.000:1.000", "0.000:0.000:1.000"])
+def test_alias_port_refuses_any_nonzero_corner(tmp_path, delay):
+    sdf_path = _write(tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay=delay))
+    with pytest.raises(
+        FunctionalVerificationError, match=r"const_drive_0\.L_LO.*uio_oe\[0\]"
+    ):
         fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
-        is None
-    )
-
-
-def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_corner(tmp_path):
-    """The zero test spans *every* `min:typ:max` member, not just the one
-    `iverilog -T <corner>` selects: an entry that is zero at `min`/`typ` but
-    not at `max` still models real delay at a corner a caller may ask for,
-    so it stays."""
-    sdf_path = _write(
-        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="0.000:0.000:1.000")
-    )
-
-    assert (
-        fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
-        is None
-    )
 
 
 def test_drop_sdf_zero_delay_alias_port_interconnects_is_a_noop_without_aliases(
@@ -4413,21 +4386,16 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
 def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
     tmp_path,
 ):
-    """Acceptance criterion #2 against the real toolchain: the identical
-    `assign`-aliased destination carrying a **non**-zero delay is left in
-    place, hits the same `Could not find intermodpath!` inside Icarus, and
-    still raises. The #2285 exemption is bounded by the delay value, not by
-    the diagnostic text -- so it can never silently retime a run."""
+    """A nonzero tie-cell arc cannot be discarded at any corner."""
     _stage_tie_alias_port_design(tmp_path, tie_delay="1.000:1.000:1.000")
     annotated = _tie_alias_port_request(
         tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
     )
 
     with pytest.raises(
-        FunctionalVerificationError, match="did not fully apply"
-    ) as excinfo:
+        FunctionalVerificationError, match=r"const_drive_0\.L_LO.*uio_oe\[0\]"
+    ):
         run_functional_verification(annotated)
-    assert "Could not find intermodpath" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -4456,7 +4424,7 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # non-last-declared entry fails too; the old "more than one entry"
 # reading is superseded. That is also why the pinned no-fix case
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-# unresolvable`, where the second load is a `specify`-bearing cell) keeps
+# unresolvable`, where the first load is a `specify`-bearing cell) keeps
 # failing: dropping the diode entry there leaves the ordinary shape (b) entry
 # behind, still unresolvable.
 #
@@ -4465,10 +4433,10 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # output pin at all, no logic observes the pin, the entry can still be
 # the cap's survivor -- the drop rests on timing emptiness, not "no
 # modpath exists". `_drop_sdf_zero_delay_physical_only_interconnects`
-# removes exactly those entries and reports the count as its own
-# `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
-# identical pin, and *any* entry onto a `specify`-bearing destination, are
-# left in place and still fail loudly (both verified live).
+# removes those zero-delay entries and reports its own count in
+# `environment.sdf.dropped`. In the live non-zero cases, the first diode's
+# entry and the `specify`-bearing load's entry in the mixed-fanout case
+# stay in the SDF and still fail loudly.
 # --------------------------------------------------------------------------- #
 
 #: Gate-level netlist in the shape a real post-route `write_verilog` emits (a
@@ -4614,9 +4582,8 @@ def test_collect_sdf_physical_only_instances_skips_a_specify_bearing_lookalike(
 
 
 def test_collect_sdf_physical_only_instances_is_empty_without_the_model(tmp_path):
-    """A cell whose model is not among the run's own sources cannot be shown
-    to be modpath-free, so it is not treated as one -- every uncertainty on
-    this path has to resolve toward leaving the SDF entry in place."""
+    """A missing model leaves the cell unclassified and its SDF entry in
+    place. This preserves the entry whenever the model is uncertain."""
     source = _write(
         tmp_path / "diode_top.v",
         _PHYSICAL_ONLY_DIODE_DUT_V.replace(
@@ -5000,11 +4967,10 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
 def test_integration_real_icarus_sdf_nonzero_physical_only_interconnect_fails_loud(
     tmp_path,
 ):
-    """Acceptance criterion #2 against the real toolchain: the identical
-    physical-only destination carrying a **non**-zero delay is left in place,
-    hits the same `Could not find intermodpath!` inside Icarus, and still
-    raises. The #2363 exemption is bounded by the delay value, not by the
-    diagnostic text -- so it can never silently retime a run."""
+    """Non-zero entries for both diodes stay in the SDF. Icarus rejects the
+    first-declared diode with `Could not find intermodpath!`, so the
+    diagnostic gate still raises. The #2363 exemption is bounded by the
+    delay value to preserve the timing of any entry Icarus can apply."""
     _stage_physical_only_diode_design(tmp_path, diode_delay="1.000:1.000:1.000")
     annotated = _physical_only_diode_request(
         tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}

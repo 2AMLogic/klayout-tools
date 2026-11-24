@@ -174,8 +174,8 @@ implemented deliberately rather than rediscovered:
     (:data:`SDF_ALIAS_PORT_DROPPED_CLASS`,
     :func:`_drop_sdf_zero_delay_alias_port_interconnects`). The exemption
     is bounded by the entry's own delay value, not by the diagnostic text:
-    an entry with a non-zero value at *any* corner is left in place and
-    still fails the gate loudly. See the module comment above
+    a nonzero delay at any corner on a separately assigned output bit
+    is refused before the build. See the module comment above
     :func:`_drop_sdf_zero_delay_alias_port_interconnects` for the full
     write-up, including why Icarus's ``<file>:<line>:`` locator cannot be
     mapped back to an entry (its line counter is cumulative across
@@ -205,14 +205,17 @@ import subprocess
 import sys
 from typing import Any
 
-from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import ANCHOR_CWD as ANCHOR_CWD
+from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import path_envelope as _path_envelope
 from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from .env_provenance import find_repo_root, repo_relative_path
+from .env_provenance import find_repo_root
+from .env_provenance import repo_relative_path as repo_relative_path
 from .functional_verification_base import (  # noqa: F401 - public re-exports
     DEFAULT_SDF_CORNER,
     DEFAULT_SDF_ENTRIES,
@@ -282,17 +285,18 @@ from .functional_verification_sdf_internal_bus import (
     SDF_INTERNAL_BUS_NET_REASONS,
     _apply_sdf_internal_bus_net_drop,
 )
+from .functional_verification_sdf_output_concat import _sdf_output_concat_report
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
 )
 from .functional_verification_sdf_steps import (
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
-    SDF_COND_EXPRESSION_REASONS,
+    SDF_IOPATH_SYNTAX_REASONS,
     _apply_sdf_alias_port_drop,
     _apply_sdf_bus_port_source_drop,
-    _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _apply_sdf_iopath_syntax_drops,
     _bus_input_port_names,
     _sdf_refusal_attribution,
     _sdf_refusal_error,
@@ -338,16 +342,13 @@ SDF_BUILD_ARGS = ("-gspecify", "-ginterconnect", "-s", SDF_ANNOTATE_MODULE)
 #: ``INTERCONNECT`` entries removed before annotation because they run from
 #: a bit-selected top-level input port onto a pin of a *physical-only*
 #: instance -- a router-inserted antenna diode (or any filler/tapcell whose
-#: model is timing-empty), whose elaborated Verilog has no ``specify`` block
-#: and no output pin at all, so no modpath the entry could annotate exists.
-#: Issue #2363's counted exemption, kept distinct from
-#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` because the mechanism, the matched
-#: endpoint, and the condition all differ -- a caller reading
-#: ``environment.sdf.dropped`` needs to tell the two apart. Like the alias
-#: class (and unlike ``timingcheck``) it is not derived from a diagnostic
-#: substring: the entries are dropped from the SDF text up front
-#: (:func:`_drop_sdf_zero_delay_physical_only_interconnects`), so Icarus
-#: never emits a diagnostic for them at all.
+#: model is timing-empty), whose Verilog has no ``specify`` block or output
+#: pin. Icarus can annotate only the last-declared load on the port bit's net
+#: (#5705). Zero delay at every corner makes the drop timing-neutral even
+#: when the physical-only load is the survivor. Issue #2363's exemption
+#: counts the entries removed from the SDF text up front
+#: (:func:`_drop_sdf_zero_delay_physical_only_interconnects`) separately from
+#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS`.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
@@ -418,17 +419,15 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "same destination is left in place and still fails loudly"
     ),
     SDF_PHYSICAL_ONLY_DROPPED_CLASS: (
-        "Icarus Verilog cannot insert an intermodpath for an INTERCONNECT "
-        "entry that runs from a bit-selected top-level input port onto a pin "
-        "of a physical-only instance (a router-inserted antenna diode, or a "
-        "filler/tapcell whose model carries no timing) -- such an entry "
-        "fails with 'Could not find intermodpath!'. The destination's "
-        "elaborated model has no specify block and no output pin at all, so "
-        "there is no modpath the entry could ever annotate and no logic that "
-        "observes the pin; entries whose every min:typ:max delay value is "
-        "zero are therefore removed before annotation and counted here "
-        "instead of failing the run -- a non-zero-delay entry on the same "
-        "destination is left in place and still fails loudly"
+        "Icarus Verilog can insert an intermodpath only for the last-declared "
+        "load on a bit-selected top-level input port net. INTERCONNECT entries "
+        "for other loads fail with 'Could not find intermodpath!'. A physical-only "
+        "destination (such as a router-inserted antenna diode or a timing-empty "
+        "filler/tapcell) has no specify block or output pin and can be the "
+        "surviving load. Its entries are removed before annotation only when "
+        "every min:typ:max delay value is zero, which preserves simulated "
+        "timing at every corner. Non-zero entries remain subject to the "
+        "annotation diagnostic gate"
     ),
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS: (
         "Icarus Verilog can fail to insert an intermodpath for an "
@@ -485,7 +484,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "scalar port, or a cell with no model is left in place and still "
         "fails loudly"
     ),
-    **SDF_COND_EXPRESSION_REASONS,
+    **SDF_IOPATH_SYNTAX_REASONS,
     **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
@@ -603,10 +602,10 @@ def load_request_arg(
 
 def _resolve_testbench(
     testbench: Any, request_dir: str, *, require_module: bool = True
-) -> tuple[str, str, str | list[str] | None]:
-    """Resolve a cocotb module name, search directory, and selected testcases.
+) -> tuple[str, list[str], str | list[str] | None]:
+    """Resolve a cocotb module name, ordered search directories, and selected testcases.
 
-    A run needs the module file under ``testbench.search_path`` (defaulting
+    A run needs the module in a directory on ``testbench.search_path`` (defaulting
     to the request directory). An offline check only validates the declaration.
     During execution this check catches a missing module before cocotb imports
     it inside the simulator. In that case cocotb can exit zero and write no
@@ -626,31 +625,9 @@ def _resolve_testbench(
             f"path: {module!r}"
         )
 
-    search_path = testbench.get("search_path")
-    if search_path is not None:
-        if not isinstance(search_path, str) or not search_path:
-            raise FunctionalVerificationError(
-                "request.testbench.search_path must be a non-empty string when given"
-            )
-        search_dir = (
-            _rpath(search_path, request_dir, "request.testbench.search_path")
-            if require_module
-            else search_path
-        )
-    else:
-        search_dir = request_dir
-
-    module_path = os.path.join(search_dir, f"{module}.py")
-    if require_module and not os.path.isfile(module_path):
-        location = (
-            "request.testbench.search_path"
-            if search_path is not None
-            else "next to the request"
-        )
-        raise FunctionalVerificationError(
-            f"testbench module not found: expected '{module_path}' "
-            f"(request.testbench.module names a Python module resolved via {location})"
-        )
+    module_dirs = resolve_testbench_search_dirs(
+        testbench.get("search_path"), request_dir, module, require_module=require_module
+    )
 
     testcase = testbench.get("testcase")
     if testcase is not None:
@@ -672,7 +649,7 @@ def _resolve_testbench(
                 "strings, or null"
             )
 
-    return module, os.path.dirname(os.path.abspath(module_path)), testcase
+    return module, module_dirs, testcase
 
 
 def _resolve_options(
@@ -875,18 +852,6 @@ class _Report(dict):
     ``{path, scope}`` envelope (docs/json-contract.md, #2224)."""
 
     local_paths: dict[str, str | None]
-
-
-def _path_envelope(
-    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
-) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape (never absolute),
-    relative to ``repo_root`` (default: the cwd's repo -- a run passes the
-    request's, so its report does not vary with the invoking directory)."""
-    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
 
 
 def _initial_state_run_specs(
@@ -1307,6 +1272,8 @@ def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
                 f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
+    _reject_env_pythonpath(env)
+
     if verilog_top and env:
         raise FunctionalVerificationError(
             "request.env cannot be combined with testbench.verilog_top -- "
@@ -1589,7 +1556,7 @@ def _run_test(
     *,
     engine: str,
     module: str,
-    module_dir: str,
+    module_dirs: list[str],
     hdl_toplevel: str,
     testcase: str | list[str] | None,
     random_seed: int | None,
@@ -1609,7 +1576,9 @@ def _run_test(
     from "one test failed" to "nothing ran". The verdict comes from
     :func:`parse_results_xml` instead, which the caller runs next.
 
-    ``module_dir`` is prepended to ``sys.path`` for the duration of the call
+    ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
+    entry 0 shadows entry 1) for the duration of the call. A single directory
+    already on the path keeps its legacy position. This is done
     because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
     to the simulator as ``PYTHONPATH`` (verified live) -- there is no
     ``test_module`` search-path parameter to use instead.
@@ -1639,9 +1608,12 @@ def _run_test(
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
     for where each engine writes it.
     """
-    inserted = module_dir not in sys.path
-    if inserted:
-        sys.path.insert(0, module_dir)
+    original_path = sys.path
+    if len(module_dirs) > 1 or (module_dirs and module_dirs[0] not in original_path):
+        sys.path = [
+            *module_dirs,
+            *(path for path in original_path if path not in module_dirs),
+        ]
     try:
         engine_runner.test(
             test_module=module,
@@ -1671,11 +1643,7 @@ def _run_test(
             f"{engine} simulation failed: {exc} ({_log_tail(log_path)})"
         ) from exc
     finally:
-        if inserted:
-            try:
-                sys.path.remove(module_dir)
-            except ValueError:  # pragma: no cover - defensive
-                pass
+        sys.path = original_path
 
 
 def _engine_version(engine: str) -> str | None:
@@ -1994,9 +1962,10 @@ def _apply_sdf_physical_only_drop(
     site): a zero-delay ``INTERCONNECT`` entry from a bit-selected top-level
     input port onto a pin of a *physical-only* instance (a router-inserted
     antenna diode, or any filler/tapcell whose model has no ``specify``
-    block and no output pin) cannot be annotated by Icarus at all, so it is
-    removed from the SDF text before ``$sdf_annotate`` and counted under
-    :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS` instead of failing the run.
+    block and no output pin) is removed before ``$sdf_annotate`` and counted
+    under :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`. Icarus can annotate only the
+    last-declared load (#5705). Zero delay at every corner makes the drop
+    timing-neutral even when that load is physical-only.
 
     Returns the path :func:`run_functional_verification` should hand to
     ``$sdf_annotate`` next -- ``annotate_source_path`` unchanged when
@@ -2093,7 +2062,7 @@ def run_functional_verification(
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
     )
-    module, module_dir, testcase, plusargs = _resolve_testbench_target(
+    module, module_dirs, testcase, plusargs = _resolve_testbench_target(
         verilog_tb, request_doc["testbench"], request_dir
     )
     (
@@ -2184,6 +2153,7 @@ def run_functional_verification(
     # Instances renamed by issue #2897's escaped-divider rewrite, reported
     # as `environment.sdf.renamed` (absent when empty).
     sdf_renamed: list[dict[str, str]] = []
+    sdf_output_concat: list[dict[str, Any]] = []
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2298,30 +2268,27 @@ def run_functional_verification(
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )
-        # Issue #5296: drop operator-expression COND IOPATHs (Icarus parse error).
-        annotate_source_path = _apply_sdf_cond_expression_drop(
+        # Drop operator conditions and valueless IOPATHs before Icarus parses the SDF.
+        annotate_source_path = _apply_sdf_iopath_syntax_drops(
             annotate_source_path,
             output_dir,
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )
-        # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
-        # (any real design's bus ports produce these) can poison a sibling
-        # INTERCONNECT entry on its own net within one $sdf_annotate call.
-        # Deferring those entries to their own, later call (see the module
-        # comment above :func:`_split_sdf_bus_port_interconnects` for which
-        # of the two confirmed mechanisms this actually fixes) is a no-op
-        # for a design with only scalar top-level ports (#1069's own case)
-        # -- `sdf_paths` stays a single-element list in that case.
-        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the
-        # netlist drives through an `assign` alias (a P&R backend's
-        # tie-cell shape) cannot be annotated by Icarus at all and cannot
-        # be made annotatable by rewriting the endpoint either; a
-        # zero-delay-at-every-corner entry is dropped up front and counted
-        # in `environment.sdf.dropped` instead of failing the run (the
-        # helper carries the full write-up; non-zero entries stay in
-        # place and still fail the diagnostic gate loudly).
-        annotate_source_path = _apply_sdf_alias_port_drop(
+        # Issue #1619: a bit-selected top-level-port INTERCONNECT entry (any
+        # real design's bus ports produce these) can poison a sibling entry
+        # on its own net within one $sdf_annotate call. Deferring those
+        # entries to their own, later call -- the module comment above
+        # :func:`_split_sdf_bus_port_interconnects` records which of the two
+        # confirmed mechanisms this fixes, and the scalar-ports-only no-op
+        # (#1069's own case) -- keeps `sdf_paths` single-element there.
+        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the netlist
+        # drives through an `assign` alias cannot be annotated by Icarus at all
+        # and cannot be made annotatable by rewriting the endpoint either; a
+        # zero-delay-at-every-corner entry is dropped up front and counted in
+        # `environment.sdf.dropped` instead of failing the run (the helper
+        # refuses nonzero delays on separately assigned bits).
+        annotate_source_path, sources, sdf_output_concat = _apply_sdf_alias_port_drop(
             annotate_source_path,
             output_dir,
             sources,
@@ -2344,7 +2311,7 @@ def run_functional_verification(
         # survivor, so the drop rests on timing emptiness, not "no modpath
         # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run; a non-zero-delay entry still fails.
+        # before annotation. Non-zero entries stay in the SDF.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
@@ -2481,7 +2448,7 @@ def run_functional_verification(
             spec,
             engine=engine,
             module=module,
-            module_dir=module_dir,
+            module_dirs=module_dirs,
             hdl_toplevel=build_hdl_toplevel,
             testcase=testcase,
             random_seed=random_seed,
@@ -2620,9 +2587,9 @@ def run_functional_verification(
                         "dropped": _sdf_dropped_report(
                             sdf_dropped_counts, sdf_pre_dropped_arcs
                         ),
-                        # Additive (issue #2897): `{from, to}` per escaped-
-                        # divider instance renamed for annotation.
+                        # Additive (#2897): `{from, to}` per escaped-divider rename.
                         **_sdf_renamed_report(sdf_renamed),
+                        **_sdf_output_concat_report(sdf_output_concat, repo_root),
                     }
                 ),
             },
@@ -2660,6 +2627,10 @@ from .functional_verification_mutation_variant import (  # noqa: E402, F401
 )
 from .functional_verification_run_results import (  # noqa: E402
     _collect_run_results,
+)
+from .functional_verification_search_path import (  # noqa: E402
+    _reject_env_pythonpath,
+    resolve_testbench_search_dirs,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
     _check_verilog_top_sdf,

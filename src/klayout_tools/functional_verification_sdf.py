@@ -790,9 +790,8 @@ def _split_sdf_bus_port_interconnects(
 # entry is dropped only when *every* delay value it carries (all three
 # `min:typ:max` members of every rvalue, not just the `-T`-selected one) is
 # zero, so dropping it cannot change any simulated timing at any corner. A
-# **non**-zero-delay entry on the identical alias-aliased port bit is left
-# in place, fails to annotate exactly as before, and still raises
-# `FunctionalVerificationError` -- loud, not silently retimed.
+# nonzero delay on a separately assigned output bit raises before simulation.
+
 #
 # Keying on the *entry's* delay value rather than on the diagnostic line is
 # also the only workable shape: Icarus's `SDF ERROR: <file>:<line>:` locator
@@ -825,61 +824,60 @@ _SDF_DELAY_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _SDF_INTERCONNECT_HEAD_RE = re.compile(r"\(INTERCONNECT\s+(\S+)\s+(\S+)")
 
 
+def _gate_level_output_aliases(chunk: str, module: str) -> set[str]:
+    """Find explicit bit aliases in a gate-level module."""
+    from .verilog_netlist import VerilogNetlistError, collect_gate_level_port_aliases
+
+    header, _, body = chunk.partition(";")
+    port_list = re.fullmatch(r"module\s+\S+?\s*\(([^()]*)\)\s*", header, re.DOTALL)
+    if port_list is None:
+        return set()
+    tokens = [token.strip() for token in port_list[1].split(",")]
+    ansi = [_ANSI_PORT_TOKEN_RE.fullmatch(token) for token in tokens]
+    is_ansi = all(ansi)
+    if is_ansi:
+        ports = [match.groups() for match in ansi if match is not None]
+        names = ", ".join(name for _, _, name in ports)
+        declarations = " ".join(
+            f"{direction} {width or ''} {name};" for direction, width, name in ports
+        )
+        chunk = f"module {module} ({names}); {declarations}\n{body}"
+    try:
+        aliases = collect_gate_level_port_aliases(chunk).get(module, {})
+    except VerilogNetlistError:
+        return set()
+    # A vector concat can also produce bit aliases in the connectivity map,
+    # but Icarus can annotate that join. Only separately assigned bits qualify.
+    output_buses = _verilog_bus_output_names(chunk)
+    bits = {
+        f"{bus}[{int(index)}]"
+        for bus, index in re.findall(
+            r"\bassign\s+([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*=", body
+        )
+        if bus in output_buses
+    }
+    return {
+        port for port in aliases if port in bits or (not is_ansi and "[" not in port)
+    }
+
+
 def _collect_sdf_alias_port_bits(
     source_paths: list[str], hdl_toplevel: str
 ) -> set[str]:
-    """Every top-level port (bit-expanded: ``uio_oe[0]``, or a bare scalar
-    port name) of ``hdl_toplevel`` whose only Verilog-level connection is an
-    ``assign`` alias -- the port references an SDF ``INTERCONNECT``
-    destination can name but Icarus cannot insert an intermodpath onto
-    (issue #2285).
-
-    Reuses :func:`klayout_tools.verilog_netlist.collect_gate_level_port_aliases`
-    (issue #2021's own alias map, already reused by
-    ``klayout_tools.lvs._apply_gate_level_port_aliases``) rather than
-    re-parsing ``assign`` statements a third time -- but applies it to
-    *only* ``hdl_toplevel``'s own ``module``/``endmodule`` chunk, never to
-    the whole of ``request.sources``: a real request's sources also carry
-    the PDK's behavioural cell models (``specify`` blocks, ``always``
-    blocks, non-alias continuous assignments), none of which that
-    deliberately narrow gate-level grammar models.
-
-    Returns an empty set -- never raises -- whenever the alias map cannot be
-    derived: no such module in any source, an unreadable file, or a top
-    module outside that gate-level subset (notably an **ANSI-style** module
-    header, ``module top (input a, output [1:0] y);`` -- ``verilog_netlist``
-    supports only the non-ANSI ``module top (a, y); input a; output [1:0]
-    y;`` form, which is what every real ``write_verilog`` post-route netlist
-    -- the only kind that carries this issue's tie-cell shape -- emits).
-    An empty set makes
-    :func:`_drop_sdf_zero_delay_alias_port_interconnects` a no-op, i.e. the
-    exact behaviour this path had before #2285: this is a *normalization*
-    pass, and failing to normalize must never be worse than not having
-    tried.
-    """
-    from .verilog_netlist import collect_gate_level_port_aliases
-
+    """Find assign-driven port bits in the specified top module."""
     chunk_re = re.compile(
-        r"\bmodule\s+" + re.escape(hdl_toplevel) + r"\b.*?\bendmodule\b",
+        r"\bmodule\s+" + re.escape(hdl_toplevel) + r"(?![\w$]).*?\bendmodule\b",
         re.DOTALL,
     )
     for path in source_paths:
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
+                text = _VERILOG_COMMENT_RE.sub(" ", handle.read())
         except OSError:
             continue
-        chunk_match = chunk_re.search(text)
-        if chunk_match is None:
-            continue
-        try:
-            aliases = collect_gate_level_port_aliases(chunk_match.group(0))
-        except Exception:
-            # Not parseable as gate-level Verilog (a hand-written RTL top,
-            # a construct outside verilog_netlist's narrow grammar) -- no
-            # alias map, so no normalization. Never fatal.
-            return set()
-        return set(aliases.get(hdl_toplevel, {}))
+        match = chunk_re.search(text)
+        if match:
+            return _gate_level_output_aliases(match.group(), hdl_toplevel)
     return set()
 
 
@@ -922,7 +920,14 @@ def _sdf_interconnect_is_droppable(entry_text: str, alias_port_bits: set[str]) -
     head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
     if head is None or head.group(2) not in alias_port_bits:
         return False
-    return _sdf_interconnect_is_zero_delay(entry_text)
+    if _sdf_interconnect_is_zero_delay(entry_text):
+        return True
+    if _SDF_BUS_PORT_TOKEN_RE.fullmatch(head.group(2)):
+        raise FunctionalVerificationError(
+            f"Icarus cannot annotate nonzero INTERCONNECT delay from {head[1]} "
+            f"to separately assigned output bit {head[2]}"
+        )
+    return False
 
 
 def _sdf_cell_delay_spans(
@@ -1099,7 +1104,7 @@ def _normalize_sdf_header_triples(sdf_path: str) -> str | None:
 
 
 def _drop_sdf_interconnect_entries(
-    text: str, droppable: Callable[[str], bool]
+    text: str, droppable: Callable[[str], bool], *, top_only: bool = False
 ) -> tuple[str, int] | None:
     """``(``text`` with every ``droppable`` delay entry removed, how many
     were removed)`` -- or ``None`` when nothing matched, in which case the
@@ -1112,7 +1117,12 @@ def _drop_sdf_interconnect_entries(
     """
     removed_spans: list[tuple[int, int]] = []
     dropped = 0
-    for cell_match in re.finditer(r"\(CELL\b", text):
+    pattern = (
+        r'\(CELL\s*\(CELLTYPE\s+"[^"]+"\s*\)\s*\(INSTANCE\s*\)'
+        if top_only
+        else r"\(CELL\b"
+    )
+    for cell_match in re.finditer(pattern, text):
         spans, count = _sdf_cell_entry_removals(text, cell_match.start(), droppable)
         removed_spans.extend(spans)
         dropped += count
@@ -1172,34 +1182,9 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     there is nothing to remove, in which case the caller keeps handing
     ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
 
-    See the module-level comment above for issue #2285's live findings: why
-    the entry cannot be made to annotate by rewriting its endpoint, why the
-    exemption is keyed on the entry's own delay value rather than on
-    Icarus's diagnostic line, and why an emptied clause has to be removed
-    along with its entries.
-
-    ``alias_port_bits`` is empty for every design with no ``assign``-aliased
-    top-level port (the overwhelmingly common case), in which case this
-    returns ``None`` immediately without reading the file -- a real
-    post-route SDF can be large, and this pass's whole cost should be paid
-    only when it can possibly matter.
-
-    Only the *destination* endpoint is matched. That is the side every
-    observed failure carries (a constant driver's output pin feeding an
-    aliased output port bit), and the source side has its own separate,
-    unrelated Icarus limitation already pinned down by
-    ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-    unresolvable`` (issue #1619 shape (b)) -- widening this pass to sources
-    would silently take over that documented case without evidence that
-    dropping is the right answer there. (Issue #2363 supplies that evidence
-    for one strictly narrower subset of shape (b) -- a bit-selected-port
-    source feeding a *physical-only*, modpath-free destination instance --
-    and handles it in its own separate pass,
-    :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
-    the general shape (b) case here stays untouched and still fails loudly.
-    Issue #2984 later added the zero-delay remainder of shape (b) in
-    :func:`_drop_sdf_zero_delay_bus_port_source_interconnects`; non-zero
-    shape (b) entries are still left alone.)
+    Only the design's own CELL can reference the top-level aliases. Refuse a
+    nonzero delay on a separately assigned bit before compiling the simulator.
+    The source-side Icarus limitations have independent handling (#2363, #2984).
     """
     if not alias_port_bits:
         return None
@@ -1209,6 +1194,7 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     return _drop_sdf_interconnect_entries(
         text,
         lambda entry_text: _sdf_interconnect_is_droppable(entry_text, alias_port_bits),
+        top_only=True,
     )
 
 
@@ -1224,11 +1210,10 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # This is shape (b) of the #1619/#1857 spike (`docs/design/sdf-annotate-
 # feasibility-spike.md` §3.7) -- a bit-selected top-level input port as the
 # entry's *source* -- so neither #1619's deferral nor #2285's alias-map
-# rewrite resolves it. It costs an `SDF ERROR: <file>:<line>: Could not find
-# intermodpath!`, and the diagnostic gate (correctly) treats an unapplied
-# annotation as a hard failure, so a real post-route SDF whose router
-# inserted antenna diodes on top-level input bits could not pass the gate at
-# all.
+# rewrite resolves it. A non-survivor costs an `SDF ERROR: <file>:<line>:
+# Could not find intermodpath!`. The diagnostic gate treats that unapplied
+# annotation as a hard failure, including for router-inserted antenna
+# diodes on top-level input bits.
 #
 # Reproduced live against Icarus 13.0 through this module, re-measured
 # with one-variable controls in issue #5705: the deciding variables are
@@ -1268,8 +1253,8 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # an entry is dropped only when *every* delay member it carries (all three
 # `min:typ:max` members of every rvalue, not just the `-T`-selected one) is
 # zero, so dropping it cannot change any simulated timing at any corner. A
-# non-zero-delay entry onto the identical physical-only pin is left in
-# place, fails to annotate, and still raises -- loud, not silently retimed.
+# non-zero-delay entry stays in the SDF. In the two-diodes fixture, the
+# first-declared diode's entry then still fails the diagnostic gate.
 #
 # "Physical-only" is decided *structurally*, from the elaborated Verilog the
 # run is already compiling (:func:`_collect_sdf_physical_only_instances`),
@@ -1290,10 +1275,9 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 _VERILOG_MODULE_CHUNK_TEMPLATE = r"\bmodule\s+{name}\b.*?\bendmodule\b"
 
 #: Any declaration that disqualifies a model from being "physical-only".
-#: ``specify`` is the direct test (no ``specify`` block, no modpath -- which
-#: is the whole justification for the drop); ``output``/``inout`` are the
-#: conservative belt-and-braces half, since a cell with a driven pin is one
-#: whose annotation could conceivably be observed even without a modpath.
+#: ``specify`` identifies timing declared by the cell model. An
+#: ``output``/``inout`` declaration also disqualifies the model because
+#: a driven pin could expose the effects of annotating the cell's input.
 _VERILOG_TIMING_CAPABLE_RE = re.compile(r"\b(?:specify|output|inout)\b")
 
 #: Verilog comments, stripped before :data:`_VERILOG_TIMING_CAPABLE_RE` is
@@ -1305,8 +1289,8 @@ _VERILOG_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 def _sdf_cell_model_is_physical_only(cell: str, source_texts: list[str]) -> bool:
     """``True`` when every definition of Verilog module ``cell`` found in
     ``source_texts`` declares no ``specify`` block, no ``output`` port, and
-    no ``inout`` port -- a cell that is structurally incapable of carrying a
-    modpath (issue #2363).
+    no ``inout`` port. These declarations identify a timing-empty model
+    for the physical-only drop (issue #2363).
 
     ``False`` when no definition is found at all, and ``False`` the moment
     any definition is timing-capable. Both defaults are deliberate: this
@@ -1385,11 +1369,9 @@ def _collect_sdf_physical_only_instances(
     source_paths: list[str], hdl_toplevel: str
 ) -> set[str]:
     """Every instance name in ``hdl_toplevel`` whose cell model is
-    physical-only -- no ``specify`` block, no ``output``/``inout`` pin, so no
-    modpath an ``INTERCONNECT`` entry onto one of its pins could ever
-    annotate (issue #2363). Antenna-effect diodes are the case this exists
-    for; a filler/tapcell with a timing-empty model qualifies by the same
-    construction.
+    physical-only, with no ``specify`` block or ``output``/``inout`` pin
+    (issue #2363). Antenna-effect diodes are the usual case. A filler/tapcell
+    with a timing-empty model qualifies by the same rules.
 
     Reuses :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s
     instance list -- the same parser
@@ -1477,11 +1459,10 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
     -- or ``None`` when there is nothing to remove, in which case the caller
     keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
 
-    See the module-level comment above for issue #2363's findings: why this
-    subset of the spike's shape (b) is structurally un-annotatable rather
-    than merely order-dependent, why the general shape (b) case is
-    deliberately left failing, and why "physical-only" is decided from the
-    elaborated model rather than from a cell-name pattern.
+    Icarus can annotate only the last-declared load on the input port bit's net
+    (#5705). This pass removes entries that carry zero delay at every corner,
+    including an entry Icarus could have applied. The module-level comment
+    above describes the model-based classification and Icarus behavior.
 
     Either empty set makes this a no-op that returns ``None`` immediately
     without reading the file -- the overwhelmingly common case (no bus
@@ -1613,14 +1594,12 @@ def _drop_sdf_zero_delay_bus_port_source_interconnects(
 #   one Icarus edge-sensitive modpath can carry only one (rise, fall) pair --
 #   whichever entry landed last would silently time the other sense too.
 #
-# So this is a counted, honestly-reported drop (the issue's direction 3),
-# with the same justification #2363's physical-only drop rests on: the
-# entry's target modpath does not exist in the elaborated design, so there is
-# nothing the entry could ever annotate, and removing it cannot change
-# simulated timing relative to what Icarus does with it anyway. What the
-# caller loses is real, though, and it is reported as such: those arcs run
-# with **no** module-path delay at all (Icarus discarded the model's own
-# placeholder delay along with the path), and `environment.sdf.dropped`
+# This is a counted drop (the issue's direction 3). Icarus discards the
+# target modpath at elaboration, so removing the entry preserves its
+# simulated timing. In #2363, Icarus can annotate only the last-declared load
+# and the drop is timing-neutral because every delay value is zero. The
+# `ifnone` arcs run with **no** module-path delay because Icarus discards
+# the model's placeholder delay along with the path. `environment.sdf.dropped`
 # names every dropped arc by cell type so a consumer can see exactly which
 # cells were not timed.
 #

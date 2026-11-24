@@ -8,6 +8,7 @@ itself) to keep both modules under the per-file size ratchet."""
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -125,6 +126,15 @@ def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, cap
     assert second["environment"]["resume"]["resumed_corners"] == 2
     assert second["environment"]["models_lib_sha256_scope"] == "client"
     fleet = second["environment"]["remote"]["fleet"]
+    summary = second["environment"]["remote"]["run"]
+    assert summary["declared_hosts"] == 2
+    assert summary["rounds"] == 2
+    assert summary["observed_launched_jobs"] == 4
+    assert summary["first_launch"] <= summary["last_terminal"]
+    assert summary["completed_units"] == summary["total_units"] == 4
+    assert summary["complete"] is True
+    assert first["environment"]["remote"]["run"]["completed_units"] == 2
+    assert first["environment"]["remote"]["run"]["complete"] is False
     assert len(fleet) == 3  # harvested shard plus the two replacement shards
     assert fleet[0]["job_id"] == harvested_job
     assert set(first_jobs) & {entry["job_id"] for entry in fleet} == {harvested_job}
@@ -179,6 +189,13 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
 
     second = run(resume=True)
 
+    summary = second["environment"]["remote"]["run"]
+    assert summary["rounds"] == 2 and summary["observed_launched_jobs"] == 2
+    assert summary["complete"] and summary["completed_units"] == 4
+    first_summary = first["environment"]["remote"]["run"]
+    assert summary["first_launch"] == first_summary["first_launch"]
+    # The formerly failed job reached a new terminal state on this harvest.
+    assert summary["last_terminal"] > first_summary["last_terminal"]
     assert submitted == []  # nothing left to dispatch
     assert len(_launches(runner)) == launches_before
     assert [c["corner_id"] for c in second["corners"]] == ids
@@ -203,6 +220,38 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
     )
     assert not manifest_path.exists()
     assert not (artifacts / "checkpoint.json").exists()
+
+
+@pytest.mark.parametrize("legacy", ["missing", "malformed"])
+def test_resume_without_history_uses_retained_evidence(tmp_path, monkeypatch, legacy):
+    _, run, _, artifacts = _harvest_run_fixture(
+        tmp_path, monkeypatch, fail_second_shard=True
+    )
+    run()
+    shards = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())["shards"]
+    stamps = [row["launched_at"] for row in shards]
+    stamps.extend(
+        json.loads(path.read_text())["launched_at"]
+        for path in artifacts.glob("batch-receipt-*.json")
+    )
+    journal = artifacts / "batch-run-history.json"
+    if legacy == "missing":
+        journal.unlink()
+    else:
+        journal.write_text("[]")
+    resumed = run(resume=True)["environment"]["remote"]["run"]
+    assert resumed["history_coverage"] == "partial"
+    assert resumed["observed_rounds"] == 1
+    assert resumed["rounds"] is None and resumed["declared_hosts"] is None
+    assert resumed["observed_launched_jobs"] == 4
+    assert datetime.fromisoformat(resumed["first_launch"]) == min(
+        map(datetime.fromisoformat, stamps)
+    )
+    assert resumed["complete"] and resumed["total_units"] == 4
+    # Independent run in the same directory with the same request and old receipts.
+    fresh = run()["environment"]["remote"]["run"]
+    assert fresh["history_coverage"] == "from_start"
+    assert fresh["rounds"] == 1 and fresh["observed_launched_jobs"] == 2
 
 
 @pytest.mark.parametrize("with_params", [True, False], ids=["params", "plain"])

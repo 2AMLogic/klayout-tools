@@ -162,8 +162,12 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     "analysis.op_check": "0.9.2",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
+    # Variant-relative object form (#7039). The worker gate is osdi_pdk_relative.
+    "options.osdi_preload[].pdk_relative": None,
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
     "options.stage_model_inputs": "0.7.0",
+    # Selected-corner reruns (#6778) have not shipped in a tag.
+    "_regrade": None,
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
@@ -171,6 +175,8 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
+    # The untagged strict-limit fields use the mandatory "exclusive_bounds" worker gate.
+    "measurements[].limits.exclusive_min / exclusive_max": None,
     # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
     # a supply_v rail value finer than three decimals is spelled at full
     # precision in corner_id instead of .3f, so sub-milli rungs keep distinct
@@ -207,24 +213,11 @@ BATCH_JOB_TOOL = "ngspice"
 
 
 def _batch_job_tool_label(remote_request: dict[str, Any]) -> str:
-    """``job.json``'s ``tool`` label for this batch job (issue #2423):
-    ``options.ngspice_binary`` when the forwarded request document
-    explicitly names one, else :data:`BATCH_JOB_TOOL`.
+    """Name the tool in the job and status documents (issue #2423).
 
-    Purely cosmetic, matching :data:`BATCH_JOB_TOOL`'s own "informational
-    only, the harness echoes it into ``status.json`` and never inspects it"
-    contract -- **never** resolved against ``$PATH`` here. This process (the
-    *submitting* host) and the job instance that actually runs
-    ``ngspice_binary`` are different machines with different filesystems and
-    `$PATH`s; a `shutil.which()` lookup on the submit side would answer a
-    question about the wrong host. The job instance's own `klt sim`
-    invocation (the ``cmd`` :func:`_build_batch_job_spec` builds) resolves
-    the real binary itself, fresh, from this same forwarded
-    ``options.ngspice_binary``/its own ``$KLT_NGSPICE_BINARY`` -- see
-    ``sim.py``'s ``_resolve_ngspice_binary``. ``$KLT_NGSPICE_BINARY`` itself
-    is not read here either, for the same "describes the submit host, not
-    the job host" reason ``_host_max_workers_cap``'s own docstring gives for
-    ``$KLT_SIM_MAX_WORKERS``.
+    Use the forwarded request's ngspice binary name, defaulting to
+    :data:`BATCH_JOB_TOOL`. The worker resolves the executable using its own
+    PATH and KLT_NGSPICE_BINARY. The submitting host only supplies the label.
     """
     options = remote_request.get("options") or {}
     override = options.get("ngspice_binary")
@@ -360,7 +353,14 @@ _CAPACITY_BACKOFF_BASE_S = 30.0
 _CAPACITY_BACKOFF_CAP_S = 600.0
 
 #: ``status.json`` states that mean the job is over, one way or another.
-BATCH_TERMINAL_STATES = ("done", "failed", "timeout")
+#: ``cancelled`` is written by 2am's fleet ``cancel`` verb before it
+#: terminates the job's instances (2am#6502, issue #4351).
+BATCH_TERMINAL_STATES = ("done", "failed", "timeout", "cancelled")
+
+#: ``error.code`` of a poll that observes :data:`CANCELLED_STATE` (issue
+#: #4351): terminal, nothing is re-launched, no results are coming.
+BATCH_JOB_CANCELLED_CODE = "batch_job_cancelled"
+CANCELLED_STATE = "cancelled"
 
 #: ``status.json`` states that mean "keep waiting". ``interrupted`` is
 #: included on purpose: Spot reclaimed the instance, and 2am's own

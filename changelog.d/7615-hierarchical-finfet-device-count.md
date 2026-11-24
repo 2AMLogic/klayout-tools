@@ -1,0 +1,1 @@
+- **ASAP7 extraction reports the total and per-class device counts across instantiated cells** (#7615, 2026-11-23).

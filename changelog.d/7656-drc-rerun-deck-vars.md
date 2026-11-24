@@ -1,0 +1,1 @@
+- **Native DRC reruns restore the recorded deck variables** so replaying a report with an unchanged layout and deck preserves the selected rules (#7656, 2026-11-23).

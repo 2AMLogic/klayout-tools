@@ -23,6 +23,8 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from .place_and_route_base import PlaceAndRouteError
+
 EDGE_TO_REGION = {
     "north": "top",
     "east": "right",
@@ -102,7 +104,6 @@ def check_pin_constraints(
 ) -> None:
     """Raise when a pattern matches no top-level port, or a port is matched by
     two entries. No-op when the port list is unknown."""
-    from .place_and_route_request import PlaceAndRouteError
 
     if ports is None:
         return

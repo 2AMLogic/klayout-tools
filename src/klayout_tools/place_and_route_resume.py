@@ -26,7 +26,7 @@ COMMIT_SCHEMA = "klt.place_and_route.stage_commit/1"
 
 #: Request keys that do not influence what a stage computes; the per-stage
 #: script text and input-file hashes already pin everything that does.
-_REQUEST_HASH_EXCLUDE = ("target_stage",)
+_REQUEST_HASH_EXCLUDE = ("target_stage", "threads")
 
 
 def commit_path(output_dir: str, hdl_toplevel: str, stage: str) -> str:
@@ -74,6 +74,9 @@ def load_commit(
         or not isinstance(record.get("stage_entry"), dict)
         or not isinstance(record.get("engine_logs"), list)
     ):
+        return None
+    # Older route records predate per-pin library reports. Replay the route once.
+    if stage == "route" and "library_limit_report_path" not in record["stage_entry"]:
         return None
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, list) or not all(

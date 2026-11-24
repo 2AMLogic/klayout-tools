@@ -8605,6 +8605,7 @@ def test_describe_grader_shape():
         "grading_ruleset_id",
         "source_doc",
         "graded_t1_item_ids",
+        "attestable_items",
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
@@ -8623,8 +8624,7 @@ def test_describe_grader_reports_none_when_the_shipped_doc_is_unreadable(
     """Never fabricate a claim this build cannot substantiate -- mirrors
     `_is_graded_by_build`'s own "unreadable shipped doc" fallback."""
     monkeypatch.setattr(signoff_module, "_build_t1_item_ids", lambda: None)
-    result = signoff_module.describe_grader()
-    assert result["graded_t1_item_ids"] is None
+    assert signoff_module.describe_grader()["graded_t1_item_ids"] is None
 
 
 def test_describe_grader_matches_klt_versions_grading_ruleset_id(capsys):
@@ -11563,7 +11563,7 @@ def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_p
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": {
             "scope": "connectivity",
-            "checked": [],
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
             "skipped": [],
             "inapplicable": [
                 {
