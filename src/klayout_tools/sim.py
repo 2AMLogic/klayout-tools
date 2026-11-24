@@ -84,7 +84,6 @@ import re
 import signal
 import statistics
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -95,6 +94,7 @@ from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from . import (
+    _warn,
     env_provenance,
     output_lock,
     sim_ac_waveform,
@@ -106,6 +106,8 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
+    sim_derive,
+    sim_derive_rollup,
     sim_energy,
     sim_eye,
     sim_form_signals,
@@ -163,6 +165,7 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
+from . import sim_transient_noise as sim_tn
 from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
@@ -290,6 +293,7 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
+from .sim_derive_rollup import attach_coverage as _attach_derive_coverage
 from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _OFFHOST_BACKENDS,
     NODESET_UNSUPPORTED_WORKER_CODE,
@@ -347,7 +351,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
-from . import sim_population_limits, sim_regrade
+from . import sim_errors, sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -1610,20 +1614,20 @@ def _resolve_ngspice_binary(options: dict[str, Any], request_dir: str) -> str:
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sim`` request JSON file.
 
-    Raises :class:`SimError` if the file is missing/unreadable, not valid
-    JSON, or missing a required top-level field (``netlist``, and one of
-    ``analysis`` or -- issue #2482 -- ``analysis_steps``; which one, and
-    that not both are declared, is validated in :func:`run_sim`).
-    ``models`` is validated separately, in :func:`run_sim` -- it is only
-    required when the request declares a ``corners.process`` axis (see
-    ``_resolve_models_lib``). Does not require the request to carry a
-    ``schema`` field (see this module's docstring).
+    Raises :class:`SimError` if the file is missing/unreadable, invalid JSON,
+    not an object, or missing a required top-level field (``netlist``, one of
+    ``analysis`` or -- #2482 -- ``analysis_steps``; which one, and that not
+    both are declared, is validated in :func:`run_sim`). ``models`` is
+    validated in :func:`run_sim`, only for a ``corners.process`` axis (see
+    ``_resolve_models_lib``). No ``schema`` field is required.
     """
     request = _load_request_json(request_path, SimError)
-    # Command and deck lists have their own validators and no corner matrix.
-    if sim_commands.COMMANDS_FIELD in request:
-        return request
-    if "decks" in request:
+    if not isinstance(request, dict):  # #7720: guard before membership tests
+        raise SimError("request file must contain a JSON object")
+    if sim_commands.COMMANDS_FIELD in request or "decks" in request:
+        sim_errors.request_options(request)  # #7720: before first read
+        if sim_commands.COMMANDS_FIELD in request:
+            return request
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
@@ -1829,7 +1833,7 @@ def _attach_meas_lint(
     request alone, so it is identical for local, batch and remote runs."""
     lint = _meas_at_lint(analysis, measurements_spec)
     for diag in lint:
-        print(f"warning: {diag['message']}", file=sys.stderr)
+        _warn.warn(f"warning: {diag['message']}")
     for corner in corners:
         corner["diagnostics"].extend(dict(d) for d in lint)
 
@@ -2820,6 +2824,7 @@ class _ResolvedSimRequest:
     ngspice_binary: Any
     ngspice_init_lines: Any
     ngspice_options: Any
+    transient_noise_seed: int | None
     osdi_preload: Any
     osdi_runner_environment: Any
     param_file: Any
@@ -3191,6 +3196,9 @@ def _prepare_sim_request(
     # Issue #3111: same up-front validation; off-host workers re-read it from
     # the forwarded request document, and the echo check below verifies it.
     ngspice_options = _validate_ngspice_options(options.get("ngspice_options"))
+    transient_noise_seed = sim_tn.validate_seed(
+        options.get("transient_noise_seed"), engine
+    )
     # Issue #3036: the rule grammar is validated up front; the rules are
     # resolved onto points after expansion, before any dispatch.
     nodeset_rules = _validate_nodeset_rules(options.get("nodeset"))
@@ -3235,6 +3243,7 @@ def _prepare_sim_request(
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
     monte_carlo_spec = request.get("monte_carlo")
+    sim_derive.validate_grid(measurements_spec, corner_points, request)
     sim_post_commands.refuse_xyce(engine, analysis)  # issue #6080
     _enforce_xyce_support_boundary(
         engine=engine,
@@ -3307,7 +3316,7 @@ def _prepare_sim_request(
         )
         # Issue #2963: disclose transient-noise sources the seed contract
         # does not cover, whatever `vary` asks for.
-        monte_carlo_info = _with_unseeded_noise(
+        monte_carlo_info = sim_tn.with_unseeded_noise(
             monte_carlo_info, netlist_path, request=request, repo_root=repo_root
         )
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
@@ -3506,6 +3515,7 @@ def _prepare_sim_request(
         ngspice_binary=ngspice_binary,
         ngspice_init_lines=ngspice_init_lines,
         ngspice_options=ngspice_options,
+        transient_noise_seed=transient_noise_seed,
         osdi_preload=osdi_preload,
         osdi_runner_environment=osdi_runner_environment,
         param_file=param_file,
@@ -3616,6 +3626,7 @@ def _run_sim_corners(
     keep_artifacts = resolved.keep_artifacts
     max_workers = resolved.max_workers
     measurements_spec = resolved.measurements_spec
+    per_corner_specs = sim_derive.per_corner_measurements(measurements_spec)
     models_lib = resolved.models_lib
     monte_carlo_info = resolved.monte_carlo_info
     monte_carlo_stats = resolved.monte_carlo_stats
@@ -3627,6 +3638,7 @@ def _run_sim_corners(
     ngspice_binary = resolved.ngspice_binary
     ngspice_init_lines = resolved.ngspice_init_lines
     ngspice_options = resolved.ngspice_options
+    transient_noise_seed = resolved.transient_noise_seed
     osdi_preload = resolved.osdi_preload
     osdi_runner_environment = resolved.osdi_runner_environment
     param_file = resolved.param_file
@@ -3674,7 +3686,7 @@ def _run_sim_corners(
         "netlist_path": dispatch_netlist_path,
         "models_lib": models_lib,
         "analysis": analysis,
-        "measurements_spec": measurements_spec,
+        "measurements_spec": per_corner_specs,
         "corner_points": corner_points,
         "timeout_s": timeout_s,
         "engine": engine,
@@ -3684,6 +3696,7 @@ def _run_sim_corners(
         "save_vectors": save_vectors,
         "complex_vectors": complex_vectors,
         "ngspice_options": ngspice_options,
+        "transient_noise_seed": transient_noise_seed,
         "stimulus_lines": stimulus_lines,
     }
     # The checkpoint, run history and shard map share one digest of these inputs.
@@ -3715,7 +3728,7 @@ def _run_sim_corners(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        measurements_spec=measurements_spec,
+        measurements_spec=per_corner_specs,
         request_dir=request_dir,
         pre_completed=pre_completed,
     )
@@ -3831,6 +3844,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
         )
 
@@ -3901,6 +3915,7 @@ def _run_sim_corners(
             "waveform_max_bytes": waveform_max_bytes,
             "waveform_decimate": waveform_decimate,
             "ngspice_options": ngspice_options,
+            "transient_noise_seed": transient_noise_seed,
             "stimulus_lines": stimulus_lines,
             "convergence_retry": convergence_retry,
         }
@@ -3999,7 +4014,7 @@ def _run_sim_corners(
             netlist_path=dispatch_netlist_path,
             models_lib=models_lib,
             analysis=analysis,
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
@@ -4053,7 +4068,7 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             request=request,
             hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
             request_dir=request_dir,
             **shard_kwargs,
         )
@@ -4067,7 +4082,7 @@ def _run_sim_corners(
                 netlist_path=dispatch_netlist_path,
                 models_lib=models_lib,
                 analysis=analysis,
-                measurements_spec=measurements_spec,
+                measurements_spec=per_corner_specs,
                 timeout_s=timeout_s,
                 keep_artifacts=keep_artifacts,
                 want_waveforms=want_waveforms,
@@ -4085,7 +4100,7 @@ def _run_sim_corners(
             shard_runner=_shard_runner,
             corner_points=dispatch_points,
             hosts=hosts,
-            measurements_spec=measurements_spec,
+            measurements_spec=per_corner_specs,
         )
 
     _require_params_echo(
@@ -4119,7 +4134,7 @@ def _run_sim_corners(
     corners = sim_batch_resume.reassemble_corners(
         bool(resume), corner_points, corners_new, pre_completed
     )
-    _attach_meas_lint(corners, analysis, measurements_spec)
+    _attach_meas_lint(corners, analysis, per_corner_specs)
     engine_version = (
         backend_engine_version
         if backend_engine_version is not None
@@ -4210,7 +4225,7 @@ def _run_sim_corners(
                 corner=corner,
                 plot_dir=plot_dir,
                 analysis_kind=analysis.get("kind"),
-                measurements_spec=measurements_spec,
+                measurements_spec=per_corner_specs,
             )
             if corner_plots:
                 corner["artifacts"]["plots"] = corner_plots
@@ -4321,8 +4336,9 @@ def _run_sim_corners(
     # resistor noise in `.tran`, so a transient that relies on declared
     # `trnoise`/`trrandom` sources says so. Absent when it does not apply.
     environment.update(
-        _transient_noise_environment(
+        sim_tn.transient_noise_environment(
             netlist_path,
+            transient_noise_seed=transient_noise_seed,
             request=request,
             analysis=analysis,
             engine=engine,
@@ -4451,12 +4467,12 @@ def _run_sim_corners(
     )
     if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
-    _attach_runner_hints(report, measurements_spec, corners, backend=backend)
+    _attach_runner_hints(report, per_corner_specs, corners, backend=backend)
     attach_process_leg_check(report, corners)
     sim_mismatch_scale.attach_unreached_families(
         report, monte_carlo_info, dispatch_points
     )
-    _attach_not_reached_count(report, measurements_spec, corners)
+    _attach_not_reached_count(report, per_corner_specs, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
         # requested -- the flat list of every SVG actually written, in
@@ -4518,9 +4534,9 @@ def _grade_corners(
     errored = sum(1 for c in corners if c["status"] == "error")
     # Count distrusted corners separately from report-wide population verdicts.
     inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
-    # A Monte Carlo sigma window or a grid-wide probit sigma can fail its
-    # bound even when every corner passes. Either fails the report.
-    measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
+    # Sigma windows, probit estimates and derived measurements can fail across
+    # the grid even when all individual corners pass.
+    rollup_statuses = {m["status"] for m in measurements_rollup}
     # Issue #2109: the common rollup rule is the single decision table for
     # real failures/errors, zero/partial/unknown/malformed coverage and full
     # success -- see `docs/coverage-contract.md`'s "The common rollup rule"
@@ -4535,8 +4551,8 @@ def _grade_corners(
     # nonempty skip list must never be reported as.
     rollup = coverage_rollup(
         {"coverage": coverage},
-        failed=bool(failed) or measurement_rollup_failed,
-        errored=bool(errored),
+        failed=bool(failed) or "fail" in rollup_statuses,
+        errored=bool(errored) or "error" in rollup_statuses,
     )
     status = rollup_status(rollup, success="pass", failure="fail", errored="error")
     # Issues #2492 + #2493: `inconclusive` outranks every non-`"error"`
@@ -4550,13 +4566,7 @@ def _grade_corners(
     # no number at all is strictly less information than a number the run
     # declines to trust.
     #
-    if status != "error" and (
-        inconclusive
-        or any(
-            m.get("statistic") == "probit_sigma" and m["status"] == "inconclusive"
-            for m in measurements_rollup
-        )
-    ):
+    if status != "error" and (inconclusive or _INCONCLUSIVE_STATUS in rollup_statuses):
         status = _INCONCLUSIVE_STATUS
     return {
         "passed": passed,
@@ -5924,6 +5934,7 @@ def _run_local(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     convergence_retry: dict[str, Any] | None = None,
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
@@ -5974,6 +5985,7 @@ def _run_local(
             waveform_max_bytes=waveform_max_bytes,
             waveform_decimate=waveform_decimate,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             convergence_retry=convergence_retry,
             portable_roots=portable_roots,
             stimulus_lines=stimulus_lines,
@@ -6120,7 +6132,7 @@ def _worker_cap_notice(message: str) -> None:
         if message in _WORKER_CAP_NOTICES_EMITTED:
             return
         _WORKER_CAP_NOTICES_EMITTED.add(message)
-    print(message, file=sys.stderr)
+    _warn.warn(message)
 
 
 def _reset_worker_cap_notices() -> None:
@@ -6364,133 +6376,6 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
     moved it out so this module keeps its size ratchet while the
     device-multiplier lint reads cards the same way)."""
     return _spice_text_logical_lines(netlist_text)
-
-
-_NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)
-
-
-def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
-    """``(lower-cased name, keyword)`` of every independent ``V*``/``I*``
-    source declaring a ``trnoise``/``trrandom`` waveform (issue #2963),
-    including inside ``.subckt`` bodies. Lexical, via
-    :func:`_logical_netlist_lines`."""
-    found: list[tuple[str, str]] = []
-    for line in _logical_netlist_lines(netlist_text):
-        if line[0].lower() not in ("v", "i"):
-            continue
-        match = _NOISE_SOURCE_RE.search(line)
-        if match:
-            found.append((line.split(None, 1)[0].lower(), match.group(1).lower()))
-    return found
-
-
-def _scan_noise_sources(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
-    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
-    declared in the netlist's scanned ``.include`` closure (issues #2963,
-    #2985), and what part of the closure could not be scanned."""
-    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
-    sources: set[tuple[str, str]] = set()
-    for _label, path in files:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                sources.update(_noise_sources_in_text(handle.read()))
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": _label, "reason": "unreadable"})
-    return sources, not_scanned
-
-
-def _unseeded_noise_report(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return None
-    report: dict[str, Any] = {
-        "unseeded_sources": [
-            {"name": name, "keyword": keyword} for name, keyword in sorted(sources)
-        ],
-        "unseeded_sources_note": _UNSEEDED_NOISE_NOTE,
-    }
-    if not_scanned:
-        report["unseeded_sources_not_scanned"] = not_scanned
-    return report
-
-
-def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
-    """Does the resolved analysis run a transient (scalar ``tran`` or an
-    ``analysis_steps[]`` tran step)?"""
-    if sim_steps.is_steps_analysis(analysis):
-        return any(
-            str(step.get("kind", "")).lower() == "tran"
-            for step in analysis.get("steps", [])
-        )
-    return str(analysis.get("kind", "")).lower() == "tran"
-
-
-def _transient_noise_environment(
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    analysis: dict[str, Any],
-    engine: str,
-    repo_root: str | None,
-) -> dict[str, Any]:
-    """Additive ``environment.transient_noise`` (issue #2985): what noise an
-    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
-    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
-    unless the engine is ngspice, a transient runs and a scanned file
-    declares such a source."""
-    if engine != "ngspice" or not _analysis_runs_tran(analysis):
-        return {}
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return {}
-    report: dict[str, Any] = {
-        "engine": engine,
-        "sources": [
-            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
-        ],
-        "intrinsic_device_noise": False,
-        "intrinsic_resistor_noise": False,
-    }
-    if not_scanned:
-        report["sources_not_scanned"] = not_scanned
-    return {"transient_noise": report}
-
-
-def _with_unseeded_noise(
-    monte_carlo_info: dict[str, Any],
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    repo_root: str | None,
-) -> dict[str, Any]:
-    """``monte_carlo_info`` plus the issue #2963 unseeded-noise disclosure
-    (and its stderr warning) when a scanned file declares such a source."""
-    noise_report = _unseeded_noise_report(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if noise_report is None:
-        return monte_carlo_info
-    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
-    return {**monte_carlo_info, **noise_report}
-
-
-_UNSEEDED_NOISE_NOTE = (
-    "trnoise()/trrandom() sources are not governed by monte_carlo.seed "
-    "(ngspice seeds them from the process id): re-running this request "
-    "redraws their noise, and samples run in separate batch jobs or hosts "
-    "may share a noise stream."
-)
 
 
 def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
@@ -6935,6 +6820,7 @@ def _prepare_corner_run(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
@@ -6993,6 +6879,7 @@ def _prepare_corner_run(
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
@@ -7305,6 +7192,7 @@ def _run_corner(
     waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
     waveform_decimate: int | None = None,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
@@ -7371,6 +7259,7 @@ def _run_corner(
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
             extra_options_card=extra_options_card,
         )
@@ -8280,6 +8169,7 @@ def _write_corner_deck(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
     extra_options_card: str | None = None,
 ) -> None:
@@ -8383,6 +8273,7 @@ def _write_corner_deck(
             save_mode=save_mode,
             save_vectors=save_vectors,
             complex_vectors=complex_vectors,
+            transient_noise_seed=transient_noise_seed,
             corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
@@ -8450,6 +8341,7 @@ def _corner_deck_control_lines(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
+    transient_noise_seed: int | None = None,
     save_mode: str = DEFAULT_SAVE_MODE,
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
@@ -8555,7 +8447,7 @@ def _corner_deck_control_lines(
     solves the corner the prefix set up. (``options.waveforms`` is refused
     for a step sequence, so ``raw_path`` is always ``None`` there.)
     """
-    lines = [".control"]
+    lines = [".control", *sim_tn.seed_lines(transient_noise_seed)]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
     # Issue #3035: the parameter reset must come first -- `reset` reloads the
@@ -9127,6 +9019,7 @@ def _run_calibration_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
@@ -9184,6 +9077,7 @@ def _run_calibration_probe(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            transient_noise_seed=transient_noise_seed,
             stimulus_lines=stimulus_lines,
         )
         _write_spiceinit(probe_dir, ngspice_init)
@@ -9231,6 +9125,7 @@ def _run_fail_fast_probe(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
@@ -9278,6 +9173,7 @@ def _run_fail_fast_probe(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        transient_noise_seed=transient_noise_seed,
         stimulus_lines=stimulus_lines,
     )
     if probe["error"] is not None:
@@ -9796,12 +9692,11 @@ def _measurement_coverage(
 ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
     """Count actual observations or applied bounds, never corner declarations.
 
-    ``corner_index`` (this corner's position in the report's own ``corners``
-    list) scopes every identity built here -- ``corner_id`` alone is a
-    *display* label (e.g. supply voltage rounded to 3 decimals) and distinct
-    corners can legitimately round to the same one, which would otherwise
-    collide as the same "unique" work identity and make
-    :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
+    ``corner_index`` (this corner's position in the report's own ``corners`` list)
+    scopes every identity built here -- ``corner_id`` alone is a *display* label (e.g.
+    supply voltage rounded to 3 decimals) and distinct corners can legitimately round to
+    the same one, which would otherwise collide as the same "unique" work identity and
+    make :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
     separate checks as a duplicate.
     """
     name = spec["name"]
@@ -9912,10 +9807,9 @@ def _corner_without_measurements(
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Coverage for one corner of a request that declares no measurements.
 
-    Returns ``(checked, skipped)``. Under ``capture_only`` (issue #3158) a
-    corner that ran clean counts its waveform capture as checked work; any
-    other corner is a ``no_requested_measurements`` skip.
-    """
+    Returns ``(checked, skipped)``. Under ``capture_only`` (issue #3158) a corner that
+    ran clean counts its waveform capture as checked work; any other corner is a
+    ``no_requested_measurements`` skip."""
     corner_work = work_id("corner", corner_index, corner["corner_id"])
     if capture_only and corner["status"] == "pass":
         return [corner_work + "/waveform_capture"], []
@@ -9926,9 +9820,7 @@ def _summarise_limits(
     measurements_spec: list[dict[str, Any]],
 ) -> tuple[int, int, list[dict[str, Any]]]:
     """Count declared limits and collect unrecognised limit keys per measurement.
-
-    Returns ``(limits_declared, measurements_with_limits, unrecognized)``.
-    """
+    Returns ``(limits_declared, measurements_with_limits, unrecognized)``."""
     unrecognized: list[dict[str, Any]] = []
     limits_declared = 0
     measurements_with_limits = 0
@@ -9955,11 +9847,10 @@ def _build_coverage(
 ) -> dict[str, Any]:
     """Common checked-work v1 plus the existing simulation coverage counters.
 
-    ``capture_only`` (issue #3158) is the request's declared intent to
-    capture waveforms with no measurements: each corner that ran clean then
-    counts its capture as the checked work, and ``capture_only: true`` is
-    recorded on the block. A corner that did not pass stays a skip, so a run
-    failure is never waived.
+    ``capture_only`` (issue #3158) is the request's declared intent to capture waveforms
+    with no measurements: each corner that ran clean then counts its capture as the
+    checked work, and ``capture_only: true`` is recorded on the block. A corner that did
+    not pass stays a skip, so a run failure is never waived.
     """
     limits_declared, measurements_with_limits, unrecognized = _summarise_limits(
         measurements_spec
@@ -9977,13 +9868,14 @@ def _build_coverage(
             )
             checked.extend(corner_checked)
             skipped.extend(corner_skipped)
-        for spec in measurements_spec:
+        for spec in sim_derive.per_corner_measurements(measurements_spec):
             actual, missing, irrelevant = _measurement_coverage(
                 spec, corner, corner_index
             )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)
+    _attach_derive_coverage(measurements_spec, corners, checked, skipped, inapplicable)
     reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
@@ -10356,17 +10248,15 @@ def _rollup_measurements(
     both of which outrank it); without a declared ``k_sigma`` nothing about
     the existing rollup changes.
 
-    A corner graded ``inconclusive`` contributes ``inconclusive`` to the
-    aggregate regardless of what its own measurement-vs-``limits``
-    comparison said -- so one distrusted corner masks a concurrent clean
-    ``fail`` at *this* aggregate, exactly as one errored corner already
-    does. That is deliberate (the aggregate reports the strongest claim
-    about trustworthiness, not the union of every corner's verdict);
-    ``corners[]`` and the top-level ``failed``/``inconclusive`` counts retain
-    the per-corner detail. ``worst_case`` still scans every corner,
-    distrusted ones included: it is a pointer to the corner worth looking
-    at, and hiding the worst margin would make an inconclusive rollup harder
-    to debug, not easier.
+    A corner graded ``inconclusive`` contributes ``inconclusive`` to the aggregate
+    regardless of what its own measurement-vs-``limits`` comparison said -- so one
+    distrusted corner masks a concurrent clean ``fail`` at *this* aggregate, exactly as
+    one errored corner already does. That is deliberate (the aggregate reports the
+    strongest claim about trustworthiness, not the union of every corner's verdict);
+    ``corners[]`` and the top-level ``failed``/``inconclusive`` counts retain the
+    per-corner detail. ``worst_case`` still scans every corner, distrusted ones
+    included: it is a pointer to the corner worth looking at, and hiding the worst
+    margin would make an inconclusive rollup harder to debug, not easier.
     """
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
@@ -10400,6 +10290,7 @@ def _rollup_measurements(
             # Additive/optional (issue #2482): `step`/`derived_from` for an
             # `analysis_steps[]` measurement; nothing for any other one.
             **sim_steps.measurement_provenance(spec),
+            **sim_derive_rollup.rollup_fields(spec, corners),
         }
         plausible_range = spec.get("plausible_range")
         if plausible_range is not None:

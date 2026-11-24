@@ -47,7 +47,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from . import _batch_collect, _batch_common, remote_transport, sim_batch
+from . import _batch_collect, _batch_common, _warn, remote_transport, sim_batch
 from . import netlist_batch as _nb
 from .extract_base import REQUEST_SCHEMA
 from .extract_netlist_target import _default_output_path
@@ -345,7 +345,7 @@ def _check_ceiling(config: sim_batch.BatchConfig, timeout_s: float) -> dict[str,
             f"backend 'batch' refused before submission: {message} {_NO_FALLBACK}",
             code=sim_batch.BATCH_JOB_CEILING_CODE,
         )
-    print(f"klt extract: warning: {message}", file=sys.stderr)
+    _warn.warn(f"klt extract: warning: {message}")
     return assessment
 
 

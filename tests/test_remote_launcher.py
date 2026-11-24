@@ -1768,7 +1768,7 @@ def test_resolve_ami_unusable_klt_version_reads_as_unknown(tmp_path, value):
 def test_manifest_schema_accepts_legacy_and_new_entries():
     _validate_manifest([_entry()])
     _validate_manifest([_entry(klt_version="0.7.0", klt_ref="v0.7.0")])
-    # The checked-in manifest (all legacy entries) stays valid.
+    # The checked-in manifest stays valid against the schema.
     shipped = json.loads(
         (_REPO_ROOT / "data" / "remote-sim-ami-manifest.json").read_text()
     )

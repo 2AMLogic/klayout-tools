@@ -32,6 +32,7 @@ scripts/
   release_notes.py               # build the GitHub Release notes from a CHANGELOG section for publish.yml (#5861)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
+  check_changelog_fragments.py   # CI gate: every changelog.d/ fragment is a `- ` bullet carrying a `#<issue>` reference (#7619)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
@@ -615,3 +616,29 @@ followed; a name bound more than once in a scope is not resolved for
 `alias._x` access; internal `from x import *` is rejected outright.
 `import-linter` 2.15 was evaluated and rejected: it models module-to-module
 edges only and cannot allow `_a` but forbid `_b` from the same module.
+
+## `check_changelog_fragments.py`
+
+CI gate (issue #7619) for the format `changelog.d/README.md` documents.
+`release_prep.py prepare` copies each pending fragment into `CHANGELOG.md`
+verbatim, so a bare paragraph or a bullet with no issue number would be
+released untraceable; this checks the shape at PR time instead. Pure stdlib,
+reads only `changelog.d/`, and runs as a non-`continue-on-error` step of the
+`lint` job ("Changelog fragment shape").
+
+```
+python scripts/check_changelog_fragments.py            # check changelog.d/
+python scripts/check_changelog_fragments.py --dir DIR  # check another directory
+```
+
+A fragment passes when its first non-blank line starts with `- ` **and** its
+text contains a `#<digits>` reference (`(#1234)`, `(issue #1234)`,
+`org/repo#1234`). A date is not required -- only 6 of the 1465 released
+bullets carry one, and the release heading already dates the section. It does
+not check that the number equals the filename's, or the shape of later
+bullets. Files in scope mirror `release_prep`: `*.md`, minus `README.md`,
+non-files and empty / whitespace-only files.
+
+Exit `0` clean, `1` offending fragments (each named on stderr with the
+reason), `2` the directory is missing. Fix a failure by editing the named
+fragment; the message suggests the `(#N)` taken from its filename.

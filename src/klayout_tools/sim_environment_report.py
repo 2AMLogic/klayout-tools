@@ -31,11 +31,10 @@ identical to what it documents.
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any
 
-from . import device_multiplier_lint, env_provenance, sim_provenance
+from . import _warn, device_multiplier_lint, env_provenance, sim_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._provenance import sha256_file
@@ -440,10 +439,9 @@ def device_multiplier_environment(
     if not_scanned:
         report["not_scanned"] = not_scanned
     if report["findings"]:
-        print(
+        _warn.warn(
             f"warning: {len(report['findings'])} device-multiplier finding(s) "
-            "for this netlist; see environment.device_multiplier.findings",
-            file=sys.stderr,
+            "for this netlist; see environment.device_multiplier.findings"
         )
     return {"device_multiplier": report}
 

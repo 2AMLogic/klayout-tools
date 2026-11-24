@@ -8,9 +8,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from . import (
     remote_transport,
@@ -31,10 +31,6 @@ from . import (
 from .sim_batch_contract import (
     REQUEST_FEATURE_MIN_RUNNER_VERSION,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 # --------------------------------------------------------------------------- #
 # job.json (2am's shell-command contract)
@@ -136,23 +132,11 @@ class BatchJobSpec:
 
 
 def _release_segment(version: str) -> str | None:
-    """The PEP 440 release segment of a ``klt --version`` build string, or
-    ``None`` when it has none (issue #3184).
+    """Read the numeric release prefix of a klt version, stripping dev and local parts.
 
-    Steps: drop the PEP 440 local part (``+...``), keep the leading
-    ``[0-9.]`` run, drop one trailing ``.``, and accept the result only if it
-    is ``N(.N)*``. This equals ``packaging.version.Version(v).release`` for
-    the strings klt produces, without importing ``packaging`` (not a runtime
-    dependency). The strings klt produces (``_version_scheme.render``) are
-    ``X.Y.Z`` for a clean build on a release tag, ``X.Y.(Z+1).devN+g<sha>``
-    for any commit after the released base's tag (so ``0.7.1.dev212+g<sha>``
-    on a checkout past ``v0.7.0``), ``X.Y.Z.devN+g<sha>`` before the base is
-    tagged, either with ``.dirty`` appended to the local part, and
-    ``X.Y.Z.dev0+unknown`` with no git facts. Their release segments are
-    ``X.Y.Z``, ``X.Y.(Z+1)``, ``X.Y.Z`` and ``X.Y.Z``.
-
-    The gate does not compare this whole segment: it compares
-    :func:`_runner_gate_release`, its first two components.
+    Mirrors the worker shell parser. An empty or malformed prefix has no
+    release segment. The general compatibility check uses its first two
+    components; request features may also use the patch and dev distance.
     """
     head = version.strip().split("+", 1)[0]
     prefix = re.match(r"[0-9.]*", head).group(0)  # always matches
@@ -162,22 +146,11 @@ def _release_segment(version: str) -> str | None:
 
 
 def _runner_gate_release(version: str) -> str | None:
-    """The ``major.minor`` the runner version gate compares, or ``None``
-    (issue #3184).
+    """Major.minor used by the general worker gate; a lone major is unknown.
 
-    The gate compares major.minor only: patch releases, ``.devN`` builds and
-    ``+g<sha>`` local builds count as the same version as their major.minor.
-    So a post-tag git client ``0.7.1.dev212+g<sha>`` matches a ``0.7.0``
-    runner, ``0.7.3`` matches ``0.7.0`` in either direction, and
-    ``0.8.0.devN`` or ``0.8.0`` against any ``0.7.x`` is a mismatch. A
-    version whose release segment (:func:`_release_segment`) has fewer than
-    two components (``7``) has no gate release and counts as unknown.
-
-    This rests on a release discipline: a change that breaks the runner
-    contract ships in a minor release, never a patch, and every minor
-    release is published to PyPI and gets a rebaked runner image.
-    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
-    the runner, so both sides of the gate use one rule.
+    Patch and development builds of one minor match. Breaking the worker
+    contract requires a minor release and a rebaked runner. The worker
+    preflight repeats this release comparison in shell.
     """
     release = _release_segment(version)
     if release is None:
@@ -188,8 +161,8 @@ def _runner_gate_release(version: str) -> str | None:
 
 #: The registry maps each feature to its first supporting release segment and
 #: detector (#3249). The major.minor gate allows patch-level differences, so
-#: feature checks compare the full release segment. Post-tag builds such as
-#: ``0.7.1.devN`` count as ``0.7.1`` even if built before the feature landed.
+#: feature checks compare the full release segment. Step-scoped on_unreached
+#: needs a worker observation for development builds within the same segment.
 #: Following v0.7.0, the first 0.7.1 features were analysis_steps (#2482),
 #: measurements[].transfer (#2923/#2924), stimulus (#2977), dual_injection
 #: (analysis.passes / measurements[].tian, #3159/#3160/#3161), complex_vectors
@@ -205,13 +178,17 @@ def _runner_gate_release(version: str) -> str | None:
 #: likewise first ships in ``0.9.3``; an older runner would reject the unknown
 #: key (at best) or grade the raw crossing count, hence mandatory.
 #: Scanned mismatch_params (#5486) and exclusive_bounds (#7645) require 0.9.3.
-def _uses_extended_eye(request: dict[str, Any]) -> bool:
+def _step_measurements(request: dict[str, Any]) -> Iterator[dict[str, Any]]:
     for step in request.get("analysis_steps") or []:
-        if isinstance(step, dict) and any(
-            isinstance(spec, dict) and sim_eye.is_eye(spec)
-            for spec in step.get("measurements") or []
-        ):
-            return True
+        if isinstance(step, dict):
+            yield from (
+                m for m in step.get("measurements") or [] if isinstance(m, dict)
+            )
+
+
+def _uses_extended_eye(request: dict[str, Any]) -> bool:
+    if any(sim_eye.is_eye(m) for m in _step_measurements(request)):
+        return True
     return any(
         isinstance(spec, dict)
         and isinstance(spec.get("eye"), dict)
@@ -240,6 +217,10 @@ def _uses_pdk_relative_osdi(request: dict[str, Any]) -> bool:
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
+    "step_on_unreached": (
+        (0, 9, 3),
+        lambda r: any(m.get("on_unreached") == "null" for m in _step_measurements(r)),
+    ),
     "_regrade": ((0, 9, 3), lambda r: r.get("_regrade") is not None),  # also CLI-probed
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
@@ -354,6 +335,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "eye",
         "eye_step_or_phase",
         "step_resolution",
+        "step_on_unreached",
         "settled",
         "stress",
         "stimulus",
@@ -479,15 +461,25 @@ def _feature_release_key(name: str) -> int:
 
 
 def _missing_runner_features(
-    features: list[str], runner_version: str | None
+    features: list[str], runner_version: str | None, step_probe: object = None
 ) -> list[str] | None:
-    """The ``features`` a runner of ``runner_version`` predates, or ``None``
-    when its version is unknown (unknown is never "missing")."""
+    """Known missing features, or None when only unverified features remain."""
     release = _release_segment(runner_version) if runner_version else None
     key = _release_key(release) if release else None
     if key is None:
         return None
-    return [name for name in features if key < _feature_release_key(name)]
+    missing = [name for name in features if key < _feature_release_key(name)]
+    # SCM development distance counts commits on a branch, not feature ancestry.
+    if (
+        "step_on_unreached" in features
+        and key == _feature_release_key("step_on_unreached")
+        and release != (runner_version or "").strip().partition("+")[0]
+    ):
+        if step_probe == "unsupported":
+            missing.append("step_on_unreached")
+        elif step_probe != "supported" and not missing:
+            return None
+    return missing
 
 
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
