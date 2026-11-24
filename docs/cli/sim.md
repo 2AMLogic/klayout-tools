@@ -747,6 +747,12 @@ runs after the generated pin, and the netlist's `.control` runs later still.
 `environment.threads_per_worker` records the count klt requested when it set
 one.
 
+With `engine: "xyce"`, klt still validates `options.threads_per_worker`.
+It leaves the process’s `OMP_NUM_THREADS` setting alone and writes no
+`set num_threads` pin. On `local` and `local-parallel`,
+`environment.threads_per_worker` reports the resolved option, including the
+default of 1 for multiple workers. Xyce receives neither control from klt.
+
 On the ngspice 46 fleet, oversubscription caused a reported ~270× per-unit
 slowdown with identical measurement values. The generated `.spiceinit` pin
 was added after an environment-only run still timed out. [Fleet verification](https://github.com/2AMLogic/klayout-tools/issues/3619)
@@ -11077,7 +11083,7 @@ the *response* echoes back.
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag, and capped by the host's `KLT_SIM_MAX_WORKERS` when set (a larger value is clamped, not refused). |
-| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. See "Threads per worker" under "Execution backends". |
+| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. `engine: "ngspice"` only; validated but accepted-and-ignored for `"xyce"` (neither `OMP_NUM_THREADS` nor the `.spiceinit` pin is applied). See "Threads per worker" under "Execution backends". |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
