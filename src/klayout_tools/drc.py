@@ -2607,11 +2607,8 @@ def rerun_drc_report(
     ``provenance.klayout_module_version``, and the host-local
     ``environment.klayout_binary``. It also excludes ``deck_output`` because
     a native deck may print per-run timings and paths.
-    ``status: "drifted"`` names every other field that changed, including a
-    changed ``violation_count``/``violations`` (the DRC-outcome-changed
-    case) as well as a changed ``provenance.input.content_hash`` (the
-    input-moved case ``--check`` also catches, redundantly but harmlessly
-    here since this mode always re-hashes as a side effect of re-running).
+    ``status: "drifted"`` reports other differences, including violations
+    and the input content hash, which ``--check`` also verifies.
 
     Raises :class:`DrcError` for a missing/unparseable committed report, a
     report missing ``file``/``deck`` to rerun, or any error the rerun itself
@@ -2630,6 +2627,7 @@ def rerun_drc_report(
         _recorded_tile,
         _recorded_top,
         _rerun_pdk_selection,
+        recorded_native_deck_vars,
     )
 
     committed = _load_committed_report(report_path, DrcError)
@@ -2669,9 +2667,10 @@ def rerun_drc_report(
         from ._drc_gf180_3lm import recorded_pdk_root, replay_prelude_kwargs
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
-        prelude_kwargs = replay_prelude_kwargs(committed, deck)
-        if prelude_kwargs and pdk_variant is None and pdk_root is None:
+        native_kwargs = replay_prelude_kwargs(committed, deck)
+        if native_kwargs and pdk_variant is None and pdk_root is None:
             eff_root = recorded_pdk_root(committed, deck, eff_variant)
+        native_kwargs["deck_vars"] = recorded_native_deck_vars(committed)
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
@@ -2680,7 +2679,7 @@ def rerun_drc_report(
             pdk_variant=eff_variant,
             pdk_root=eff_root,
             **_rerun_assertion_kwargs(committed),
-            **prelude_kwargs,
+            **native_kwargs,
             **recorded_negative_control_kwargs(committed),
         )
     else:

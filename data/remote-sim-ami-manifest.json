@@ -7,7 +7,9 @@
       "ami_id": "ami-08ff4d015ebd4b1f1",
       "pdk_snapshot": "sky130A-2026.08.03",
       "ngspice_version": "46",
-      "built_at": "2026-08-03T13:14:49Z"
+      "built_at": "2026-08-03T13:14:49Z",
+      "klt_version": "0.1.0",
+      "klt_ref": "cf6df6409ba1804ead8d781f79bbf9aa11936a86"
     },
     {
       "pdk": "gf180mcu",
@@ -15,7 +17,9 @@
       "ami_id": "ami-0d29920f74c634d07",
       "pdk_snapshot": "gf180mcu-2026.08.08",
       "ngspice_version": "46",
-      "built_at": "2026-08-08T06:02:25Z"
+      "built_at": "2026-08-08T06:02:25Z",
+      "klt_version": "0.2.0",
+      "klt_ref": "42245d1b986c5b3efc256d96b3ba13085b46140e"
     },
     {
       "pdk": "gf180mcu",
@@ -23,7 +27,9 @@
       "ami_id": "ami-0c05848625d82349b",
       "pdk_snapshot": "gf180mcu-2026.08.08",
       "ngspice_version": "46",
-      "built_at": "2026-08-08T06:02:25Z"
+      "built_at": "2026-08-08T06:02:25Z",
+      "klt_version": "0.2.0",
+      "klt_ref": "42245d1b986c5b3efc256d96b3ba13085b46140e"
     },
     {
       "pdk": "gf180mcu",
@@ -31,7 +37,9 @@
       "ami_id": "ami-0b9c5932936afd514",
       "pdk_snapshot": "gf180mcu-2026.08.08",
       "ngspice_version": "46",
-      "built_at": "2026-08-08T06:02:25Z"
+      "built_at": "2026-08-08T06:02:25Z",
+      "klt_version": "0.2.0",
+      "klt_ref": "42245d1b986c5b3efc256d96b3ba13085b46140e"
     },
     {
       "pdk": "gf180mcu",
@@ -39,7 +47,9 @@
       "ami_id": "ami-0ef7cf385b9146c75",
       "pdk_snapshot": "gf180mcu-2026.08.08",
       "ngspice_version": "46",
-      "built_at": "2026-08-08T06:02:25Z"
+      "built_at": "2026-08-08T06:02:25Z",
+      "klt_version": "0.2.0",
+      "klt_ref": "42245d1b986c5b3efc256d96b3ba13085b46140e"
     },
     {
       "pdk": "gf180mcu",
@@ -47,7 +57,9 @@
       "ami_id": "ami-0e566be6c3ba02559",
       "pdk_snapshot": "gf180mcu-2026.08.24",
       "ngspice_version": "46",
-      "built_at": "2026-08-24T20:11:51Z"
+      "built_at": "2026-08-24T20:11:51Z",
+      "klt_version": "0.3.0",
+      "klt_ref": "ec5b15749a6d69617f27854f42e92db627f4041f"
     }
   ]
 }

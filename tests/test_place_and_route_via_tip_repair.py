@@ -353,3 +353,33 @@ def test_successive_local_merges_preserve_whole_conductors():
         actual = kdb.Region(indexed)
         assert actual.count() == metal.count()
         assert (actual ^ metal).is_empty()
+
+
+@pytest.mark.parametrize(
+    ("edit", "merged_count"),
+    [
+        # Shares only the x=30 edge with the conductor: zero overlap.
+        (kdb.Box(10, 0, 30, 10), 2),
+        # Shares only the corner point (30, 10) with the conductor.
+        (kdb.Box(10, 10, 30, 20), 2),
+    ],
+    ids=["edge", "corner"],
+)
+def test_merge_repair_merges_conductor_that_only_touches_the_edit(edit, merged_count):
+    from klayout_tools.place_and_route_via_tip_repair import _merge_repair
+
+    # The neighbour lookup must be touch-inclusive: a conductor abutting the
+    # edit's bounding box with no overlap still has to be re-merged with it.
+    metal = kdb.Region(kdb.Box(30, 0, 40, 10)) + kdb.Region(kdb.Box(100, 0, 110, 10))
+    indexed = kdb.Shapes()
+    indexed.insert(metal)
+    extra = kdb.Region(edit)
+    _merge_repair(kdb, indexed, extra)
+    reference = (metal + extra).merged()
+    actual = kdb.Region(indexed)
+    # The edit joins the touching conductor; the far one is left alone.
+    assert reference.count() == merged_count
+    # Count is the discriminating check: an unmerged abutting box covers the
+    # same area, so the XOR below stays empty even if the conductor is skipped.
+    assert actual.count() == reference.count()
+    assert (actual ^ reference).is_empty()
