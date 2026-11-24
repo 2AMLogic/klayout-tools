@@ -401,10 +401,12 @@ from .extract_report_canonicalize import (
 from .extract_spef import (
     DefNetConnections,
     _renamed_def_name,
-    _unescape_spice_safe_net_name,
 )
 from .extract_spef import ExtractError as ExtractError
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
+from .extract_spef_block import (
+    _spef_missing_conn_warnings as _spef_missing_conn_warnings,
+)
 from .extract_spef_block import write_spef_block
 from .extract_validate import _attach_resistance_paths as _attach_resistance_paths
 from .extract_validate import _require_parasitics as _require_parasitics
@@ -1009,6 +1011,7 @@ def run_extract(
     resistance_graph_r_cut_ohm: float | None = None,
     resistance_graph_caps: Mapping[str, int] | None = None,
     emit_selected_resistance: bool = False,
+    emit_resistance_network: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1477,36 +1480,29 @@ def run_extract(
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
 
-    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
-    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
-    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
-    of the net's geometry-derived resistor graph, with coverage counts and
-    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
-    other field are unchanged, and ``False`` (the default) adds no key.
-    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+    ``resistance_graph`` (``--resistance-graph``, #2982) requires parasitics.
+    It adds the geometry-derived terminal-pair resistance matrix, coverage and
+    diagnostics to each net. The existing scalar and ladder stay unchanged.
+    See :func:`_compute_parasitics`.
 
-    ``emit_selected_resistance`` (internal, issue #4037; set only by
-    ``klt pex``, never exposed on ``klt extract``) writes each net's
-    ``selected_resistance_ohm`` as its lumped R in the emitted netlist where
-    ``resistance_source == "graph"``; requires ``resistance_graph=True``.
-    ``False`` keeps the legacy-scalar netlist.
+    PEX can use the graph to write two alternative netlists. With
+    ``emit_selected_resistance`` (#4037), each graph-sourced net uses its
+    ``selected_resistance_ohm`` as its lumped R. With ``emit_resistance_network``
+    (``klt pex --resistance-network``, #6899), solved nets with at least three
+    terminals use a Kron-reduced network in place of the star. Both require
+    ``resistance_graph=True``. The latter is incompatible with ``spef_output``.
+    Both default to false and preserve the legacy netlist when disabled.
 
-    ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    overrides every landing's per-cut resistance (``0`` = ideal via).
-    ``None`` (the default) resolves each landing from the deck's nominal
-    per-cut tables (``ParasiticsDeck.cuts``/``.poly_contact``, issue #6917)
-    and keeps an uncurated landing ``unsupported`` on the legacy scalar.
+    ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, #2983)
+    overrides per-cut resistance at every landing (zero models an ideal via).
+    The default uses the deck's cut or poly-contact tables (#6917) and keeps
+    unsupported landings on the legacy scalar.
 
-    ``resistance_graph_caps`` (``--resistance-graph-max-terminals`` /
-    ``--resistance-graph-max-cells`` / ``--resistance-graph-max-nodes`` /
-    ``--resistance-graph-max-edges``, issue #6964) raises the builder's own
-    per-net size caps, as ``{builder keyword: positive integer}`` holding
-    only the caps that were given (``None``/empty: none). A cap the builder
-    would exceed is reported ``graph_too_large`` naming the value applied,
-    so a net stays on the legacy scalar until its cap is raised. Defaults
-    come from :mod:`~klayout_tools.extract_resistance_graph`'s constants
-    (64 terminals, 4096 mesh cells, 5000 nodes, 20000 edges); needs
-    ``resistance_graph=True``.
+    ``resistance_graph_caps`` (#6964) accepts positive per-net limits keyed by
+    builder argument. The ``--resistance-graph-max-*`` options override the
+    defaults of 64 terminals, 4096 mesh cells, 5000 nodes and 20000 edges.
+    An exceeded cap reports ``graph_too_large`` and its value, retaining the
+    legacy scalar. Omitted caps use the builder defaults. Requires a graph.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2421,6 +2417,7 @@ def run_extract(
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         critical_net_patterns=critical_net_patterns,
         critical_net_all=critical_net_all,
         critical_net_excludes=critical_net_excludes,
@@ -2637,6 +2634,7 @@ def run_extract(
         deck_name=deck_name,
         distributed_rc=distributed_rc,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         mom_crosscheck=mom_crosscheck,
         mom_net=mom_net,
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -2660,6 +2658,7 @@ def run_extract(
     )
 
     spef_path = write_spef_block(
+        circuit=circuit,
         spef_output=spef_output,
         parasitics_report=parasitics_report,
         def_net_connections=def_net_connections,
@@ -2764,6 +2763,7 @@ def run_extract(
         netlist_sha256=netlist_sha256,
         nets=nets,
         parasitics_report=parasitics_report,
+        emit_resistance_network=emit_resistance_network,
         path=path,
         pdk_info=pdk_info,
         report_parasitics_shape=report_parasitics,
@@ -4026,19 +4026,18 @@ def _reconcile_top_pins(
     demote: bool,
     unresolved: Sequence[kdb.Net] = (),
 ) -> list[str]:
-    """Reconcile the top circuit's pins against ``below_top_labels`` (issue
-    #291), the label strings that name a net only from below an instance
-    boundary.
+    """Reconcile top pins promoted by ``make_top_level_pins()`` (#291, #7663).
 
-    ``make_top_level_pins()`` has already promoted every named net. This finds
-    the promoted pins whose net name is a below-top label and, when
-    ``demote`` is set, removes those pins (the net keeps its name and stays an
-    internal node). Returns the sorted, de-duplicated net names affected --
-    the input to the caller's ``warnings`` entry, whether or not they were
-    actually demoted.
+    ``below_top_labels`` names nets labeled only below an instance boundary.
+    Demotion removes promoted pins and keeps their named internal nets.
+    Return sorted, unique affected names for warnings even without demotion.
+    Substrate nets named by ``connect_global`` have no such labels and keep their pins.
 
-    Global/substrate nets (named by ``connect_global``, not by any drawn text)
-    are never in ``below_top_labels``, so a substrate pin is left untouched.
+    ``unresolved`` holds ``<instance>__<pin>`` nets minted by ``_wire_abstract_cells``
+    where an abstract pin touches no conductor. When demoting, remove their
+    pins by net identity before the early return, sparing same-named user
+    nets. Omit these names from the result because ``_wire_abstract_cells``
+    already emits per-instance "left unconnected" warnings.
     """
     if demote:
         for net in unresolved:
@@ -5155,71 +5154,33 @@ def _remap_def_net_connections(
     after_by_before: dict[str, str] = {}
     for _circuit, before, after in renames:
         after_by_before.setdefault(before, after)
-    remapped: dict[str, Sequence[tuple[str, str]]] = {}
-    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
-    for key, pins in def_net_connections.items():
-        target = after_by_before.get(key)
-        if target is None:
-            remapped[key] = pins
-        else:
-            # Issue #3900: the key carries the DEF's own SPEF spelling, so
-            # the SPEF a linked design reads still names the net as the DEF
-            # does; only the SPICE/JSON spelling is the renamed one.
-            renamed_items[_renamed_def_name(target, key)] = pins
-    # The renamed net is what actually exists, so it wins any key clash.
-    remapped.update(renamed_items)
-    # Keep the DEF's renamed-port map (issue #3257 gap B), re-keyed the same way.
+    targets = set(after_by_before.values())
+
+    def remap_key(key: str) -> str:
+        return (
+            _renamed_def_name(after_by_before[key], key)
+            if key in after_by_before
+            else key
+        )
+
+    # Keep the observed net's DEF spelling, instance pins and port pins together.
+    # An absent DEF net with the same normalized spelling has no layout island.
+    remapped = {
+        remap_key(key): pins
+        for key, pins in def_net_connections.items()
+        if key in after_by_before or key not in targets
+    }
     port_pins = getattr(def_net_connections, "port_pins", None)
     if port_pins is None:
         return remapped
     return DefNetConnections(
         {net: tuple(pins) for net, pins in remapped.items()},
-        {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
+        {
+            remap_key(key): pins
+            for key, pins in port_pins.items()
+            if key in after_by_before or key not in targets
+        },
     )
-
-
-def _spef_missing_conn_warnings(
-    parasitics_report: Mapping[str, Any],
-    original: Mapping[str, Sequence[tuple[str, str]]] | None,
-    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
-) -> list[str]:
-    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
-    correspond to a ``--def-net-connections`` net yet get no instance
-    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
-    those port-only), or a dotted DEF net whose rewritten spelling did not
-    reach the key lookup."""
-    if not remapped:
-        return []
-    names = [
-        _unescape_spice_safe_net_name(entry["net"])
-        for entry in parasitics_report["nets"]
-    ]
-    counts: dict[str, int] = {}
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-    stale = {
-        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
-        for key in (original or {})
-        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
-    }
-    missing = sorted(
-        name
-        for name in counts
-        if (remapped.get(name) and counts[name] > 1)
-        or (name in stale and not remapped.get(name))
-    )
-    if not missing:
-        return []
-    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
-    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
-    return [
-        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
-        f"net but were written without instance *CONN pins ({shown}"
-        + (f", +{more} more" if more > 0 else "")
-        + ") -- duplicated net names stay port-only, and a DEF net name the "
-        "extractor did not rename cannot be matched; downstream `klt sta` "
-        "will report these nets as partially unannotated"
-    ]
 
 
 def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
@@ -7596,6 +7557,8 @@ def _extract_netlist(
         l2n.connect(tap_substrate_outside, contact)
         for isolated_slice in tap_substrate_isolated:
             l2n.connect(isolated_slice, contact)
+    # Connect terminal poly and retain its probe layers for abstract-pin wiring (#7663).
+    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     # Re-join an abstracted macro's own well to the contact/metal stack its
     # tie was contacted up through (issue #2398) -- the `tap`/`nwell`/
     # `contact` triangle above, restricted to the well-tie geometry erasure
@@ -7604,7 +7567,6 @@ def _extract_netlist(
     # every other region registered above. Deliberately outside the
     # `tap_declared` gate: it is empty whenever the deck has no tap mechanism
     # at all, so the gate would be redundant.
-    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     _abstract_well_tie = _connect_abstract_well_tie(
         l2n, nwell, nwell_body_cover, contact, abstract_well_tie_cover
     )

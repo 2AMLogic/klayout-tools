@@ -1,1 +1,1 @@
-- On ASAP7, `klt place-and-route` can repair M1 tip spacing between a cut-flush V1 landing and a facing wire, including a wire in library geometry. The separate `via_pad_trim.m1_landing_pad_wire_pairs_extended` count reports successful repairs.
+- On ASAP7, `klt place-and-route` can repair M1 tip spacing between a cut-flush V1 landing and a facing wire, including a wire in library geometry. The separate `via_pad_trim.m1_landing_pad_wire_pairs_extended` count reports successful repairs (#7397).

@@ -43,6 +43,7 @@ from typing import Any
 from . import macros as macro_spec
 from . import output_lock
 from . import place_and_route_library_limits as _library_limits
+from . import place_and_route_multicycle as _multicycle
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from . import place_and_route_route_overflow as _route_overflow
@@ -304,12 +305,7 @@ from .place_and_route_request_checks import (
     _validate_request_level as _validate_request_level,
 )
 
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
+# Keep the split script emitters importable here for existing callers (#3904).
 from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
@@ -404,6 +400,7 @@ from .place_and_route_warnings import (
 from .place_and_route_warnings import (
     _response_warnings as _response_warnings,
 )
+from .post_route_sta_multicycle import multicycle_request_error
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1085,6 +1082,7 @@ def _run_single_corner(
         portable_paths,
         output_dbu_um,
         post_route_sdf,
+        multicycle,
     ) = _validate_request_level(request, request_dir, corner_override=corner_override)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
@@ -1183,6 +1181,7 @@ def _run_single_corner(
             max_fanout=max_fanout,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            multicycle=multicycle,
             power_activity=power_activity,
             cell_library=cell_library,
             seed=seed,
@@ -1246,6 +1245,7 @@ def _run_single_corner(
             engine_logs=engine_logs,
             repo_root=repo_root,
         )
+        _check_multicycle_error(completed)
         with completed.diagnostics(PlaceAndRouteError):
             if completed.returncode != 0:
                 raise PlaceAndRouteError(
@@ -1350,6 +1350,7 @@ def _run_single_corner(
                 max_fanout=max_fanout,
                 input_delay_ns=input_delay_ns,
                 output_delay_ns=output_delay_ns,
+                multicycle=multicycle,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
                 library=library,
@@ -1433,20 +1434,7 @@ def _run_single_corner(
         }
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
-        # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
-        # routed-geometry parasitics via `klt extract --parasitics` against the
-        # GDS just merged above, fed back into a fresh OpenSTA session
-        # (`read_spef`) seeded from the `"route"` stage's own checkpoint --
-        # after the DEF->GDS merge, before this function's own final response
-        # is assembled, exactly the "after write_def/the DEF->GDS merge...
-        # before the report calls" ordering the issue's own scope names (the
-        # report calls in question are this helper's own internal
-        # `_metrics_report_lines`/`_violation_count_lines`, run inside the
-        # second `openroad` invocation it launches -- the merge itself runs
-        # in-process Python, so no *Tcl* command can sit "between" it and
-        # `write_def`; the ordering constraint is honored at the pipeline-step
-        # level instead). Off by default -- see `_validate_post_route_spef`'s
-        # own docstring for why.
+        # Extract SPEF from the merged GDS and read it in a fresh timing session.
         if post_route_spef:
             with explain_spef_layer_map(layer_map_info):
                 spef_sta = _post_route_spef_metrics(
@@ -1465,6 +1453,7 @@ def _run_single_corner(
                     max_fanout=max_fanout,
                     input_delay_ns=input_delay_ns,
                     output_delay_ns=output_delay_ns,
+                    multicycle=multicycle,
                     checkpoint_in=checkpoint_path,
                     # Issue #1002: `write_sdf` inside that same session, right
                     # after its `read_spef` -- see `_validate_post_route_sdf`.
@@ -1697,6 +1686,7 @@ def _run_single_corner(
 
     response: dict[str, Any] = {
         **exclusions,
+        **_multicycle.response_fields(multicycle),
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -1982,6 +1972,8 @@ def _run_rebuild_corners(
                 corner_override=name,
                 output_subdir=name,
             )
+        except _multicycle.MulticycleConstraintError:
+            raise
         except PlaceAndRouteError as exc:
             _route_overflow.record_corner_failure(entry, exc)
         else:
@@ -2011,6 +2003,12 @@ def _run_rebuild_corners(
 # --------------------------------------------------------------------------- #
 # Request validation
 # --------------------------------------------------------------------------- #
+
+
+def _check_multicycle_error(completed: _OpenRoadResult) -> None:
+    if completed.returncode and (message := multicycle_request_error(completed.stdout)):
+        with completed.diagnostics(_multicycle.MulticycleConstraintError):
+            raise _multicycle.MulticycleConstraintError(message)
 
 
 def _engine_error_message(

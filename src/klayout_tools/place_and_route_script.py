@@ -17,6 +17,7 @@ from typing import Any
 from . import place_and_route_clock as _vclk
 from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
+from ._sta_multicycle import multicycle_lines
 from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_base import (
     _ANTENNA_VIOLATIONS_BEGIN,
@@ -963,6 +964,7 @@ def _stage_script_lines(
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
     instance_groups: list[dict[str, Any]] | None = None,
+    multicycle: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
 
@@ -1004,14 +1006,10 @@ def _stage_script_lines(
             max_transition_ns, max_capacitance_pf, max_fanout
         )
         lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+        lines += multicycle_lines(multicycle, mode="validate")
         lines += _floorplan_init_lines(floorplan)
-        # `place_macro` fixes each declared hard-macro instance at its
-        # caller-given location -- must run after the floorplan's own die/
-        # core area is initialized (a location outside the die is invalid)
-        # and after `link_design` (the instance must already exist in the
-        # linked network). Never OpenROAD's automatic macro placer
-        # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision. Brace quoting preserves a bracketed instance name.
+        # Fix the caller's macro locations after linking and floorplan initialization.
+        # Brace-quote literal names for the later glob/list site (#4701, #4715).
         lines += [
             f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
@@ -1048,6 +1046,7 @@ def _stage_script_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += multicycle_lines(multicycle, mode="apply")
     unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
 
     declarations, place_fixed, check_fixed = fixed_group_commands(instance_groups or [])
