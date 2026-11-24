@@ -5461,6 +5461,13 @@ def _publish_manifest(tmp_path: Path, monkeypatch, images: list[dict]) -> Path:
     path = tmp_path / "ami-manifest.json"
     path.write_text(json.dumps({"schema_version": 1, "images": images}))
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(path))
+    # These gate tests inject normalized candidates, including historical
+    # multi-image sets. The S3 reader itself is covered in test_sim_batch_image.
+    monkeypatch.setattr(
+        sb.sim_batch_image,
+        "read_batch_runner_images",
+        lambda pdk, region, *_: rl.published_runner_identities(pdk, region, path),
+    )
     return path
 
 
@@ -5628,30 +5635,6 @@ def test_prelaunch_unpinned_region_refuses_only_when_every_image_mismatches(
     assessment = sb._assess_published_runner(request, config)
     assert assessment["status"] == "mismatch"
     assert "0.5.0" in assessment["message"] and "0.6.2" in assessment["message"]
-
-
-def test_prelaunch_uses_the_latest_build_per_region(tmp_path, monkeypatch):
-    """An older entry for the same (pdk, region) is audit trail, exactly as
-    for `resolve_ami`: only the newest build is compared."""
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    old = _image(klt_version="0.7.0")
-    new = {**_image(klt_version="0.5.0"), "built_at": "2026-10-12T00:00:00Z"}
-    _publish_manifest(tmp_path, monkeypatch, [old, new])
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "mismatch"
-
-
-def test_prelaunch_missing_manifest_is_unknown_not_an_error(tmp_path, monkeypatch):
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "absent.json"))
-    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", tmp_path / "absent-user.json")
-    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", tmp_path / "absent-default.json")
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "unknown"
 
 
 def test_prelaunch_sharded_request_refuses_once_with_zero_calls(tmp_path, monkeypatch):
@@ -6957,7 +6940,9 @@ def test_pdk_variant_check_passes_when_listed_or_unknown(tmp_path, monkeypatch, 
         tmp_path, monkeypatch, [_image(pdk="gf180mcu", klt_version="0.7.0", **image)]
     )
     request = json.loads(path.read_text())
-    sb._validate_batch_pdk_variant(request, "us-east-1")  # does not raise
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path).runner_identities("gf180mcuC")
+    )  # does not raise
 
 
 def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
@@ -6965,7 +6950,9 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
 ):
     request = {"models": {"pdk": "gf180mcuC"}}
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "missing.json"))
-    sb._validate_batch_pdk_variant(request, None)
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )
     _publish_manifest(
         tmp_path,
         monkeypatch,
@@ -6974,9 +6961,13 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
             _image(region="us-west-2", pdk="gf180mcu", pdk_variants=["gf180mcuC"]),
         ],
     )
-    sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )  # any candidate lists it
     with pytest.raises(sim.SimError):
-        sb._validate_batch_pdk_variant(request, "us-east-1")
+        sb._validate_batch_pdk_variant(
+            request, _config(tmp_path).runner_identities("gf180mcuC")
+        )
 
 
 # --- engine_build_comparison (issue #3095) ---------------------------------

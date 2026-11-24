@@ -141,13 +141,17 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   tier-verdict report by different rules — a registry wheel built from a
   release tag, a `pip install git+...@<tag>` snapshot of that same tag, and a
   full-repo checkout that has moved past the tag on `main`. This field is a
-  `sha256:`-prefixed content hash of the shipped `signoff.py` grading module:
-  identical between two installs of byte-identical grading code regardless
-  of how each was installed, and different whenever the grading logic
-  changes — see [`signoff.md`'s "Identifying the grading
+  `sha256:`-prefixed content hash of the shipped `signoff*.py` grading
+  modules (issue #7434: every module in the package directory whose filename
+  matches — the grading rules and the `reason` vocabulary they emit are
+  spread across the whole leaf family — with each file's basename mixed into
+  the digest before its bytes, so a rename or a content move between leaves
+  changes the id too): identical between two installs of byte-identical
+  grading code regardless of how each was installed, and different whenever
+  the grading logic changes — see [`signoff.md`'s "Identifying the grading
   build"](signoff.md#identifying-the-grading-build) for the full mechanism,
   including `klt signoff --describe-grader`. `null` only if this install's
-  `signoff.py` cannot be read at all (never fabricated).
+  `signoff*.py` grading modules cannot be read at all (never fabricated).
 - `klayout_version` (issue #1490) — the KLayout engine actually resolved
   into this process (`klayout.__version__`, same value as
   `provenance.klayout_version`), or `null` if unresolvable.
