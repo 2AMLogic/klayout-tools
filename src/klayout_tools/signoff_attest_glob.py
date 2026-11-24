@@ -22,9 +22,9 @@ inventory is refused with a message naming the required version, so an older
 "literal path" forever, which is why the glob form is a mapping, not a
 string).
 
-Like :mod:`signoff_attest_item9`, this module does not import
-:mod:`signoff_attest` at module level (which imports us): the error class and
-the path validator are imported lazily.
+This module does not import :mod:`signoff_attest` at module level (which
+imports us): the path validator is imported lazily. The error class comes
+from the leaf :mod:`signoff_base`.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ._jsonnum import is_int
+from .signoff_base import AttestationError
 
 #: The inventory ``schema_version`` that introduced ``{"glob": ...}``
 #: members. A schema-1 inventory is refused, not silently reinterpreted;
@@ -48,13 +49,6 @@ _GLOB_KEYS = frozenset({"glob"})
 #: Upper bound (seconds) on the ``git ls-files`` call, matching
 #: ``build_identity``'s probe budget.
 _LS_FILES_TIMEOUT_S = 30
-
-
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
 
 
 def _normalize(raw: Any, field: str, root: str) -> str:
@@ -70,7 +64,7 @@ def _claim(path: str, field: str, seen: dict[str, str]) -> str:
     already-listed file raises the ordinary duplicate error instead of
     silently double-binding it."""
     if path in seen:
-        raise _error(
+        raise AttestationError(
             f"path '{path}' is listed more than once (in '{seen[path]}' and "
             f"'{field}') -- each inventoried file must appear exactly once"
         )
@@ -125,7 +119,7 @@ def _expand_glob(
     directory is refused exactly as a literal symlink path would be.
     """
     if not is_int(schema_version) or schema_version < GLOB_SCHEMA_VERSION:
-        raise _error(
+        raise AttestationError(
             f"'{field}' glob entries need inventory schema_version "
             f"{GLOB_SCHEMA_VERSION} (this inventory declares "
             f'{schema_version!r}) -- set "schema_version": '
@@ -133,7 +127,7 @@ def _expand_glob(
         )
     unknown = sorted(key for key in raw if key not in _GLOB_KEYS)
     if unknown or "glob" not in raw:
-        raise _error(
+        raise AttestationError(
             f"'{field}' entries accept a literal path string or an object "
             f"with exactly a 'glob' key (got {unknown or 'no glob key'})"
         )
@@ -144,7 +138,7 @@ def _expand_glob(
         if fnmatch.fnmatchcase(path, pattern)
     )
     if not matches:
-        raise _error(
+        raise AttestationError(
             f"'{field}' glob '{pattern}' matched no git-tracked file -- a "
             "glob that attests nothing is refused, like an empty path list"
         )
@@ -160,15 +154,15 @@ def _validated_pattern(raw: Any, field: str) -> str:
     Empty ``.`` and ``/`` segments are dropped, so ``records//*.md`` and
     ``./records/*.md`` mean ``records/*.md``."""
     if not isinstance(raw, str) or not raw.strip():
-        raise _error(f"'{field}' glob patterns must be non-empty strings")
+        raise AttestationError(f"'{field}' glob patterns must be non-empty strings")
     if os.path.isabs(raw) or raw.startswith(("/", "\\")):
-        raise _error(
+        raise AttestationError(
             f"'{field}' glob pattern '{raw}' is absolute -- inventory paths "
             "are repository-relative"
         )
     parts = [part for part in raw.split("/") if part not in ("", ".")]
     if any(part == ".." for part in parts):
-        raise _error(
+        raise AttestationError(
             f"'{field}' glob pattern '{raw}' is outside the repository "
             "-- a glob may not escape it with '..'"
         )
@@ -194,7 +188,7 @@ def _tracked_files(root: str, field: str, pattern: str) -> list[str]:
         completed = None
     if completed is None or completed.returncode != 0:
         detail = "" if completed is None else f": {completed.stderr.strip()}"
-        raise _error(
+        raise AttestationError(
             f"'{field}' glob '{pattern}' could not list git-tracked files in "
             f"'{root}'{detail} -- a glob expands from the git index "
             "(git-tracked files only), never from the filesystem"

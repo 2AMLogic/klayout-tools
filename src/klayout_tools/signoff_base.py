@@ -180,6 +180,17 @@ class SignoffError(Exception):
     """
 
 
+class AttestationError(SignoffError):
+    """A malformed inventory or committed envelope -- nothing was attested.
+
+    A :class:`~klayout_tools.signoff.SignoffError` subclass so the CLI's
+    existing ``except SignoffError`` reports it through the ordinary error
+    envelope (exit ``1``)."""
+
+    # Mixed-version workers must still resolve this exception at its public path.
+    __module__ = "klayout_tools.signoff_attest"
+
+
 class EnvelopeVersionSkewError(SignoffError):
     """Raised by :func:`_classify` for an envelope that carries a kind's
     **primary** marker but none of the shape discriminators that marker is

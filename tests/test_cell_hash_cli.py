@@ -6,9 +6,21 @@ import re
 import klayout.db as kdb
 import pytest
 
-from klayout_tools._provenance import cell_geometry_digest
+from klayout_tools._provenance import cell_geometry_digest, layout_geometry_digest
 from klayout_tools.cli import main
 from test_signoff_foundry_cell_exception import _gds, _item3, _setup
+
+
+@pytest.mark.parametrize("extension", ["gds", "oas"])
+def test_digest_matches_existing_provenance(tmp_path, extension):
+    layout = _gds(tmp_path / f"block.{extension}", with_top=True)
+    # The full layout and TOP's subtree cover identical geometry with distinct headers.
+    assert layout_geometry_digest(layout) == (
+        "sha256:559207f60998a9a9f5594c6014640ae9431ee1a37dd73be3dfacf9e3118f3a8e"
+    )
+    assert cell_geometry_digest(layout, "TOP") == (
+        "sha256:94d5ab1809de05c587e2bb7ad2809777fb72710dee208b3373213ae702d3428a"
+    )
 
 
 @pytest.mark.parametrize("extension", ["gds", "oas"])
