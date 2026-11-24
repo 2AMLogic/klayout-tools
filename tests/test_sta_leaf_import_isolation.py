@@ -33,6 +33,7 @@ CASES = {
     "_sta_request_diag": None,
     "_sta_sdc_multicycle": None,
     "_sta_sdc_check": ("resolve_sdc_check", [False, "."]),
+    "_sta_spef_inputs": ("resolve_spef", [False, "."]),
     "_sta_timing_derate": ("validate_timing_derate", [{"timing_derate": False}]),
     "_sta_wire_load": None,
     "post_route_sta_electrical": None,
@@ -44,6 +45,10 @@ CASES = {
     "post_route_sta_multicycle": None,
     "post_route_sta_path_groups": None,
     "post_route_sta_stages": None,
+    "post_route_sta_violating_endpoints": (
+        "_validate_max_violating_endpoints",
+        [{"max_violating_endpoints": 0}],
+    ),
 }
 
 

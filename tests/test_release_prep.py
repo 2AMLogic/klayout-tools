@@ -217,6 +217,41 @@ def test_cli_prepare_empty_section_exits_2(tmp_path: Path, capsys) -> None:
     assert "nothing to release" in capsys.readouterr().err
 
 
+def test_fragment_notes_resolve_only_in_new_section(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    fragment = repo / "changelog.d" / "1234-added.md"
+    fragment.parent.mkdir()
+    current = "the first release after `v0.8.0`"
+    future = "the next release after v0.9.5"
+    fragment.write_text(f"- {current}, {future}, and {current}.\n")
+    changelog = repo / "CHANGELOG.md"
+    historic = f"- historical: {current}.\n"
+    changelog.write_text(CHANGELOG + historic)
+
+    rp.prepare(repo, None, "2026-11-09")
+    assembled = changelog.read_text()
+    assert f"- `klt 0.9.0`, {future}, and `klt 0.9.0`." in assembled
+    assert assembled.endswith(historic)
+    assert not fragment.exists()
+    rp.prepare(repo, "0.9.0", "2026-11-10")
+    assert changelog.read_text() == assembled
+
+
+def test_stale_fragment_note_reports_source_line_before_writes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    fragments = repo / "changelog.d"
+    fragments.mkdir()
+    (fragments / "100-valid.md").write_text("- first release after `v0.8.0`\n")
+    (fragments / "200-stale.md").write_text(
+        "\n\n- stale in the first release after `v0.7.0`.\n"
+    )
+    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+
+    with pytest.raises(rp.PrepError, match=r"changelog\.d/200-stale\.md:3:"):
+        rp.prepare(repo, None, "2026-11-09")
+    assert {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
+
+
 def test_prepare_refuses_stale_anchor(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     stale = "intro\n\nfirst ships in the first release after `v0.7.0`.\n"
@@ -327,6 +362,45 @@ def test_publish_refuses_non_tag_refs() -> None:
 
 def test_release_lag_workflow_is_retired() -> None:
     assert not (REPO_ROOT / ".github/workflows/release-lag.yml").exists()
+
+
+@pytest.mark.parametrize("with_fragments", [False, True])
+def test_prepare_resolves_legacy_unreleased_entries(
+    tmp_path: Path, with_fragments: bool
+):
+    repo = _repo(tmp_path)
+    note = "the first release after `v0.8.0`"
+    changelog = repo / "CHANGELOG.md"
+    historical = "## 0.8.0 (2026-10-24)\n\n- " + note + "\n"
+    changelog.write_text(
+        f"# Changelog\n\n## Unreleased\n\n- Legacy: {note}\n\n{historical}"
+    )
+    if with_fragments:
+        fragment = repo / "changelog.d" / "100.md"
+        fragment.parent.mkdir()
+        fragment.write_text("- Fragment\n")
+    rp.prepare(repo, None, "2026-11-09")
+    result = changelog.read_text()
+    assert "- Legacy: `klt 0.9.0`\n" in result
+    assert result.endswith(historical)
+
+
+def test_prepare_stale_unreleased_anchor_reports_file_line_before_writing(
+    tmp_path: Path,
+):
+    repo = _repo(tmp_path)
+    changelog = repo / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\nIntro\n\n## Unreleased\n\n- Old\n"
+        "  the first release after `v0.7.0`\n"
+    )
+    fragment = repo / "changelog.d" / "200.md"
+    fragment.parent.mkdir()
+    fragment.write_text("- Pending\n")
+    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    with pytest.raises(rp.PrepError, match=r"CHANGELOG\.md:8:"):
+        rp.prepare(repo, None, "2026-11-09")
+    assert {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
 
 
 def test_refresh_collects_late_notes_once_and_leaves_history_intact(tmp_path):

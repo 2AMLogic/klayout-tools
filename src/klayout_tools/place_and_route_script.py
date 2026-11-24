@@ -18,27 +18,41 @@ from . import place_and_route_clock as _vclk
 from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_base import (
+    _ANTENNA_VIOLATIONS_BEGIN,
+    _ANTENNA_VIOLATIONS_END,
+    _GLOBAL_PLACEMENT_DENSITY,
+    _HOLD_VIOLATIONS_BEGIN,
+    _HOLD_VIOLATIONS_END,
+    _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_VIOLATIONS_END,
+    _MAX_TRANSITION_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_VIOLATIONS_END,
+    _SETUP_VIOLATIONS_BEGIN,
+    _SETUP_VIOLATIONS_END,
+    PlaceAndRouteError,
+)
+from .place_and_route_cell_libraries import (
+    _ANTENNA_DIODE_CELLS,
+    _CTS_BUFFER_CELLS,
+    _FILLER_CELLS,
+    _NO_TAPCELL_LIBRARIES,
+    _ROW_RAIL_STRAP,
+    _TAPCELL_CELLS,
+)
 from .place_and_route_fences import placement_fence_lines
 from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
+from .place_and_route_layers import _ROUTING_LAYER_RANGE
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_power_pins import applied_power_pins
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
-from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_unconstrained import (
     cts_stage_lines,
     resizer_pass_lines,
     run_is_unconstrained,
 )
-
-# The stage-script emitters below read the per-library tables and the
-# violation-marker sentinels that stay defined in `place_and_route.py` (the
-# orchestration and the STA/audit subsystems share them). They are imported
-# inside each function, at call time: `place_and_route` re-exports this module
-# at import, so a module-level `from .place_and_route import ...` here would be
-# circular -- the same lazy-import idiom `place_and_route_request.py` uses.
-
 
 # --------------------------------------------------------------------------- #
 # Tcl script generation
@@ -243,12 +257,6 @@ def _violation_count_lines() -> list[str]:
     with the WNS/TNS fields next to them. Unit: violating endpoints (one
     ``-format end`` row per endpoint per path group), not enumerated paths.
     """
-    from .place_and_route import (
-        _HOLD_VIOLATIONS_BEGIN,
-        _HOLD_VIOLATIONS_END,
-        _SETUP_VIOLATIONS_BEGIN,
-        _SETUP_VIOLATIONS_END,
-    )
 
     return _timing_violation_report_lines(
         setup_begin=_SETUP_VIOLATIONS_BEGIN,
@@ -319,15 +327,9 @@ def _design_rule_check_lines(
     pass gives a reader the other half of that comparison directly, instead
     of requiring a raw ``stdout.log`` read to recover it.
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_VIOLATIONS_END,
-        _MAX_TRANSITION_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_VIOLATIONS_END,
-    )
 
     # `None` selects the module's original marker pair, resolved here rather
-    # than as a default argument (the constants are imported lazily above).
+    # than as a default argument (the constants are module-scope imports).
     if transition_begin is None:
         transition_begin = _MAX_TRANSITION_VIOLATIONS_BEGIN
     if transition_end is None:
@@ -353,10 +355,6 @@ def _antenna_check_lines() -> list[str]:
     `check_antennas`'s own stdout summary line ("Found N net violations."),
     isolated the same `puts` marker way :func:`_violation_count_lines` isolates
     the setup/hold blocks."""
-    from .place_and_route import (
-        _ANTENNA_VIOLATIONS_BEGIN,
-        _ANTENNA_VIOLATIONS_END,
-    )
 
     return [
         f'puts "{_ANTENNA_VIOLATIONS_BEGIN}"',
@@ -415,10 +413,6 @@ def _tapcell_masters(
     hard failure rather than a silent all-``None`` that would look
     identical to the verified no-tapcell case.
     """
-    from .place_and_route import (
-        _NO_TAPCELL_LIBRARIES,
-        _TAPCELL_CELLS,
-    )
 
     if library is not None and "tapcell" in library:
         return library["tapcell"]
@@ -433,7 +427,6 @@ def _filler_masters(
     """Filler masters: ``request.library.filler`` (issue #4127), else the
     built-in :data:`_FILLER_CELLS` entry (``KeyError`` if neither; callers
     run after the up-front validation)."""
-    from .place_and_route import _FILLER_CELLS
 
     if library is not None and "filler" in library:
         return library["filler"]
@@ -863,7 +856,6 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     router obstruction they provide completely unaffected -- this fallback
     only ever needed the physical shapes, never a new logical port.
     """
-    from .place_and_route import _ROW_RAIL_STRAP
 
     layer, width_um, pitch_um, offset_um, power_pin, ground_pin = _ROW_RAIL_STRAP[
         cell_library
@@ -904,7 +896,6 @@ def _route_diode_cell(cell_library: str, library: dict[str, Any] | None) -> str 
         return None
     if library is not None and "antenna_diode" in library:
         return library["antenna_diode"][0]
-    from .place_and_route import _ANTENNA_DIODE_CELLS
 
     return _ANTENNA_DIODE_CELLS[cell_library][0]
 
@@ -974,12 +965,6 @@ def _stage_script_lines(
     instance_groups: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
-    from .place_and_route import (
-        _CTS_BUFFER_CELLS,
-        _GLOBAL_PLACEMENT_DENSITY,
-        _ROUTING_LAYER_RANGE,
-        _ROW_RAIL_STRAP,
-    )
 
     global_placement_call = _global_placement_call(
         placement_density, _GLOBAL_PLACEMENT_DENSITY, seed

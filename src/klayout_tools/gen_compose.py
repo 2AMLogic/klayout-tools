@@ -258,6 +258,7 @@ from .gen_compose_landing_pads import (
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
 from .gen_compose_pad_conflicts import leg_pad_notch_conflict
+from .gen_compose_pad_ports import endpoint_pad_ports
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -2980,12 +2981,24 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.routing must be a JSON object")
     # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
-    raw_minimal_ladder = routing.get("minimal_ladder")
+    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
+    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
+    # sizes). The two fields select competing pad-sizing policies and are
+    # rejected together before label-derived landings are searched.
+    minimal_ladder = False
     if request.get("connectivity") and routing:
         landing_pad_override_um = _parse_landing_pad_override(
             routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
         )
-        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+        raw_minimal_ladder = routing.get("minimal_ladder")
+        if raw_minimal_ladder is not None:
+            if not isinstance(raw_minimal_ladder, bool):
+                raise GenComposeError(
+                    "request.routing.minimal_ladder must be a boolean when given"
+                )
+            minimal_ladder = raw_minimal_ladder
+        if minimal_ladder and landing_pad_override_um is not None:
             # Issue #6058: the two fields are competing pad-sizing policies
             # -- the override replaces the fixed baseline for *every* pad,
             # the mode drops the baseline from *intermediate* pads only --
@@ -3125,12 +3138,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
-    # sizing; True sizes a ladder's intermediate hop pads at their own
-    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
-    # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together before label-derived landings are searched.
-    minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
@@ -3178,12 +3185,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        if raw_minimal_ladder is not None:
-            if not isinstance(raw_minimal_ladder, bool):
-                raise GenComposeError(
-                    "request.routing.minimal_ladder must be a boolean when given"
-                )
-            minimal_ladder = raw_minimal_ladder
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
@@ -3522,6 +3523,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         notes,
     )
 
+    endpoint_ports = endpoint_pad_ports(connectivity, blocks, offsets_um)
     for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
         pins = entry["pins"]
@@ -3660,12 +3662,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
-            _net_pin_blocks: frozenset[str] = frozenset(
-                {block for block, _port in net_pin_set}
-            ),
             _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
+            _endpoint_ports=endpoint_ports[net_index],
         ) -> RouteConflict | None:
             """Route-vs-route collision check (#1057, spacing-aware since
             #1386) for one candidate leg.
@@ -3822,9 +3822,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             contact_reason = _pad_other_block_contact_reason(
                 pad_boxes,
                 _net_label,
-                sorted(
-                    block_id for block_id in blocks if block_id not in _net_pin_blocks
-                ),
+                sorted(blocks),
+                _endpoint_ports,
                 _own_block_layer_geometry,
                 drawing_dbu,
             )

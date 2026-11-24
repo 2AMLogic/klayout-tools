@@ -183,6 +183,14 @@ def _limit_keys(limits: Any) -> list[str]:
     return [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
 
 
+def _recognised_bound(measurement: Any) -> bool:
+    """Whether ``measurement`` is a dict declaring a recognised, non-null
+    ``min``/``max`` bound (#7268 credit test, shared per #7329)."""
+    if not isinstance(measurement, dict):
+        return False
+    return bool(_limit_keys(measurement.get("limits")))
+
+
 def _bounds_checked(
     measurement: dict[str, Any],
     corners: Any,
@@ -418,6 +426,8 @@ def multi_row_info(
     failed: list[Any],
     spec_rows: list[dict[str, Any]] | None,
     credited: dict[int, tuple[list[str] | None, bool]] | None = None,
+    joint_covered: frozenset[str] = frozenset(),
+    joint_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
@@ -439,16 +449,17 @@ def multi_row_info(
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
 
-    Issue #6985: a row carrying the ``structural`` disposition is listed
-    under ``structural_rows`` -- ``[{id, claim, artifact}]`` -- never in
-    ``declared_gaps``, ``uncovered_rows`` or ``row_sources`` (it is neither
-    covered nor a gap: its claim is evidenced by inspecting the pinned
-    artifact, not by a measurement). The key is omitted when no structural
-    row is declared, keeping a disposition-free report byte-identical.
+    Issue #6969: ``joint_covered`` (rows every ``joint_grid`` member proved) join
+    ``covered`` as ``derived``; ``joint_rows`` lists shortfalls, omitted when empty.
+
+    Structural rows (#6985) appear separately in optional ``structural_rows``
+    entries with their id, claim and pinned artifact. They do not contribute
+    measured coverage, gaps or uncovered rows.
     """
     if spec_rows is None:
         return {}
     row_sources, slices, partial = row_credits(graded, credited or {}, spec_rows)
+    row_sources.update(dict.fromkeys(joint_covered, "derived"))
     failed_rows = sorted(
         {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
     )
@@ -483,4 +494,5 @@ def multi_row_info(
         **({"row_slices": slices} if slices else {}),
         **({"partial_rows": partial} if partial else {}),
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
+        **({"joint_rows": joint_rows} if joint_rows else {}),
     }

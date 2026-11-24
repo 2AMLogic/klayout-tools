@@ -179,6 +179,7 @@ from .lvs_base import (  # noqa: F401 -- shared vocabulary re-exported by lvs
     CATEGORY_DEVICE_FINFET_BULK_TIED,
     CATEGORY_DEVICE_FLAVOUR_MISMATCH,
     CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED,
+    CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS,
     CATEGORY_DEVICE_PARAMETER_EXCLUDED,
     CATEGORY_DEVICE_PARAMETER_TOLERATED,
     CATEGORY_DEVICE_PLACEHOLDER_VALUE,
@@ -646,7 +647,7 @@ def _aggregate_lvs_findings(
     geometry_warnings: Any,
     flatten_warnings: Any,
     power_only_pruning_warnings: Any,
-    family_findings: Any,
+    precompare_findings: Any,
     gate_level_port_alias_warnings: Any,
     reference_gate_level_case_folds: Any,
     layout_pin_renames: Any,
@@ -819,7 +820,7 @@ def _aggregate_lvs_findings(
     # `severity: "warning"`: it never changes `status`, it only keeps a match
     # reached without comparing a resistor/capacitor's geometry at all from
     # being indistinguishable from one where the two sides' geometry actually
-    # agreed. Extended unconditionally (like `family_findings` below, unlike
+    # agreed. Extended unconditionally (like `precompare_findings` below, unlike
     # the `if`-guarded warnings above): the list is empty on every run with no
     # resistor/capacitor class to report.
     mismatches.extend(geometry_warnings)
@@ -844,16 +845,12 @@ def _aggregate_lvs_findings(
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
-    # Issue #2421: same append-here rationale as the disclosures above --
-    # this is a pre-flight determination about the reference netlist and the
-    # deck, made before the compare ran, not a `NetlistComparer` event.
-    # Unlike them it is `severity: "error"` (the reference really cannot
-    # match), but like `device.class_arity` it is diagnostic only: it never
-    # moves `status` on its own -- the compare that already ran reported the
-    # mismatch this entry explains. Extended unconditionally (like
-    # `supply_findings` below, unlike the `if`-guarded warnings above): the
-    # list is empty on every run that has no such family to report.
-    mismatches.extend(family_findings)
+    # Issue #2421: pre-compare determinations, appended here, not folded into
+    # `_build_mismatches`. The deck-family findings are `severity: "error"`
+    # yet diagnostic only -- they never move `status`; the compare that
+    # already ran reported the mismatch they explain. The metre-scale
+    # `device.implausible_dimensions` warnings ride along, likewise pre-compare.
+    mismatches.extend(precompare_findings)
 
     if gate_level_port_alias_warnings:
         # Issue #2021: same rationale as the disclosures above -- joining an
@@ -869,7 +866,7 @@ def _aggregate_lvs_findings(
         _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
     )
 
-    # Issue #2854: same append-here rationale as `family_findings` above --
+    # Issue #2854: same append-here rationale as `precompare_findings` above --
     # a promoted pin net carrying 2+ declared pin names is a pre-compare
     # determination the inline extraction's rename pass made about the
     # layout's declared interface, not a `NetlistComparer` event. Like
@@ -1256,6 +1253,7 @@ def run_lvs(
         layout_pin_renames,
         layout_abstracted_cells,
         supply_findings,
+        layout_dimensions,
         layout_input_role,
         flatten_warnings,
         power_only_pruning_warnings,
@@ -1700,7 +1698,7 @@ def run_lvs(
         geometry_warnings=geometry_warnings,
         flatten_warnings=flatten_warnings,
         power_only_pruning_warnings=power_only_pruning_warnings,
-        family_findings=family_findings,
+        precompare_findings=family_findings + layout_dimensions + ref_stage.dimensions,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
         reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
@@ -2032,8 +2030,8 @@ def _reconstruct_lvs_request(
         # Issue #2686: replay the applied label-purpose override, `null`
         # roles included; a report without the echo replays without one.
         layout_spec.update(_label_layers_replay(committed))
-        # Issue #4347: replay the DEF-name options too.
-        layout_spec.update(_def_options_replay(committed))
+        # Replay the applied connectivity and DEF naming options.
+        layout_spec.update(_layout_connectivity_replay(committed))
         # Issue #2853: replay the cell-level black-box abstraction too.
         layout_spec.update(_layout_abstraction_replay(committed))
     else:
@@ -2560,12 +2558,11 @@ def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return replay
 
 
-def _def_options_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """The ``request.layout`` keys that rebuild a committed report's
-    ``def_net_names``/``def_pins`` echo (issue #4347), or ``{}`` for a report
-    without one. Passed through verbatim, so a malformed recorded value is
-    rejected by the request parsers on replay."""
+def _layout_connectivity_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the layout-side DEF and implicit-connect options for replay."""
     replay: dict[str, Any] = {}
+    if "join_same_named_nets" in committed:
+        replay["join_same_named_nets"] = committed["join_same_named_nets"]
     if committed.get("def_net_names") is True:
         replay["def_net_names"] = True
     if committed.get("def_pins") is not None:
@@ -2716,6 +2713,8 @@ def _resolve_layout(
     def_pins: frozenset[str] | None = None,
     progress: bool | str = False,
     coverage: dict[str, Any] | None = None,
+    *,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2952,13 +2951,11 @@ def _resolve_layout(
                 layout_file,
                 deck_name,
                 layout_coverage=coverage,
+                join_same_named_nets=join_same_named_nets,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
-                # Issue #1513: `request.layout.pin_source_cells` -- the
-                # positional counterpart to `declared_pins` above. `None`
-                # when the field was never given, unchanged from every
-                # request that predates it.
+                # The source cells locate the declared pins in the layout (#1513).
                 pin_source_cells=pin_source_cells,
                 # Issue #2854: `request.layout.rename_declared_pins` --
                 # validated by `_parse_layout_rename_declared_pins` above;
@@ -4675,15 +4672,15 @@ def _is_reader_placeholder_circuit(circuit: Any) -> bool:
     return names == [str(index) for index in range(1, len(names) + 1)]
 
 
-def _reachable_reference_circuits(netlist: Any, top: str | None) -> list[Any]:
-    """The reference circuits reachable from the compared top (``top`` by
+def _reachable_circuits(netlist: Any, top: str | None, side: str) -> list[Any]:
+    """The circuits reachable from the compared top (``top`` by
     name, else the netlist's sole top circuit), each once, in visit order.
 
     ``[]`` when the top cannot be resolved -- :func:`_select_circuit`'s own
     later call raises the authoritative error for that, so this
     pre-compare scan never pre-empts it with a different one."""
     try:
-        root = _select_circuit(netlist, top, "reference")
+        root = _select_circuit(netlist, top, side)
     except LvsError:
         return []
     seen: set[int] = set()
@@ -4746,7 +4743,7 @@ def _unresolved_reference_subckt_calls(
     except OSError:
         defined = set()
     findings: list[dict[str, Any]] = []
-    for parent in _reachable_reference_circuits(reference_netlist, top):
+    for parent in _reachable_circuits(reference_netlist, top, "reference"):
         for sub in parent.each_subcircuit():
             callee = sub.circuit_ref()
             mangled = callee.name.upper()

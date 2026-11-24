@@ -92,7 +92,37 @@ def test_write_error_names_destination(tmp_path, capsys):
     )
     output = capsys.readouterr()
     assert output.out == ""
-    assert str(dest) in json.loads(output.err)["error"]["message"]
+    message = json.loads(output.err)["error"]["message"]
+    assert str(dest) in message
+    assert "No such file or directory" in message
+    assert ".klt-" not in message
+
+
+@pytest.mark.parametrize("suffix", [".json", ".json.gz"])
+def test_write_error_in_read_only_dir_preserves_report(tmp_path, capsys, suffix):
+    layout, spec = tmp_path / "cell.gds", tmp_path / "spec.json"
+    _antenna_fixture(layout, li1_um2=0.2)
+    _basic_spec(spec)
+    report = tmp_path / "ro" / ("report" + suffix)
+    report.parent.mkdir()
+    report.write_bytes(b"previous report")
+    report.parent.chmod(0o555)
+    try:
+        if os.access(report.parent, os.W_OK):
+            pytest.skip("this account can create files in a read-only directory")
+        assert (
+            main(["erc", str(layout), str(spec), "-o", str(report), "--format", "json"])
+            == 1
+        )
+    finally:
+        report.parent.chmod(0o755)
+    streams = capsys.readouterr()
+    message = json.loads(streams.err)["error"]["message"]
+    assert str(report) in message
+    assert "Permission denied" in message
+    assert ".klt-" not in message
+    assert report.read_bytes() == b"previous report"
+    assert not list(tmp_path.glob(".klt-*.tmp"))
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")

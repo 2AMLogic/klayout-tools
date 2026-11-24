@@ -1,0 +1,1 @@
+- **Simulation diagnostics distinguish unary and binary ngspice extrema** and the sim guide includes tested scalar-spread recipes (#7659, 2026-11-23).

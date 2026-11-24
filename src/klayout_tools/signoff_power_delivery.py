@@ -45,6 +45,7 @@ from ._provenance import content_hash
 from .signoff_artifact import report_artifact_unavailable
 from .signoff_base import SignoffError, _read_json_source
 from .signoff_disclosed_evidence import _lookup_evidence
+from .signoff_malformed_coverage import power_delivery_part_refusal
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,
@@ -1647,17 +1648,14 @@ def _grade_power_delivery(
       ``erc.unlabelled_conductor`` and blocks the item, and a met citation
       states the negative it now rests on in
       ``power_delivery.supply_unlabelled_islands``
-      (:func:`_erc_supply_unlabelled_islands`) rather than leaving it
-      implicit in a clean island count that could not have seen it. Issue
-      #2623: a spec can declare (and get checked) the one well class it
-      *can* express while disclosing a further class as inexpressible or
-      tool-limited (``ties_disclosure.undeclared_classes``, issue #2541) --
-      this does not change the verdict (the declared, checked tie already
-      carries item 11 to ``"met"`` on its own merits), but a met citation
-      names the disclosed class too, in
-      ``power_delivery.disclosed_undeclared_tie_classes``
-      (:func:`_erc_disclosed_undeclared_tie_classes`), present only when the
-      cited run actually disclosed one;
+      (:func:`_erc_supply_unlabelled_islands`). Issue #2623: a spec can
+      declare (and get checked) the one well class it *can* express while
+      disclosing a further class as inexpressible or tool-limited
+      (``ties_disclosure.undeclared_classes``, issue #2541) -- this does not
+      change the verdict (the declared, checked tie already carries item 11
+      to ``"met"`` on its own merits), but a met citation names the
+      disclosed class too, in ``power_delivery.disclosed_undeclared_tie_classes``
+      (:func:`_erc_disclosed_undeclared_tie_classes`);
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`~klayout_tools.signoff._check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
@@ -1791,13 +1789,17 @@ def _grade_power_delivery(
     if port_reason is not None:
         return "unmet", port_reason, parts_citation, {"power_ports": power_ports_block}
 
+    # Earlier electrical failures take precedence over malformed coverage (#5643).
+    refusal = power_delivery_part_refusal(by_kind, _citation)
+    if refusal is not None:
+        coverage_reason, coverage_detail = refusal
+        return "unmet", coverage_reason, parts_citation, coverage_detail
+
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
     # `exit_status` -- signoff_cmd.py's text rendering, the fleet roll-up's
-    # `drc_coverage` reduction) by leading with the ERC part, the one
-    # artifact both columns of item 11 always cite; `parts` carries every
-    # cited artifact in full, so nothing a reader needs is only reachable
-    # through the leading part.
+    # `drc_coverage` reduction) by leading with the ERC part; `parts` carries
+    # every cited artifact in full.
     citation = _citation(erc)
     citation["parts"] = [
         _citation(by_kind[kind], runset_rehash_unverifiable=rehash_unverifiable)
@@ -1819,45 +1821,43 @@ def _grade_power_delivery(
         ).get("status"),
         # Issue #2234: which of the cited run's `erc.missing_tie` checks
         # rested on a caller assertion (`ties[].tap_boxes`) rather than on
-        # PDK-marker narrowing -- `[]` for a purely marker-derived (or
-        # pre-#2234) run. See `erc_ties_checked_by_assertion`.
+        # PDK-marker narrowing -- `[]` for a marker-derived run. See
+        # `erc_ties_checked_by_assertion`.
         "ties_checked_by_assertion": erc_ties_checked_by_assertion(erc["envelope"]),
         # Issue #2255: which of them rested on a caller-asserted *well*
         # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
         # than on a drawn well/tub layer -- the native-substrate case, `[]`
-        # for every drawn-well (or pre-#2255) run. A separate list from the
-        # tap-side one above because it is a separate, weaker claim; see
-        # `_erc_ties_checked_by_well_assertion`.
+        # for every drawn-well run. A separate, weaker claim than the
+        # tap-side one above; see `_erc_ties_checked_by_well_assertion`.
         "ties_checked_by_well_assertion": _erc_ties_checked_by_well_assertion(
             erc["envelope"]
         ),
         # Issue #2524: the severed-rail negative, per declared supply that
         # owns its roles -- `{name: unlabelled_islands}`, all zero for a met
         # item (a non-zero one is `erc.unlabelled_conductor`, which
-        # `_erc_supply_findings` already blocks on). `{}` when no supply
-        # declared `nets[].roles`, which is the honest "not measured" rather
-        # than a fabricated clean. See `_erc_supply_unlabelled_islands`.
+        # `_erc_supply_findings` already blocks on); `{}` when no supply
+        # declared `nets[].roles` -- the honest "not measured". See
+        # `_erc_supply_unlabelled_islands`.
         "supply_unlabelled_islands": _erc_supply_unlabelled_islands(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
     add_substrate_continuity(citation["power_delivery"], erc["envelope"])  # #5346
     # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
-    # declared and checked -- this is the `tie_count > 0` path, already
-    # `"met"` on those merits -- plus one or more further classes disclosed
-    # as inexpressible/tool-limited via `ties_disclosure.undeclared_classes`,
-    # issue #2541) previously left that disclosure legible only one layer
-    # down, in the cited `klt erc` envelope. Additive only -- present only
-    # when the cited run actually disclosed a named class, so a run that
-    # disclosed nothing renders this citation exactly as it always has; see
+    # declared and checked -- the `tie_count > 0` path, already `"met"` on
+    # those merits -- plus further classes disclosed as inexpressible or
+    # tool-limited via `ties_disclosure.undeclared_classes`, issue #2541)
+    # previously left that disclosure legible only one layer down, in the
+    # cited `klt erc` envelope. Additive only; see
     # `_erc_disclosed_undeclared_tie_classes`.
     disclosed_undeclared_tie_classes = _erc_disclosed_undeclared_tie_classes(
         erc["envelope"]
     )
-    if disclosed_undeclared_tie_classes:
-        citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
-            disclosed_undeclared_tie_classes
-        )
+    citation["power_delivery"].update(
+        {"disclosed_undeclared_tie_classes": disclosed_undeclared_tie_classes}
+        if disclosed_undeclared_tie_classes
+        else {}
+    )
     # Issue #4199: present only when the cited P&R response states the
     # library is tapless, so a `null` tapcell_master reads as by-design.
     citation["power_delivery"].update(_par_tapless_field(par))
