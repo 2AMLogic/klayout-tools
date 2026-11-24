@@ -16,6 +16,7 @@ from . import env_provenance
 from ._digest import sha256_file_required
 from .ngspice_build import engine_version, probe_engine_build
 from .pdk import find_pdk
+from .pdk_families import pdk_variant_family
 
 _DEVICE = re.compile(
     r"^\s*([A-Za-z0-9_.-]+)\s*:\s*A simulator independent device loaded with OSDI\s*$",
@@ -53,7 +54,7 @@ def _model_path(token: str, asset: Path) -> Path:
 
 
 def declared_models(info: dict[str, Any]) -> list[Path]:
-    required = info["variant"] in ("ihp-sg13g2", "sg13g2")
+    required = pdk_variant_family(info["variant"]) == "sg13g2"
     asset = info["assets"].get("ngspice")
     setup = Path(asset, ".spiceinit") if asset else None
     if not required and (setup is None or not setup.exists()):

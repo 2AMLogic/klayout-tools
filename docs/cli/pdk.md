@@ -292,17 +292,39 @@ directory itself, or a named subdirectory of it). When present it wins over
   An error such as `template 't' differs across members and a table in
   'b.lib' inherits index_2` names the file and the missing local axis.
   Use consistent template definitions or provide the intended grid on each
-  referencing table. A duplicate cell name is also an error.
+  referencing table.
+  An optional library-level voltage group is unioned by name, not compared
+  (issue #7809): when some files declare `input_voltage (NAME) { ... }` or
+  `output_voltage (NAME) { ... }` and the others declare no group of that kind
+  at all, the merged header carries the group once with its original body
+  (appended after the first file's header when the first file lacks it) and
+  the files without it are not compared against it. This is the shape of a
+  split release where a later re-released cell group dropped the two default
+  `default_VDD_VSS_input` / `default_VDD_VSS_output` groups. The two kinds are
+  decided independently. Files that each declare the kind are still compared
+  like any other header field, so a same-named group with a different body, a
+  group under a different name, or a missing sibling group refuses and names
+  the differing field. A file without the group whose cells reference its name
+  (`input_voltage : NAME;` or `output_voltage : NAME;`) also refuses, naming
+  the file and group, because the union would make that reference resolve.
+  Every other missing header field (`nom_voltage`, `default_max_transition`,
+  ...) still refuses. A duplicate cell name is also an error.
   A one-element list equals the string form. The place-and-route timing sweep uses these corner keys in
   descriptor order. Each list contributes one merged deck and a single report
   entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
-  {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
-  do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
-  place-and-route` consults it before the convention; unmapped libraries/keys
-  keep the convention. A requested interconnect corner missing from a mapped
-  `tech_lef` is an error naming the mapped corners (no fallback to `nom`).
-  CDL/SPICE views are not covered.
+  {"min"|"nom"|"max": path}, "gds": path, "verilog": [path, ...]}` (every key
+  optional) for trees that do not use the open_pdks `lef/`, `techlef/`,
+  `gds/`, `verilog/` naming. `klt place-and-route` consults the LEF/GDS keys
+  before the convention; `klt functional-verification`'s `request.pdk`
+  consults `verilog` (issue #7695): a **non-empty list** of behavioural-model
+  files, prepended to the simulation sources **verbatim, in the declared
+  order** — list a file before the files that depend on it. Unmapped
+  libraries/keys keep the convention. A requested interconnect corner missing
+  from a mapped `tech_lef` is an error naming the mapped corners (no fallback
+  to `nom`). A `verilog` value that is not a list, is empty, or names a
+  missing, absolute or root-escaping path is an error naming the file and
+  field. CDL/SPICE views are not covered.
 - Every path must be relative and stay under the root (`..`/absolute paths are
   rejected; symlinks the checkout ships are followed). A malformed descriptor,
   an escaping path, or a mapped `.lib` that does not exist is a

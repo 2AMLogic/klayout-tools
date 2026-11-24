@@ -224,76 +224,24 @@ def run(args: argparse.Namespace) -> int:
         # never handed to a shell, so quoting is resolved once, visibly,
         # rather than by whatever `/bin/sh` the host happens to have.
         measure_command = _parse_measure_command(args.measure_command)
-        if getattr(args, "dry_run", False):
-            if runset is not None:
-                raise PexError(
-                    "--dry-run does not model --engine klayout-runset: its "
-                    "preflight checks the curated deck and parasitics, which "
-                    "this engine does not use. Run `klt pex --extract-only` "
-                    "to exercise the extraction without a measurement leg"
-                )
-            # Issue #5464: a separate entry point, not a `dry_run=` parameter
-            # threaded through `run_pex`/`run_extract` -- a dry run performs a
-            # strict, engine-free subset of the real run's checks and shares
-            # their helpers, so a second control flow through the real path
-            # would buy nothing. Returns early: a dry run has no delta rows to
-            # grade and writes no `--envelope-out` file (see docs/cli/pex.md).
-            dry_report = run_pex_dry_run(
-                args.layout,
-                args.testbenches,
-                args.deck,
-                top=args.top,
-                pdk_variant=args.pdk,
-                pdk_root=args.pdk_root,
-                backend=args.backend,
-                max_units_per_job=args.max_units_per_job,
-                max_concurrent_jobs=args.max_concurrent_jobs,
-                hosts=args.hosts,
-                resume=args.resume,
-                capacity_wait_s=args.wait_for_capacity,
-                timeout_s=args.timeout_s,
-                deck_options=deck_options,
-                declared_pins=declared_pins,
-                rename_declared_pins=args.rename_declared_pins,
-                tie_declared_pins=args.tie_declared_pins,
-                label_layers=label_layers,
-                tie_nets=tie_nets,
-                device_models=device_models,
-                critical_nets=args.critical_nets,
-                critical_net_patterns=args.critical_net_patterns,
-                critical_net_all=args.critical_net_all,
-                critical_net_excludes=args.critical_net_excludes,
-                distributed_rc=args.distributed_rc,
-                resistance_graph=args.resistance_graph,
-                resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
-                resistance_graph_caps=parse_resistance_graph_caps(args),
-                parasitic_variants=args.parasitic_variants,
-                substrate_tie_ohms=args.substrate_tie_ohms,
-                mom_rlc_net=args.mom_rlc_net,
-                mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
-                mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
-                mom_rlc_inductance_nh=args.mom_rlc_inductance_nh,
-                measure_command=measure_command,
-                reference_netlist=args.reference_netlist,
-                measure_timeout_s=args.measure_timeout_s,
-                flatten_schematic=args.flatten_schematic,
-                schematic_top=args.schematic_top,
-                device_only_leg=args.device_only_leg,
-                extract_only=args.extract_only,
-                submit_only=args.submit_only,
-                attach=args.attach_manifest,
+        dry_run = getattr(args, "dry_run", False)
+        if dry_run and runset is not None:
+            raise PexError(
+                "--dry-run does not model --engine klayout-runset: its "
+                "preflight checks the curated deck and parasitics, which "
+                "this engine does not use. Run `klt pex --extract-only` "
+                "to exercise the extraction without a measurement leg"
             )
-            emit_success(dry_report, args.format, _print_dry_run_text)
-            return EXIT_PASS
-        report = run_pex(
-            args.layout,
-            args.testbenches,
-            args.deck,
-            output=args.output,
+        # Issue #7818: the 41 keyword arguments `run_pex_dry_run` and
+        # `run_pex` take identically, built once so a new `klt pex` flag is
+        # threaded to both entry points exactly once. Built after the
+        # `--dry-run` + `--engine klayout-runset` refusal above so that
+        # refusal keeps its place ahead of `parse_resistance_graph_caps`'s
+        # own usage error (the exact precedence the two separate calls had).
+        shared_kwargs = dict(
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
-            artifacts_dir=args.outdir,
             backend=args.backend,
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
@@ -345,10 +293,13 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
-            # `--resistance-graph[-r-cut]` (issue #4037): `False`/`None` when
-            # never given, unchanged from every call site that predates them.
+            # `--resistance-graph[-r-cut]` (issue #4037) and
+            # `--resistance-network` (issue #6899): `False`/`None` when
+            # never given, unchanged from every call site that predates
+            # them.
             resistance_graph=args.resistance_graph,
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            resistance_network=args.resistance_network,
             # `--resistance-graph-max-*` (issue #6964): the explicit caps as
             # `{builder keyword: value}`; `None` when never given.
             resistance_graph_caps=parse_resistance_graph_caps(args),
@@ -391,10 +342,33 @@ def run(args: argparse.Namespace) -> int:
             # `--submit-only` / `--attach` (issue #4619): async batch runs.
             submit_only=args.submit_only,
             attach=args.attach_manifest,
+        )
+        if dry_run:
+            # Issue #5464: a separate entry point, not a `dry_run=` parameter
+            # threaded through `run_pex`/`run_extract` -- a dry run performs a
+            # strict, engine-free subset of the real run's checks and shares
+            # their helpers, so a second control flow through the real path
+            # would buy nothing. Returns early: a dry run has no delta rows to
+            # grade and writes no `--envelope-out` file (see docs/cli/pex.md).
+            dry_report = run_pex_dry_run(
+                args.layout,
+                args.testbenches,
+                args.deck,
+                **shared_kwargs,
+            )
+            emit_success(dry_report, args.format, _print_dry_run_text)
+            return EXIT_PASS
+        report = run_pex(
+            args.layout,
+            args.testbenches,
+            args.deck,
+            output=args.output,
+            artifacts_dir=args.outdir,
             submit_request=_submit_request(args) if args.submit_only else None,
             # `--engine klayout-runset` (issue #6559): `None` for the curated
             # engine, which leaves this call exactly as it was.
             runset=runset,
+            **shared_kwargs,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)

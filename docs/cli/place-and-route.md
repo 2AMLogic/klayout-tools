@@ -38,6 +38,9 @@ Like `klt synthesize`/`klt lvs`/`klt sim`, `klt place-and-route` takes a
   search order.
 - `--backend` — where a `pdk.rebuild_corners` request's units run:
   `local` or `batch` (the Spot batch fleet). See "Backend selection".
+- `--from-def <DEF>` — run *only* the DEF→GDS merge on an existing routed
+  DEF (no OpenROAD stage). See
+  [Merging a committed routed DEF (`--from-def`)](#merging-a-committed-routed-def---from-def).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -547,6 +550,75 @@ that produced it. See [OpenROAD threads](#openroad-threads).
   per corner), and `--resume` together with `--check`.
 * Out of scope: resuming inside a stage, and the `--backend batch` path.
 
+## Merging a committed routed DEF (`--from-def`, issue #7721)
+
+The merge-time repair family — `min_area_repair`, `via_pad_trim` (with its
+`tip_check` and the nested `router_fill_scan`), `power_stack_repair` — runs
+inside the DEF→GDS merge, so a plain `klt drc` re-grade of an old stream
+never invokes it, and `--resume` reuses the merge only when the stage
+`.odb` checkpoints and `*.commit.json` records are still on disk with
+matching input hashes — artifacts a committed result set does not carry
+alongside its GDS/DEF. Every evidence set committed before a repair
+therefore stays red on every later pin, with no way to tell "the repairs
+would clear this stream" from "they don't cover it".
+
+`--from-def` closes that gap with a local, no-OpenROAD entry point:
+
+```
+klt place-and-route request.json --from-def <routed.def>
+```
+
+It resolves the tech/cell LEF, standard-cell GDS view and macro views from
+the request exactly as a placement run does (`--pdk`/`--pdk-root` honored),
+runs *only* the existing DEF→GDS merge — repairs included, byte-for-byte
+the same code path — on the supplied routed DEF, and writes its GDS to
+`<stage_root>/<hdl_toplevel>_from_def.gds` (`outputs.dir` honored). The
+distinct `_from_def` name means a re-merge never overwrites the committed
+`<hdl_toplevel>.gds` it is being compared against; a populated
+`outputs.dir` is allowed (that is the whole point), and the caller's input
+DEF is only ever read. No OpenROAD process is launched, no stage ODB or
+commit record is read or written, and the output directory is taken under
+the same advisory lock every cooperating `klt` writer holds.
+
+**Request shape.** The same request document the original run took, with
+only the fields the merge consumes required: `hdl_toplevel` and
+`pdk.cell_library`. `netlist`, `floorplan` and `seed` may be omitted —
+or left in from the original request, untouched and unread. A request
+setting `post_route_spef` is refused by name: that pass needs the route
+stage's own OpenSTA checkpoint, which only a placement run produces.
+
+**Response.** `status`, `hdl_toplevel`, `def_path` (the supplied DEF),
+`gds_path`, `gds_dbu_um`, and the merge's own report fields — `layer_map`,
+`def_net_names`, `min_area_repair`, `via_pad_trim` (with
+`tip_check.router_fill_scan`), `power_stack_repair`, `pin_conductor` —
+all in the same shape a route-stage run reports them. The additive
+`from_def` block reports the actual merge inputs (`tech_lef`, `cell_lef`,
+`cell_gds`, `macro_lefs`, `macro_gds`) together with the supplied DEF's
+`def_content_hash`, so a consumer can pin which committed routing a report
+graded. Routing, stage timing and ODB metrics are absent: they exist only
+when a placement run produced them.
+
+**Errors** (exit 1, existing checks): a missing `--from-def` file, an
+unresolvable PDK/LEF pair, a missing standard-cell GDS view, or a DEF that
+does not define the request's `hdl_toplevel` top cell. `--from-def` is
+mutually exclusive with `--check`, `--rerun`, `--resume` and `--backend`.
+
+**Comparing the original and regenerated stream with the same deck** — the
+post-hoc repair-validation workflow:
+
+```
+# original committed stream
+klt drc --engine klayout --deck <deck> artifacts/gcd.gds --format json > old.json
+# same routing, merged under the current pin's repair passes
+klt place-and-route request.json --from-def artifacts/gcd.def
+klt drc --engine klayout --deck <deck> artifacts/gcd_from_def.gds --format json > new.json
+```
+
+Success is running the current repair passes on the same routing and
+reporting what they did (`min_area_repair`, `via_pad_trim.tip_check`,
+`power_stack_repair` in the response above) — an arbitrary consumer design
+can still have violations afterwards.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -925,6 +997,9 @@ layouts" and "DEF-derived declared pins" sections for the full mechanism.
 
 ## Hard-macro placement (`request.macros`)
 
+`lef` stays required here: the LEF-less (blackbox-only) macro declaration is
+`klt synthesize`-only (issue #5612), and a LEF-less entry is a request error.
+
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line
 in "Out of scope" below into an additive request field, closing that gap
 exactly the way its own note anticipated. `request.macros` is an optional
@@ -1179,11 +1254,23 @@ Two details are deliberate:
 Omitting both fields emits neither line and leaves the generated Tcl
 byte-identical to before this field existed.
 
-**Still out of scope, deliberately**: per-port delay maps, and a full
-caller-supplied SDC passthrough (`read_sdc`) — which would also cover false
-paths, multicycle paths, and clock uncertainty, none of which have a surface
-here today. Both are tracked as follow-on work to issue #1865 rather than
-folded into it.
+Per-port delay maps and full caller-supplied SDC remain follow-on work to
+issue #1865. For multicycle exceptions, use `constraints.multicycle_paths`.
+
+### Multicycle paths
+
+Each entry supplies a launch selector (`from`), a capture selector (`to`),
+positive `setup` and `hold` multipliers, and an optional `through` pin selector.
+A clock period is required. Floorplan checks that the endpoints resolve and
+share a timed path before placement starts. Every checkpoint, corner sweep and
+SPEF timing session reapplies the pair after restoring the design and clocks.
+An invalid entry exits with status 1 and names its request index.
+
+The response echoes `multicycle_paths` in request order, including each index
+and an optional `through` value (`null` when omitted). Each rebuilt corner
+carries its own echo. Omitted or empty entries leave the Tcl and response
+unchanged. All checks run in the existing engine sessions. For selector syntax
+and path-specific timing measurements, see [standalone STA multicycle paths](sta.md#multicycle-paths-constraintsmulticycle_paths-issue-6921).
 
 ### Detect the sentinel mechanically: `timing_status`
 
@@ -1723,6 +1810,21 @@ change and no corpus fixture regeneration were needed** — the committed
 design's DEF net names, which is what
 `tests/test_extract.py::test_def_net_names_recovers_the_routed_corpus_designs_own_net_names`
 asserts.
+
+**Re-deriving a deck rule natively over this GDS (issue #7715).** The
+property sits on the routed wires only; library cell and via-cell shapes
+carry none. A native `klayout.db` rebuild of a deck rule that builds its
+regions with `kdb.Region(cell.shapes(layer))` sees it: merged semantics then
+keeps a wire that ends inside a via pad as its own polygon, and
+`Edges.enclosing_check` reports wire-to-pad abutments the packaged deck does
+not. For such a rebuild, read the GDS with
+`LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
+properties); keep the default read for `klt extract --def-net-names`, which
+needs them. Recursive regions ignore properties by default. Both
+`klt drc` engines gave the same results with and without the tag. Measured on the
+`klayout` module 0.30.13 and 0.30.14 for the `enclosing_check` rebuild only
+-- no claim for other primitives. The minimal repro, its numbers and the
+`klt drc` measurements are in [`drc.md`](drc.md#re-deriving-a-deck-rule-natively-over-a-routed-gds-issue-7715).
 
 **Why the two ratios differ so much.** Extraction is flat, so the SPEF also
 carries every standard cell's *internal* nodes (819 of `gcd`'s 1356
@@ -2428,7 +2530,8 @@ live re-measurement above.
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. On the gf180mcu libraries an applied `split_cuts` adds a `warnings[]` entry naming the rule ids it is measured to trip under `klt drc --deck gf180mcu` (issue #7311; `{Metal3 0.128}`, #4301). |
-| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — no `create_clock` is emitted, the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — global placement keeps its routability optimization and omits `-timing_driven`, no `create_clock` is emitted, and the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.multicycle_paths` | array of objects, optional | Paired setup and hold exceptions for clocked paths. See [Multicycle paths](#multicycle-paths). |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
@@ -2856,8 +2959,10 @@ uncapped.
 | `gds_dbu_um` | number \| null | Additive field (issue #4482). The dbu (um) of the merged `gds_path`: the tech LEF's native dbu unless `request.output_dbu_um` refined it. `null` unless `stage_reached` is `"route"`. |
 | `min_area_repair` | object \| null | Additive field (issue #2139). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own post-route minimum-**area** repair pass — see "Minimum-area repair" below. `status` — `"clean"` (no sub-minimum-area polygon remains on any checked layer), `"violations"` (at least one could not be repaired safely), or `"skipped"` (the pass could not run at all). `reason` — `null` unless `"skipped"`; a `"skipped"` pass is deliberately **not** reported as clean, so "never measured" stays distinguishable from "measured and clean". `patches` — repair patches drawn. `repaired`/`remaining` — violating polygons cleared / still violating, both re-measured against the layer's own post-repair geometry rather than inferred. `rules[]` — per-rule detail (`rule`, `layer`, `threshold_um2`, `violations_before`, `violations_after`, `patches`) for every checked layer that had at least one violation, sorted by rule id; `[]` when nothing violated. `unrepaired[]` — up to 20 still-violating polygons (`rule`, `layer`, `area_um2`, `threshold_um2`, `bbox_um`), so a caller can act on real residual geometry rather than on a bare count. |
 | `via_pad_trim` | object \| null | Additive field (issue #4495). `null` unless `stage_reached` is `"route"`; no `schema_version` bump. Reports the DEF→GDS merge's **ASAP7-only** pass that trims the metal landing pads of OpenROAD's `VIA_*` cells, which otherwise break the packaged deck's length-conditioned tip rules (Table 3.12.1 `M<n>.S.2`–`M<n>.S.5`). Scope is **`M1`–`M3` over `V1`–`V3`** (issue #4495's follow-up report: the disagreement is not specific to the V1/M1 pad): the deck states that tip family for `M1` and applies it to `M2`/`M3`, and requires 5 nm of cut enclosure from every one of those metals, so one conservative enclosure is correct across the span. It stops below `M4`, where `V3.M4.EN.2` is 11 nm and the deck's spacing is unconditional — `M4`-and-above pads are never edited. A pad that protrudes past the wire is **shrunk** to the via cut(s) it lands plus 5 nm on every side, which is what changes the merged metal region; it is shrunk only if the shrunk pad still touches the wire wherever the original did, and is otherwise left alone (counted in `pads_left`). A shrink needs a cut layer in the layer map and a cut under the pad. `"trimmed"` means pads were dropped or shrunk, **not** that the deck result improved — see `tip_check` below for what the deck's tip rules say about the merged geometry, and `klt drc --deck asap7` for the signoff verdict. A pad polygon is dropped only when, in **every** placed instance of its via cell, it is fully covered by same-layer metal outside any `VIA_*` cell (routed wire, PDN, standard-cell metal); partly covered pads are left alone. `status` — `"trimmed"` (at least one pad dropped or shrunk), `"clean"` (ran, nothing to drop) or `"skipped"` (`reason` says why; every non-ASAP7 PDK reports `"skipped"` and its GDS is byte-identical to before). `cells_touched` — via cells whose pad was edited, counted once however many of their layers were; `pads_trimmed` / `pads_shrunk` / `pads_left` — pad polygons dropped / shrunk to the cut enclosure (additive, issue #4508) / kept unchanged; `layers` — the same three counts per routing layer actually checked (`layer_name`, `layer`), so a layer checked with nothing to do is distinguishable from one never looked at. **`route_drc_violation_count: 0` does not imply deck-clean on ASAP7** — TritonRoute's rule set does not carry the deck's tip rules; run `klt drc --deck asap7` on `gds_path` (using `gds_dbu_um`) for the deck verdict. |
+| `via_pad_trim.m1_v1_enclosures_repaired` | integer | On ASAP7, number of placed single-cut V1 landings where top-level M1 was added to meet the 5 nm and 2 nm opposite-side requirements of `V1.M1.EN.1`. The pass checks attached cell or route metal, local M1 width and spacing, other cuts, pin labels and passive markers. A shared via master keeps its original geometry. |
+| `via_pad_trim.m1_v1_enclosures_remaining` | integer | On ASAP7, number of inspected placements that still lack a complete 5 nm side and a 2 nm opposite side after repair. Both enclosure counts cover top-level placements of via masters with one rectangular V1 cut enclosed by one rectangular M1 pad. |
 | `via_pad_trim.m1_landing_pairs_extended` | integer | On ASAP7, the number of pairs of placed V1 landing pads extended along their facing M1 edges to resolve `M1.S.4`. The pass adds top-level metal only where the complete narrow edges belong to these pads and the edit preserves nearby conductor isolation and M1 spacing. Unresolved pairs remain in `tip_check`. |
-| `via_pad_trim.m1_landing_pad_wire_pairs_extended` | integer | On ASAP7, the number of `M1.S.4` or `M1.S.5` pairs repaired between a placed V1 landing and a facing wire edge, and of `M1.S.2` pairs (issue #7426) where the landing's short face sits within 25 nm of a long non-pad M1 edge — typically library metal; there only the landing grows, to the long edge class Table 3.12.1 then governs by `M1.S.1`'s 18 nm, and the neighbour is never edited. The landing face must be flush with its cut. The pass tries extending only the landing first, then both faces if needed (never for `M1.S.2` — the neighbour is already long). It adds top-level metal only when the edit clears local M1 width and spacing, preserves conductor isolation, and avoids contact with cuts. Unresolved pairs remain in `tip_check`. |
+| `via_pad_trim.m1_landing_pad_wire_pairs_extended` | integer | Counts repaired ASAP7 M1 spacing pairs between a placed V1 landing and a wire. For `M1.S.2`, the pass grows a cut-flush short landing face opposite a long wire. A via elsewhere along the wire is clear of the edit when it lies outside the facing span. For `M1.S.4` and `M1.S.5`, the pass tries growing a cut-flush landing and then both faces if needed. An `M1.S.5` notch in one conductor can also be repaired by extending the routed edge when it faces an exposed segment of a recessed pad side and the full 18 nm wire strip is already metal. Each edit adds only top-level M1, preserves conductor isolation, clears the local M1 width and spacing checks, and avoids V0/V1 cuts, passive markers and M1 labels. Unresolved pairs remain in `tip_check`. |
 | `via_pad_trim.tip_check` | object | Additive sub-object (issue #4495), always present whenever `via_pad_trim` is. The **deck-vs-router disagreement, reported**: a count of the packaged ASAP7 deck's length-conditioned tip rules (`M1`–`M3` `S.2`–`S.5`, Table 3.12.1) in the merged GDS, and of how many of those hits touch router-inserted `VIA_*` landing geometry. `route_drc_violation_count` cannot report them — it is TritonRoute's own count, and TritonRoute's ASAP7 rule set does not carry those rules — so a routed block can read `route_drc_violation_count: 0` while the deck flags hundreds of tip violations against the geometry the router inserted. Measured inside `trim_via_pads` — **after** the trim, **before** `_refine_dbu` — i.e. on the in-memory layout at its native dbu rather than on the written `gds_path` at `gds_dbu_um` (the dbu refinement is a lossless integer scale whose class bounds land in the same inter-multiple gaps, so no count changes), and it writes no geometry: the merged GDS is byte-identical whether this pass runs or not, on every PDK. `status` — `"violations"`, `"clean"` (ran, none) or `"skipped"` (`reason` says why; every non-ASAP7 PDK reports `"skipped"`). `violations` / `via_pad_violations` / `router_fill_violations` (issue #5740, additive) — totals over every rule: all hits, the `VIA_*`-attributed subset, and the subset attributable to the router's own `SHAPE DRCFILL` patch metal — the min-area patches OpenROAD's PDN builder inserts on via-stack intermediate layers (`pdn/src/via.cpp`), which KLayout's reader draws into the merged GDS without preserving the SHAPE annotation. The patch region is reconstructed from the routed DEF's own text (`place_and_route_def_drcfill.scan_def_drcfill`, the same targeted-text-scan convention as the die-area parse) whenever the merge runs on ASAP7; a pair touching both a landing pad and a patch counts in both subsets, and the total is unchanged by the attribution. A DEF whose router wrote no DRCFILL, a scan that could not run, and a run with no DEF at all all read `router_fill` 0 — `router_fill_scan` (issue #6100, additive; no `schema_version` bump) is what tells them apart: the DEF scan's own `status` (`"scanned"`, or `"skipped"` with `reason` saying why — unreadable file, no `UNITS DISTANCE MICRONS` statement), `reason` and `unresolved` (items the scan saw but could not reconstruct into geometry — e.g. a width-less `NETS`-section item, which this pass never supplies tech-LEF widths for) whenever the scan was attempted, and `null` when it was not — no DEF was handed in, or the PDK family is not ASAP7 (`status`/`reason` above then say so), so "measured, zero patches" stays distinguishable from "never measured" the way `min_area_repair` keeps a `"skipped"` pass from reading as clean. `rules` — one entry per deck rule id with a non-zero count: `rule`, `layer`, `threshold_nm`, `violations`, the `via_pads`/`router_fill` subsets, and `markers`/`markers_truncated` (issue #7405, additive; no `schema_version` bump, the same additive-field precedent as `router_fill`/`router_fill_scan`): one marker per hit — `box_um` (`[left, bottom, right, top]`: the edge pair's bounding box, clipped by the check's own projection metric to the fragments that face each other, in **microns** in top-cell coordinates and therefore independent of the layout dbu) plus that pair's own `via_pad`/`router_fill` flags, evaluated by the same interacting predicates as the subset counts so per-marker flags and counts cannot disagree — sorted by box for determinism and capped at 200 per rule entry, with `markers_truncated: true` when the cap cut the list; `violations` and the subset counts stay full and uncapped, so a hit-heavy report carries a bounded, attributable sample instead of a bare count. This is a **targeted measurement, not a deck run** (it loads no `.drc` script and needs no `klayout` binary): only `M1`–`M3` and only the tip family — not `S.1` (side-to-side), `S.6` (corner-to-corner), widths, areas or enclosures — and attribution is geometric, so it cannot tell a pad's own tip edge from a routed wire edge abutting that pad. `klt drc --deck asap7` stays the signoff verdict; the two agree rule-for-rule on the tip family (`tests/test_place_and_route_via_tip.py` runs the real deck as the oracle). Cost is a few edge checks per layer: 2.1 s on the in-repo ASAP7 canary block (`blocks/asap7-ucie-phy`, 23 x 44 um, 52,747 instances), where it counts 142 tip violations, 135 of them on `VIA_*` landing pads — the same counts the real deck reports for those four rules on that layout. Because the rules are conditioned on a 36.25 nm edge length, a layout coarser than the deck's own 0.25 nm dbu cannot express the bound exactly — request `output_dbu_um: 0.00025` (issue #4482) for counts that match a deck run exactly. |
 | `pin_conductor` | object \| null | Additive field (issue #5700); no `schema_version` bump. `null` unless `stage_reached` is `"route"`. Reports whether the DEF→GDS merge drew each top-level DEF `PINS` rectangle on its routing layer's **conductor** `(layer, datatype)` as well as its pin purpose — see "Top-level pins on the conductor layer" below. `status` — `"staged"` (a derived layer map was applied; `layers[]` lists each affected layer as `layer_name`, `layer`, `datatype` — the conductor pair the pin is now also drawn on), `"unchanged"` (no layer declares `NET` and `PIN` purposes on separate lines, so the PDK map was applied as-is) or `"skipped"` (`reason` says why, e.g. no layer map resolved). The derived map is a throwaway file: `layer_map.path`/`resolution` keep naming the PDK's own map, byte-identical to before, and no host path is added to the response, so `--portable-paths` needs no rewriting for this field. |
 | `power_stack_repair` | object \| null | Additive field (issue #6909); no `schema_version` bump. `null` unless `stage_reached` is `"route"`. Reports the merge's **ASAP7-only** post-pdngen repair of the `asap7sc7p5t` power stack's three deck-measured residual families — `V4.M4.EN.1` (the wide-V4 cut's zero-enclosure M4 landing), `V4.M5.EN.2` (the endmost cut of each M5 strap sitting flush with the strap end) and `M3.S.2` (the stack stub's ≤ 36 nm side edge making the adjacent 36 nm track's 18 nm gap a tip-to-side case) — none of which any `power.*` request field reaches. `status` — `"violations"` (one or more targets remain, including after a partial repair), `"repaired"` (patches drawn and no targets left), `"clean"` (ran and found no targets) or `"skipped"` (`reason` says why; every non-ASAP7 PDK reports `"skipped"` and its GDS is **byte-identical** to before — the pass touches nothing off ASAP7). `patches` — total rectangles drawn. Three count triples, one per family: `targets` (geometry in the deck rule's firing class), `repaired`, and `left` (not safely repairable — an M4/M5 patch's new metal or its family spacing ring contained another same-layer polygon, or no M3 stub strip was safe (see below) — reported, never forced; `left` is the honest remainder `klt drc --deck asap7` still flags). The M4 landing extension is horizontal (12 nm each side), so every across-track M4 rule the landing already satisfied (width, `W.3`, `AUX.1`, `AUX.2`) is untouched; the M5 strap extension is 12 nm past the endmost cut along the grid-free strap direction; the M3 stub is lengthened to 44 nm, moving its side edges into the deck's long-edge class where the 18 nm adjacent-track gap is legal without moving any edge in x. An M4/M5 patch is drawn only when the region it adds plus the spacing ring around it holds no other polygon of the same layer; an M3 stub strip only when the 32 nm band past its new end edge holds no other M3 polygon **and** re-running the deck's M1–M3 spacing rules (`S.1`–`S.6`, including the 20 nm corner-to-corner `S.6`) on the local M3 with and without the strip shows no violation the layout did not already have — it extends upward when downward would add one, and leaves the stub (counted in `left`) when neither direction is safe. So a patch can only merge with the conductor it repairs — no short, no open — and cannot trade one spacing violation for another (`tests/test_place_and_route_power_stack.py` runs the real deck as the oracle and the live before/after is recorded in "Platform PDN presets"). Runs after `min_area_repair` and before `via_pad_trim`, so that pass's `tip_check` measures the repaired geometry. |
@@ -3764,6 +3869,10 @@ with the message the single-corner path gives, with no `corner_runs` and no
 `.klt/place-and-route/<corner>/` directory written. Only a corner-dependent
 failure — a liberty/LEF that cannot be resolved for that corner, or an engine
 failure inside that unit — is recorded in that corner's `corner_runs[].error`.
+`--backend batch` applies the same validation (issue #7583) before it packages
+or uploads anything, and it takes precedence over a packaging or fleet-config
+problem: a defective request is one `PlaceAndRouteError` with the same message
+and no job submitted, instead of one remote failure per unit.
 
 One failing unit does not stop the others. The command exits `1` when
 `status` is `"failed"` — the aggregated report is still printed on stdout.
@@ -3900,9 +4009,10 @@ job cannot succeed on such a runner. The fix is a rebuilt runner image.
 **There is never a local fallback.** A unit whose upload, launch, poll or run
 fails is a `failed` `corner_runs` entry with the error and job id, the other
 units still complete, and the command exits `1` with the aggregated report on
-stdout. A request-level problem (unresolvable fleet config, input outside the
-tree) is a normal error envelope (exit `1`, `error.code` when set) before any
-job is submitted. OpenROAD is never started on this host on the batch path.
+stdout. A request-level problem (a request defect the local backend also
+rejects, an unresolvable fleet config, input outside the tree) is a normal
+error envelope (exit `1`, `error.code` when set) before any job is submitted.
+OpenROAD is never started on this host on the batch path.
 
 ## Partial completion (`target_stage`)
 

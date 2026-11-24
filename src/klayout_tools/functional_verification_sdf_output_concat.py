@@ -15,11 +15,15 @@ gets -- so those arcs annotate without touching the caller's netlist.
 
 The rewrite is strictly gated: a port is rewritten only when every bit of
 its declared ``[N:0]`` range is assigned exactly once, each right-hand
-side is a bare scalar identifier, nothing else in the module references
-any bit (or the whole vector) -- so no cell pin drives a bit and no other
-statement reads one -- and the SDF carries at least one nonzero
-``INTERCONNECT`` onto one of its bits, keeping every all-zero run on
-today's ``zero_delay_alias_port_interconnect`` drop. Every other shape is
+side is a bare scalar identifier -- plain or escaped, the ``\\sub.block_any``
+spelling a flattening netlist writer emits for every hierarchical net
+name; an escaped element keeps its terminating space in the emitted
+concat, and its backslash-stripped spelling feeds the self-reference
+check -- nothing else in the module references any bit (or the whole
+vector) -- so no cell pin drives a bit and no other statement reads one
+-- and the SDF carries at least one nonzero ``INTERCONNECT`` onto one of
+its bits, keeping every all-zero run on today's
+``zero_delay_alias_port_interconnect`` drop. Every other shape is
 left exactly as it was, and the typed pre-build refusal still fires for
 it (#6937's bound, unchanged).
 """
@@ -50,8 +54,25 @@ _VERILOG_OUTPUT_BUS_RANGE_RE = re.compile(
 )
 
 #: A bare scalar Verilog identifier -- the only right-hand side whose
-#: per-bit assign is provably the concat of the same identifiers.
-_VERILOG_BARE_IDENT_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*\Z")
+#: per-bit assign is provably the concat of the same identifiers. An
+#: escaped identifier (``\\foo``, whose terminating whitespace ``.strip()``
+#: has already removed by the time it is judged) names the same scalar and
+#: qualifies too.
+_VERILOG_BARE_IDENT_RE = re.compile(r"(?:[A-Za-z_$][A-Za-z0-9_$]*|\\\S+)\Z")
+
+
+def _canonical_ident(name: str) -> str:
+    """The comparison spelling of a bare identifier: an escaped identifier
+    (``\\foo``) names the same object as plain ``foo``, so the
+    self-reference guard drops the leading backslash before comparing."""
+    return name[1:] if name.startswith("\\") else name
+
+
+def _concat_element(name: str) -> str:
+    """The concat spelling of one right-hand-side identifier: an escaped
+    identifier extends to the next whitespace, so it must carry a trailing
+    space or the following ``,``/``}`` would join its name."""
+    return name + " " if name.startswith("\\") else name
 
 
 def _sdf_buses_with_nonzero_output_bit_arcs(text: str) -> set[str]:
@@ -119,7 +140,14 @@ def _per_bit_assigns(
         if index in found or index > top:
             return None
         rhs = match.group(2).strip()
-        if not _VERILOG_BARE_IDENT_RE.fullmatch(rhs) or rhs == bus:
+        if not _VERILOG_BARE_IDENT_RE.fullmatch(rhs) or _canonical_ident(rhs) == bus:
+            return None
+        if rhs.startswith("\\") and not re.search(
+            re.escape(rhs) + r"\s+;\Z", stripped[match.start() : match.end()]
+        ):
+            # An escaped identifier runs to the next whitespace, so one
+            # butted against the ``;`` is the prefix of a longer name
+            # (``assign y[0] = \\foo;bar ;``) -- unprovable, leave it.
             return None
         found[index] = (rhs, match.start(), match.end())
     if sorted(found) != list(range(top + 1)):
@@ -201,7 +229,11 @@ def _bus_concat_edits(
     raw_spans.sort()
     first_stmt, (first_start, first_end) = raw_spans[0]
     indent = chunk[first_start:first_stmt]
-    concat = "{" + ",".join(found[index][0] for index in range(top, -1, -1)) + "}"
+    concat = (
+        "{"
+        + ",".join(_concat_element(found[index][0]) for index in range(top, -1, -1))
+        + "}"
+    )
     replacement = indent + f"assign {bus} = {concat};"
     if chunk[first_end - 1] == "\n":
         replacement += "\n"

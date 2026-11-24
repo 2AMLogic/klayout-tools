@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
 from ._provenance import sha256_file
 
 RUNSET_ENGINE = "klayout-runset"
@@ -50,6 +51,21 @@ RUNSET_ENGINE = "klayout-runset"
 REASON_RUNSET_NOT_PINNED = "runset_not_pinned"
 REASON_RUNSET_HASH_MISMATCH = "runset_hash_mismatch"
 REASON_RUNSET_UNRECOGNISED_DEVICE = "runset_unrecognised_device"
+#: Issue #6903: the cited `klayout-runset` LVS report failed with the
+#: pinned IHP runset's mirrored-``inductor2`` terminal-order limitation.
+REASON_RUNSET_INDUCTOR_TERMINAL_ORDER = "runset_inductor_terminal_order"
+
+#: Issue #6903: the ``topology.known_limitation`` token the lvs engine
+#: writes for the mirrored-``inductor2`` terminal-order limit
+#: (:data:`klayout_tools.lvs_runset_ports.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER`).
+#: Duplicated as a literal contract value here so the signoff group needs
+#: no lvs-group import (the report's ``mismatches[]`` is the contract
+#: between them); ``tests/test_signoff_runset_inductor.py`` pins the two equal.
+LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER = "mirrored-inductor2-terminal-order"
+
+#: The ``mismatches[]`` category that carries the token (issue #4819's
+#: in-band known-limitation shape, reused by #6903).
+_KNOWN_LIMITATION_CATEGORY = "topology.known_limitation"
 
 _IHP_REPO = "IHP-GmbH/IHP-Open-PDK"
 _GF_PV_REPO = "fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv"
@@ -117,6 +133,28 @@ def is_runset_report(envelope: dict[str, Any]) -> bool:
     return envelope.get("engine") == RUNSET_ENGINE
 
 
+def mirrored_inductor_limitation(envelope: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``topology.known_limitation`` entry naming the pinned IHP
+    runset's mirrored-``inductor2`` terminal-order limitation on this
+    ``klayout-runset`` report, else ``None`` (including every non-runset
+    report). Read from ``mismatches[]``, the contract the lvs engine
+    writes; never changes a verdict by itself -- the report's ``status``
+    stays whatever the runset reported (issue #6903 part C)."""
+    if not is_runset_report(envelope):
+        return None
+    for entry in envelope.get("mismatches") or []:
+        if not isinstance(entry, dict):
+            continue
+        details = entry.get("details")
+        if (
+            entry.get("category") == _KNOWN_LIMITATION_CATEGORY
+            and isinstance(details, dict)
+            and details.get("limitation") == LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER
+        ):
+            return entry
+    return None
+
+
 def runset_block(envelope: dict[str, Any]) -> dict[str, Any]:
     block = (envelope.get("provenance") or {}).get("runset")
     return block if isinstance(block, dict) else {}
@@ -128,7 +166,7 @@ def _folded_class_counts(counts: Any) -> dict[str, int] | None:
         return None
     folded: dict[str, int] = {}
     for name, count in counts.items():
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        if not is_int(count) or count < 0:
             return None
         key = str(name).upper()
         folded[key] = folded.get(key, 0) + count

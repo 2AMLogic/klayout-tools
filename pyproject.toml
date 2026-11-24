@@ -235,6 +235,7 @@ packages = ["src/klayout_tools"]
 # `kb.py` documents as a repo-checkout corpus intentionally left out of the
 # wheel.)
 [tool.hatch.build.targets.wheel.force-include]
+"data/remote-sim-ami-manifest.json" = "klayout_tools/data/remote-sim-ami-manifest.json"
 "docs/design-evidence-tiers.md" = "klayout_tools/data/design-evidence-tiers.md"
 # Per-verb CLI pages: `--help` text points at `docs/cli/<verb>.md`, so ship them
 # for wheel-only installs (issue #5288).

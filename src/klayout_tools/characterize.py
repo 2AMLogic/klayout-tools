@@ -64,6 +64,7 @@ from functools import partial
 from typing import Any
 
 from . import liberty_writer
+from ._jsonnum import is_finite_number
 from ._paths import _load_request_json, _resolve_relative
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
@@ -766,12 +767,12 @@ def _resolve_corner(request: dict[str, Any]) -> dict[str, Any]:
             "`.lib` reports as its operating_conditions)"
         )
     supply_v = spec.get("supply_v")
-    if not isinstance(supply_v, (int, float)) or isinstance(supply_v, bool):
+    if not is_finite_number(supply_v):
         raise CharacterizeError("request.corner.supply_v is required (volts)")
     if supply_v <= 0:
         raise CharacterizeError("request.corner.supply_v must be positive")
     temperature_c = spec.get("temperature_c")
-    if not isinstance(temperature_c, (int, float)) or isinstance(temperature_c, bool):
+    if not is_finite_number(temperature_c):
         raise CharacterizeError("request.corner.temperature_c is required (Celsius)")
     process = spec.get("process")
     if process is not None and not isinstance(process, str):
@@ -780,7 +781,7 @@ def _resolve_corner(request: dict[str, Any]) -> dict[str, Any]:
             '(e.g. "mos_tt") or omitted'
         )
     nom_process = spec.get("nom_process", 1.0)
-    if not isinstance(nom_process, (int, float)) or isinstance(nom_process, bool):
+    if not is_finite_number(nom_process):
         raise CharacterizeError("request.corner.nom_process must be a number")
     return {
         "name": name,
@@ -808,13 +809,9 @@ def _resolve_axis(raw: Any, field: str) -> tuple[float, ...]:
         raise CharacterizeError(
             f"{field} is required: a non-empty, strictly ascending array of grid values"
         )
-    values: list[float] = []
-    for index, entry in enumerate(raw):
-        if not isinstance(entry, (int, float)) or isinstance(entry, bool):
-            raise CharacterizeError(f"{field}[{index}] must be a number")
-        if entry <= 0:
-            raise CharacterizeError(f"{field}[{index}] must be positive")
-        values.append(float(entry))
+    values = [
+        _positive_number(entry, f"{field}[{index}]") for index, entry in enumerate(raw)
+    ]
     if any(
         later <= earlier for earlier, later in zip(values, values[1:], strict=False)
     ):
@@ -836,7 +833,7 @@ def _resolve_thresholds(request: dict[str, Any]) -> liberty_writer.Thresholds:
     resolved: dict[str, float] = {}
     for field_name in defaults.__dataclass_fields__:
         value = spec.get(field_name, getattr(defaults, field_name))
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if not is_finite_number(value):
             raise CharacterizeError(f"request.thresholds.{field_name} must be a number")
         resolved[field_name] = float(value)
     unknown = sorted(set(spec) - set(defaults.__dataclass_fields__))
@@ -1055,7 +1052,7 @@ def _optional_positive(value: Any, field: str) -> float | None:
 
 
 def _positive_number(value: Any, field: str) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if not is_finite_number(value):
         raise CharacterizeError(f"{field} must be a number")
     if value <= 0:
         raise CharacterizeError(f"{field} must be positive")

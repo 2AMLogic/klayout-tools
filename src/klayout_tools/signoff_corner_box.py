@@ -7,11 +7,18 @@ from .signoff_row_extent import label_list
 from .signoff_unmet_reasons import (
     _REASON_CHECK_FAILED,
     _REASON_INVALID_EVIDENCE,
+    _REASON_NO_EVIDENCE,
     _REASON_PARTIAL_COVERAGE,
     _REASON_WRONG_KIND,
 )
 
 Key = tuple[str | None, str]
+
+#: Why a declared box refuses a citation that is not a PEX report (#7700).
+_WRONG_KIND_PROBLEM = (
+    "corner_box applies to this partition, and only a PEX report with "
+    "delta[] corner rows can satisfy it"
+)
 
 
 def _row_problem(row: Any) -> str | None:
@@ -35,6 +42,7 @@ class CornerBox:
     corners: tuple[str, ...] = ()
     problem: str | None = None
     original_reasons: dict[int, str] = field(default_factory=dict)
+    wrong_kind_problem: str = _WRONG_KIND_PROBLEM
 
     def member_disclosure(self, spec: dict, status: str) -> dict[str, str]:
         reason = self.original_reasons.get(id(spec))
@@ -71,6 +79,9 @@ class CornerBox:
     def grade(self, envelopes: dict[int, dict], graded: list, extra: dict) -> tuple:
         summary = self.coverage(envelopes)
         detail = {"corner_box": summary}
+        if not graded:
+            # Issue #7700: nothing cited is `no_evidence`, as without a box.
+            return "unmet", _REASON_NO_EVIDENCE, None, detail, {}
         if summary["missing"]:
             return "unmet", _REASON_PARTIAL_COVERAGE, None, detail, extra
         citations = [grade[2] for _, _, grade in graded]
@@ -92,7 +103,7 @@ def corner_member_outcome(
     if box is None:
         return unmet
     if kind != "pex":
-        return "unmet", _REASON_WRONG_KIND, None, {}
+        return "unmet", _REASON_WRONG_KIND, None, {"problem": box.wrong_kind_problem}
     rows = envelope.get("delta")
     if not isinstance(rows, list):
         return (
@@ -141,8 +152,28 @@ def read_corner_box(manifest: dict, item: int, partition: str) -> CornerBox | No
                 return CornerBox(
                     problem=f"corner_box.{key} needs a list of unique non-empty IDs"
                 )
-            return CornerBox(tuple(corners))
+            return CornerBox(
+                tuple(corners),
+                wrong_kind_problem=_wrong_kind_problem(
+                    key, partition, manifest.get("kind")
+                ),
+            )
     return None
+
+
+def _wrong_kind_problem(key: str, partition: str, block_kind: Any) -> str:
+    """Name the box on a ``wrong_kind`` refusal and the remedy that works.
+
+    Only a bare ``"7"`` box on a mixed-signal block's digital partition is
+    helped by scoping the box to ``"7.analog"``; anywhere else the box has
+    to be satisfied or removed.
+    """
+    if key == "7" and partition == "digital" and block_kind == "mixed-signal":
+        return (
+            f'{_WRONG_KIND_PROBLEM}; declare the box under "7.analog" '
+            "to scope it to the analog partition"
+        )
+    return f'{_WRONG_KIND_PROBLEM}; cite a PEX report, or remove corner_box["{key}"]'
 
 
 def print_corner_box(item: dict) -> None:

@@ -29,7 +29,7 @@ from klayout_tools.pex_net_correspondence import (
     correspondence,
     preferred_renames,
 )
-from klayout_tools.pex_runset import PexRunset
+from klayout_tools.pex_runset import PexExtractOptions, PexRunset
 from test_extract_body_nets_sg13cmos5l import (
     _make_sg13cmos5l_inverter_layout,
 )
@@ -122,7 +122,7 @@ def fake_klayout(monkeypatch, tmp_path):
     return state
 
 
-def _merged(tmp_path, fake_klayout):
+def _merged(tmp_path, fake_klayout, *, pins=None, rename=False):
     gds = tmp_path / "inv.gds"
     _write_fixture(str(gds))
     deck_file = tmp_path / "pdk.lvs"
@@ -130,31 +130,13 @@ def _merged(tmp_path, fake_klayout):
     return merged_runset_extract(
         layout_path=str(gds),
         output=str(tmp_path / "leg.spice"),
-        top="TOP",
         runset=PexRunset(deck_file=str(deck_file)),
         deck_name="sg13cmos5l",
-        pdk_variant=None,
-        pdk_root=None,
-        label_layers=None,
-        device_models=None,
-        deck_options=None,
-        declared_pins=None,
-        rename_declared_pins=False,
-        tie_declared_pins=False,
-        critical_nets=None,
-        critical_net_patterns=None,
-        critical_net_all=False,
-        critical_net_excludes=None,
-        distributed_rc=False,
-        resistance_graph=False,
-        resistance_graph_r_cut_ohm=None,
-        resistance_graph_caps=None,
-        parasitic_variants=None,
-        substrate_tie_ohms=None,
-        mom_rlc_net=None,
-        mom_rlc_resistance_ohm=None,
-        mom_rlc_capacitance_ff=None,
-        mom_rlc_inductance_nh=None,
+        options=PexExtractOptions(
+            top="TOP",
+            declared_pins=pins,
+            rename_declared_pins=rename,
+        ),
     )
 
 
@@ -438,31 +420,9 @@ def test_real_pnpmpa_merged_run_reports_the_measured_mismatch(tmp_path):
     report = merged_runset_extract(
         layout_path=gds,
         output=str(tmp_path / "pnpMPA.spice"),
-        top="pnpMPA_lvs",
         runset=PexRunset(deck_file=deck),
         deck_name="sg13cmos5l",
-        pdk_variant=None,
-        pdk_root=None,
-        label_layers=None,
-        device_models=None,
-        deck_options=None,
-        declared_pins=None,
-        rename_declared_pins=False,
-        tie_declared_pins=False,
-        critical_nets=None,
-        critical_net_patterns=None,
-        critical_net_all=False,
-        critical_net_excludes=None,
-        distributed_rc=False,
-        resistance_graph=False,
-        resistance_graph_r_cut_ohm=None,
-        resistance_graph_caps=None,
-        parasitic_variants=None,
-        substrate_tie_ohms=None,
-        mom_rlc_net=None,
-        mom_rlc_resistance_ohm=None,
-        mom_rlc_capacitance_ff=None,
-        mom_rlc_inductance_nh=None,
+        options=PexExtractOptions(top="pnpMPA_lvs"),
     )
     corr = report["net_correspondence"]
     assert report["device_counts"] == {"pnpMPA": 1, "ptap1": 1}

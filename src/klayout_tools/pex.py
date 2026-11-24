@@ -263,6 +263,7 @@ from .pex_netlist_text import (
 )
 from .pex_resistance_graph import (
     _reject_resistance_graph_with_distributed_rc,
+    _reject_resistance_network_without_graph,
     _resistance_graph_echo,
 )
 from .sim import SimError, load_request, run_sim
@@ -2399,15 +2400,7 @@ def _extract_device_only_leg(
     layout_path: str,
     deck_name: str | None,
     *,
-    top: str | None,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-    deck_options: Any,
-    declared_pins: Any,
-    rename_declared_pins: bool,
-    tie_declared_pins: bool,
-    label_layers: Any,
-    device_models: Any = None,
+    options: pex_runset.PexExtractOptions,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The parasitic-free leg's netlist path and its parity against the
     parasitic extraction (issue #3298), or ``(None, None)`` without
@@ -2423,16 +2416,8 @@ def _extract_device_only_leg(
             layout_path,
             deck_name,
             output=f"{stem}.device-only{ext}",
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
             parasitics=False,
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            label_layers=label_layers,
-            device_models=device_models,
+            **options.device_only_kwargs(),
         )
     except ExtractError as exc:
         raise PexError(f"device-only extraction failed: {exc}") from exc
@@ -2551,6 +2536,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
     resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
@@ -2622,23 +2608,16 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm``/``resistance_graph_caps``
-    (``klt pex --resistance-graph [--resistance-graph-r-cut OHM]
-    [--resistance-graph-max-* N]``, issues #4037, #6964) forward to ``klt
-    extract``'s terminal-aware resistance graph and make the extracted netlist
-    use each ``resistance_source == "graph"`` net's ``selected_resistance_ohm``
-    as its lumped R (``legacy`` nets keep the legacy scalar). The caps raise
-    the graph builder's per-net size limits. ``extraction.resistance_graph``
-    echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
-    values -- only when a cap was given) and one ``{net, net_id,
-    resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
-    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
-    the graph flag, the report and netlist are byte-identical. Combining it with
-    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    before this feature existed.
 
-    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    ``resistance_graph`` selects the extracted graph resistance or legacy
+    fallback per net. Its report echoes terminals, pair resistances, fallback
+    reasons and the optional per-cut resistance. Explicit caps are echoed
+    with all four effective limits. ``resistance_network`` requires the graph
+    and writes a Kron-reduced network for each solved net with three or more
+    terminals. The graph is incompatible with the distributed RC ladder.
+
+    ``critical_net_patterns``/``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
     issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
     straight through; ``extraction.critical_nets`` then echoes the resolved
@@ -2859,8 +2838,12 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    _reject_resistance_network_without_graph(resistance_network, resistance_graph)
     pex_runset.refuse_unsupported(
-        runset, device_only_leg=device_only_leg, tie_nets=tie_nets
+        runset,
+        device_only_leg=device_only_leg,
+        tie_nets=tie_nets,
+        resistance_network=resistance_network,
     )
 
     # Issue #1261: every input-path field this run's own JSON response
@@ -2877,6 +2860,35 @@ def run_pex(
     requests = [_load_testbench_request(path, timeout_s) for path in testbench_paths]
     probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
 
+    # Issue #7818: the 24 extraction options every helper downstream of this
+    # entry point reads, bundled once -- the flat keyword signature above is
+    # the public contract and stays unchanged.
+    options = pex_runset.PexExtractOptions(
+        top=top,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
+        label_layers=label_layers,
+        device_models=device_models,
+        critical_nets=critical_nets,
+        critical_net_patterns=critical_net_patterns,
+        critical_net_all=critical_net_all,
+        critical_net_excludes=critical_net_excludes,
+        distributed_rc=distributed_rc,
+        resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_network=resistance_network,
+        resistance_graph_caps=resistance_graph_caps,
+        parasitic_variants=parasitic_variants,
+        substrate_tie_ohms=substrate_tie_ohms,
+        mom_rlc_net=mom_rlc_net,
+        mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+        mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+        mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    )
     try:
         # Issue #6559/#6606: the engine dispatch (curated / runset / the
         # `--deck`-under-runset merged route) and the option mapping live in
@@ -2886,29 +2898,7 @@ def run_pex(
             deck_name,
             runset=runset,
             output=output,
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            label_layers=label_layers,
-            device_models=device_models,
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            critical_nets=critical_nets,
-            critical_net_patterns=critical_net_patterns,
-            critical_net_all=critical_net_all,
-            critical_net_excludes=critical_net_excludes,
-            distributed_rc=distributed_rc,
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            resistance_graph_caps=resistance_graph_caps,
-            parasitic_variants=parasitic_variants,
-            substrate_tie_ohms=substrate_tie_ohms,
-            mom_rlc_net=mom_rlc_net,
-            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+            options=options,
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -2922,15 +2912,7 @@ def run_pex(
         extracted_netlist_path,
         layout_path,
         deck_name,
-        top=top,
-        pdk_variant=pdk_variant,
-        pdk_root=pdk_root,
-        deck_options=deck_options,
-        declared_pins=declared_pins,
-        rename_declared_pins=rename_declared_pins,
-        tie_declared_pins=tie_declared_pins,
-        label_layers=label_layers,
-        device_models=device_models,
+        options=options,
     )
 
     # Issue #4245: `--tie-net` merges reported-unbiased body nets into

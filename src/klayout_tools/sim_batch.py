@@ -105,6 +105,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     _batch_common,
     _provenance,
+    _warn,
     remote_transport,
     sim_batch_image,
     sim_batch_observer,
@@ -141,7 +142,7 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_echo_checks import check_ngspice_options_echo
+from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
@@ -174,6 +175,7 @@ from .sim_batch_contract import (  # noqa: F401
     _POLL_PROGRESS_EVERY,
     BATCH_ARTIFACTS_DIRNAME,
     BATCH_CONCURRENCY_CAP_CODE,
+    BATCH_IMAGE_PROFILE_CODE,
     BATCH_INTERRUPTED_CODE,
     BATCH_JOB_CEILING_CODE,
     BATCH_JOB_COMMAND_FAILED_CODE,
@@ -268,6 +270,8 @@ from .sim_batch_job_timeout import (
     resolve_poll_timeout_s,
 )
 from .sim_batch_knobs import (
+    _read_fleet_config,
+    _resolve_image_profile,
     _resolve_interrupted_grace_s,
     _resolve_max_concurrent_jobs,
     _resolve_max_job_seconds,
@@ -327,6 +331,7 @@ class BatchConfig:
     feature_diagnostic: dict[str, Any] | None = None
     image_pointer_key: str = "images/eda-batch-runner/current.json"
     runner_images: list[dict[str, Any]] | None = None
+    image_profile: str | None = None
 
     def runner_identities(self, pdk: str | None) -> list[dict[str, Any]]:
         """Reuse the pointer snapshot across all gates and shards of this request."""
@@ -344,38 +349,6 @@ class BatchConfig:
         return sim_batch_image.read_batch_runner_images(
             pdk, self.region, command, _run_subprocess
         )
-
-
-def _read_fleet_config(provision_script: str) -> dict[str, str]:
-    """Best-effort read of 2am's ``batch-fleet.env`` sitting beside the
-    resolved provision script.
-
-    Deliberately *not* a shell evaluation: only literal ``KEY=value`` /
-    ``KEY="value"`` lines are honored, anything interpolated (``$``/backtick)
-    or malformed is skipped, and an unreadable/absent file yields ``{}``.
-    This is a convenience source for non-secret fleet identifiers
-    (bucket, jobs prefix, region, submit profile), never a credential path.
-    """
-    path = os.path.join(
-        os.path.dirname(os.path.abspath(provision_script)), FLEET_CONFIG_FILENAME
-    )
-    values: dict[str, str] = {}
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return values
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if not key.startswith("BATCH_") or "$" in value or "`" in value:
-            continue
-        values[key] = value
-    return values
 
 
 def _resolve_provision_script(batch_spec: dict[str, Any]) -> str:
@@ -628,6 +601,7 @@ def _resolve_batch_config(
     corner_count: int,
     timeout_s: float,
     check_runner: bool = True,
+    sim_image_profiles: bool = True,
 ) -> BatchConfig:
     """Resolve every ``batch.*`` knob, raising
     :class:`~klayout_tools.sim.SimError` before any S3 write. Per-field
@@ -668,8 +642,9 @@ def _resolve_batch_config(
         )
     capacity_wait_s = resolve_capacity_wait_s(batch_spec)
     runner_version_check = _resolve_runner_version_check(batch_spec)
+    image_profile = _resolve_image_profile(batch_spec) if sim_image_profiles else None
     max_job_seconds, max_job_seconds_source = _resolve_max_job_seconds(
-        batch_spec, fleet
+        batch_spec, fleet, image_profile
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
@@ -707,6 +682,7 @@ def _resolve_batch_config(
         runner_version_check=runner_version_check,
         max_job_seconds=max_job_seconds,
         max_job_seconds_source=max_job_seconds_source,
+        image_profile=image_profile,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
@@ -761,6 +737,7 @@ def dry_run_runner_check(
             BATCH_RUNNER_FEATURE_CODE,
             BATCH_RUNNER_MISMATCH_CODE,
             BATCH_MAX_UNITS_CODE,
+            BATCH_IMAGE_PROFILE_CODE,
             ENGINE_VERSION_UNMET_CODE,
             # Issue #7543: a malformed poll knob is the request author's,
             # never the host's, so the dry run refuses it like the submit.
@@ -844,7 +821,7 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
             "anyway; see docs/cli/sim.md)",
             code=BATCH_RUNNER_MISMATCH_CODE,
         )
-    print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {message}; submitting anyway")
 
 
 def _feature_diagnostic(
@@ -909,7 +886,7 @@ def _enforce_published_runner_features(
             code=BATCH_RUNNER_FEATURE_CODE,
         )
     if assessment["check"] != "enforce":
-        print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+        _warn.warn(f"klt sim: warning: {message}; submitting anyway")
         return _feature_diagnostic(
             missing, versions, assessment["client_klt_version"], "manifest"
         )
@@ -1057,7 +1034,7 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             'request.batch.job_ceiling_check to "warn" to submit anyway)',
             code=BATCH_JOB_CEILING_CODE,
         )
-    print(f"klt sim: warning: {warning}", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {warning}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1260,6 +1237,9 @@ def submit_job(
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
+            # Every sim mode and shard publishes its profile through this write.
+            if config.image_profile == "simlong":
+                spec = replace(spec, image_profile=config.image_profile)
             json.dump(spec.to_job_json(), handle)
         spec_copy = ("s3", "cp", job_json_path, f"{prefix}/job.json")
         _run_checked(
@@ -1772,6 +1752,14 @@ def _install_batch_artifacts(
 # --------------------------------------------------------------------------- #
 
 
+def _batch_job_environment(config: BatchConfig, job_id: str) -> dict[str, Any]:
+    """Submit-side identifiers available before the worker reports a status."""
+    environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
+    if config.image_profile is not None:
+        environment["image_profile"] = config.image_profile
+    return environment
+
+
 def _batch_environment(
     config: BatchConfig, job_id: str, status: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1780,8 +1768,7 @@ def _batch_environment(
     a ``fleet[]`` array under sharding), carrying what ``status.json``
     actually observed rather than what was requested."""
     return {
-        "provider": "aws-batch-fleet",
-        "job_id": job_id,
+        **_batch_job_environment(config, job_id),
         "region": status.get("region") or config.region,
         "instance_id": status.get("instance_id"),
         "instance_type": status.get("instance_type"),
@@ -2067,13 +2054,10 @@ def _read_worker_environment(
 
 
 def _runner_feature_report(
-    request: dict[str, Any] | None, runner: str | None
+    request: dict[str, Any] | None, runner: str | None, step_probe: object = None
 ) -> dict[str, Any] | None:
-    """The ``runner_request_features`` block, or ``None`` if nothing is required.
-
-    ``decks`` (issue #4109) is judged by :func:`_runner_supports_decks`; the
-    rest are plain min-version entries in :data:`_RUNNER_REQUEST_FEATURES`.
-    ``missing`` is ``None`` (status ``unknown``) when the runner is unknown.
+    """Summarize requested capabilities from release floors and worker observations.
+    Missing evidence yields unknown. Decks use their own version check.
     """
     features = _request_features(request) if request else []
     uses_decks = bool(request and request.get("decks"))
@@ -2082,7 +2066,7 @@ def _runner_feature_report(
     if not features:
         return None
     registry = [name for name in features if name != "decks"]
-    missing = _missing_runner_features(registry, runner) if registry else []
+    missing = _missing_runner_features(registry, runner, step_probe) if registry else []
     if uses_decks:
         decks_ok = _runner_supports_decks(runner) if runner else None
         if decks_ok is None:
@@ -2123,6 +2107,7 @@ def _read_runner_identity(
     """
     client = _provenance._klt_version()
     runner: str | None = None
+    step_probe = None
     if local_dir is not None:
         try:
             with open(
@@ -2133,6 +2118,7 @@ def _read_runner_identity(
             value = document.get("runner_klt_version")
             if isinstance(value, str) and value.strip():
                 runner = value.strip()
+                step_probe = document.get("step_on_unreached")
         except (OSError, ValueError, AttributeError):
             runner = None
     runner_release = _runner_gate_release(runner) if runner is not None else None
@@ -2157,7 +2143,7 @@ def _read_runner_identity(
         "client_klt_version": client,
         "runner_compatibility": status,
     }
-    report = _runner_feature_report(request, runner)
+    report = _runner_feature_report(request, runner, step_probe)
     if report is not None:
         fields["runner_request_features"] = report
         missing = report["missing"]
@@ -2631,10 +2617,7 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             handle.write("\n")
         os.replace(tmp_path, path)
     except OSError as exc:
-        print(
-            f"klt sim: warning: could not write batch receipt {path}: {exc}",
-            file=sys.stderr,
-        )
+        _warn.warn(f"klt sim: warning: could not write batch receipt {path}: {exc}")
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -3145,8 +3128,7 @@ def _poll_and_collect(
             _poll_timeout_corners(corner_points, measurements_spec, exc),
             None,
             {
-                "provider": "aws-batch-fleet",
-                "job_id": job_id,
+                **_batch_job_environment(config, job_id),
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -3188,7 +3170,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
-        check_ngspice_options_echo(request, report)
+        check_runner_option_echoes(request, report)
         sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
         identity = _read_job_identity(collected, request, report=report)
         environment = {**environment, **identity}
@@ -3381,6 +3363,7 @@ def _run_batch(
             environment = {
                 **environment,
                 "job_ceiling": job_ceiling,
+                "image_profile": config.image_profile or "sim",
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
@@ -3417,6 +3400,7 @@ def _run_batch(
         environment = {
             **environment,
             "job_ceiling": job_ceiling,
+            "image_profile": config.image_profile or "sim",
             **_feature_diagnostic_field(config),
         }
     return corners, engine_version, environment
@@ -3682,11 +3666,11 @@ class _BatchFleetRun:
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Retry capacity-refused shards in order with a fresh wait budget."""
-        refused = sorted(self.capacity_refused)
+        """Reset the wait budget and pending count for the capacity-refused shards."""
         self.started = time.monotonic()
         self.budget_spent.clear()
-        return refused
+        self.watch.start_retry_pass(self.capacity_refused)
+        return sorted(self.capacity_refused)
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         return self._guarded(shard_points, self._run_one_shard)

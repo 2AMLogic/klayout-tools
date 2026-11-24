@@ -49,7 +49,7 @@ from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, sim_batch
 from ._jsonnum import is_number
-from .sim_errors import SimError
+from .sim_errors import SimError, request_options
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -412,9 +412,7 @@ def plan_command_units(
     from .sim import DEFAULT_TIMEOUT_S
 
     commands = _validate_request_shape(request)
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = _timeout(
         options.get("timeout_s"), "request.options.timeout_s", DEFAULT_TIMEOUT_S
     )
@@ -808,7 +806,7 @@ def _run_batch(
             pdk=(request.get("models") or {}).get("pdk"),
             version_check=config.runner_version_check,
         )
-        environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
+        environment = sim_batch._batch_job_environment(config, job_id)
         try:
             sim_batch.submit_job(config, job_id, spec)
             sim_batch.launch_job(config, job_id)

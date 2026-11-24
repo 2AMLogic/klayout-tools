@@ -317,7 +317,7 @@
     },
     {
       "path": "src/klayout_tools/extract_spef.py",
-      "lines": 992
+      "lines": 972
     },
     {
       "path": "src/klayout_tools/extract_subcircuit.py",
@@ -329,11 +329,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2656
+      "lines": 2643
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2473
+      "lines": 2452
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3122
+      "lines": 2554
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_gds_merge.py",
-      "lines": 775
+      "lines": 753
     },
     {
       "path": "src/klayout_tools/place_and_route_power_audit.py",
@@ -497,15 +497,15 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2167
+      "lines": 2114
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1344
+      "lines": 1327
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1151
+      "lines": 1117
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
@@ -829,7 +829,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6516
+      "lines": 6481
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

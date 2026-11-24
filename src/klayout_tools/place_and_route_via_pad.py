@@ -63,6 +63,7 @@ from typing import Any
 
 from .pdk_families import pdk_variant_family
 from .place_and_route_def_drcfill import scan_def_drcfill
+from .place_and_route_via_enclosure import repair_m1_v1_enclosures
 from .place_and_route_via_tip import check_via_pad_tips
 from .place_and_route_via_tip_repair import repair_m1_landing_pairs
 
@@ -326,6 +327,27 @@ def _drcfill_regions(
     return scanned["regions"] or None, scanned
 
 
+def _repair_placed_m1(kdb, layout, top, lef_to_gds, report):
+    """Recheck spacing and enclosure proposals after either changes a facing edge."""
+    total_pads = total_wires = total_enclosures = 0
+    while True:
+        counts = {}
+        pads = repair_m1_landing_pairs(kdb, layout, top, lef_to_gds, report=counts)
+        wires = counts["m1_landing_pad_wire_pairs_extended"]
+        enclosures, remaining = repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds)
+        total_pads += pads
+        total_wires += wires
+        total_enclosures += enclosures
+        if not (pads or wires or enclosures):
+            break
+    report.update(
+        m1_landing_pairs_extended=total_pads,
+        m1_landing_pad_wire_pairs_extended=total_wires,
+        m1_v1_enclosures_repaired=total_enclosures,
+        m1_v1_enclosures_remaining=remaining,
+    )
+
+
 def trim_via_pads(
     kdb: Any,
     *,
@@ -365,9 +387,7 @@ def trim_via_pads(
         lef_to_gds=lef_to_gds,
     )
     if pdk_variant_family(variant) == _ASAP7_FAMILY:
-        report["m1_landing_pairs_extended"] = repair_m1_landing_pairs(
-            kdb, layout, top_cell, lef_to_gds, report=report
-        )
+        _repair_placed_m1(kdb, layout, top_cell, lef_to_gds, report)
     drcfill_regions, drcfill_scan = _drcfill_regions(
         kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
     )

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from fractions import Fraction
 from itertools import combinations
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .gen_compose_base import GenComposeError
 
 # Only measurements carry database-unit quantization error.
@@ -113,11 +113,7 @@ def _require_gate_bbox(value: Any, where: str) -> dict[str, float]:
     box: dict[str, float] = {}
     for key in ("x0", "y0", "x1", "y1"):
         raw = value[key]
-        if (
-            isinstance(raw, bool)
-            or not isinstance(raw, (int, float))
-            or not math.isfinite(raw)
-        ):
+        if not is_finite_number(raw):
             raise ValueError(f"{where}.{key} must be a finite number (um)")
         box[key] = float(raw)
     if box["x1"] < box["x0"] or box["y1"] < box["y0"]:

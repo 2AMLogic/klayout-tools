@@ -93,9 +93,9 @@ from . import (
     sim_remote,
     sim_staging,
 )
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
-from .sim_errors import SimError
+from .sim_errors import SimError, request_options
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -263,9 +263,7 @@ def plan_deck_units(
             "-- one off-host job runs the whole deck list across its own "
             "worker pool (options.max_workers)"
         )
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _deck_error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = DEFAULT_TIMEOUT_S
     if options.get("timeout_s") is not None:
         default_timeout = _validated_timeout(
@@ -1878,8 +1876,7 @@ def _collect_decks_batch(
             message=str(exc),
             outdir=outdir,
             environment={
-                "provider": "aws-batch-fleet",
-                "job_id": job_id,
+                **sim_batch._batch_job_environment(config, job_id),
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -2164,6 +2161,7 @@ def run_deck_request(
         _validate_ngspice_init,
         apply_engine_host,
     )
+    from .sim_spiceinit import add_deck_init_hints
 
     if resume and (submit_only or attach_job_id is not None):
         raise SimError(
@@ -2171,11 +2169,7 @@ def run_deck_request(
             "--attach for a deck-list request -- the submitted job is one "
             "unit of work that is collected whole"
         )
-    if max_workers is not None and (
-        not isinstance(max_workers, int)
-        or isinstance(max_workers, bool)
-        or max_workers < 1
-    ):
+    if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
         request,
@@ -2209,7 +2203,7 @@ def run_deck_request(
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
-        return _run_decks_offhost(
+        report = _run_decks_offhost(
             request,
             units,
             pending,
@@ -2225,10 +2219,9 @@ def run_deck_request(
             collect_partial=collect_partial,
         )
 
-    if backend == "local":
-        workers = 1
-    else:
-        workers = _resolve_max_workers(max_workers)
+        return add_deck_init_hints(report, ngspice_init_lines)
+
+    workers = 1 if backend == "local" else _resolve_max_workers(max_workers)
     report = _run_decks_local(
         pending,
         staging_root=request_dir,
@@ -2243,4 +2236,4 @@ def run_deck_request(
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )
-    return report
+    return add_deck_init_hints(report, ngspice_init_lines)

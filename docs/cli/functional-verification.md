@@ -469,7 +469,7 @@ envelope — see [`docs/json-contract.md`](../json-contract.md)).
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 | `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
 | `klt_sdf_renamed.sdf` / `klt_sdf_renamed_sources/<n>/<file>` | Written only when the input SDF names an instance whose escaped identifier contains a hierarchy divider (a flattened `generate` array's `\g[0].sub.u1`; issue #2897). The SDF copy and a copy of each request source declaring such an instance, with each one renamed to a plain identifier; `environment.sdf.renamed` lists the renames. The caller's own files are untouched. |
-| `klt_sdf_output_concat_sources/<n>/<file>` | Written only when the SDF carries a nonzero `INTERCONNECT` onto a bit of a top-level output port the netlist drives through separate per-bit assigns (issue #7534). A copy of each request source declaring such a port, with those assigns replaced by the equivalent whole-vector `assign y = {bN,…,b0};`; `environment.sdf.output_assign_rewritten` lists `{port, bits, file}` per rewritten port. The caller's own files are untouched, and shapes the rewrite cannot prove equivalent are never copied (the #6937 refusal fires instead). |
+| `klt_sdf_output_concat_sources/<n>/<file>` | Written only when the SDF carries a nonzero `INTERCONNECT` onto a bit of a top-level output port the netlist drives through separate per-bit assigns (issue #7534). A copy of each request source declaring such a port, with those assigns replaced by the equivalent whole-vector `assign y = {bN,…,b0};`; an escaped-identifier right-hand side — the `\sub.block_any` spelling a flattening P&R writer emits for every hierarchical net name — qualifies as the same scalar (issue #7693), its concat element keeping the terminating space (`assign y = {\sub.b1 ,\sub.b0 };`). `environment.sdf.output_assign_rewritten` lists `{port, bits, file}` per rewritten port. The caller's own files are untouched, and shapes the rewrite cannot prove equivalent are never copied (the #6937 refusal fires instead). |
 | `sim_build_icarus/<hdl_toplevel>.fst` (Icarus) or `dump.vcd` (Verilator) | The waveform trace, on `options.trace: true` runs only (Epic #1585 Phase 3, issue #1845) — location and format are cocotb's own per-engine convention, not a request choice: Icarus writes into `sim_build_icarus/`, Verilator writes directly into `.klt/functional-verification/`. Echoed by path/format/size in the response's `trace` field. Copy its `path` and `format` into a [wave-build request](wave.md) to query it. |
 
 ## Coverage
@@ -1027,11 +1027,15 @@ netlist and SDF stay byte-identical, no `dropped` class is recorded and
 `partial` stays `false`: no timing is discarded, only respelled. The
 rewrite fires only for a port klt can prove equivalent — every bit `0..N`
 of a plain `[N:0]` range assigned exactly once, each right-hand side a
-bare scalar identifier, and no other statement in the module driving or
-reading any bit (an instance port connection `.x(y[i])` counts as a
-driver). Everything else — a bit not assigned, assigned twice, or
-cell-driven, a non-identifier right-hand side, a range other than
-`[N:0]`, a top module not found — keeps the typed pre-build refusal above.
+bare scalar identifier (an escaped identifier — `\sub.block_any`, the
+spelling a flattening netlist writer emits for every hierarchical net
+name — is the same scalar and qualifies, keeping its terminating space in
+the concat: `assign y = {\sub.b1 ,\sub.b0 };`), and no other statement in
+the module driving or reading any bit (an instance port connection
+`.x(y[i])` counts as a driver). Everything else — a bit not assigned,
+assigned twice, or cell-driven, a non-identifier right-hand side, a range
+other than `[N:0]`, a top module not found — keeps the typed pre-build
+refusal above.
 An all-zero run is untouched: the rewrite applies only to a port with at
 least one nonzero arc onto one of its bits, so the
 `zero_delay_alias_port_interconnect` drop and `partial: true` behaviour of
@@ -1041,8 +1045,8 @@ least one nonzero arc onto one of its bits, so the
 annotation, and counted** (issue #2363). A router inserts an antenna-effect
 diode on a pin whose net violates the antenna rules; the diode is a
 *physical-only* cell — its Verilog model has no `specify` block and no output
-pin at all — so it appears in the post-route netlist and SDF but can carry no
-timing:
+pin. The diode appears in the post-route netlist and SDF with no cell timing
+of its own:
 
 ```verilog
 sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
@@ -1055,9 +1059,9 @@ sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
 That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 (issue #1619 — a bit-selected top-level port as the entry's *source*), so
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
-alias-map normalization above resolves it, and it costs one `SDF ERROR:
-<file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0, re-measured with one-variable-per-case controls in issue #5705: the
+alias-map normalization above resolves the rejection of a non-survivor
+(`SDF ERROR: <file>:<line>: Could not find intermodpath!`). Icarus 13.0 was
+measured live with one-variable-per-case controls in issue #5705: the
 deciding variable is the port bit's net's **physical fanout**, not the
 `INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
 interconnect modpath per bit-selected top-level port net, for the
@@ -1087,10 +1091,9 @@ when its instance is the net's last-declared load; the drop does not rest on
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*
-  rvalue it carries is zero. A **non**-zero-delay entry onto the identical
-  physical-only pin (including one that is zero at `min`/`typ` but not at
-  `max`) is left in place, fails to annotate, and still fails the run with
-  exit 1.
+  rvalue it carries is zero. An entry with a non-zero delay at any corner
+  stays in the SDF. If it targets a non-survivor, it still fails the
+  diagnostic gate with exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
   ordinary `specify`-bearing standard cell — the general shape (b) case,
   which on a fanout-above-1 port-bit net fails whenever it is not the
@@ -1391,7 +1394,7 @@ the run and identify the affected cell arcs in `arcs`.
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
-| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a physical-only instance was removed before annotation. Icarus can annotate only the last-declared load on the port bit's net. Zero delay at every corner makes the removal timing-neutral even when the physical-only instance is that load. |
 | `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
 | `zero_delay_internal_bus_net_interconnect` | SDF-text normalization (issue #6075) | An `INTERCONNECT` entry running across a bit-select of an **internal** wire — both endpoints ordinary instance pins whose parsed netlist connections resolve to the same bit-select of a wire that is not a top-level port — carrying zero delay at every corner, was removed before annotation. Measured live on Icarus 13.0: Icarus inserts **no** intermodpath for *every* entry on such a net (0-of-N at any fanout, unlike a port bit's last-declared-survivor rule), and the entry text is byte-identical to an entry on a scalar net that annotates cleanly, so the decision is made from the same gate-level parse the run already compiles, not from the SDF text. A non-zero entry on the identical net is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
@@ -1779,6 +1782,23 @@ listed in `sources` compiles once, in its dependency-order position.
 `__blackbox*.v` siblings (sky130 ships two) are never selected: a blackbox
 has no behaviour. The resolved files appear in `environment.sources` like
 any other source.
+
+**Descriptor-declared roots (issue #7695).** A root described by a
+`klt-pdk.json` (such as an ASAP7 root from `scripts/assemble-asap7-pdk-root.py`)
+may name the models itself with `views.<cell_library>.verilog`, an ordered
+list of files (see `docs/cli/pdk.md`). When the descriptor maps that key for
+the requested `cell_library`, the list is used **instead of** the
+`libs.ref/<cell_library>/verilog/` convention above: the files are prepended
+verbatim in their declared order, with no `primitives.v` probing, and
+`pdk_no_verilog_view` therefore no longer fires for that library. A library
+the descriptor does not give a `verilog` list falls back to the convention
+unchanged. A descriptor that cannot be loaded is a refusal, not a fallback.
+The assembled ASAP7 root maps the five `AO`, `INVBUF`, `OA`, `SEQ` and
+`SIMPLE` TT models per flavour (the same five groups its Liberty merges), so
+`pdk: {"variant": "asap7", "root": "<root>", "cell_library":
+"asap7sc7p5t_rvt"}` serves `klt synthesize`, `klt place-and-route`,
+`klt sta` and gate-level `klt functional-verification` from one root. The
+`pdk_cell_library_mismatch` check below applies on this route too.
 
 The CLI's `--pdk`/`--pdk-root` override `pdk.variant`/`pdk.root`
 respectively (the sibling-verb precedence); `cell_library` comes from the

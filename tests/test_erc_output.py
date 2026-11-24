@@ -122,7 +122,7 @@ def test_write_error_in_read_only_dir_preserves_report(tmp_path, capsys, suffix)
     assert "Permission denied" in message
     assert ".klt-" not in message
     assert report.read_bytes() == b"previous report"
-    assert not list(tmp_path.glob(".klt-*.tmp"))
+    assert not list(report.parent.glob(".klt-*.tmp"))
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")

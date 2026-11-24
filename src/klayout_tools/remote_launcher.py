@@ -104,19 +104,14 @@ USER_MANIFEST_PATH: Path = Path(
     "~/.config/klt/remote-sim-ami-manifest.json"
 ).expanduser()
 
-#: Step 4 (final fallback) of :func:`load_ami_manifest`'s resolution order:
-#: <repo root>/data/remote-sim-ami-manifest.json. Mirrors kb.py's
-#: DEFAULT_KB_ROOT convention -- walk up from this module's own location so
-#: the module works the same from an installed wheel's source checkout or a
-#: repo clone; every function also accepts an explicit path override for
-#: tests. A tool-installed ``klt`` (uv tool / pipx / pip) resolves this
-#: inside the installed package's own data dir -- the historically sole
-#: location, now behind :data:`USER_MANIFEST_PATH`/:data:`AMI_MANIFEST_ENV_VAR`.
-DEFAULT_MANIFEST_PATH: Path = (
-    Path(__file__).resolve().parent.parent.parent
-    / "data"
-    / "remote-sim-ami-manifest.json"
-)
+# The wheel bundles the published manifest inside the package. In a source
+# checkout the canonical file lives at the repository root under data/.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_MANIFEST_FILE = Path("data") / "remote-sim-ami-manifest.json"
+DEFAULT_MANIFEST_PATH: Path = _PACKAGE_DIR / _MANIFEST_FILE
+if _PACKAGE_DIR.parent.name == "src" and not DEFAULT_MANIFEST_PATH.is_file():
+    DEFAULT_MANIFEST_PATH = _PACKAGE_DIR.parent.parent / _MANIFEST_FILE
+
 
 #: PDK combinations the AMI build pipeline maintains (per #264's acceptance
 #: criteria, extended to SG13G2 by #2573). Not every historical PDK klt

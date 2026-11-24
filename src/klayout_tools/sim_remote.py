@@ -59,9 +59,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport, sim_staging, sim_steps
+from . import remote_fleet, remote_transport, sim_derive, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
-from .sim_echo_checks import check_ngspice_options_echo
+from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 
 if TYPE_CHECKING:
@@ -727,7 +727,7 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
-    check_ngspice_options_echo(request, remote_report)
+    check_runner_option_echoes(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
@@ -773,7 +773,7 @@ def _build_remote_request(
     from .sim import _corner_points_to_wire
     from .sim_regrade import REGRADE_REQUEST_FIELD
 
-    remote_request = dict(request)
+    remote_request = sim_derive.without_derive(dict(request))  # issue #7184
     remote_request.pop("remote", None)
     remote_request["backend"] = "local-parallel"
     remote_request["netlist"] = remote_transport.REMOTE_NETLIST_FILENAME

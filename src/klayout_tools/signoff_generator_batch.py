@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, remote_transport, sim_batch
+from ._jsonnum import is_number
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -207,11 +208,7 @@ def _parse_approval(index: int, raw: Any) -> GeneratorApproval:
             f"{label}.allowed_arguments must be a list of string lists"
         )
     timeout_s = raw.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if (
-        isinstance(timeout_s, bool)
-        or not isinstance(timeout_s, (int, float))
-        or not 0 < timeout_s <= MAX_TIMEOUT_S
-    ):
+    if not is_number(timeout_s) or not 0 < timeout_s <= MAX_TIMEOUT_S:
         raise GeneratorApprovalError(
             f"{label}.timeout_s must be a number in (0, {int(MAX_TIMEOUT_S)}]"
         )
@@ -551,10 +548,9 @@ def run_approved_generator(
     committed_hash: str,
     artifact: str,
 ) -> GeneratorOutcome:
-    """Run ``approval`` on the batch runner and compare its output with the
-    committed artifact (``committed_hash`` is what ``artifact`` just
-    re-hashed to). Never raises for an execution problem: every failure is a
-    ``failed`` outcome, and no path here runs the generator on this host.
+    """Run the approved generator on the fleet and compare its output to the
+    committed artifact. ``committed_hash`` is the freshly computed artifact hash.
+    Execution problems return a failed outcome.
     """
     evidence: dict[str, Any] = {
         "backend": "batch",
@@ -572,6 +568,7 @@ def run_approved_generator(
             {"models": {"pdk": approval.pdk}},
             corner_count=1,
             timeout_s=approval.timeout_s,
+            sim_image_profiles=False,
         )
     except Exception as exc:  # SimError / BatchError: unresolvable fleet config
         return _fail(FAIL_CONFIG, f"batch backend not usable: {exc}", evidence)

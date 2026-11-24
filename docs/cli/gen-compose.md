@@ -3278,7 +3278,8 @@ and the rules come from the active deck:
 | any footprint overlaps a `keepout_layers` shape | `keep_out` |
 | a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
 | a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
-| a pad, merged with everything drawn on its own layer, leaves a notch narrower than the layer's `space` rule (the port net's own metal included: a pad wider than the run it lands on protrudes past it and notches the merged polygon) | `self_notch` |
+| a pad, merged with the layer metal it touches, *introduces* a notch narrower than the layer's `space` rule (the port net's own metal included: a pad wider than the run it lands on protrudes past it and notches the merged polygon). A notch the layer already carries away from the pad does not count — that is `klt drc`'s finding, not the landing's | `self_notch` |
+| a pad is closer than its metal's `space` rule to a *separate, non-touching* shape of the port net's own metal (a pad landing between two islands of one net leaves a gap to each; a shape the pad overlaps is the intended landing and is exempt) | `self_space` |
 
 The port is reported on the net's own layer at the chosen point, so the
 router's existing via-drop draws the stack there. Candidates are ranked by

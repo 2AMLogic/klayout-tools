@@ -24,7 +24,7 @@ from typing import Any
 from . import _json_pointer
 from . import evidence_lint as el
 from . import evidence_record as er
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 
 F_CITE_MISSING = "cited_record_missing"
 F_TWIN_MISSING = "cited_twin_missing"
@@ -112,13 +112,9 @@ def _check_claim_row(row: Any) -> None:
             raise EvidenceClaimsError(f"claims row needs a string {key!r}: {row!r}")
     if row.get("agg") not in (None, "min", "max"):
         raise EvidenceClaimsError("claims 'agg' must be 'min' or 'max'")
-    if "decimals" in row and (
-        not isinstance(row["decimals"], int) or isinstance(row["decimals"], bool)
-    ):
+    if "decimals" in row and not is_int(row["decimals"]):
         raise EvidenceClaimsError("claims 'decimals' must be an integer")
-    if "scale" in row and (
-        not isinstance(row["scale"], (int, float)) or isinstance(row["scale"], bool)
-    ):
+    if "scale" in row and not is_number(row["scale"]):
         raise EvidenceClaimsError("claims 'scale' must be a number")
 
 

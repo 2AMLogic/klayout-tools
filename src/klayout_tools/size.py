@@ -55,6 +55,7 @@ from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
+from .ngspice_build import engine_version as _ngspice_engine_version
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import CornerPoint, SimError, _expand_corners, _resolve_models_lib
 
@@ -175,7 +176,6 @@ _FIXED_VDS_FEEDBACK_GAIN = 1e4
 
 _MARKER_RE = re.compile(r"^KLT_SIZE_POINT\s+(\d+)\s+(\S+)\s*$")
 _OP_VALUE_RE = re.compile(r"^@\S+\[(\w+)\]\s*=\s*([-+0-9.eEgGnN]+)\s*$")
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _FATAL_LOG_RE = re.compile(
     r"fatal error|could not find a valid modelname|no simulations run|"
     r"simulation\(s\)\s+aborted",
@@ -453,9 +453,7 @@ def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int
         candidates = [i for i in candidates if points[i]["process"] == process]
     temperature_c = sizing_spec.get("temperature_c")
     if temperature_c is not None:
-        if isinstance(temperature_c, bool) or not isinstance(
-            temperature_c, (int, float)
-        ):
+        if not is_number(temperature_c):
             raise SizeError("request.corners.sizing.temperature_c must be a number")
         candidates = [
             i for i in candidates if points[i]["temperature_c"] == float(temperature_c)
@@ -2039,8 +2037,7 @@ def _invoke_ngspice(
             text=True,
             timeout=timeout_s,
         )
-        match = _ENGINE_VERSION_RE.search(completed.stdout or "")
-        engine_version = match.group(1) if match else None
+        engine_version = _ngspice_engine_version(completed.stdout)
     except subprocess.TimeoutExpired:
         launch_diagnostic = f"ngspice did not complete within {timeout_s}s, killed"
     except FileNotFoundError as exc:

@@ -67,6 +67,109 @@ class PexRunset:
     runset_timeout: float | None = None
 
 
+@dataclass(frozen=True)
+class PexExtractOptions:
+    """The 24 ``klt pex`` extraction options every internal helper threads
+    toward ``run_extract`` (issue #7818).
+
+    Before this bundle each of the internal signatures between
+    :func:`klayout_tools.pex.run_pex` /
+    :func:`klayout_tools.pex_dry_run.run_pex_dry_run` and ``run_extract``
+    re-declared all 24 verbatim, so one new ``klt pex`` extraction flag meant
+    five identical signature edits. The public entry points keep their flat
+    keyword signatures and construct this bundle once; every field default is
+    the ``None``/``False`` a caller passed before the flag existed, so the
+    ``run_extract`` calls these feed are unchanged."""
+
+    top: str | None = None
+    pdk_variant: str | None = None
+    pdk_root: str | None = None
+    deck_options: Mapping[str, str] | None = None
+    declared_pins: frozenset[str] | None = None
+    rename_declared_pins: bool = False
+    tie_declared_pins: bool = False
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None
+    device_models: Mapping[str, str] | None = None
+    critical_nets: Sequence[str] | None = None
+    critical_net_patterns: Sequence[str] | None = None
+    critical_net_all: bool = False
+    critical_net_excludes: Sequence[str] | None = None
+    distributed_rc: bool = False
+    resistance_graph: bool = False
+    resistance_graph_r_cut_ohm: float | None = None
+    resistance_network: bool = False
+    resistance_graph_caps: Mapping[str, int] | None = None
+    parasitic_variants: Sequence[str] | None = None
+    substrate_tie_ohms: float | None = None
+    mom_rlc_net: str | None = None
+    mom_rlc_resistance_ohm: float | None = None
+    mom_rlc_capacitance_ff: float | None = None
+    mom_rlc_inductance_nh: float | None = None
+
+    def run_extract_kwargs(self) -> dict[str, Any]:
+        """The keyword arguments of the parasitics-path ``run_extract`` call
+        ``klt pex`` always makes: the 24 fields plus the two derived emission
+        switches, exactly as the pre-bundle call passed them -- ``None``/
+        ``False`` whenever the flags were never given (issues #1558, #2854,
+        #2686, #4037), ``emit_selected_resistance`` tracking
+        ``--resistance-graph`` and ``emit_resistance_network`` tracking
+        ``--resistance-network`` (issue #6899; the runset shapes are refused
+        by name in :func:`refuse_unsupported` before a runset run reaches
+        here)."""
+        return {
+            "top": self.top,
+            "pdk_variant": self.pdk_variant,
+            "pdk_root": self.pdk_root,
+            "deck_options": self.deck_options,
+            "declared_pins": self.declared_pins,
+            "rename_declared_pins": self.rename_declared_pins,
+            "tie_declared_pins": self.tie_declared_pins,
+            "label_layers": self.label_layers,
+            "device_models": self.device_models,
+            "critical_nets": self.critical_nets,
+            "critical_net_patterns": self.critical_net_patterns,
+            "critical_net_all": self.critical_net_all,
+            "critical_net_excludes": self.critical_net_excludes,
+            "distributed_rc": self.distributed_rc,
+            "resistance_graph": self.resistance_graph,
+            "resistance_graph_r_cut_ohm": self.resistance_graph_r_cut_ohm,
+            "resistance_graph_caps": self.resistance_graph_caps,
+            "emit_selected_resistance": self.resistance_graph,
+            "emit_resistance_network": self.resistance_network,
+            "parasitic_variants": self.parasitic_variants,
+            "substrate_tie_ohms": self.substrate_tie_ohms,
+            "mom_rlc_net": self.mom_rlc_net,
+            "mom_rlc_resistance_ohm": self.mom_rlc_resistance_ohm,
+            "mom_rlc_capacitance_ff": self.mom_rlc_capacitance_ff,
+            "mom_rlc_inductance_nh": self.mom_rlc_inductance_nh,
+        }
+
+    def device_only_kwargs(self) -> dict[str, Any]:
+        """The 9-field subset the parasitic-free device-only leg
+        (:func:`klayout_tools.pex._extract_device_only_leg`, issue #3298)
+        can serve: the parasitics-only options (``critical_nets``,
+        ``distributed_rc``, ``mom_rlc_*``) are not passed, as ``run_extract``
+        rejects them without parasitics."""
+        return {
+            "top": self.top,
+            "pdk_variant": self.pdk_variant,
+            "pdk_root": self.pdk_root,
+            "deck_options": self.deck_options,
+            "declared_pins": self.declared_pins,
+            "rename_declared_pins": self.rename_declared_pins,
+            "tie_declared_pins": self.tie_declared_pins,
+            "label_layers": self.label_layers,
+            "device_models": self.device_models,
+        }
+
+
+#: The all-defaults bundle (B008: a module-level singleton, so it can serve
+#: as :func:`run_extract_leg`'s argument default). Every field is
+#: ``None``/``False``, the exact options a caller passed before issue #7818
+#: bundled them.
+DEFAULT_EXTRACT_OPTIONS = PexExtractOptions()
+
+
 def runset_from_args(
     engine: str,
     deck_file: str | None,
@@ -123,14 +226,18 @@ def refuse_unsupported(
     *,
     device_only_leg: bool,
     tie_nets: Sequence[tuple[str, str]] | None,
+    resistance_network: bool = False,
 ) -> None:
     """Refuse, by name, the ``klt pex`` options only a parasitic-annotated
     extraction can serve and ``run_extract``'s own refusal table never sees --
     they are not ``run_extract`` parameters: ``--device-only-leg`` (the
     runset leg *is* already the parasitic-free one) and ``--tie-net`` (it ties
     nets the curated deck reports as unbiased PMOS bodies, which this engine
-    never computes). Silence would be worse than refusal: a caller who
-    believes either is in force would read the report as if it were.
+    never computes), plus ``--resistance-network`` (issue #6899): both runset
+    shapes re-emit lumped per-net networks, so a reduced terminal network
+    the curated extraction wrote would be silently dropped. Silence would be
+    worse than refusal: a caller who believes any of these is in force
+    would read the report as if it were.
     """
     if runset is None:
         return
@@ -139,6 +246,7 @@ def refuse_unsupported(
         for flag, given in (
             ("--device-only-leg", device_only_leg),
             ("--tie-net", tie_nets),
+            ("--resistance-network", resistance_network),
         )
         if given
     ]
@@ -228,29 +336,7 @@ def run_extract_leg(
     *,
     runset: PexRunset | None,
     output: str | None = None,
-    top: str | None = None,
-    pdk_variant: str | None = None,
-    pdk_root: str | None = None,
-    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
-    device_models: Mapping[str, str] | None = None,
-    deck_options: Mapping[str, str] | None = None,
-    declared_pins: frozenset[str] | None = None,
-    rename_declared_pins: bool = False,
-    tie_declared_pins: bool = False,
-    critical_nets: Sequence[str] | None = None,
-    critical_net_patterns: Sequence[str] | None = None,
-    critical_net_all: bool = False,
-    critical_net_excludes: Sequence[str] | None = None,
-    distributed_rc: bool = False,
-    resistance_graph: bool = False,
-    resistance_graph_r_cut_ohm: float | None = None,
-    resistance_graph_caps: Mapping[str, int] | None = None,
-    parasitic_variants: Sequence[str] | None = None,
-    substrate_tie_ohms: float | None = None,
-    mom_rlc_net: str | None = None,
-    mom_rlc_resistance_ohm: float | None = None,
-    mom_rlc_capacitance_ff: float | None = None,
-    mom_rlc_inductance_nh: float | None = None,
+    options: PexExtractOptions = DEFAULT_EXTRACT_OPTIONS,
 ) -> dict[str, Any]:
     """``klt pex``'s extracted leg, in whichever of its three shapes this
     run's engine selection asks for (issues #6559/#6606):
@@ -264,9 +350,10 @@ def run_extract_leg(
       (issue #6606): :func:`klayout_tools.pex_merged_leg.merged_runset_extract`
       runs the runset leg *and* a curated parasitic extraction, joins them
       by the geometric net correspondence, and attaches the curated
-      parasitic network to the runset devices. ``deck_name``/``label_layers``
-      route to the curated leg here; every other option only a richer
-      curated parasitic model could serve is refused by name in there.
+      parasitic network to the runset devices. ``deck_name`` and the
+      ``label_layers``/``device_models`` fields of ``options`` route to the
+      curated leg here; every other option only a richer curated parasitic
+      model could serve is refused by name in there.
 
     Raises :class:`ExtractError` (the caller wraps it into a ``PexError``)
     for every extraction-side failure and usage refusal.
@@ -277,72 +364,17 @@ def run_extract_leg(
         return merged_runset_extract(
             layout_path=layout_path,
             output=output,
-            top=top,
             runset=runset,
             deck_name=deck_name,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            label_layers=label_layers,
-            device_models=device_models,
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            critical_nets=critical_nets,
-            critical_net_patterns=critical_net_patterns,
-            critical_net_all=critical_net_all,
-            critical_net_excludes=critical_net_excludes,
-            distributed_rc=distributed_rc,
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            resistance_graph_caps=resistance_graph_caps,
-            parasitic_variants=parasitic_variants,
-            substrate_tie_ohms=substrate_tie_ohms,
-            mom_rlc_net=mom_rlc_net,
-            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+            options=options,
         )
     return run_extract(
         layout_path,
         deck_name,
         output=output,
-        top=top,
-        pdk_variant=pdk_variant,
-        pdk_root=pdk_root,
         # Issue #6559: the runset engine has no parasitics; every other
         # option passes through and is refused by name by `run_extract`.
         parasitics=runset is None,
-        # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-        # both whenever the flags were never given, which is the exact
-        # `run_extract` call this mapping made before they existed.
-        deck_options=deck_options,
-        declared_pins=declared_pins,
-        # Issue #2854: `--rename-declared-pins` passthrough. `False`
-        # whenever the flag was never given, which is the exact
-        # `run_extract` call this mapping made before it existed.
-        rename_declared_pins=rename_declared_pins,
-        tie_declared_pins=tie_declared_pins,
-        # Issue #2686: `--label-layer` passthrough. `None` when the flag
-        # was never given -- the exact `run_extract` call made before it.
-        label_layers=label_layers,
-        device_models=device_models,
-        critical_nets=critical_nets,
-        critical_net_patterns=critical_net_patterns,
-        critical_net_all=critical_net_all,
-        critical_net_excludes=critical_net_excludes,
-        distributed_rc=distributed_rc,
-        # Issue #4037: `False`/`None` whenever the flags were never given,
-        # which is the exact `run_extract` call made before they existed.
-        resistance_graph=resistance_graph,
-        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-        resistance_graph_caps=resistance_graph_caps,
-        emit_selected_resistance=resistance_graph,
-        parasitic_variants=parasitic_variants,
-        substrate_tie_ohms=substrate_tie_ohms,
-        mom_rlc_net=mom_rlc_net,
-        mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-        mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-        mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+        **options.run_extract_kwargs(),
         **extract_options(runset),
     )

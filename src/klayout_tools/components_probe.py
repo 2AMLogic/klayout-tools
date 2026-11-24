@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 
 def _require_probe_name(entry: Any, error_cls: type[Exception]) -> str:
     """The ``name`` of one probe entry, or raise -- the probe-side twin of
@@ -66,7 +68,7 @@ def validate_probes(
         point: dict[str, float] = {}
         for axis in ("x", "y"):
             value = entry.get(axis)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise error_cls(
                     f"probes entry {name!r} {axis!r} must be a number "
                     f"(micrometres), got {value!r}"

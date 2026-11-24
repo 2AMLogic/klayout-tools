@@ -44,7 +44,7 @@ def unconstrained_warnings(
         return []
     if STAGE_ORDER.index(target_stage) < STAGE_ORDER.index("place"):
         return []
-    skipped = ["repair_design", "repair_timing"]
+    skipped = ["global_placement -timing_driven", "repair_design", "repair_timing"]
     if STAGE_ORDER.index(target_stage) >= STAGE_ORDER.index("cts"):
         skipped += ["clock_tree_synthesis", "repair_timing -hold"]
     return [

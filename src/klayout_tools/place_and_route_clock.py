@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 VIRTUAL_CLOCK_NAME = "klt_virtual_clk"
 
 
@@ -27,11 +29,7 @@ def validate_clock_constraints(
         return None, None
     if clock_port is not None and not (isinstance(clock_port, str) and clock_port):
         raise error_cls("request.constraints.clock_port must be a non-empty string")
-    if not (
-        isinstance(clock_period_ns, (int, float))
-        and not isinstance(clock_period_ns, bool)
-        and clock_period_ns > 0
-    ):
+    if not (is_number(clock_period_ns) and clock_period_ns > 0):
         raise error_cls("request.constraints.clock_period_ns must be a positive number")
     return clock_port, float(clock_period_ns)
 

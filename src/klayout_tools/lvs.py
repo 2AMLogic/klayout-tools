@@ -142,6 +142,7 @@ from ._report_verify import (
 )
 from ._report_verify import load_committed_report as _load_committed_report
 from ._report_verify_hints import input_hash_check
+from ._spice_text import fold_spice_continuations
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -329,7 +330,7 @@ from .netlist_capacitor_recovery import (
     parse_capacitor_class_comments,
     resistor_classes_for_deck,
 )
-from .netlist_inductor_recovery import inductor_classes_for_deck
+from .netlist_inductor_recovery import bare_inductor_x_cards, inductor_classes_for_deck
 from .netlist_normalize_scan import recovery_subckt_names
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
@@ -2559,7 +2560,9 @@ def _layout_abstraction_replay(committed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _layout_connectivity_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the layout-side DEF and implicit-connect options for replay."""
+    """Rebuild the layout-side DEF and implicit-connect options for replay.
+    ``join_same_named_nets`` and ``def_pins`` pass through verbatim, so a
+    malformed recorded value is rejected by the request parsers on replay."""
     replay: dict[str, Any] = {}
     if "join_same_named_nets" in committed:
         replay["join_same_named_nets"] = committed["join_same_named_nets"]
@@ -2631,18 +2634,6 @@ def _reject_subckt_call_layout_netlist(path: str, text: str) -> None:
         )
 
 
-def _logical_spice_cards(netlist_text: str) -> list[str]:
-    """Split ``netlist_text`` into lines, joining ``+`` continuations so a
-    wrapped card is one logical card."""
-    logical: list[str] = []
-    for raw in netlist_text.splitlines():
-        if raw.lstrip().startswith("+") and logical:
-            logical[-1] += " " + raw.lstrip()[1:]
-        else:
-            logical.append(raw)
-    return logical
-
-
 def _bare_resistor_x_card_name(
     tokens: list[str], classes: Mapping[str, str]
 ) -> str | None:
@@ -2663,38 +2654,42 @@ def _bare_resistor_x_card_name(
     return f"{tokens[0]} ({classes[model]})"
 
 
-def _reject_bare_resistor_x_cards(
+def _reject_bare_deck_x_cards(
     netlist_text: str,
     netlist_path: str,
     reference_deck_name: str | None,
     layout_deck_name: str | None,
 ) -> None:
-    """Issue #3078: refuse a bare pre-extracted ``layout.netlist`` (no
-    ``layout.deck``) carrying a ``klt extract`` resistor ``X`` card -- one
-    naming a resistor class of ``reference.deck`` with the writer's 3-net
-    shape and an ``r=`` parameter (the test ``netlist_capacitor_recovery``
-    applies). Without ``layout.deck`` the card is read as an undefined
-    subcircuit, the layout side has no resistor devices, and the compare
-    reports a spurious ``mismatch``. Best-effort: an unresolvable
-    ``reference.deck`` is left to the reference-side validation."""
+    """Reject writer-shaped device calls that need the reference deck to recover.
+    Leave an unresolvable reference deck to reference-side validation.
+    """
     if layout_deck_name or not reference_deck_name:
         return
     try:
-        classes = resistor_classes_for_deck(get_extraction_deck(reference_deck_name))
+        deck = get_extraction_deck(reference_deck_name)
     except (UnknownExtractionDeckError, InvalidDeckOptionError):
         return
-    if not classes:
-        return
-    offending = [
+    cards = fold_spice_continuations(netlist_text.splitlines())
+    resistors = resistor_classes_for_deck(deck)
+    resistor_hits = [
         name
-        for line in _logical_spice_cards(netlist_text)
-        if (name := _bare_resistor_x_card_name(line.split(), classes))
+        for line in cards
+        if (name := _bare_resistor_x_card_name(line.split(), resistors))
     ]
+    inductor_hits = bare_inductor_x_cards(
+        cards, netlist_text, netlist_path, inductor_classes_for_deck(deck)
+    )
+    offending = resistor_hits + inductor_hits
     if offending:
+        kinds = " and ".join(
+            k
+            for k, hits in (("resistor", resistor_hits), ("inductor", inductor_hits))
+            if hits
+        )
         raise LvsError(
-            f"layout netlist '{netlist_path}' contains resistor X card(s) "
+            f"layout netlist '{netlist_path}' contains {kinds} X card(s) "
             f"{', '.join(offending)} that need `layout.deck` to be read as "
-            "resistor devices; without it they are read as undefined "
+            f"{kinds} devices; without it they are read as undefined "
             "subcircuits and the compare reports a spurious mismatch. Add "
             f'`layout.deck` (e.g. "deck": "{reference_deck_name}").'
         )
@@ -2898,13 +2893,11 @@ def _resolve_layout(
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
-            # guarantees. The 8th return (unmodelled_poly, #324) is likewise a
-            # report-only structured view of `klt extract`'s own warnings,
-            # not surfaced in `klt lvs`'s response. The 9th return
-            # (voltage_domain_warnings, #552) is likewise a report-only
-            # structured view of `klt extract`'s own warnings, not surfaced
-            # in `klt lvs`'s response -- the compare itself is unaffected by
-            # which voltage-domain model a MOS device happens to bind to.
+            # guarantees. The 8th (unmodelled_poly, #324) and 9th
+            # (voltage_domain_warnings, #552) returns are likewise report-only
+            # structured views of `klt extract`'s own warnings, not surfaced
+            # in `klt lvs`'s response; for the 9th, the compare is unaffected
+            # by which voltage-domain model a MOS device happens to bind to.
             # The 10th return (abstracted_cells, #620) is `klt extract
             # --abstract-cells`'s own report; `klt lvs` forwards
             # `request.layout.abstract_cells` (issue #2853) and echoes this
@@ -2955,12 +2948,11 @@ def _resolve_layout(
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
-                # The source cells locate the declared pins in the layout (#1513).
+                # The source cells locate the declared pins in the layout (#1513);
+                # `None` when never given, unchanged from requests that predate it.
                 pin_source_cells=pin_source_cells,
-                # Issue #2854: `request.layout.rename_declared_pins` --
-                # validated by `_parse_layout_rename_declared_pins` above;
-                # `False` when the field was never given, unchanged from
-                # every request that predates it.
+                # Issue #2854: validated above; `False` when the field was never
+                # given, unchanged from every request that predates it.
                 rename_declared_pins=rename_declared_pins,
                 # Issue #559: defer the resistor `fixed_offset_ohm`
                 # correction when `combine_devices` will run -- applying it
@@ -3048,7 +3040,7 @@ def _resolve_layout(
         ) from exc
     _reject_subckt_call_layout_netlist(layout_netlist_path, layout_netlist_text)
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
-    _reject_bare_resistor_x_cards(
+    _reject_bare_deck_x_cards(
         layout_netlist_text,
         layout_netlist_path,
         reference_deck_name,

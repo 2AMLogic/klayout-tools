@@ -6,8 +6,599 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-24
+
+- **PR #7745**: fix: point the case-alias merged-net warning at --rename-declared-pins
+- **PR #7749**: Allow batch simulations to select the simlong fleet profile
+- **PR #7746**: test: detect live gates reached only through a nested def in the STA lane guard
+- **PR #7800**: Skip derived observations that produced no value
+- **PR #7740**: test: guard batch dry-run knob validator against resolver drift
+- **PR #7756**: fix: make a joint row's table covered tri-state so an unevaluable member reads unknown
+- **PR #7753**: test: glob read-only dir for leftover staging files in erc output test
+- **PR #7816**: fix: refuse non-finite numbers in klt characterize request validation
+- **PR #7764**: fix: accept escaped identifiers in the sdf output-concat rewrite
+- **PR #7814**: fix: union optional input/output_voltage groups across split Liberty cell-group files
+- **PR #7813**: fix: name a FinFET-valid re-extraction recipe in the klt sta SPEF annotation hint
+- **PR #7820**: refactor: route the last inline number-not-bool guards through _jsonnum and fail CI on new ones
+- **PR #7772**: chore: tighten five place-and-route size-baseline entries
+- **PR #7797**: Prevent failed ngspice expressions from crediting existing node voltages
+- **PR #7811**: docs: restore lvs.py replay and pin_source_cells contract comments
+- **PR #7734**: docs: note that DEF net-name properties change native Region rebuilds, pin with a test
+- **Issue #7826** (closed): klt netlist --output-dir exists only in dev builds: no release can run a multi-netlist regeneration check
+- **Issue #7724** (closed): klt extract: pins labelled twice emit pipe-joined net names (NAME|alias) that are unsafe SPICE node names
+- **Issue #7706** (closed): Live-STA guard: a collected test whose only gate reference sits inside a nested def is no longer detected
+- **Issue #7430** (closed): klt sim: a source_inconclusive derive group counts its /observation row as checked with no value
+- **Issue #6646** (closed): No guard keeps _validate_batch_request_knobs in step with _resolve_batch_config's knob list
+- **Issue #7701** (closed): klt signoff: a joint row's table `covered` reads false for an unevaluable member, which can contradict the item axis
+- **Issue #7719** (closed): tests: read-only-dir leftover-staging-file assertion globs the wrong directory
+- **Issue #7812** (closed): klt characterize accepts NaN for supply_v, temperature_c, nom_process, grid values and constraint_tolerance_ns
+- **Issue #7693** (closed): functional-verification options.sdf: the #7534 output-concat rewrite ignores escaped identifiers, so per-bit assigns with escaped RHS never rewrite
+- **Issue #7809** (closed): Liberty list-merge still refuses a corner when one cell-group file lacks the input_voltage / output_voltage groups the others declare (after #6940)
+- **Issue #7808** (closed): klt sta: the spef_annotation hint prescribes --def-pins (refused by name on a FinFET deck) and omits --def-net-connections; following it leaves every path unannotated
+- **Issue #5580** (closed): Finish _jsonnum consolidation with an AST sweep: 113 inline number/int-not-bool guards survive three regex sweeps, and one copy accepts infinity
+- **Issue #7679** (closed): Tighten the five place-and-route size limits after the stage split lands
+- **Issue #7794** (closed): klt sim credits an invalid operating-point expression when its measurement name matches a circuit node
+- **Issue #7806** (closed): Restore the two lvs.py contract facts #7461 condensed (re-scoped out of #7602)
+- **Issue #7715** (closed): drc: DEF net-name shape properties change what a native klayout.db re-derivation of a deck rule reports; the guide does not say to drop them
+- **Issue #6440** (closed): gen-compose ports_from_labels: landing search certifies a sub-spacing gap between the pad and two non-touching shapes of the port's own net (space, not notch)
+- **PR #7803**: Repair M1 enclosure at individual placed ASAP7 V1 landings
+- **PR #7802**: Use shared numeric validation in cell characterization
+- **PR #7763**: docs(lvs): record live verification of the subckt-call path against sg13g2.lvs
+- **PR #7761**: feat: resolve functional-verification cell models from a descriptor verilog view
+- **PR #7758**: fix: classify OSDI-required PDKs via pdk_variant_family, share ngspice version parser
+- **PR #7755**: fix(signoff): name a declared item-7 corner_box when it changes a refusal
+- **PR #7751**: docs: restore extract_netlist_from_layout and extract_netlist_tuple contract docstrings
+- **PR #7748**: fix: reject landing pads that sit sub-space from a separate own-net shape
+- **PR #7739**: test: run the placement-fence Tcl under OpenROAD
+- **Issue #7798** (closed): Repair safe M1 enclosures at placed ASAP7 VIA_VIA12 cuts
+- **Issue #7747** (closed): docs(lvs): replace stale "Not live-verified against the IHP sg13g2.lvs" note in docs/cli/lvs.md
+- **Issue #7700** (closed): signoff: a declared item-7 corner_box changes two refusal reasons without naming itself
+- **Issue #7695** (closed): klt functional-verification request.pdk: resolve behavioural cell models for a descriptor-declared ASAP7 root (pdk_no_verilog_view)
+- **Issue #7657** (closed): pdk_osdi should classify the SG13G2 family through pdk_variant_family, not a hardcoded variant tuple
+- **Issue #7602** (closed): Restore the extract.py / extract_finfet.py docstrings condensed for a size budget that no longer binds
+- **Issue #7587** (closed): place-and-route: no automated regression test covers the placement-fence Tcl (klt_install_fence / klt_fence_instance)
+- **PR #7760**: fix: reject only the notches a gen-compose pad introduces, on the polygons it touches
+- **PR #7742**: fix(place-and-route): run request-level validation in the batch preflight
+- **PR #7793**: Record measured direction ambiguity for lower-metal via widths
+- **PR #7795**: Measure SG13G2 inductor winding and port-label controls
+- **PR #7738**: test: cover SHA-256 upstream_source commit width; type fleet-row field as object
+- **PR #7735**: docs(changelog): add fragment for SG13G2 unchecked pSD implant-to-active rules
+- **PR #7759**: refactor: replace inline int-not-bool guards with _jsonnum.is_int
+- **PR #7730**: docs: describe --top shape-presence semantics in drc coverage note
+- **PR #7728**: docs: restore _leg_conflict check-sequence rationale beside the checks
+- **PR #7732**: fix: let an empty job id reach the job-id validator in klt sim
+- **PR #7733**: docs: add changelog fragment for the signoff upstream_source pin
+- **PR #7731**: test: pin touch-inclusive neighbour lookup in the M1 repair merge
+- **PR #7338**: feat(pex): write Kron-reduced terminal networks for multi-terminal nets
+- **PR #7690**: Suggest ngspice init on remote corner and raw deck model-selection errors
+- **PR #7335**: feat(sim): grade cross-corner derived figures via measurements[].derive
+- **PR #7788**: Preserve PEX correspondence for resistor port strips under metal landing pads
+- **PR #7736**: docs: state the recognised min/max bound rule where signoff docs say "limits-bearing"
+- **PR #7729**: Correct the model-staging reference in the sim options table
+- **PR #7597**: Apply multicycle constraints in every place-and-route timing session
+- **PR #7725**: klt sim: refuse non-object options on deck-list and command-list requests
+- **PR #7330**: Defer every pre-error stderr warning through _warn under --format json
+- **PR #7765**: feat: add klt place-and-route --from-def merge-only entry point
+- **PR #7779**: Check the runner capability for step-scoped unreached measurements
+- **PR #7769**: fix: grade a sta envelope's own status in signoff and add opt-in require_routed_geometry
+- **PR #7790**: Expose declared top ports on merged runset PEX netlists
+- **PR #7791**: docs(sim): scope options.transient_noise_seed to one seed per deck and deck-list inertness
+- **PR #7789**: Check V3 width across horizontal ASAP7 M4 tracks
+- **Issue #6314** (closed): gen-compose landing search: the self-notch test merges the whole layer per candidate, and a pre-existing notch rejects every point
+- **Issue #7583** (closed): klt place-and-route --backend batch skips every request-level validator before upload
+- **Issue #7574** (closed): signoff: upstream_source's SHA-256 commit width is untested, and the fleet-row schema table types it nullable when it is optional
+- **Issue #7704** (closed): Add a changelog.d fragment for the SG13G2 pSD implant-to-active coverage disclosure
+- **Issue #7599** (closed): Update docs/cli/drc.md coverage-table note for --top layer scoping
+- **Issue #7617** (closed): Restore the _leg_conflict check-sequence rationale (#1386/#6961/#7024/#7221) lost to the gen_compose.py size ratchet
+- **Issue #7651** (closed): klt sim --job-status '' changed from batch_job_id_invalid (exit 1) to a usage error (exit 2)
+- **Issue #7611** (closed): signoff: add an Unreleased changelog entry for upstream_source
+- **Issue #7654** (closed): place-and-route (asap7): pin the touch-inclusive region-query semantics the M1 repair's neighbour lookup depends on
+- **Issue #6899** (closed): extract/pex: opt-in netlist mode that writes a multi-terminal net's resistance from the resistance graph, so dead stub branches are not in series with the current path
+- **Issue #7616** (closed): klt sim: the ngspice model-selection init hint skips the remote backend and deck-mode reports
+- **Issue #7184** (closed): klt sim / signoff: a deterministic spec figure derived across a swept axis of separate corner runs (knob range, step resolution, box-method spread over temperature) has no gradeable form
+- **Issue #7786** (closed): klt pex --engine klayout-runset --deck: synthetic non-metal resistor port strips under Metal1 landing pads poison net_correspondence as unidentified_layer
+- **Issue #7352** (closed): docs: signoff reference still says "limits"-bearing where grading requires a recognised min/max bound
+- **Issue #6599** (closed): docs(sim): options.pdk_revision table row cites "Staging the request's model inputs" as below, it is above
+- **Issue #6908** (closed): Support auditable multicycle timing for enable-sequenced register paths
+- **Issue #6923** (closed): Apply multicycle constraints throughout place-and-route timing
+- **Issue #7199** (closed): Under --format json, warnings still precede the envelope/payload for klt sim (stderr) and place-and-route (stdout)
+- **Issue #7720** (closed): klt sim: malformed options crash deck-list requests and falsey non-objects pass on deck and command lists
+- **Issue #7203** (closed): Route remaining stderr warning emitters (sim, extract, netlist, erc/power) through _warn deferral under --format json
+- **Issue #7721** (closed): place-and-route: the merge-time repair passes are unreachable for a committed routed stream — a pre-repair stream re-graded on a post-fix pin reproduces its tip-family hits exactly
+- **Issue #7770** (closed): sim batch runner grades an unreached .meas FIND/WHEN target as status "error" despite measurements[].on_unreached: "null" and the documented log pattern
+- **Issue #7711** (closed): klt signoff grades a klt sta envelope met regardless of its status and geometry_source
+- **Issue #7787** (closed): klt pex --engine klayout-runset --deck: merged netlist emits a 0-pin .SUBCKT (pin_count_mismatch) when ports are labelled on the curated deck's .pin layer and --pins is refused
+- **Issue #7709** (closed): Document the two scope limits of `options.transient_noise_seed` discovered after #5772 shipped: per-process RNG advance, and deck-list inertness
+- **PR #7744**: test(drc): cover notched and flush ASAP7 V1 enclosures
+- **PR #7053**: feat(lvs): surface runset strict-port findings, name mirrored-inductor2 terminal-order limit
+- **PR #7752**: ci: gate changelog fragments on bullet shape and issue reference
+- **PR #7750**: docs(sim): fix five wrong-direction section cross-references in sim.md
+- **PR #7178**: Bind GF180 MOS capacitors to their bias-dependent PDK subcircuits
+- **PR #7465**: Keep schematic probe selection independent of the PEX driver
+- **PR #7467**: Correct the array-check overlap compatibility release note
+- **PR #7785**: Reconcile Monte Carlo noise warnings with the transient noise seed
+- **PR #5991**: feat(synthesize): accept an abstract-less macro declared by verilog_blackbox
+- **PR #7757**: fix: record installed klt version and ref for the six remote-sim AMIs
+- **PR #7775**: Match dotted FinFET net names across DEF, SPEF and design pins
+- **PR #7784**: Ignore untracked files in Git-backed PDK revision stamps
+- **PR #7595**: Report per-corner engine session counts for multicycle STA
+- **PR #7413**: Emit relocatable batch simulation reports with portable paths
+- **PR #7782**: docs(drc): substantiate the ASAP7 V0 enclosure gap on shipped LIG
+- **PR #7783**: List each missing mutation scope path once
+- **PR #7781**: Document unresolved abstract-pin demotion and the terminal-poly probes
+- **PR #7464**: Clarify sim shard declarations and per-role signoff mismatches
+- **PR #7780**: Document caller-driven transient-noise yields with circuit and seed provenance
+- **PR #7447**: Deduplicate PDK models across symlink spellings
+- **PR #7778**: Cover mixed node groups in PEX schematic target binding
+- **PR #5876**: feat(sim): pin the trrandom stream via options.transient_noise_seed and disclose transient-noise reproducibility
+- **PR #7727**: fix(sim): match the SOURCES revision token case-insensitively in pdk_revision_comparison
+- **PR #7776**: Report truncated STA endpoint lists that exceed their violation counts
+- **PR #7743**: fix(release): handle wrapped availability notes and newer anchors in consumed text
+- **PR #7754**: docs: fold $VAR layout variants into ASAP7 retained-deviation cell names
+- **PR #7713**: docs(sim): state options.threads_per_worker is ignored on xyce
+- **PR #7722**: refactor: bundle run-invariant STA dispatch args, share response header
+- **PR #7774**: feat(drc): check ASAP7 upper-metal via end caps
+- **PR #7773**: refactor: share one Yosys launcher and report builder in klt equiv
+- **PR #7446**: Report each invalid mutation index once
+- **PR #7410**: Identify bare inductor X cards that need a layout deck for LVS
+- **PR #6407**: klt extract: --distributed-rc --spef crashes with KeyError 'resistance_ohm' in t (#6218)
+- **PR #6471**: fix: explain physical-only SDF drops using the Icarus survivor rule
+- **PR #6618**: docs: reword signoff item-10 inventory row to match canonical-YAML drift rule
+- **PR #6650**: fix(sim): re-base capacity-wait pending count at each --capacity-retries pass
+- **PR #7768**: Pin the typed Monte Carlo error across population-limit request shapes
+- **PR #7741**: fix(changelog): add leading bullet to two unreleased changelog fragments
+- **PR #7428**: Pin existing synthesis report fields while allowing additive keys
+- **PR #7480**: fix(sta): source clock_sinks from an all_registers query, not latency-report pins
+- **PR #7717**: docs(releasing): document all three availability-note sources in release prep
+- **PR #7681**: Re-attest item 9 with an explicit tool-pin update
+- **PR #7680**: Expose attestable T1 items in the signoff grader description
+- **PR #7207**: Bind a differently named schematic DUT in PEX testbench mode
+- **PR #7689**: Recover arithmetic auto trial timing from trial-local ABC statistics
+- **PR #7398**: Collect gallery layout metrics in process
+- **PR #6077**: feat: strap diff_pair's splits in-cell behind strap_splits
+- **PR #7037**: feat: add klt sim measurements[].population_limits Monte Carlo dispersion bound
+- **PR #7145**: Record the SPEF input digest in standalone STA reports
+- **PR #7316**: feat: add joint_grid spec-row form grading a PVT grid across benches
+- **PR #7345**: fix: point gen-compose's exhausted-lanes error at legs[].layer_role
+- **PR #7638**: Document the measured ngspice fleet threading behavior
+- **PR #6231**: fix(gen): refuse a --pdk-pcell --cell-name equal to the vendor PCell's own name
+- **PR #7665**: refactor(sim): share sidecar waveform readers across measurement forms
+- **PR #7698**: fix: refuse a one-argument .lib inside a selected mismatch_scale section
+- **PR #7336**: fix(lvs): keep subckts reached via .lib file+section selection
+- **PR #7703**: test: add end-to-end extract-then-LVS regression for the unsupported-landing short
+- **PR #7684**: Grade declared PEX corner coverage across item 7 citations
+- **PR #7672**: Restore recorded native DRC globals during report replay
+- **PR #7683**: Report unrepaired ASAP7 power-stack targets as violations
+- **PR #7618**: Validate minimal_ladder before searching for a legal landing pad
+- **PR #6055**: feat: attest 8 accepts uncited_rows declaring an owned spec-row gap
+- **PR #7449**: feat: add bounded violating_endpoints list to klt sta
+- **PR #7688**: Check class-based live STA tests against their pytest markers
+- **PR #7236**: Support windowed reductions of ngspice transient expressions
+- **PR #7499**: Warn when LVS device dimensions suggest a missing SPICE suffix
+- **PR #7309**: Guard the *_errors leaf splits with a runtime import-isolation test
+- **PR #5972**: fix: reject same-net notches in the ports_from_labels landing search
+- **PR #7699**: fix: drop staging filename from report-write errors; document writable-parent requirement
+- **PR #7674**: Preserve physical poly connections across abstract cell terminals
+- **PR #7643**: fix(sim): use the published batch image for preflight
+- **PR #7443**: fix: hash every signoff*.py grading module in grading_ruleset_id
+- **PR #7461**: Support explicit same-name connections in inline LVS and report replay
+- **PR #6165**: refactor: move the last three private JSON-number predicate copies onto _jsonnum
+- **PR #7642**: fix(drc): disclose unchecked SG13G2 implant-to-active rules
+- **PR #7341**: docs: escape pipe in pex.md extraction row label_layers code span
+- **PR #7608**: Return structured sim errors for non-object options and Monte Carlo requests
+- **PR #7696**: docs: state the 3LM metal4_drawn residual in the gf180mcu mslot checks
+- **PR #7697**: docs: correct tip_check sample box_um x-extent to the fixture value
+- **PR #7517**: fix(drc): scope layer presence to the selected hierarchy
+- **PR #7702**: Document sub-block evidence under unmet signoff rows
+- **PR #7344**: fix: require recognised limit bounds in model-run refusal and timing-margin rows
+- **PR #6037**: feat(sim): attribute batch modelname aborts to the worker PDK stamp
+- **PR #7666**: fix(gen-compose): detect pad contact with foreign ports on endpoint blocks
+- **PR #7676**: Distinguish unary and binary extrema in ngspice measurement hints
+- **PR #7147**: Deliver raw per-symbol xschem netlists with --output-dir
+- **PR #5846**: refactor: one acceptance rule for every LAYER/DATATYPE parser
+- **PR #7662**: feat(sim): grade strict per-side measurement limits
+- **PR #7403**: Resolve availability notes in pending changelog fragments
+- **PR #7435**: Decouple placement stages from the place-and-route orchestrator
+- **PR #7661**: Remove obsolete version suffixes from LVS and DRC schema titles
+- **PR #6208**: fix(signoff): gate item 11's cited parts on malformed coverage, name the refused evidence
+- **PR #6194**: feat: signoff --require-grading-ruleset pins the grading build before anything runs
+- **PR #7685**: Consolidate the pending file-size mismatch release notes
+- **PR #7669**: Pass per-corner simulation timeouts through PEX
+- **PR #7682**: Document model comparisons on checkpoint-only batch resumes
+- **PR #7667**: docs: record the curated FinFET hierarchy census contract
+- **PR #6638**: ci: run CI and the DRC sample on merge-group commits
+- **PR #7692**: fix(sim): restore lazy batch fingerprints and main checks
+- **Issue #7562** (closed): asap7 deck: pin V1.M1.EN.1's notch-fragment and flush (0 nm) behaviour with committed fixtures
+- **Issue #6903** (closed): klt lvs klayout-runset (ihp-sg13g2): mirrored inductor2 compares terminal-reversed and the runset's strict top-port findings never reach the envelope
+- **Issue #7619** (closed): changelog.d fragments: README documents a bullet format nothing enforces, so 12% will land in CHANGELOG.md without an issue number or date
+- **Issue #7737** (closed): docs(sim): three more wrong-direction section cross-references in docs/cli/sim.md
+- **Issue #7004** (closed): klt pex: a recognized gf180mcu MOS capacitor emits a linear C card, so model_mismatch never clears for moscap-based blocks
+- **Issue #7392** (closed): Move pex_sim_evidence's PexError back-import to the pex_errors leaf module
+- **Issue #7396** (closed): changelog.d/5698-array-check-abutment.md announces an `overlap` measured_um sign flip that the shipped code does not make
+- **Issue #6225** (closed): klt sim: environment.monte_carlo.unseeded_sources_note contradicts the new transient_noise.reproducibility_note when options.transient_noise_seed pins a trrandom stream
+- **Issue #5612** (closed): synthesize: no way to declare a macro by blackbox alone, so a design whose macro has no LEF yet cannot be synthesized at all
+- **Issue #4675** (closed): Record the installed klt version and ref for six remote-sim AMIs
+- **Issue #7694** (closed): klt extract --spef: a dotted DEF net name still loses its parasitics at 6bd18bbc (a PINS net keeps the rewritten spelling; internal dotted nets are omitted as unknown to the DEF)
+- **Issue #7771** (closed): pdk: provenance.pdk.version adds -dirty for untracked files, so files staged inside a pinned PDK checkout read as an edited PDK
+- **Issue #7564** (closed): klt sta: constraints.multicycle_paths has no entry-count bound, and each entry costs a full extra engine session per corner
+- **Issue #7381** (closed): sim batch reports embed absolute client-side paths (client_ngspice_binary, requests[].report)
+- **Issue #7777** (closed): functional-verification --mutations: duplicate missing scope entries are repeated in _scope_errors message
+- **Issue #7707** (closed): extract: document _reconcile_top_pins' unresolved parameter and re-anchor the #2398 comment
+- **Issue #7365** (closed): sim-merge/signoff docs: exit-10 table omits spec_row/case, and a restored _check_input_hashes docstring paragraph
+- **Issue #7762** (closed): klt sim: a transient-noise Monte Carlo campaign has no request expression, so its per-draw values cannot come from a klt-native run
+- **Issue #6597** (closed): functional-verification: request.pdk model dedupe compares path strings, so a symlinked PDK spelling compiles the same model twice
+- **Issue #7723** (closed): sim: transient_noise_seed echo check cannot distinguish 'no noise source' from 'runner predates environment.transient_noise'
+- **Issue #7273** (closed): klt pex --schematic-top mis-counts a partially parenthesized X-card node list
+- **Issue #7708** (closed): Dead `_UNSEEDED_NOISE_NOTE` left in sim.py after the #5772 transient-noise module split
+- **Issue #5772** (closed): Friction: klt sim has no way to pin or report the RNG seed governing trnoise/trrandom sources, so a transient-noise campaign's seeds are neither recordable nor reproducible
+- **Issue #6362** (closed): sim: options.pdk_revision token comparison is case-sensitive and full-length only, so an abbreviated or differently-cased revision reports a spurious mismatch
+- **Issue #7554** (closed): klt sta: violating_endpoints count cross-check is silent when a truncated side returns more rows than the violation count
+- **Issue #7493** (closed): release_prep availability-note guard is narrower than it reads: a line-wrapped note escapes it, and a newer-than-PREV anchor is orphaned once its source is consumed
+- **Issue #7716** (closed): asap7 deck: retained-deviation list and drc.md's recognise-by-cell-name rule miss placed layout variants (`$VAR1`) of a listed cell
+- **Issue #7705** (closed): sim: xyce + options.threads_per_worker is a silent no-op, and no longer documented
+- **Issue #7712** (closed): Bundle run-invariant STA dispatch arguments and share the top-level response header in post_route_sta
+- **Issue #7766** (closed): Share Yosys execution, log persistence, and report envelope assembly between equiv and equiv_sequential
+- **Issue #6497** (closed): functional-verification --mutations: repeated non-positive index reports the same message twice
+- **Issue #6743** (closed): klt lvs: a bare pre-extracted layout.netlist carrying an inductor X card has no guiding error (the #3078 resistor guard has no inductor analogue)
+- **Issue #6218** (closed): klt extract: --distributed-rc --spef crashes with KeyError 'resistance_ohm' in the SPEF writer
+- **Issue #6367** (closed): functional-verification: four sites still justify #2363's drop as "no modpath could ever annotate", contradicting #5705's survivor rule
+- **Issue #6605** (closed): docs/cli/signoff.md item-10 table row still promises drift for every key/value change under canonical-YAML v1
+- **Issue #6535** (closed): Capacity-retry passes double-count _CapacityWatch._finished, so the 'waiting for capacity' progress line reports a wrong (eventually negative) pending count
+- **Issue #7767** (closed): Main red: population-limit CLI test expects the pre-#7608 Monte Carlo object diagnostic
+- **Issue #6236** (closed): Pinned sweep-lease-fence.sh predates the lease-host fix: Codex Builders lose their claim before push
+- **Issue #7726** (closed): Main red: changelog.d/7509-drc-top-coverage.md has no leading '- ' (test_changelog_fragments_start_with_a_bullet)
+- **Issue #7412** (closed): test_no_budget_report_golden hashes the whole synthesize report, so additive fields break every unrelated PR
+- **Issue #7417** (closed): klt sta: clock_propagation.clock_sinks equals the length of clock_sinks_sample, not the sink count
+- **Issue #7492** (closed): RELEASING.md still scopes availability-note resolution (and the exit-2 refusal) to docs/cli/signoff.md
+- **Issue #7673** (closed): signoff --attest: no supported way to re-attest after a tool-pin bump (inventory pin must be hand-edited)
+- **Issue #7675** (closed): signoff: no machine-readable list of which T1 items --attest can mint (help-text-only, and grep-truncatable)
+- **Issue #6971** (closed): PEX testbench cannot bind a schematic DUT whose name differs from the layout top
+- **Issue #7504** (closed): synthesize: CHANGELOG claims arithmetic auto trials recover ABC timing from the statistics dump; they do not
+- **Issue #7179** (closed): Remove the gallery bootstrap’s two metrics subprocesses per layout
+- **Issue #7718** (closed): gen-compose landing search: self-notch test is whole-layer, so it still disagrees with compose()'s late check on a pre-existing notch (and misattributes it)
+- **Issue #7322** (closed): test_import_isolation discovery re-parses every source module once per leaf (O(leaves x modules))
+- **Issue #5557** (closed): klt gen diff_pair: splits>1 exposes every sub-instance separately with no option to strap them, and layout-plan execute cannot connect them
+- **Issue #3522** (closed): Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502)
+- **Issue #6967** (closed): klt sim monte_carlo: a bound on the dispersion itself (k*sigma alone, optionally net of a quantization variance) with a worst-corner aggregation cannot be graded (#2960 direction 2)
+- **Issue #7018** (closed): klt sta response: no content hash for a caller-supplied spef (spef_path external carries no digest)
+- **Issue #6969** (closed): klt signoff item 5: a spec row whose Target is joint grid coverage across several benches' envelopes has no gradeable citation form
+- **Issue #7003** (closed): gen-compose: same-block nets with interleaved pads (cross-coupled pair) cannot be auto-routed; router can't discover a layer swap
+- **Issue #5405** (closed): Live-verify klayout-runset DEVICE_LIST pass-through against IHP sg13g2.lvs (follow-up to #5402)
+- **Issue #6128** (closed): gen --pdk-pcell: --cell-name equal to the vendor PCell name makes KLayout rename the top to <name>$1 while the report says <name>
+- **Issue #7647** (closed): Share sidecar rawfile read and column-unpack preambles in sim_measurement_kind
+- **Issue #7671** (closed): klt sim: a single-argument `.lib <file>` inside a selected mismatch section silently truncates the mismatch_scale sigma scan
+- **Issue #6705** (closed): klt lvs: a colliding .SUBCKT reached through .lib '<file>' <section> is still swallowed by the X-card recovery reader (#6268 residual)
+- **Issue #7556** (closed): lvs/extract: a fresh abstract-cell extraction of the #4410 routed input reports 170 signal errors where the original pre-extracted netlist reports 22
+- **Issue #7649** (closed): klt signoff item 7: several klt pex reports that jointly cover a corner box have no gradeable citation form, and a one-corner report grades met
+- **Issue #7656** (closed): drc --check --rerun: klayout-engine replay drops the report's own --deck-var globals (except 3LM prelude reports)
+- **Issue #7653** (closed): place-and-route: power_stack_repair reports status "clean" when every target was left unrepaired
+- **Issue #7600** (closed): gen-compose: non-boolean minimal_ladder reports no-legal-landing instead of the type diagnostic when the landing search fails
+- **Issue #5856** (closed): signoff --attest 8: no way to declare a known, owned spec-row gap (item 9 has unbenched_rows; item 8 refuses unknown fields)
+- **Issue #7418** (closed): klt sta: no way to list all violating endpoints; worst_paths_by_group is worst-per-group only
+- **Issue #7557** (closed): Live-STA lane registration guard only scans top-level test functions, so a class-based or nested live test still evades it
+- **Issue #7020** (closed): klt sim: measurements[].expr reductions run over the whole analysis only, so a FROM/TO-windowed MIN/AVG of an expression has no declarative form
+- **Issue #7494** (closed): klt lvs: no diagnostic when a reference card's bare geometry is read as SI metres (1e6x oversize)
+- **Issue #7299** (closed): No automated guard keeps the *_errors leaf modules out of their orchestrator's import graph
+- **Issue #5608** (closed): gen-compose ports_from_labels: the access landing search ignores the port net's own shapes, so a certified via-drop pad can leave a sub-minimum notch
+- **Issue #7658** (closed): Document klt erc -o's atomic-replace semantics and list --output among ERC's rejected layout-only flags
+- **Issue #7663** (closed): extract: generated open-pin names become top ports when abstract wordlines abut across cells
+- **Issue #6430** (closed): open_pdks_commit never reaches the batch fleet's image: bake publishes no manifest entry (cross-repo, 2am infra)
+- **Issue #7434** (closed): grading_ruleset_id's coverage shrinks with every signoff.py leaf split — reason-string and envelope-reader changes no longer move the id
+- **Issue #7030** (closed): klt lvs: no way to express a PDK runset's implicit-connect (same-name label) net join; curated engine reports a split the PDK-native runset joins
+- **Issue #7612** (closed): release_prep availability notes: line-wrapped notes, and fragment notes anchored newer than PREV, escape both the resolver and the anchor guard
+- **Issue #7640** (closed): SG13G2 DRC reports clean for zero pSD enclosure of P+ Activ in NWell
+- **Issue #7332** (closed): docs/cli/pex.md: an unescaped pipe in the extraction row's code span splits the table cell, so GFM drops the rest of the description
+- **Issue #7604** (closed): klt sim: a non-object request.monte_carlo / request.options escapes as an uncaught AttributeError instead of a structured SimError
+- **Issue #7655** (closed): docs: state what the empty metal4_drawn does to MSLOT<n>.1/.9 on 3LM gf180mcu
+- **Issue #7613** (closed): RELEASING.md still scopes availability-note resolution and the exit-2 refusal to docs/cli/signoff.md only
+- **Issue #7652** (closed): docs: tip_check markers sample in place-and-route.md shows a box_um x-extent the checks cannot emit
+- **Issue #7509** (closed): klt drc --top scopes violations but not coverage: stream-wide shapes=0 layers land in coverage.layers_checked and their rules in coverage.rules_checked
+- **Issue #7586** (closed): signoff docs: document the text 'sub-block:' trail on an unmet composed parent row
+- **Issue #7329** (closed): signoff: two truthy-`limits` bound tests remain outside the row-credit paths
+- **Issue #5593** (closed): klt sim --backend batch: a binned MOS instance that resolves locally aborts on the fleet with 'could not find a valid modelname' at the same klt and ngspice version, with no PDK-revision parity signal or pin
+- **Issue #7603** (closed): gen-compose: pad-vs-block contact check skips every block hosting a pin of the routed net, including its foreign wires
+- **Issue #7659** (closed): klt sim batch: scalar max()/min() of sibling measurements in an 'expr' measurement produce no value
+- **Issue #6947** (closed): klt netlist: a split_files export delivers only the top-level netlist; the per-symbol netlists xschem wrote are silently deleted
+- **Issue #5605** (closed): Promote the shared LAYER/DATATYPE parser and delete its four duplicates
+- **Issue #7714** (closed): Restore the contract detail three sim docstrings lost to the file-size ratchet (#5593 follow-up)
+- **Issue #7645** (closed): klt sim: measurement limits are inclusive-only, so a ratified strict inequality has no declarative form (the klt yield gap of #1096, unfixed on the sim side)
+- **Issue #7376** (closed): release_prep: availability-note placeholders are resolved in signoff.md but not in the assembled CHANGELOG section
+- **Issue #7362** (closed): Break the place_and_route.py import cycle across eight sibling modules via place_and_route_base
+- **Issue #7648** (closed): lvs-response and drc-response schema titles still say "version 2" while schema_version is 3
+- **Issue #7009** (closed): place-and-route: instance_groups region/order can verify placement but not constrain it — the steering half of #4804 has no open tracker
+- **Issue #5643** (closed): klt signoff --manifest: a cited envelope's malformed coverage block is silently omitted from the citation (envelope mode reports coverage_state/coverage_error)
+- **Issue #5847** (closed): klt signoff: no way to assert the rendering klt version, so a mismatched render is indistinguishable from a correct one while moving is_release/grading_ruleset_id/item reasons
+- **Issue #7421** (closed): Reconcile the superseded #6518 changelog fragment with #6683's replacement hint
+- **Issue #7646** (closed): klt pex: no per-corner timeout override for the extracted-side leg (testbench must stay unmodified)
+- **Issue #6904** (closed): klt pdk check: verify the installed OSDI (Verilog-A) model set, so sg13g2 chips stop gating sim records on a per-repo build-osdi.sh manifest
+- **Issue #7650** (closed): docs/cli/sim.md overstates the checkpoint-only resume case: environment.remote also carries models_lib_comparison
+- **Issue #7632** (closed): json-contract.md records no precedent for klt extract's instantiated device-count fields, and implies they are runset-only
+- **Issue #6634** (closed): ci: qualify PR checks for GitHub merge queues
+- **Issue #7670** (closed): lvs: SG13G2 RF X-card rewrite can collide with an existing L/C element name
+- **Issue #7691** (closed): Repair main simulation file-size gates and batch fingerprint handling
+
 ### 2026-11-23
 
+- **PR #7687**: Register the multicycle OpenROAD checks in the live STA lane
+- **PR #7626**: fix(gen): draw the SG13G2 PFET implant and well on differential pairs
+- **PR #7568**: fix(ci): retry transient layout fetches in the TT DRC CI sample
+- **PR #7548**: build(deps): bump the uv-minor-patch group across 1 directory with 2 updates
+- **PR #7500**: Save ERC layout reports with atomic plain and gzip output
+- **PR #7490**: Share ring drawing between standalone and composed PCells
+- **PR #7482**: feat: cancel a batch fleet job with klt sim --cancel JOB_ID
+- **PR #7460**: Grade grid-wide noise sigma from two binary Monte Carlo measurements
+- **PR #7454**: feat(sta,pnr): surface Liberty warnings that discard timing models (STA-1253/STA-1311)
+- **PR #7439**: Move layout-plan body-net binding into its own module
+- **PR #7380**: fix: retry and announce klt sim --resume harvest's silent shard skips
+- **PR #7356**: Report the selected batch ngspice binary hash and document numeric reproducibility
+- **PR #7294**: Format pending changelog entries and guard the bullet prefix
+- **PR #7271**: Constrain named standard cells to rectangular OpenROAD fences
+- **PR #7173**: Avoid reading simulation inputs again for unused batch shard keys
+- **PR #7083**: feat: add klt signoff --diff-reports for two saved tier reports
+- **PR #7065**: feat(signoff): record a consumed block's upstream repository and commit
+- **PR #7044**: feat: add opt-in placement-overlap gate to gen-compose (options.check_placement)
+- **PR #7635**: fix(signoff): scope mixed-signal digital item 6 to assigned spec rows
+- **PR #7634**: fix(sim): preserve selected Monte Carlo samples on regrade workers
+- **PR #7624**: Compare multicycle SDC constraints and cite their STA request
+- **PR #7596**: Replay portable gate-level LVS reports from the verifying checkout
+- **PR #7592**: Retain per-pin library-limit reports for each route corner
+- **PR #7573**: fix: keep unnamed routed nets out of named rails in abstract pin joins
+- **PR #7563**: fix: qualify place-and-route text fmax_mhz with the sta opposite-edge caveat
+- **PR #7558**: fix(place-and-route): raise request-level validation errors once before rebuild-corner units start
+- **PR #7553**: feat: rewrite separately assigned SDF output bits to a whole-vector concat build copy
+- **PR #7552**: fix(sim): refuse malformed batch poll knobs through the error envelope
+- **PR #7637**: fix(release): refresh late notes into the prepared version
+- **PR #7506**: fix(gen-compose): reject notches between a via pad and its own backbone
+- **PR #7498**: Link retained Loom pins to their upstream reports
+- **PR #7479**: feat: report per-hit marker boxes in via_pad_trim.tip_check
+- **PR #7476**: feat(drc): check asymmetric ASAP7 V1 enclosure by M1
+- **PR #7470**: Restore the extraction port and net identity rationale
+- **PR #7582**: Exercise all same-release runner feature probes in Bash
+- **PR #7623**: Record retirement checks for the four Loom pin groups
+- **PR #7466**: Expose the expected report path for a refused batch-set member
+- **PR #7512**: fix(sta): report missing per-port delays on a secondary clock
+- **PR #7584**: Show consulted sub-blocks under unmet signoff rows
+- **PR #7622**: Use the shared path envelope in functional verification
+- **PR #7639**: Match IHP seal-ring chamfer and component markers
+- **PR #7629**: fix(signoff): accept a legacy omission of a pinned inventory description
+- **PR #7631**: fix(sim): identify the first mismatched regrade worker corner
+- **PR #7641**: Avoid whole-layer M1 merges during ASAP7 via-pad repair
+- **PR #7664**: fix(pex): forward the curated FinFET hierarchy census
+- **PR #7636**: fix(lvs): convert SG13G2 RF calls for the native runset reader
+- **PR #6956**: fix: run native gf180mcu slot checks on three-metal stacks
+- **PR #7570**: docs(lvs): swap schema category list for a pointer, backfill CLI row
+- **PR #7577**: docs: restore worst_paths_by_group additive guarantee and make edge guidance actionable
+- **PR #7585**: docs: complete the ASAP7 M1-M3 spacing table with S.1/S.3 and name the 18 nm coincidence
+- **PR #7614**: Describe the resolved layout input in the LVS response schema
+- **PR #7660**: Clarify extraction pin indexes after explicit SPICE port ordering
+- **PR #5504**: feat(sim): scale sg13g2 MOS mismatch sigmas read from the model libraries
+- **PR #7677**: docs: add extraction.substrate_dc_tie to pex.md table and example; re-anchor #6559 comment
+- **PR #7174**: Verify installed OSDI model identities and registration from the PDK
+- **PR #7593**: Suggest declaring ngspice init after a model-selection abort
+- **PR #7625**: Identify the pre-restructure netlist used for synthesis timing
+- **PR #7550**: test: select the live STA lane by a live_openroad marker instead of four node IDs
+- **PR #7346**: feat(extract): drop-r-body parasitic variant keeps body/bulk terminals on the star hub
+- **PR #7576**: docs(lvs): describe runset.incomplete in the klayout-runset section
+- **PR #7575**: Merge Liberty templates when every table supplies its own grid
+- **PR #7471**: Report whole-run completion and launch history for resumed batch simulations
+- **PR #7084**: feat(place-and-route): repair the ASAP7 pdngen M2-M5 power stack after the DEF-GDS merge (V4.M4.EN.1 / V4.M5.EN.2 / M3.S.2 to zero)
+- **PR #7566**: test: pin non-boolean minimal_ladder rejection under a landing pad override
+- **PR #7519**: docs(test): point the ccsnoise regression at pdk_cells
+- **PR #7458**: feat(synthesize): recover ABC timing from the statistics dump when the engine loses ABC stdout
+- **PR #7408**: Report the written substrate DC reference in single-top PEX
+- **PR #7620**: Report input verification and content hashes for graded signoff citations
+- **PR #7343**: fix: reject gen-compose pads touching another net's block geometry
+- **PR #7156**: Clarify the file-size mismatch hint in local and CI runs
+- **PR #7621**: Report instantiated devices in hierarchical ASAP7 extraction
+- **PR #6164**: feat(sim): honor --pdk-root with --op-lint and report its resolved PDK
+- **PR #7542**: build(deps): bump flate2 from 1.1.10 to 1.1.11 in /native/legalize in the cargo-minor-patch group across 1 directory
+- **PR #7551**: docs: name klt stats --geometry-digest as the source_digest recompute path
+- **PR #7594**: feat: repair ASAP7 M1.S.2 spacing at V1 landing short faces
+- **PR #7580**: Test the cached SG13G2 compiler startup probe offline
+- **PR #7560**: docs: reconcile deck-rule docstrings after #6692's plain-rule consolidation
+- **PR #7440**: Skip ties whose connect_to role never touches their tap sites
+- **PR #7046**: feat(sim): re-run check-failing points with tightened solver settings (klt sim --regrade)
+- **PR #5981**: feat: accept a list for testbench.search_path and reject env.PYTHONPATH
+- **PR #7463**: Require a complete group when classifying min and max
+- **PR #7387**: Clarify the default PDK token for LVS pin-order provenance
+- **PR #7578**: docs(place-and-route): record re-measured zero M5.W.3 for the asap7sc7p5t preset
+- **PR #7384**: Distinguish no-git IHP discovery from the shared-checkout fallback
+- **PR #7064**: fix(em,pnr,sta): anchor path envelopes on the request's repo, not the cwd
+- **PR #7074**: refactor(sim): share the local backends' corner-runner binding
+- **PR #7591**: Measure multicycle timing on the synthesized netlist
+- **PR #7535**: Draw SG13G2 PFET source/drain implants and warn on uncovered active
+- **PR #7546**: build(deps-dev): bump jsdom from 30.1.3 to 31.0.0 in /site
+- **PR #6631**: fix: dry-run refuses malformed request.batch knobs the submit path refuses
+- **PR #7167**: Use a promoted pin as the second resistance-graph terminal
+- **PR #7579**: docs: retarget stale :func: cross-references after module splits
+- **PR #7148**: feat(signoff): grade configuration slices for spec rows
+- **PR #7427**: Isolate IHP root discovery tests from the host override
+- **PR #7486**: Count valueless SDF IOPATH entries before Icarus annotation
+- **PR #7043**: refactor: share one negative-control grading helper between DRC engines
+- **PR #7545**: build(deps-dev): bump the npm-minor-patch group across 1 directory with 5 updates
+- **PR #7513**: docs(pnr): describe the corners loaded for worst slack
+- **PR #7495**: Read escaped scalar pin names in named Verilog connections
+- **PR #7536**: Compare ASAP7 M1–M3 deck spacing with the public routing LEF
+- **PR #7041**: feat: apply and measure register multicycle paths in klt sta
+- **PR #7442**: Repair guarded ASAP7 M1 pad-to-wire tip spacing
+- **PR #7475**: test(lvs): distinguish split fanout from a dangling output
+- **PR #7530**: Restore the routing and label-access rationale in gen-compose
+- **PR #7521**: docs(extract): correct the net identity helper reference
+- **PR #7459**: Check the pinned SG13G2 compiler before building OSDI models
+- **PR #7529**: Report conflicting pad policies before the label landing search
+- **PR #7391**: Record --top on drc reports and replay it on --check --rerun
+- **PR #7451**: Provide verified library defaults for powered ASAP7 RVT routes
+- **PR #7249**: Resolve OSDI model preloads relative to the selected PDK variant
+- **PR #7342**: signoff: compose a parent block's rows from its sub-block manifests
+- **PR #7508**: fix(liberty): compare every repeated header group in split libraries
+- **PR #7372**: fix(sim): carry the echoed card and cause under an `Error on line N` abort
+- **PR #7462**: Preserve DEF bus indices and identify discarded SPEF nets
+- **PR #7450**: Include expression runner hints in the simulation diagnostic inventory
+- **PR #7379**: docs: add key_mismatch (put, get, delete) to artifact exit-1 row
+- **PR #7348**: feat: warn on deck-known gf180mcu split_cuts and tap-pitch power configs
+- **PR #7527**: Require explicit Liberty timing tables and share PWL card formatting
+- **PR #7389**: fix(sim): fold lone unary plus in control-scope meas suggestions
+- **PR #7390**: Explain missing layer maps when post-route SPEF fails
+- **PR #7520**: Preserve derived expression evidence in off-host simulation reports
+- **PR #7469**: Restore the replay provenance and mutation contract
+- **PR #7433**: Reject fixed origins on floorplan-only requests and cover placement failures
+- **PR #7510**: docs(place-and-route): locate log, digest and corner verdict contracts
+- **PR #7377**: Qualify the standalone STA frequency estimate for opposite-edge paths
+- **PR #7339**: Measure ASAP7 M4-M7 W.3 per polygon across the track
+- **PR #7453**: Share the plain deck-rule scan used by ring and composition geometry
+- **PR #7457**: Keep trailing Yosys banner-line comments in the netlist digest
+- **PR #7456**: Keep the selected interior layout circuit when flattening LVS netlists
+- **PR #7472**: test: verify real sv2v unpacked ports and header conversion
+- **PR #7160**: docs(functional-verification): trace the GF180 SDF counter capture
+- **PR #7373**: Time structured generated clocks in standalone STA
+- **PR #7360**: test: share one ihp-sg13g2 resolver across the live IHP suites
+- **PR #7436**: Document the batch-set member report path across client versions
+- **PR #6648**: refactor: drop unreachable re-poll loop in capacity-retry interrupt branch
+- **PR #5536**: feat: measure async preset/clear arcs and recovery/removal for sequential cells
+- **PR #6035**: feat: add hints.layout_short_nets layout net merge and isolated-substrate extract warning
+- **Issue #7686** (closed): Register the multicycle OpenROAD tests missing from the live STA lane
+- **Issue #7567** (closed): klt gen diff_pair: sg13g2 PFET still draws no pSD after #7531
+- **Issue #7555** (closed): test flake: Pinned gf180mcuD DRC sample fails with no_gds on a design that passes on main
+- **Issue #7497** (closed): klt erc: add -o for the JSON report, matching klt drc/lvs's committed-report contract
+- **Issue #7488** (closed): Extend gen_pcells._ring_shapes to guard_ring and well_island
+- **Issue #6968** (closed): klt sim / signoff: a statistic derived from two measurements' populations, then aggregated over the corner grid (mean or worst), has no gradeable form (#2960 direction 3)
+- **Issue #7411** (closed): place-and-route / sta: OpenSTA Liberty warnings that discard timing models (STA-1253, STA-1311) are not surfaced, so slacks can silently omit every register-launched path
+- **Issue #7424** (closed): layout_plan_ports.py is at 490/500 lines with no baseline ceiling
+- **Issue #7115** (closed): klt sim --resume: harvest trusts the stale shard map's state and re-runs shards the fleet already finished
+- **Issue #6973** (closed): klt sim batch: no numeric-reproducibility contract across runner ngspice builds/hosts
+- **Issue #7218** (closed): Two changelog.d fragments do not follow the documented bullet format
+- **Issue #7034** (closed): place-and-route: constrain named standard cells to a rectangular placement region
+- **Issue #6851** (closed): Skip unused shard-map fingerprints on single-job batch simulations
+- **Issue #6850** (closed): klt signoff: compare checklist changes between two saved tier reports
+- **Issue #6972** (closed): signoff: a block manifest cannot name the repository and commit a consumed block came from, so block provenance is invisible to the grader
+- **Issue #6942** (closed): No fail-fast placement-overlap gate: gen-compose overlap checks are advisory-only and hand-rolled merges have nothing to call
+- **Issue #6938** (closed): signoff: item 6 not_applicable cannot be scoped to the digital partition of a mixed-signal block whose one ratified spec carries the analog partition's statistical rows
+- **Issue #7609** (closed): sim: a --regrade of a non-default-Monte-Carlo-seeded request is refused by the batch/remote worker after the job launches
+- **Issue #6922** (closed): Compare multicycle entries in sdc_check and identify exception-backed signoff citations
+- **Issue #7589** (closed): klt lvs --check --rerun cannot replay a report recorded with portable_paths: true ($PDK_ROOT token re-entered as a cwd-relative path)
+- **Issue #7588** (closed): place-and-route: library-limit DRC counts land in the response but the per-pin rows they are scraped from stay in unretained engine stdout
+- **Issue #7561** (closed): extract --abstract-cells: pad-route join absorbs anonymous signal nets into a named rail (VGND) when only one side carries a name
+- **Issue #7522** (closed): klt place-and-route text output prints the same timing__fmax-derived fmax_mhz with no opposite-edge qualification
+- **Issue #7538** (closed): place-and-route: request-level validation errors surface as per-corner failures under --rebuild-corners
+- **Issue #7534** (closed): functional-verification options.sdf: nonzero INTERCONNECTs onto per-bit-assigned output bits are refused typed (per #6937's bound) — the annotatable whole-vector spelling is a netlist rewrite klt could do in its build copy
+- **Issue #7543** (closed): klt sim --backend batch: malformed batch.poll_interval_s / poll_timeout_s escapes the JSON error envelope as an uncaught ValueError
+- **Issue #7514** (closed): release_prep: content merged into an open release branch after the cut bypasses prepare (orphaned signoff anchor + unconsumed fragments)
+- **Issue #7501** (closed): gen-compose: a leg whose backbone turns within (pad half + deck spacing + width/2) of its own via-drop pad composes routed:true and leaves a same-net notch only klt drc sees
+- **Issue #6306** (closed): Upstream to rjwalters/loom: file issues for the four retained pin deltas (2026-11-17 audit follow-up)
+- **Issue #7405** (closed): place-and-route (asap7): the #4508 pad shrink is a no-op on the V1/V2-V3 via landing pads, so the pad-touching M1/M3 tip-rule residual is unaddressed
+- **Issue #7198** (closed): Restore the pre-existing design rationale PR #6246 deleted to clear the per-file size ratchet
+- **Issue #7363** (closed): Add a generated-probe-shell regression for osdi_pdk_relative (and crossings_value_from), like eye_step_or_phase has
+- **Issue #7601** (closed): Re-audit the four Loom pins now that three of their upstream reports are closed as completed
+- **Issue #7114** (closed): klt sim --batch-set: a member refused not_launched at envelope-write time keeps report:null even after its job runs and collects
+- **Issue #7507** (closed): klt sta sdc_check: a per-entry non-primary clock hides a missing per-port SDC delay line (false "match")
+- **Issue #7361** (closed): signoff: --format text does not render detail.composition on a partly-composed parent row
+- **Issue #7607** (closed): Collapse functional_verification._path_envelope into the shared _artifact_envelope.path_envelope
+- **Issue #4845** (closed): ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck
+- **Issue #7627** (closed): signoff --attest --check reports producer-added envelope metadata as drift, with no version discriminator
+- **Issue #7610** (closed): sim: require_regrade_echo reports a count disagreement for an id mismatch, and its raise path has no test
+- **Issue #7630** (closed): place-and-route (asap7): M1 tip repair re-merges the whole M1 region once per repaired pair
+- **Issue #7633** (closed): klt pex's extraction.device_count still reports 0 for a hierarchical curated ASAP7 extraction
+- **Issue #5406** (closed): bug(lvs): klayout-runset subckt-call pass-through ignores IHP sg13g2 (no DEVICE_LIST); X inductor/svaricap still refused
+- **Issue #6916** (closed): klt drc --engine klayout: decide a route for MSLOT.* on 3LM gf180mcu variants (split from #6910)
+- **Issue #7559** (closed): docs/schemas/lvs-response.schema.json: the mismatches[].category "Documented values" list is 7 categories behind docs/cli/lvs.md
+- **Issue #7523** (closed): docs/cli/sta.md: worst_paths_by_group discussion lost its additive-field guarantee, and its replacement points at edge data the response does not carry
+- **Issue #7572** (closed): Add deck S.1 and S.3 to the ASAP7 M1-M3 spacing comparison, and name the 18 nm coincidence
+- **Issue #7606** (closed): lvs-response schema: `layout` field description still says "Echo of layout.file" and omits its default {path, scope} shape
+- **Issue #7644** (closed): run_extract's docstring still promises pin_index matches the written .SUBCKT header
+- **Issue #7549** (closed): Live verification: dispatch post-route-sta-live.yml on the #7541 branch (21 live_openroad tests, zero skips, 45-min timeout)
+- **Issue #5486** (closed): klt sim monte_carlo: mismatch_scale and instances are curated to two PDK families, so a third family can neither scale nor gate per-instance mismatch
+- **Issue #7678** (closed): test flake: klt verify Action smoke test fails on actions/upload-artifact CreateArtifact (ECONNRESET)
+- **Issue #7628** (closed): Document extraction.substrate_dc_tie in pex.md's field table and worked example; fix misattributed #6559 comment
+- **Issue #7565** (closed): post-route-sta-live: the skip guard fails on collection-time skips from unrelated modules once the lane selects -m live_openroad
+- **Issue #7581** (closed): docs/cli/pdk.md still says differing Liberty template content is always an error after #7533
+- **Issue #7590** (closed): klt sim batch: a fleet-only modelname abort survives model staging with a matched PDK stamp; the worker deck's missing ngspice compatibility mode is the untraced lead
+- **Issue #7605** (closed): constrained_timing measures the pre-restructure netlist, but docs call it the "final mapped netlist"
+- **Issue #7541** (closed): Live OpenSTA tests are reachable only by hand-listed node IDs: 12 of 16 never run in any lane
+- **Issue #7317** (closed): extract: device body/bulk terminals on their own star leaf make ngspice transient Newton iteration fail for near-floating-body OSDI models
+- **Issue #7569** (closed): docs/cli/lvs.md: runset.incomplete is a published mismatches[].category with no mention in the CLI reference
+- **Issue #7533** (closed): Merge Liberty cell groups whose same-name templates differ only in index values
+- **Issue #7668** (closed): test flake: CodeQL Analyze (actions) fails after exactly 45m with Initialize CodeQL never concluding (recurrence of #3618)
+- **Issue #7117** (closed): klt sim: a resumed sharded batch run's final report carries whole-run completion but round-local remote provenance
+- **Issue #6909** (closed): place-and-route (asap7): give the asap7sc7p5t PDN preset a deck-clean M2-M5 stack (V4.M4.EN.1, V4.M5.EN.2, M3.S.2 are documented residuals with no request control)
+- **Issue #7544** (closed): gen-compose: no test pins the non-boolean minimal_ladder diagnostic when a valid landing_pad_size_um is also set
+- **Issue #7515** (closed): Fourth leftover `pdk.list_lib_corners` reference, in a test docstring
+- **Issue #7010** (closed): synthesize: timing is null (timing_unavailable) whenever the engine is the YoWASP/WASI Yosys build — the ABC log carries no stime summary
+- **Issue #7066** (closed): Report the substrate DC tie used by single-top klt pex runs
+- **Issue #7598** (closed): klt signoff: multi-citation citations_graded entries drop per-citation input_verified / content_hash, so "not re-hashed" is indistinguishable from "not reported"
+- **Issue #7325** (closed): gen-compose: intermediate landing pad sharing an edge with another net's block geometry composes routed:true
+- **Issue #6683** (closed): file-size mismatch message says "PR checkout log" but also fires on main pushes and local runs
+- **Issue #7615** (closed): klt extract: JSON device_count/device_counts/devices cover only the top cell, disagreeing with hierarchical SPICE netlists
+- **Issue #4371** (closed): Live-verify klt synthesize sv_frontend=sv2v against a real sv2v binary
+- **Issue #5751** (closed): sim: --pdk-root is refused with --op-lint, so an op-lint run cannot be PDK-pinned on a multi-install host
+- **Issue #4002** (closed): Make gf180mcu's native sign-off deck runnable from klt drc --engine klayout (assemble rule_decks + run_drc.py)
+- **Issue #4902** (closed): klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value
+- **Issue #4409** (closed): Live-verify lvs power_connectivity well-pin exclusion on the routed sky130 block (follow-up to #4363)
+- **Issue #4091** (closed): klt netlist: absolute sch_path/sym_path comments make --check drift between checkouts
+- **Issue #5311** (closed): klt extract/lvs: stepped-width shared pFET diffusion matches on 0.9.1 but splits nets on 0.9.2.dev661
+- **Issue #7540** (closed): gen-compose: document how to recompute blocks[].source_digest (it is a decoded-geometry digest; reproduce with `klt stats --geometry-digest`)
+- **Issue #6862** (closed): Verify the saved transient-corner comparison on a configured batch fleet
+- **Issue #4417** (closed): Live-verify place-and-route --resume against real OpenROAD (gcd to route)
+- **Issue #5153** (closed): Live-verify klt sim request.adapt on real ASAP7 extract-then-sim (needs lambdapdk + bsimcmg.osdi)
+- **Issue #7426** (closed): place-and-route (asap7): pad-touching M1/M3 tip-spacing residual needs a router control or a local repair (split from #7405)
+- **Issue #7539** (closed): Add an offline test for fetch-sg13g2-sim-toolchain.sh's compiler startup probe
+- **Issue #7537** (closed): Finish the docstring reconciliation left by #6692's deck-rule consolidation
+- **Issue #7419** (closed): klt erc: a ties[] connect_to role with zero geometric overlap with its own tap sites reports missing_tie findings, not a spec error (still at 0.9.2)
+- **Issue #6778** (closed): sim: re-run check-failing points with tightened solver settings before grading (gf180-pll#1059, sky130-temp-por#153)
+- **Issue #5797** (closed): functional-verification: no way to add a second directory to the testbench's Python path
+- **Issue #7127** (closed): `.meas` lint: `_callee_start`'s group-strip loop can spin forever on an unbalanced group
+- **Issue #7354** (closed): docs/schemas/lvs-response.schema.json: path_value description still scopes the $PDK_ROOT form to portable_paths
+- **Issue #7526** (closed): Reconcile #6453 and docs/cli/place-and-route.md's "two M5.W.3 markers" after the W.3 per-polygon deck fix lands
+- **Issue #7375** (closed): Strengthen test_without_git_discovery_uses_the_active_checkout: it passes regardless of the fallback
+- **Issue #6764** (closed): em / OpenROAD engine logs: {path, scope} envelopes are anchored on the process cwd, so a committed report varies with the invoking directory
+- **Issue #6896** (closed): Share corner-runner arguments between sequential and parallel local simulation
+- **Issue #6924** (closed): Produce exception-aware timing on the mapped synthesis netlist
+- **Issue #7531** (closed): gen/deck: pfet S/D implant omitted and the curated sg13g2 deck passes vacuously without it (DRC clean + LVS match on a PMOS-less layout)
+- **Issue #6437** (closed): klt sim --dry-run still accepts six request.batch values the submit path refuses (remainder of #5674's gap 1)
+- **Issue #7029** (closed): extract: include the promoted top-level pin on a single-device SKY130 resistance-graph path
+- **Issue #7571** (closed): place-and-route docstrings: two stale `:func:` module paths for `_write_spef` and `resolve_liberty_for_cell_library`
+- **Issue #7006** (closed): signoff: item-5 spec_rows coverage is row-binary -- an envelope covering a slice of a row's sweep grades the whole row covered
+- **Issue #7404** (closed): Discovery tests for find_ihp_sg13g2() fail when KLT_IHP_SG13G2_ROOT is exported
+- **Issue #7481** (closed): functional-verification options.sdf: a valueless IOPATH entry (no delay triplets, the write_sdf sequential-arc shape) is an Icarus syntax error that aborts the whole annotation — no counted drop
+- **Issue #6959** (closed): Share negative-control grading between the curated and native DRC engines
+- **Issue #7511** (closed): place-and-route STA docstring: a third leftover `list_lib_corners` reference describes the swept corner set
+- **Issue #7491** (closed): klt lvs: gate-level-verilog reader still rejects an escaped cell *pin* name in a '.PORT(NET)' connection (third _IDENT_RE site after #1371/#4810/#5693)
+- **Issue #7532** (closed): Document ASAP7 M1–M3 deck spacing rules alongside the public ORFS tech LEF
+- **Issue #6921** (closed): Apply and measure register multicycle paths in standalone STA
+- **Issue #6453** (closed): place-and-route (asap7): TritonRoute M5 landing patches can exceed M5.W.3 width buckets under PDN-strap congestion; no request field moves them
+- **Issue #7397** (closed): ASAP7 DEF→GDS merge: M1 tip-to-tip between a via pad's cut-flush edge and a facing non-pad wire survives the #7142 repair
+- **Issue #4410** (closed): lvs gate-level-verilog + abstract-cell netlist: dangling-output instances still error after #4323
+- **Issue #7525** (closed): gen-compose: restore the #1188/#1501/#2927 rationale PR #7157 deleted to fit the file-size ratchet
+- **Issue #7516** (closed): Correct the _net_identity_name cross-reference in extract_report_canonicalize
+- **Issue #6989** (closed): Remove the speculative libLLVM symlink from the SG13G2 installer
+- **Issue #7524** (closed): gen-compose: minimal_ladder + landing_pad_size_um now reports a floor or no-legal-landing error instead of the #6058 mutual-exclusion error
+- **Issue #7000** (closed): klt drc --check --rerun replays top-less: a per-cell report on a multi-top stream drifts in coverage fields
+- **Issue #6932** (closed): place-and-route: provide built-in ASAP7 RVT library defaults for powered routes
+- **Issue #7039** (closed): klt sim: osdi_preload cannot be expressed PDK-relative the way per-section corner libs can
+- **Issue #6927** (closed): signoff: no construct for a parent block whose tier verdict is the roll-up of its sub-block manifests
+- **Issue #7505** (closed): Liberty header comparison collapses same-named duplicate top-level groups
+- **Issue #7032** (closed): klt sim: unit diagnostics keep only the first line of a multi-line ngspice error, so the failure cause is invisible without a local rerun
+- **Issue #7401** (closed): klt sta: read_spef discards every escaped bus-bracket net name (STA-1650) while klt's own name correlation un-escapes it, so the annotation count over-reports what reached the timing
+- **Issue #6731** (closed): klt sim: batch_convergence_all_failed escapes DIAGNOSTIC_CODES, so --fail-on-diagnostic errors on a code the report emits
+- **Issue #7369** (closed): docs: artifact.md's Exit codes table omits key_mismatch as an exit-1 cause
+- **Issue #7311** (closed): place-and-route (gf180mcu 9t5v0): explicit power block with ORFS connect tuning and default tapcell pitch reports ok with no warnings, then fails klt drc's gf180mcu deck on the PDN via stacks and tap distance
+- **Issue #7518** (closed): characterize: TimingArc's four optional tables let a partial timing() group render silently; _pwl is now triplicated
+- **Issue #7314** (closed): `.meas` control-scope suggestion still keeps a LONE unary plus ngspice rejects
+- **Issue #7366** (closed): place-and-route: with no layer map resolved, post_route_spef fails after routing with an unrelated FinFET geometry refusal; the #4488 warning is never printed
+- **Issue #7496** (closed): expr_no_value: first-failure enrichment misses top-level derived measurements, and its docs row omits the report-level/no-op note
+- **Issue #7429** (closed): Restore the #2423 `canonical_binaries` rationale and the mutation contract lost in the equiv_replay confirmation refactor
+- **Issue #7422** (closed): place-and-route: commit the remaining fixed-instance-group failure controls as tests
+- **Issue #7374** (closed): place-and-route: relocate the contract docstrings PR #7150 traded for its line budget
+- **Issue #7005** (closed): klt sta fmax_mhz: OpenSTA find_clk_min_period drops opposite-edge (half-cycle) path ends, and the documented 1/(T - WNS) basis is not the emitted one
+- **Issue #7226** (closed): ASAP7 DRC deck: M4-M7 W.3 is evaluated on the merged edge set and pairs edges of different polygons - a wide strap edge and a separate signal shape exactly 2g*k apart report a false width marker
+- **Issue #6692** (closed): Consolidate five copies of the same-layer deck rule lookup into the shared decks group
+- **Issue #7355** (closed): synthesize: banner-normalised digest also omits trailing first-line content after the Yosys banner
+- **Issue #7191** (closed): LVS flatten_layout drops an explicitly selected interior layout circuit
+- **Issue #4277** (closed): Live-verify klt synthesize sv_frontend=sv2v against a real sv2v (follow-up to #4228)
+- **Issue #7359** (closed): Live verification: run both IHP suites with KLT_IHP_SG13G2_ROOT set (companion to #7255)
+- **Issue #6991** (closed): functional-verification options.sdf: partial annotation (cond-expression + ifnone-edge drops) turns a hold-clean gf180mcu gate-level run into a functional failure on Icarus
+- **Issue #6925** (closed): Support structured generated clocks in klt sta
+- **Issue #7255** (closed): Live IHP-Open-PDK tests share no root resolver, and neither form finds the dispatch fleet's PDK layout
+- **Issue #7407** (closed): batch-set member report path changed between 0.9.2 and 0.9.3 with no compatibility path for pinned consumers
 - **PR #7503**: fix: match byte-identical short hex pins in --expect-version
 - **PR #7487**: Recognize PEX-side worker observations in envelope path lint
 - **PR #7468**: Canonicalize extract reports without loading the layout engine
@@ -4656,60 +5247,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #2460** (closed): klt lvs: subckt-call conversion cannot handle fixed-geometry device wrappers (L supplied, W baked into the subcircuit name)
 - **Issue #2459** (closed): klt lvs: subckt-call converter cannot express a PDK's fixed-width device flavour wrapper (geometry in the subcircuit name, not a call-site parameter)
 - **Issue #2457** (closed): klt erc: no rule for 'a declared supply reaches a top-level terminal' -- a rail that is one island but bonds to nothing reports clean
-
-### 2026-09-24
-
-- **PR #2455**: sim_batch: run one ngspice per physical core on the batch job instance
-- **PR #2454**: sim: $KLT_SIM_BACKEND host default, so fleet workers send SPICE grids to Spot (2am#1004)
-- **PR #2450**: fix(gen): snap guard-ring placement offsets to the dbu grid
-- **PR #2448**: feat(pnr): support request.power on sg13g2_stdcell by skipping only tapcell
-- **PR #2446**: feat(extract): measure MoM-capacitor mmin/mmax from drawn finger geometry
-- **PR #2440**: feat(lvs): diagnose a reference that mixes deck-option-selected device classes
-- **PR #2439**: docs: pin MoM-cap card's W/L-only parameter set as a cited limitation
-- **PR #2438**: fix(equiv,sim): resolve yosys/ngspice/iverilog/vvp binaries instead of hardcoding names
-- **PR #2436**: fix(gen): per-flavour res_array width floor for sky130's narrow poly-resistor primitives
-- **PR #2434**: fix(extract): restore an abstracted macro's own well tie for body pins
-- **PR #2433**: fix(extract): capture the capacitor top-plate-via exclusion before --abstract-cells erasure
-- **PR #2432**: fix(signoff): let a generic envelope opt in to input_verified via provenance.input.path
-- **PR #2431**: fix(signoff): match item 11 supply pairing by net_correspondence alias membership
-- **PR #2430**: feat(pex): report a model_mismatch diagnostic for device model divergence
-- **PR #2429**: feat(synthesize): request-level standard-cell exclusion (constraints.dont_use)
-- **PR #2428**: feat(provenance): record the fully resolved deck-option set, not just overrides
-- **PR #2426**: feat(erc): disclose drawn layers the supply spec declares nowhere
-- **PR #2425**: fix(lvs): case-fold circuit/device names in capacitor recovery map key
-- **PR #2424**: fix(lvs): stop combine_devices adopting a dup() copy's wrong parameters
-- **PR #2422**: fix(lvs): resolve the netgen binary instead of hardcoding the name
-- **PR #2420**: feat(gen-compose): add explicit-placement bbox targets as an origins_um alternative
-- **PR #2390**: fix(drc): enforce the max half of gf180mcu's CO.1/Vn.1 fixed-size cut rules (#2370)
-- **PR #2385**: feat(place-and-route): name the library-only limit alongside existing design-rule violation counts
-- **PR #2384**: fix(decks): check gf180mcu Nplus/Pplus implant width, space, overlap
-- **PR #2383**: fix(erc): grade a ties[] entry whose well_layer has no geometry as skipped, not clean
-- **PR #2214**: .github/workflows: Migrate workflows to Blacksmith runners
-- **PR #1829**: build(deps): bump eecircuit-engine from 1.7.0 to 1.8.0 in /site
-- **Issue #2456** (closed): signoff report gained fields without a schema_version bump — consumers that byte-compare a committed report can't tell a renderer change from a verdict change
-- **Issue #2442** (closed): gf180mcu: off-grid guard-ring padding trips contact.width.1 max-width bound
-- **Issue #2441** (closed): klt place-and-route: request.power (PDN) unsupported on sg13g2_stdcell — no tap/endcap cell masters
-- **Issue #2435** (closed): extract: recover MoM-capacitor mmin/mmax (and cap_cmomi feed) from drawn finger geometry
-- **Issue #2423** (closed): Friction: klt equiv (yosys) and klt sim (ngspice/iverilog/vvp) hardcode their engine binary names, with no option or env override
-- **Issue #2421** (closed): Friction: klt lvs gives no diagnostic when a reference netlist mixes device classes that a single deck option makes mutually exclusive
-- **Issue #2410** (closed): gen-compose: placement.strategy "explicit" has no bbox-target alternative to raw origins_um
-- **Issue #2408** (closed): extract --pdk: unbound MoM-capacitor cards omit mmin/mmax/feed/subblock/mm_ok PDK subckt parameters
-- **Issue #2407** (closed): res_array: width_um floor of 0.42 excludes PDK-native narrower poly-resistor variants (sky130 res_high_po 0.35 um)
-- **Issue #2406** (closed): CI wall-clock budget: per-job Tests (Python 3.1x) breaches recurring across unrelated PRs
-- **Issue #2405** (closed): klt signoff item 11's LVS supply pairing can never match klt lvs's own alias-joined net_correspondence rows
-- **Issue #2403** (closed): signoff: a generic envelope's freshness can never be anchored to an artifact, so input_verified is always null for item 8
-- **Issue #2402** (closed): Friction: klt pex does not flag a MOS model-flavour divergence between the extracted and reference netlists, so an unrelated-device delta reports as gradeable
-- **Issue #2398** (closed): extract: --abstract-cells erases a macro's well tap, so a well-labelled body pin binds to an isolated island the parent's routing can't reach
-- **Issue #2397** (closed): lvs: #1921's capacitor class recovery never fires for a lowercase .SUBCKT name (reader case-folds circuit names, recovery map does not)
-- **Issue #2396** (closed): extract: --abstract-cells erases a MiM capacitor's top plate but keeps its top-plate via, so every cap in the black box shorts top plate to bottom plate
-- **Issue #2394** (closed): Friction: --deck-option values are absent from provenance — two runs that extract different device classes and parameter values are provenance-identical
-- **Issue #2389** (closed): klt erc: the envelope never names a drawn conductor layer the spec's stackup omits, so a committed supply spec silently narrows as a layout is re-routed
-- **Issue #2386** (closed): klt extract: written SPICE deck drops the device class from C cards while M/R cards keep theirs
-- **Issue #2382** (closed): klt synthesize: no request-level standard-cell exclusion (`dont_use`), and the needed exclusion is corner-dependent so a hardcoded per-library table cannot cover it
-- **Issue #2377** (closed): klt erc: a ties[] entry whose well_layer has no geometry is graded as checked work, not as a skip
-- **Issue #2374** (closed): lvs: options.combine_devices silently mis-accumulates a combined device's parameters, nondeterministically, when combine runs against a Netlist.dup() copy (#1185 retry path)
-- **Issue #2373** (closed): Friction: klt lvs netgen engine hardcodes the binary name 'netgen', unreachable on Debian/Ubuntu where the package installs 'netgen-lvs'
-- **Issue #2370** (closed): gf180mcu DRC deck: CO.1/Vn.1 contact/via size checked as minimum-only — width_check needs a max-bound mode
-- **Issue #2369** (closed): gf180mcu DRC deck: add missing Nplus/Pplus implant width/space/gate-overlap rules (NP.1/2/3a/5a/5b, PP.1/2/3a/5a/5b)
-- **Issue #2357** (closed): place-and-route: per-corner max_transition/max_capacitance violation counts do not say which limit they were checked against
 
