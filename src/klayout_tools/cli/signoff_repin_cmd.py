@@ -30,6 +30,7 @@ _REPIN_EXCLUSIVE_FLAGS = (
     ("--check", "check"),
     ("--describe-grader", "describe_grader"),
     ("-o/--output", "output"),
+    ("--require-grading-ruleset", "require_grading_ruleset"),
 )
 
 
