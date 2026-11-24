@@ -5257,10 +5257,18 @@ The per-spec-row table renders a joint row as one `state: "joint"` record —
 no single measurement is quotable — carrying `joint` = `{covered, members:
 [{member, missing_points, missing_probe}]}` from a static re-read of the same
 citations (a command-backed, unreadable or Monte Carlo member reads `null`/
-`null`, "not evaluable from the report alone"); `--format text` prints
-`[JOINT]` with one indented line per member shortfall. A manifest declaring
-no `joint_grid` row omits every new key and renders byte-identically;
-additive, no `schema_version` bump.
+`null`, "not evaluable from the report alone"). `joint.covered` is
+**tri-state** (issue #7701), reducing the members the same way: `false` when
+any member the projection *can* read has a shortfall (definitely not covered,
+whatever the unreadable members would show); `null` when none does but at
+least one member is unevaluable (unknown — the item axis, which re-runs
+command-backed members, may still derive the row); `true` only when every
+member is readable and clean. A consumer must not read `null` as "not
+covered". `--format text` prints `[JOINT]` with `covered`, `shortfall` or
+`not evaluable from the report alone` (the `null` case), then one indented line
+per member shortfall or unevaluable member. A manifest declaring no
+`joint_grid` row omits every new key and renders byte-identically; additive, no
+`schema_version` bump.
 
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
 reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
@@ -5452,7 +5460,8 @@ because of it. Its rules:
   measurement is quotable, so the record carries the per-member projection
   under `joint` (`{covered, members: [{member, missing_points,
   missing_probe}]}`, `null`/`null` for a member the projection cannot read —
-  command-backed, unreadable, or Monte Carlo).
+  command-backed, unreadable, or Monte Carlo; `covered` is `true`/`false`/
+  `null` — `null` is unknown, see "Joint grid coverage across benches").
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the

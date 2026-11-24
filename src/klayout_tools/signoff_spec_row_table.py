@@ -24,7 +24,9 @@ here: the projection is **static** -- file-backed citations are re-read;
 command-backed citations would have to be re-executed to render, so they
 contribute nothing here, as does an unreadable, malformed or
 unresolvable citation. Grading reports those on the item axis; this
-block never contradicts it.
+block never asserts what the item axis may contradict -- a ``joint``
+record's ``covered`` is ``false`` only on a readable shortfall and
+``null`` (unknown) when a member could not be read here (issue #7701).
 
 The module also hosted ``_members_rows_declared`` from its start; issue
 #6969 moved it to :mod:`.signoff_joint_rows` with the ``joint_grid``
