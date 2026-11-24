@@ -900,8 +900,13 @@ modified. With a deck, the KLayout engine follows nested `.include` and
 `.inc` directives in both the layout and reference netlists when resolving
 drawn-resistor and MoM-capacitor X cards. A matching `.SUBCKT` definition
 takes precedence over device recovery. An X card with no matching definition
-still recovers as a device of its deck class. The simulation-form and
-unresolved-call diagnostics scan the top-level text.
+still recovers as a device of its deck class. A corner-selected
+`.lib '<file>' <section>` line is followed the same way (issue #6705): only
+the named section's definitions count (the selector matches its declaration
+case-insensitively), while a colliding definition in another section or
+outside every section does not take precedence, so such an X card stays
+recoverable. The simulation-form and unresolved-call diagnostics scan the
+top-level text.
 
 The reference (and any pre-extracted layout) netlist must use the same
 **schematic-equivalent** device form `klt extract` writes: a plain element

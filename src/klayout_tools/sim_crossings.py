@@ -46,7 +46,6 @@ extracted -- the same "new optional member, absent when not applicable" rule
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,7 +58,6 @@ from .sim_crossings_reduce import (
     validate_value_from,
 )
 from .sim_errors import SimError
-from .sim_raw import parse_ascii_rawfile
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
 CROSSING_EDGES = ("rise", "fall", "either")
@@ -429,40 +427,35 @@ def _extract_one(
 ) -> CrossingsOutcome:
     body = spec["crossings"]
     signal = body["signal"]
-    if not os.path.isfile(raw_path):
-        return CrossingsOutcome(
-            error=(
-                f"measurement '{spec['name']}' produced no crossings series: "
-                f"its signal ({signal!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch name"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return CrossingsOutcome(
-            error=f"measurement '{spec['name']}': could not read its crossings "
-            f"rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return CrossingsOutcome(
-            error=(
-                f"measurement '{spec['name']}' produced no crossings series: "
-                f"its signal ({signal!r}) yielded no samples"
-            )
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=spec["name"],
+        columns=2,
+        missing_error=(
+            f"measurement '{spec['name']}' produced no crossings series: "
+            f"its signal ({signal!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch name"
+        ),
+        empty_error=(
+            f"measurement '{spec['name']}' produced no crossings series: "
+            f"its signal ({signal!r}) yielded no samples"
+        ),
+        rawfile_label="crossings rawfile",
+    )
+    if columns is None:
+        return CrossingsOutcome(error=error)
+    scale, values = columns
     name = spec["name"]
     sweep = sim_crossings_dc.is_dc(kind)
     resolved_level, error = sim_crossings_dc.resolve_level(
-        name, body, points, supply_v, sweep
+        name, body, scale, values, supply_v, sweep
     )
     if error is not None:
         return CrossingsOutcome(error=error)
     outcome = find_crossings(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        scale,
+        values,
         resolved_level if resolved_level is not None else float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="crossings"),
