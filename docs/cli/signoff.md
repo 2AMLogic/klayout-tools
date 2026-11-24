@@ -4919,8 +4919,9 @@ new. Outcomes:
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
   when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
-  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
-  **passing** measurements grade (issue #6027): those rows leave
+  failing `klt sim` citation still credits the rows its tagged, **passing**
+  measurements carrying a recognised, non-null `min`/`max` bound grade (issue
+  #6027): those rows leave
   `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
   bench with one known-failing row can claim the rows its envelope genuinely
   carries. A row whose tagged measurement fails — or that the failing
@@ -5095,7 +5096,8 @@ spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
 its envelope has at least one `spec_row`-tagged measurement, a named row counts
 as covered only if the envelope has a *passing* measurement tagged with it that
-declares `limits`; a named row with no such measurement is uncovered
+carries a recognised, non-null `min`/`max` bound; a named row with no such
+measurement is uncovered
 (`partial_coverage`, listed in `detail.uncovered_rows`). A tag for a row the
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
@@ -5212,9 +5214,10 @@ there is no `schema_version` bump; note that a digital manifest citing only
 metric measured in that same sweep". A digital item 5 whose passing citations
 are all `klt sim` grades `met` only when the manifest declares at least one
 `spec_rows` row with `"timing_margin": true` (boolean, default `false`) **and**
-each such row is evidenced by a cited `klt sim` envelope: a passing,
-`limits`-bearing `measurements[]` entry tagged `spec_row: "<row>"`, whose name
-has a passing measurement in **every** `corners[]` entry. A manifest-asserted
+each such row is evidenced by a cited `klt sim` envelope: a passing
+`measurements[]` entry with a recognised, non-null `min`/`max` bound, tagged
+`spec_row: "<row>"`, whose name has a passing measurement in **every**
+`corners[]` entry. A manifest-asserted
 `rows` list is not enough; the tag must be in the envelope. Otherwise the item is
 `unmet` / `timing_margin_missing`, with
 `detail.missing_timing_margin: [{"row": "<id>", "corners": [...]}]` (`row` is
@@ -5452,8 +5455,9 @@ and `partial_coverage` is an existing reason.
 **Derived coverage on a `klt yield` envelope, and `reported` measurements
 (issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
 written: when a citation carries `rows` **and** its envelope has at least one
-`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
-measurement grades are covered. One case is added on top of it, for `klt
+`spec_row`-tagged measurement, only the rows a tagged measurement with a
+recognised, non-null `min`/`max` bound grades are covered. One case is added on
+top of it, for `klt
 yield` envelopes only:
 
 - a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
@@ -5554,8 +5558,9 @@ every other item grades it `wrong_kind`. It reuses `klt sim`'s
 - `kind`, `status` (`"pass"` is the passing token), `method` and
   `measurements[]` are required. `method` is a disclosure echoed on the
   citation (`citation.method`); it is never graded.
-- A row is covered only by a passing, `limits`-bearing measurement tagged
-  `spec_row: <row>`, and the citation passes only if `status` is `pass` and
+- A row is covered only by a passing measurement with a recognised, non-null
+  `min`/`max` bound, tagged `spec_row: <row>`, and the citation passes only
+  if `status` is `pass` and
   every `corners[]` point entry (the per-point list, optional) passes.
   Otherwise `partial_coverage` with `detail.uncovered_rows`, or
   `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
