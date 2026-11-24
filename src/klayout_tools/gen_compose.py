@@ -3734,8 +3734,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             Automatic climbs and GF180 9K/11K top-metal landings also
             check intermediate and far pads for spacing.
 
-            Reject intersections and conductive contacts before checking the
-            deck's spacing rule. A via-drop leg also needs room between its
+            Check order and rationale: see ``_leg_conflict_message`` (#1386,
+            #6961, #7024, #7221). A via-drop leg also needs room between its
             landing pad and its own backbone on the primary route layer."""
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None

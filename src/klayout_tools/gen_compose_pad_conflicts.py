@@ -128,6 +128,12 @@ def _leg_conflict_message(
     pad names pad-vs-pitch instead of a generic backbone crossing. Returns
     ``None`` when no test fires -- the caller keeps looping.
 
+    The #1386 spacing test grows the candidate by the deck's own same-layer
+    ``"space"`` threshold (``kdb.Region.sized`` -- the standard "distance < d"
+    Minkowski-sum test, symmetric regardless of which side grows) and
+    intersects that with the other region. A layer with no known ``"space"``
+    rule keeps the overlap and contact tests only (#6961).
+
     The overlap and spacing messages (and their thresholds) are
     byte-identical to the pre-#5803 wording. What they say changes only
     for a pad-involving conflict and -- #7221 -- for a touching pair on
