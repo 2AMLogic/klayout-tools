@@ -165,6 +165,14 @@ def add_pex_parser(
         ),
     )
     pex_parser.add_argument(
+        "--schematic-top",
+        metavar="NAME",
+        help=(
+            "Schematic DUT subcircuit called by the testbench when its name "
+            "differs from the physical top. Pins remain positional."
+        ),
+    )
+    pex_parser.add_argument(
         "--flatten-schematic",
         dest="flatten_schematic",
         action="store_true",
