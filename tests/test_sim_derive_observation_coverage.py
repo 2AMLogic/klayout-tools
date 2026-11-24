@@ -49,3 +49,32 @@ def test_finite_implausible_derived_values_still_count_as_observations(
         assert group["reason"] == "implausible_value" and group["value"] > 0.1
         observation = work_id("derived_measurement", "span", group["group_id"])
         assert observation + "/observation" in report["coverage"]["checked"]
+
+
+def test_missing_axis_point_skips_only_the_affected_observation(
+    tmp_path, monkeypatch, capsys
+):
+    derived = {"name": "span", "derive": DERIVE["derive"]}
+    exclude = [{"supply_v": {"vdd": 1.0}, "params": {"code": 128}}]
+    code, report = _run(
+        tmp_path, monkeypatch, capsys, [SOURCE, derived], exclude=exclude
+    )
+
+    groups = report["measurements"][1]["derive"]["groups"]
+    assert code == 4 and report["status"] == "error"
+    assert [(g["status"], g["reason"]) for g in groups] == [
+        ("error", "missing_axis_points"),
+        ("pass", None),
+    ]
+    missing, measured = [
+        work_id("derived_measurement", "span", group["group_id"]) + "/observation"
+        for group in groups
+    ]
+    coverage = report["coverage"]
+    assert missing not in coverage["checked"] and measured in coverage["checked"]
+    assert {"id": missing, "reason": "unavailable_measurement"} in coverage["skipped"]
+    for observation in (missing, measured):
+        assert {
+            "id": observation + "/limits",
+            "reason": "characterization_without_limits",
+        } in coverage["inapplicable"]
