@@ -769,16 +769,9 @@ _SDT_TALL = (
 )
 _SDT_HANDLING = "kept as stated; expected exactly; left out of the clean run"
 
-#: Every retained deviation of the pinned shipped cells (lambdapdk v0.2.17,
-#: asap7sc7p5t_28_{R,L,SL}) from the implemented rules. docs/cli/drc.md
-#: lists the same records.
-#:
-#: Names are library cell names. A placed block can also carry a layout
-#: variant ``<cell>_ASAP7_75t_<VT>$VAR<n>`` of one of these cells; it is
-#: folded into its base name (strip ``$VAR<n>``, then ``_ASAP7_75t_<VT>``)
-#: before a ``klt drc`` ``source_cell`` is matched against this list. Variant
-#: names are never recorded here: the pinned GDS files hold no ``$`` cell, so
-#: the shipped-cell gate does not place one.
+#: Retained deviations in lambdapdk v0.2.17's asap7sc7p5t_28_{R,L,SL} cells.
+#: Match a placed source_cell by stripping $VAR<n>, then _ASAP7_75t_<VT>.
+#: The pinned GDS files contain no $ variants. See docs/cli/drc.md for the records.
 SHIPPED_CELL_DEVIATION_RECORDS: tuple[Asap7CellDeviation, ...] = tuple(
     Asap7CellDeviation(
         cell,
@@ -811,11 +804,9 @@ def _deviation_map(
     return out
 
 
-#: ``cell -> rule ids`` view of :data:`SHIPPED_CELL_DEVIATION_RECORDS`: the
-#: exact deviation set the shipped-cell regression compares against. Names
-#: are given without the ``_ASAP7_75t_<VT>`` suffix, and a ``$VAR<n>`` layout
-#: variant folds into its base name before it is looked up here (see the
-#: comment on :data:`SHIPPED_CELL_DEVIATION_RECORDS`).
+#: Library cell to rule IDs, derived from :data:`SHIPPED_CELL_DEVIATION_RECORDS`.
+#: The shipped-cell regression checks this exact map. Fold a placed layout
+#: variant to its base cell name before looking it up here.
 SHIPPED_CELL_DEVIATIONS: dict[str, tuple[str, ...]] = _deviation_map(
     SHIPPED_CELL_DEVIATION_RECORDS
 )
