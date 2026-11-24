@@ -262,8 +262,15 @@ from .lvs_gate_level import (
     _supply_pin_universe,  # noqa: F401
 )
 from .lvs_gate_level_convert import (
-    _convert_gate_level_reference,
+    _convert_gate_level_reference as _convert_gate_level_reference,
+)
+from .lvs_gate_level_convert import (
     _gate_level_port_case_fold_warnings,
+)
+from .lvs_gate_level_preparation import (
+    _convert_reference_text,
+    _prepare_reference_stage,
+    _read_reference_text,
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
@@ -301,7 +308,7 @@ from .lvs_power import (
     _well_layer_lef_pins,
     _with_stub_power_connectivity_reason,
 )
-from .lvs_reference_stage import _prepare_reference_stage, _read_reference_stage
+from .lvs_reference_stage import _read_reference_stage
 from .lvs_replay import (
     _anchor_top_level_pins_replay_options,
     _combine_devices_max_attempts_replay_options,
@@ -335,8 +342,12 @@ from .netlist_normalize_scan import recovery_subckt_names
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
 from .verilog_netlist import (
-    VerilogNetlistError,
-    collect_gate_level_port_aliases,
+    VerilogNetlistError as VerilogNetlistError,
+)
+from .verilog_netlist import (
+    collect_gate_level_port_aliases as collect_gate_level_port_aliases,
+)
+from .verilog_netlist import (
     parse_subckt_pin_orders,
 )
 
@@ -1243,13 +1254,7 @@ def run_lvs(
     from .lvs_layout_stage import _resolve_layout_stage
     from .lvs_passive_pairing import curated_pairing
 
-    # Issue #7822: a gate-level-verilog reference is validated and converted
-    # here, before the (potentially multi-minute) extraction below -- a
-    # reference the converter rejects must name the failing input
-    # immediately, not after the extraction has finished. `None` for every
-    # other reference form (nothing about them needs the extracted netlist
-    # moved earlier). The prepared result travels to
-    # `_read_reference_stage`, which reuses it instead of re-converting.
+    # Validate the gate-level reference before starting layout extraction.
     reference_preparation = _prepare_reference_stage(reference_spec, request_dir, opts)
 
     layout_coverage: dict[str, Any] = {}
@@ -3233,15 +3238,7 @@ def _read_reference_netlist(
     resolves it internally exactly as before, and the value is ignored for
     every form but ``"gate-level-verilog"``.
 
-    ``gate_level_converted`` (issue #7822) is the same kind of hand-me-down
-    for the conversion itself: the plain-element SPICE text
-    :func:`klayout_tools.lvs_reference_stage._prepare_reference_stage`
-    already produced before ``run_lvs`` started extracting the layout, so an
-    invalid reference fails fast instead of after a multi-minute extraction.
-    Given, this function skips the pin-order resolution, the conversion and
-    the port-alias collection entirely (their outputs -- the case folds and
-    port aliases -- already sit in the collectors passed in alongside it).
-    ``None`` (every other caller) converts here exactly as before.
+    A prepared gate-level reference carries the converted SPICE and bindings.
 
     Note: on genuinely malformed input, ``NetlistSpiceReader`` does not raise
     -- it prints a ``"Warning: Line ignored..."`` diagnostic (to the
@@ -3259,17 +3256,7 @@ def _read_reference_netlist(
         detect_subckt_call_devices,
     )
 
-    try:
-        # `errors="replace"` so a non-SPICE binary reference (a mis-pointed
-        # path) never crashes the detection scan on a decode error -- it flows
-        # through to `NetlistSpiceReader`, which tolerates garbage and yields
-        # an empty netlist that surfaces as the "no top circuit" LvsError, the
-        # pre-existing behaviour this hook preserves.
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError as exc:
-        raise LvsError(f"could not read reference netlist '{path}': {exc}") from exc
-
+    text = _read_reference_text(path)
     text, read_path, tmp_path = _quote_includes_for_read(text, path, form)
     # Issue #1876: the recovery scan below runs over whichever text is
     # actually handed to `NetlistSpiceReader` -- the original file for the
@@ -3279,6 +3266,7 @@ def _read_reference_netlist(
     # principle, if a caller's own upstream tooling produced one that does.
     read_text = text
 
+    converted: str | None = None
     if form == "subckt-call":
         try:
             conversion = convert_reference_netlist(
@@ -3297,52 +3285,21 @@ def _read_reference_netlist(
         converted = conversion.text
         if placeholder_value_classes is not None:
             placeholder_value_classes.update(conversion.placeholder_value_classes)
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".spice", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(converted)
-            tmp_path = tmp.name
-        read_path = tmp_path
-        read_text = converted
     elif form == "gate-level-verilog":
-        if gate_level_converted is not None:
-            # Issue #7822: the prepare stage (`_prepare_reference_stage`)
-            # already resolved the pin orders, converted this text and
-            # collected the port aliases and case folds (into the very
-            # collectors passed in here) before extraction started.
-            converted = gate_level_converted
-        else:
+        converted = gate_level_converted
+        if converted is None:
             if pin_orders is None:
                 pin_orders = _resolve_gate_level_pin_orders(
                     library, pdk_variant, pdk_root, pin_order_files=pin_order_files
                 ).pin_orders
-            try:
-                converted = _convert_gate_level_reference(
-                    text, pin_orders, finfet, gate_level_port_case_folds
-                )
-            except VerilogNetlistError as exc:
-                raise LvsError(
-                    f"could not convert gate-level-verilog reference netlist "
-                    f"'{path}' to plain-element form: {exc}"
-                ) from exc
-            if gate_level_port_aliases is not None:
-                # Issue #2021: re-parses the same `text` `convert_gate_level_
-                # verilog` just parsed successfully -- cheap (a single flat
-                # module) and pure, kept as a separate entry point so the SPICE
-                # conversion's own return type stays untouched (see
-                # `collect_gate_level_port_aliases`'s docstring).
-                gate_level_port_aliases.update(collect_gate_level_port_aliases(text))
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".spice", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(converted)
-            tmp_path = tmp.name
-        read_path = tmp_path
-        read_text = converted
+            converted = _convert_reference_text(
+                path,
+                text,
+                pin_orders,
+                finfet,
+                gate_level_port_case_folds,
+                gate_level_port_aliases,
+            )
     else:
         offending = detect_subckt_call_devices(text)
         if offending:
@@ -3357,6 +3314,17 @@ def _read_reference_netlist(
                 "the plain-element form (M-card) before comparing -- see "
                 'docs/cli/lvs.md, "Netlist form".'
             )
+
+    if converted is not None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".spice", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(converted)
+            tmp_path = tmp.name
+        read_path = tmp_path
+        read_text = converted
 
     netlist = kdb.Netlist()
     recovered_capacitor_classes = parse_capacitor_class_comments(read_text)

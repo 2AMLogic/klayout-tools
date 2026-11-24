@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 from . import lvs as _lvs
 from .lvs_coverage import _implausible_dimensions
 from .lvs_flatten import root_selected_circuit
+from .lvs_gate_level_preparation import _GateLevelPreparation, _prepare_reference_stage
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
 
@@ -35,100 +36,6 @@ class _ReferenceStage(NamedTuple):
     reference_pin_order_files: list[str]
     reference_netlist: Any
     reference_known_limit_counts: dict[str, int]
-
-
-class _GateLevelPreparation(NamedTuple):
-    """A gate-level Verilog reference converted *before* extraction
-    (issue #7822).
-
-    Everything here is derived from the request and the reference file
-    alone -- no extracted netlist is needed -- so `run_lvs` resolves it
-    before the (potentially multi-minute) layout extraction stage and
-    hands it to :func:`_read_reference_stage`, which then reads the
-    already-converted text instead of re-converting. An invalid reference
-    therefore fails in seconds with the very same "could not convert
-    gate-level-verilog reference netlist ..." diagnostic, instead of
-    after the extraction has finished. The conversion metadata (pin-order
-    resolution and its provenance, port aliases, case folds) travels with
-    the converted text so the later stage records exactly what a
-    non-prepared run would have; operations that need the extracted
-    netlist (supply pairing, the power-only prune, the port-alias join)
-    stay in the later stage.
-    """
-
-    reference_netlist_path: str
-    pin_order_files: list[str]
-    pin_orders: dict[str, list[str]]
-    pdk_info: dict[str, Any] | None
-    sources: list[dict[str, Any]]
-    port_aliases: dict[str, dict[str, str]]
-    case_folds: list[dict[str, str]]
-    converted_text: str
-
-
-def _prepare_reference_stage(
-    reference_spec: dict[str, Any], request_dir: str, opts: Any
-) -> _GateLevelPreparation | None:
-    """Issue #7822: validate and convert a ``gate-level-verilog`` reference
-    up front, before layout extraction.
-
-    Returns ``None`` for every other reference form (their reads stay in
-    :func:`_read_reference_stage`, unchanged). For the gate-level form this
-    resolves the pin-order sources, converts the Verilog to plain-element
-    SPICE and collects the conversion's metadata (port aliases, case folds)
-    exactly as :func:`klayout_tools.lvs._read_reference_netlist` would --
-    same steps, same diagnostics -- so a reference the converter rejects
-    names the failing input immediately rather than after extraction.
-    """
-    if reference_spec.get("form", "plain-element") != "gate-level-verilog":
-        return None
-    reference_netlist_path = _lvs._require_path(
-        reference_spec, "netlist", "reference", request_dir
-    )
-    pin_order_files = _lvs._resolve_reference_pin_order_files(
-        reference_spec, request_dir
-    )
-    resolved_pin_orders = _lvs._resolve_gate_level_pin_orders(
-        reference_spec.get("library"),
-        reference_spec.get("pdk"),
-        reference_spec.get("pdk_root"),
-        pin_order_files=pin_order_files,
-    )
-    try:
-        # `errors="replace"` for the same reason `_read_reference_netlist`
-        # reads leniently: a mis-pointed path must surface as a conversion
-        # error, not a decode crash.
-        with open(reference_netlist_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError as exc:
-        raise _lvs.LvsError(
-            f"could not read reference netlist '{reference_netlist_path}': {exc}"
-        ) from exc
-    port_aliases: dict[str, dict[str, str]] = {}
-    case_folds: list[dict[str, str]] = []
-    try:
-        converted = _lvs._convert_gate_level_reference(
-            text, resolved_pin_orders.pin_orders, opts.finfet_layout, case_folds
-        )
-    except _lvs.VerilogNetlistError as exc:
-        raise _lvs.LvsError(
-            f"could not convert gate-level-verilog reference netlist "
-            f"'{reference_netlist_path}' to plain-element form: {exc}"
-        ) from exc
-    # Issue #2021: the port-alias mapping collected from the same parse
-    # (see `_read_reference_netlist`'s own call for why this is a separate
-    # entry point) -- done here so the later stage never re-parses.
-    port_aliases.update(_lvs.collect_gate_level_port_aliases(text))
-    return _GateLevelPreparation(
-        reference_netlist_path=reference_netlist_path,
-        pin_order_files=pin_order_files,
-        pin_orders=resolved_pin_orders.pin_orders,
-        pdk_info=resolved_pin_orders.pdk_info,
-        sources=resolved_pin_orders.sources,
-        port_aliases=port_aliases,
-        case_folds=case_folds,
-        converted_text=converted,
-    )
 
 
 def _flatten_reference(
@@ -166,12 +73,9 @@ def _read_reference_stage(
     Given, this stage reuses all of it (never re-resolving or re-converting)
     so the two calls together do exactly the work one unprepared call did.
     """
-    if preparation is not None:
-        reference_netlist_path = preparation.reference_netlist_path
-    else:
-        reference_netlist_path = _lvs._require_path(
-            reference_spec, "netlist", "reference", request_dir
-        )
+    reference_netlist_path = _lvs._require_path(
+        reference_spec, "netlist", "reference", request_dir
+    )
     reference_form = reference_spec.get("form", "plain-element")
     if reference_form not in _lvs._REFERENCE_FORMS:
         raise _lvs.LvsError(
@@ -214,73 +118,21 @@ def _read_reference_stage(
             "device-class/model name to the reference net its implicit bulk "
             "terminal carries"
         )
-    # Issue #1622: resolved here rather than inside `_read_reference_netlist`
-    # so the *same* mapping serves both consumers with one read of each
-    # pin-order source -- the conversion's own `pin_order_lookup` and, below,
-    # the power-pin universe `_prune_power_only_circuits` needs.
-    reference_pin_orders: dict[str, list[str]] | None = None
-    # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
-    # internally to read the library's pin-order source -- reused here (not
-    # re-resolved) purely so `provenance.pdk` can record it below, matching
-    # `klt extract`/`klt sta`/`klt place-and-route`. Stays `None` for every
-    # other `reference.form`, which resolves no PDK at all.
-    reference_pdk_info: dict[str, Any] | None = None
-    # Issue #2693: one record per pin-order file actually read -- a
-    # macro-backed design resolves pin orders from several libraries (the
-    # standard cells plus each macro's own one-file-per-macro library), so
-    # `provenance.pdk` alone no longer says where a cell's pin order came
-    # from. Empty for every other `reference.form`, which reads none.
-    reference_pin_order_sources: list[dict[str, Any]] = []
-    # Issue #2693: `reference.library`/`reference.pin_order_files` are
-    # validated inside the resolver (both are specific to this one form, and
-    # "neither was given" is its own error there), so this branch stays a
-    # single call.
-    # Issue #4353: the resolved files are also echoed (`reference_conversion`)
-    # so `--rerun` is independent of the original request directory.
+    binding = preparation or _prepare_reference_stage(reference_spec, request_dir, opts)
+    reference_pin_orders = reference_pdk_info = converted_text = None
     reference_pin_order_files: list[str] = []
-    if reference_form == "gate-level-verilog":
-        if preparation is not None:
-            # Issue #7822: pin orders (and their provenance) were resolved
-            # before extraction -- reuse the very objects the prepare stage
-            # produced, so `provenance.pdk` records them exactly as an
-            # unprepared run would.
-            reference_pin_order_files = preparation.pin_order_files
-            reference_pin_orders = preparation.pin_orders
-            reference_pdk_info = preparation.pdk_info
-            reference_pin_order_sources = preparation.sources
-        else:
-            reference_pin_order_files = _lvs._resolve_reference_pin_order_files(
-                reference_spec, request_dir
-            )
-            resolved_pin_orders = _lvs._resolve_gate_level_pin_orders(
-                reference_spec.get("library"),
-                reference_spec.get("pdk"),
-                reference_spec.get("pdk_root"),
-                pin_order_files=reference_pin_order_files,
-            )
-            reference_pin_orders = resolved_pin_orders.pin_orders
-            reference_pdk_info = resolved_pin_orders.pdk_info
-            reference_pin_order_sources = resolved_pin_orders.sources
-    # Issue #1907: populated by the `form: "subckt-call"` conversion with every
-    # resistor/capacitor device class it wrote the literal `0` placeholder
-    # value onto -- consumed by `_apply_reference_placeholder_values` below,
-    # empty for every other reference form.
+    reference_pin_order_sources: list[dict[str, Any]] = []
     reference_placeholder_classes: dict[str, str] = {}
-    # Issue #2021: populated by `_read_reference_netlist` only for
-    # `form="gate-level-verilog"` -- `{<module name>: {<port>: <canonical
-    # net>}}` for every declared port whose only Verilog-level connection is
-    # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
-    # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
-    # Issue #4815: fold records from the gate-level conversion's
-    # case-insensitive pin binding, disclosed as warnings below.
     reference_gate_level_case_folds: list[dict[str, str]] = []
-    if preparation is not None:
-        # Issue #7822: both were collected while the prepare stage
-        # converted the reference -- seed the same containers so the read
-        # below never re-parses the Verilog.
-        reference_gate_level_port_aliases.update(preparation.port_aliases)
-        reference_gate_level_case_folds.extend(preparation.case_folds)
+    if binding is not None:
+        reference_pin_orders = binding.pin_orders
+        reference_pdk_info = binding.pdk_info
+        converted_text = binding.converted_text
+        reference_pin_order_files = binding.pin_order_files
+        reference_pin_order_sources = binding.sources
+        reference_gate_level_port_aliases = binding.port_aliases
+        reference_gate_level_case_folds = binding.case_folds
     # Issue #2136: the library-derived power-pin universe plus the layout
     # nets those pins land on, used below to mark a `net_correspondence[]`
     # entry that pairs a layout supply net with a reference net that is not
@@ -307,9 +159,7 @@ def _read_reference_stage(
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         gate_level_port_case_folds=reference_gate_level_case_folds,
-        gate_level_converted=(
-            preparation.converted_text if preparation is not None else None
-        ),
+        gate_level_converted=converted_text,
         finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
