@@ -1,0 +1,1 @@
+- **SG13G2 PFET differential pairs draw their source/drain implant and enclose device active in NWell** (#7567). The implant hint now reflects the streamed geometry for both LV and HV pairs.

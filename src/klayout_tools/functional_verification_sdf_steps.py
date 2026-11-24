@@ -23,6 +23,9 @@ from .functional_verification_sdf import (
     _sdf_interconnect_is_zero_delay,
     _sdf_iopath_arc,
 )
+from .functional_verification_sdf_output_concat import (
+    _apply_sdf_output_assign_rewrite,
+)
 
 #: The ``environment.sdf.dropped`` class counting ``COND``-wrapped ``IOPATH``
 #: entries removed before annotation because their condition is an operator
@@ -210,34 +213,32 @@ def _apply_sdf_alias_port_drop(
     sources: list[str],
     hdl_toplevel: str,
     sdf_pre_dropped_counts: dict[str, int],
-) -> str:
-    """Issue #2285's zero-delay alias-port ``INTERCONNECT`` drop, one step
-    of :func:`run_functional_verification`'s SDF-normalization pipeline --
-    the code of that function's own inline alias block, moved out to this
-    module unchanged (its two sibling drops already live as helpers there
-    for the same reason: no new branch in the already-baselined function,
-    which the per-file size ratchet also caps at its current line count).
+) -> tuple[str, list[str], list[dict[str, Any]]]:
+    """Prepare independently assigned output bits for Icarus annotation.
 
-    An ``INTERCONNECT`` onto a top-level port bit the netlist drives
-    through a Verilog ``assign`` alias cannot be annotated by Icarus at
-    all and cannot be made annotatable by rewriting the endpoint either;
-    when such an entry is zero-delay at every corner, dropping it cannot
-    change simulated timing, so it is removed here and counted under
-    :data:`SDF_ALIAS_PORT_DROPPED_CLASS`. A nonzero delay on a separately
-    assigned bit raises before the simulator build. Returns the path
-    the next step should read -- ``annotate_source_path`` unchanged when
-    nothing was dropped.
+    Rewrite eligible buses to whole-vector assignments in build copies (#7534).
+    On the remaining alias bits, count and drop arcs with zero delay at every
+    corner (#2285) and refuse nonzero delays before building (#6937).
+    Return the SDF path, build sources, and per-port rewrite records for
+    ``environment.sdf.output_assign_rewritten``.
     """
-    return _write_sdf_drop_step(
-        _drop_sdf_zero_delay_alias_port_interconnects(
+    sources, rewritten = _apply_sdf_output_assign_rewrite(
+        annotate_source_path, sources, hdl_toplevel, output_dir
+    )
+    return (
+        _write_sdf_drop_step(
+            _drop_sdf_zero_delay_alias_port_interconnects(
+                annotate_source_path,
+                _collect_sdf_alias_port_bits(sources, hdl_toplevel),
+            ),
             annotate_source_path,
-            _collect_sdf_alias_port_bits(sources, hdl_toplevel),
+            output_dir,
+            "klt_sdf_alias_dropped.sdf",
+            SDF_ALIAS_PORT_DROPPED_CLASS,
+            sdf_pre_dropped_counts,
         ),
-        annotate_source_path,
-        output_dir,
-        "klt_sdf_alias_dropped.sdf",
-        SDF_ALIAS_PORT_DROPPED_CLASS,
-        sdf_pre_dropped_counts,
+        sources,
+        rewritten,
     )
 
 

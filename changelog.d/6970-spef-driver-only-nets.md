@@ -1,1 +1,2 @@
-Standalone STA excludes confirmed driver-only internal nets from design-side SPEF name coverage. Nets with sinks or connected top-level ports still count, as do nets whose connectivity could not be verified.
+- **SPEF coverage for driver-only nets** (#6970, 2026-11-22).
+  Standalone STA excludes confirmed driver-only internal nets from design-side SPEF name coverage. Nets with sinks or connected top-level ports still count, as do nets whose connectivity could not be verified.

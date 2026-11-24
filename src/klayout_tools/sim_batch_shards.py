@@ -1,11 +1,12 @@
-"""Request identity and shard scoping for sharded ``--submit-only`` /
-``--attach`` (issues #4620, #4878); split out of :mod:`sim_batch_async`."""
+"""Request identity and shard scoping for ``--submit-only``, ``--attach``
+and ``--resume`` (issues #4620, #4878); split out of :mod:`sim_batch_async`."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, sim_batch
@@ -17,6 +18,14 @@ from .sim_errors import SimError
 #: ``--submit-only --wait-for-capacity`` can be collected by an
 #: ``--attach <map>`` that (by design) cannot repeat that flag (issue #4878).
 _SUBMISSION_ONLY_BATCH_FIELDS = ("capacity_wait_s", "max_concurrent_jobs")
+
+
+ShardFingerprint = str | Callable[[], str]
+
+
+def resolve_fingerprint(value: ShardFingerprint | None) -> str | None:
+    """Read the fingerprint inputs once dispatch has selected a shard map."""
+    return value() if callable(value) else value
 
 
 def _canonical_sha256(document: Any) -> str:
@@ -179,6 +188,44 @@ def mismatch_error(
     return SimError(message, code=sim_batch.BATCH_SHARD_MANIFEST_CODE)
 
 
+def load_resume_shard_map(
+    path: str, fingerprint: str, request: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]], int] | None:
+    """Read + validate the retained shard map at ``path`` (issue #5775):
+    ``None`` when there is no map, or a well-formed one listing no shards --
+    an inert file, not a stale one. An unreadable map, or one written for a
+    different fingerprint/request, refuses with
+    :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
+    stale results."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        entries = [dict(entry) for entry in document["shards"]]
+        hosts = int(document["hosts"])
+        map_fingerprint = str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--resume: shard map {path} is unreadable ({exc}); delete it "
+            "or drop --resume",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    if not entries:
+        return None
+    if map_fingerprint != fingerprint:
+        raise mismatch_error(path, document, fingerprint, False)
+    mismatch = shard_map_mismatch(document, request)
+    if mismatch is not None:
+        raise SimError(
+            f"--resume: shard map {path} was submitted from a different "
+            f"request ({mismatch}); re-run with exactly the request the "
+            "shards were submitted from",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    return document, entries, hosts
+
+
 def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:
     """``--attach <map> --collect-partial``: read one shard's ``status.json``
     once, never waiting. Returns for a shard in a terminal state (collected
@@ -242,7 +289,7 @@ def attach_batch_shards(
     request: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None,
-    shard_fingerprint: str | None,
+    shard_fingerprint: ShardFingerprint | None,
     collect_partial: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """``--attach <shard map>`` (issue #4620): wait for every shard a
@@ -287,7 +334,7 @@ def attach_batch_shards(
             measurements_spec=measurements_spec,
             request_dir=request_dir,
             config=config,
-            shard_fingerprint=shard_fingerprint or fingerprint,
+            shard_fingerprint=resolve_fingerprint(shard_fingerprint) or fingerprint,
             resume=True,
             attach_only=True,
             collect_partial=collect_partial,
