@@ -1,7 +1,11 @@
 """PEX measures a schematic-only internal node alongside post-layout comparisons."""
 
 import json
+import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -231,3 +235,28 @@ def test_required_extracted_failure_keeps_probe_and_blames_port(tmp_path, monkey
     assert rows["vout"]["error"]["side"] == "extracted" and report["status"] == "error"
     assert rows["internal"]["status"] == "skipped" and "error" not in rows["internal"]
     assert report["backend_failure"]["code"] == "batch_job_failed"
+
+
+def test_probe_selection_and_graph_refusal_do_not_load_pex_driver():
+    code = """
+import sys
+from klayout_tools.pex_errors import PexError
+from klayout_tools import pex_resistance_graph as graph
+from klayout_tools.pex_sim_evidence import _selected_probes
+
+assert _selected_probes({}, "probe", omit=False) == []
+assert "klayout_tools.pex" not in sys.modules
+try:
+    graph._reject_resistance_graph_with_distributed_rc(True, True)
+except PexError as error:
+    assert "--resistance-graph cannot be combined with --distributed-rc" in str(error)
+else:
+    raise AssertionError("expected the conflicting options to raise PexError")
+assert "klayout_tools.pex" not in sys.modules
+"""
+    source = Path(__file__).resolve().parents[1] / "src"
+    subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": str(source)},
+        check=True,
+    )
