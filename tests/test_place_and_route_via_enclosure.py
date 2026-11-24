@@ -105,6 +105,26 @@ def test_notch_needs_enclosure_along_the_entire_side():
     ).is_empty()
 
 
+@pytest.mark.parametrize("lower_first", [True, False])
+def test_repair_does_not_depend_on_placement_order(lower_first):
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top, via = layout.create_cell("top"), layout.create_cell("VIA_VIA12")
+    metal, cut = layout.layer(19, 0), layout.layer(21, 0)
+    via.shapes(metal).insert(kdb.Box(0, 0, 18, 18))
+    via.shapes(cut).insert(kdb.Box(0, 0, 18, 18))
+    for y in (0, 50) if lower_first else (50, 0):
+        top.insert(kdb.CellInstArray(via.cell_index(), kdb.Trans(0, y)))
+        top.shapes(metal).insert(kdb.Box(-50, y, 16, y + 18))
+    # The upper right side already clears 2 nm except for a 1 nm notch. While
+    # the notch is open it blocks the lower landing's extension, so the lower
+    # landing is only repairable once the upper one has been repaired.
+    for box in [kdb.Box(18, 50, 20, 58), kdb.Box(18, 59, 20, 68)]:
+        top.shapes(metal).insert(box)
+    assert _repair(layout, top) == (2, 0)
+    assert _repair(layout, top) == (0, 0)
+
+
 @pytest.mark.skipif(
     shutil.which("klayout") is None, reason="requires the KLayout binary"
 )

@@ -107,24 +107,28 @@ def repair_m1_v1_enclosures(kdb, layout, top, lef_to_gds) -> tuple[int, int]:
     metal = kdb.Shapes()
     metal.insert(kdb.Region(top.begin_shapes_rec(metal_index)).merged())
     repaired = 0
-    refused = []
-    for cut, pad in _placed_landings(kdb, top, metal_index, cut_index):
-        source = _source(kdb, metal, cut)
-        candidates = _missing_enclosures(kdb, cut, source, layout.dbu)
-        if not candidates:
-            continue
-        extra = _extension(
-            kdb, cut, pad, source, candidates, metal, layout.dbu, protected
-        )
-        if extra is None:
-            refused.append(cut)
-            continue
-        top.shapes(metal_index).insert(extra)
-        _merge_repair(kdb, metal, extra)
-        repaired += 1
-    # Another placement may have added metal to the same conductor later.
-    remaining = sum(
-        bool(_missing_enclosures(kdb, cut, _source(kdb, metal, cut), layout.dbu))
-        for cut in refused
-    )
-    return repaired, remaining
+    pending = list(_placed_landings(kdb, top, metal_index, cut_index))
+    while True:
+        refused = []
+        progress = False
+        for cut, pad in pending:
+            source = _source(kdb, metal, cut)
+            candidates = _missing_enclosures(kdb, cut, source, layout.dbu)
+            if not candidates:
+                continue
+            extra = _extension(
+                kdb, cut, pad, source, candidates, metal, layout.dbu, protected
+            )
+            if extra is None:
+                refused.append((cut, pad))
+                continue
+            top.shapes(metal_index).insert(extra)
+            _merge_repair(kdb, metal, extra)
+            repaired += 1
+            progress = True
+        # A later repair can fill a notch or join a conductor that made an
+        # earlier landing unrepairable, so the result must not depend on
+        # placement order: revisit refusals until a pass repairs nothing.
+        if not (progress and refused):
+            return repaired, len(refused)
+        pending = refused
