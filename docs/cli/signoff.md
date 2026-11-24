@@ -5283,6 +5283,36 @@ for item 7. The manifest is the record of which cells were cited; `klt
 signoff` does not check they cover the hierarchy. A single string/object
 entry renders exactly as before.
 
+To require a particular set of PVT corners for item 7, declare the corner
+IDs in the manifest. For example, a two-corner analog box looks like this.
+
+```json
+{"corner_box": {"7.analog": ["tt/1.800V/27C", "ss/1.620V/125C"]}}
+```
+
+The bare key `"7"` applies to either partition. A qualified key overrides
+it for that partition. Each list must contain at least one ID, and its IDs
+must be unique, non-empty strings. Signoff compares them literally. The
+manifest supplies the required box even if a cited report ran only one
+corner. Monte Carlo sample IDs have no special handling and do not count
+toward a base corner.
+
+Each declared corner needs a passing PEX `delta[]` row for every distinct
+`(testbench, measurement)` in the cited reports. A command-mode row has a
+null testbench. Schematic-only `skipped` rows contribute no requirements
+or credit. Extra corners need no coverage. A report with an aggregate
+`error` caused only by row errors can contribute its passing measurements.
+A second report can supply the missing comparisons. Any limit failure
+still fails the item, and every citation must pass the usual freshness,
+post-layout and coverage checks. Reports predating the row identity fields
+need a fresh run to contribute to a declared box.
+
+The JSON item retains each report's own verdict in `citations_graded`.
+Its `detail.corner_box` gives the declared and covered corner counts. When
+coverage is incomplete, the reason is `partial_coverage` and each entry in
+`missing` names the `corner_id` and the remaining measurement keys. Text
+output prints the count and names the missing corners.
+
 `invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
 `detail.problem` string naming the cause, e.g. `member 2 is not a string or
 an object with 'file'/'command'`.
