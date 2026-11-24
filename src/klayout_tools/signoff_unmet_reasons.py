@@ -251,3 +251,33 @@ def unmet_reason_counts(items: list[dict[str, Any]]) -> dict[str, Any]:
             reason = str(item.get("reason"))
             counts[reason] = counts.get(reason, 0) + 1
     return {"unmet_reason_counts": dict(sorted(counts.items()))} if counts else {}
+
+
+#: Issue #2109: the evidence resolved to a readable, recognised envelope of a
+#: kind this item accepts, whose producer applied the common rollup rule
+#: (:func:`~klayout_tools.coverage.coverage_rollup`) and reported its
+#: **partial** status token -- ``"clean_partial"``, ``"pass_partial"``, the
+#: per-kind spelling in :data:`_PARTIAL_STATUS_BY_KIND`. Every check it ran
+#: passed, and it also skipped requested work, so its result is real but not
+#: unconditional.
+#:
+#: It *names* the same class of problem as the "no runnable check proves
+#: this item" reasons (:data:`_REASON_WRONG_KIND`,
+#: :data:`_REASON_NOT_POST_LAYOUT`, :data:`_REASON_NOTHING_CHECKED`), per
+#: issue #826's invariant: the cited check did not fail on its own terms,
+#: and the fix is to re-run it over the work it skipped, not to fix a defect
+#: it found. Reporting it as ``check_failed`` -- which is what happened
+#: before this constant existed, since a partial token simply is not the
+#: kind's success token -- sent a reader looking for a violation that does
+#: not exist.
+#:
+#: It is *ordered* like :data:`_REASON_CHECK_FAILED` rather than like those
+#: three, because it replaces that reason on the same code path: it is
+#: decided from the envelope's own verdict, before :func:`_build_tier_item`'s
+#: kind gate (which only ever downgrades a would-be ``"met"``). So a partial
+#: report cited for an item that does not accept its kind reports
+#: ``partial_coverage``, exactly as a *failing* report of that kind reports
+#: ``check_failed`` rather than ``wrong_kind`` today. The three gated
+#: refusals differ because they apply to an envelope that *passed*, where
+#: "cite a different artifact" really is the more actionable answer.
+_REASON_PARTIAL_COVERAGE = "partial_coverage"

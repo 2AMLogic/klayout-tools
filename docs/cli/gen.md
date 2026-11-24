@@ -63,6 +63,8 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
   generated under different `--cell-name`s share that child name (issue
   #5933; pinned by `tests/test_gen_pdk_pcell_vendor_name.py`).
+  A `--cell-name` equal to the vendor PCell's own name is refused before
+  writing the stream because the top and child would share a name (#6128).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -2962,7 +2964,9 @@ plus one additive `pdk_pcell` object:
 ```
 
 - `generator` is `"<library>/<cell>"`, and `cell_name` defaults to
-  `<cell>_0`.
+  `<cell>_0`. A `--cell-name` equal to the vendor cell name is refused with
+  an application error (exit `1`): the vendor child keeps its own name, so
+  the top and the child would collide (issue #6128).
 - `dbu_um` is resolved from the PDK's tech LEF exactly as for a built-in
   generator, so a `--pdk-pcell` block and a built-in block resolved against
   the same PDK agree by construction.

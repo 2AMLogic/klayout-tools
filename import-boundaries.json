@@ -295,6 +295,7 @@
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_abstract_pin_join",
+        "klayout_tools.extract_abstract_poly",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_report_canonicalize",
         "klayout_tools.extract_validate",
@@ -455,10 +456,12 @@
         "klayout_tools.gen_compose_landing_pads",
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_pad_conflicts",
+        "klayout_tools.gen_compose_pad_ports",
         "klayout_tools.gen_compose_plane_change",
         "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
+        "klayout_tools.gen_compose_port_search",
         "klayout_tools.gen_compose_routing",
         "klayout_tools.gen_compose_top_metal_floors",
         "klayout_tools.gen_compose_via_cuts"
@@ -630,6 +633,7 @@
         "klayout_tools.netlist_class_registry",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_diagnostics",
+        "klayout_tools.netlist_export",
         "klayout_tools.netlist_inductor_recovery",
         "klayout_tools.netlist_instances",
         "klayout_tools.netlist_inputs",
@@ -730,8 +734,10 @@
         "klayout_tools.netlist_construct_scan",
         "klayout_tools._c_stdout",
         "klayout_tools.place_and_route",
+        "klayout_tools.place_and_route_cell_libraries",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_asap7",
+        "klayout_tools.place_and_route_base",
         "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_batch_job",
         "klayout_tools.place_and_route_batch_single",
@@ -854,6 +860,7 @@
         "klayout_tools._json_pointer",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
+        "klayout_tools._layer_spec",
         "klayout_tools._layout",
         "klayout_tools._macros_blackbox",
         "klayout_tools._native",
@@ -926,6 +933,7 @@
         "klayout_tools.signoff_attest_command",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
+        "klayout_tools.signoff_attest_gaprows",
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
@@ -954,7 +962,9 @@
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_grouped_citations",
+        "klayout_tools.signoff_joint_rows",
         "klayout_tools.signoff_justified_gap",
+        "klayout_tools.signoff_malformed_coverage",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_nothing_checked",
@@ -964,8 +974,10 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_corner_box",
         "klayout_tools.signoff_report_diff",
         "klayout_tools.signoff_row_extent",
+        "klayout_tools.signoff_require_build",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
@@ -1029,6 +1041,7 @@
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
+        "klayout_tools.sim_batch_image",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_knobs",
         "klayout_tools.sim_batch_plan",
@@ -1077,6 +1090,7 @@
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_mismatch_scale",
+        "klayout_tools.sim_mismatch_scan",
         "klayout_tools.sim_measurement_grading",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
@@ -1139,6 +1153,7 @@
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
         "klayout_tools.sim_window",
+        "klayout_tools.sim_windowed",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
@@ -1190,6 +1205,7 @@
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
         "klayout_tools._sta_sdc_multicycle",
+        "klayout_tools._sta_spef_inputs",
         "klayout_tools._sta_timing_derate",
         "klayout_tools._sta_wire_load",
         "klayout_tools.post_route_sta",
@@ -1198,7 +1214,8 @@
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
         "klayout_tools.post_route_sta_stages",
-        "klayout_tools.post_route_sta_verify"
+        "klayout_tools.post_route_sta_verify",
+        "klayout_tools.post_route_sta_violating_endpoints"
       ]
     },
     "stats": {
@@ -1446,11 +1463,6 @@
     {
       "consumer": "drc",
       "exporter": "cli-infra",
-      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
-    },
-    {
-      "consumer": "drc",
-      "exporter": "layers",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
@@ -2846,12 +2858,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.erc_spec",
-        "exporter": "klayout_tools._paths",
-        "symbol": "_parse_layer_datatype",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.erc",
         "exporter": "klayout_tools._paths",
         "symbol": "_reject_unknown_keys",
@@ -3017,12 +3023,6 @@
         "consumer": "klayout_tools.mom",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_spec_json",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.mom",
-        "exporter": "klayout_tools._paths",
-        "symbol": "_parse_layer_datatype",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
@@ -3323,12 +3323,6 @@
         "consumer": "klayout_tools.power",
         "exporter": "klayout_tools._paths",
         "symbol": "_load_spec_json",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.power",
-        "exporter": "klayout_tools._paths",
-        "symbol": "_parse_layer_datatype",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

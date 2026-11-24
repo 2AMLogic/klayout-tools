@@ -1,1 +1,0 @@
-- **File-size ledger mismatches point authors to the PR checkout log** to compare the file and its ledger entry at the tested base and merge commits (#6518, 2026-11-18).

@@ -314,6 +314,7 @@ from .sim_environment_report import _corner_process_sections
 from .sim_environment_report import (
     corner_coverage_environment as _corner_coverage_environment,
 )
+from .sim_expr_hint import unsupported_function_hint
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -434,9 +435,9 @@ from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
     _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
-    _refuse_corner_only_flags,
     _with_capacity_retries_override,
     _with_capacity_wait_override,
+    refuse_corner_only_flags,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -1323,9 +1324,7 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # own device instances to name a likely culprit before falling
         # back to ngspice's raw line.
         "model_bin_range",
-        re.compile(
-            r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
-        ),
+        sim_bin_range.MODELNAME_ABORT_RE,
     ),
     (
         # The generic shapes of an ngspice deck abort (issue #3879): `Error
@@ -1623,29 +1622,27 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
-    # Deck-list requests (issue #2804) carry `decks` instead of a corner
-    # request's netlist/analysis; their shape is validated by the deck
-    # subsystem (sim_decks.plan_deck_units), so the corner request's
-    # required fields do not apply here.
+    # Command and deck lists have their own validators and no corner matrix.
     if sim_commands.COMMANDS_FIELD in request:
-        # Command-list requests (issue #4443): shape is validated by
-        # sim_commands.plan_command_units.
         return request
     if "decks" in request:
         if not isinstance(request.get("decks"), list) or not request["decks"]:
             raise SimError("request.decks must be a non-empty list of deck objects")
         return request
     request = validate_request_shape(
-        request,
-        "request file",
-        error_cls=SimError,
-        required_fields=("netlist",),
+        request, "request file", error_cls=SimError, required_fields=("netlist",)
     )
     if "analysis" not in request and "analysis_steps" not in request:
         raise SimError(
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
+    for field in ("options", "monte_carlo"):
+        value = request.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise SimError(
+                f"request.{field} must be an object (got {type(value).__name__})"
+            )
     return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
@@ -2481,7 +2478,7 @@ def run_sim(
     # corner dir and ngspice would never find its deck. Absolutise once here.
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
-    _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
+    refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -4342,6 +4339,7 @@ def _run_sim_corners(
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
+            request=request,
             corners_lost=corners_lost,
             artifacts_dir=artifacts_dir,
             checkpoint_path=checkpoint_path if checkpoint_retained else None,
@@ -4390,7 +4388,6 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
     remote = environment.get("remote")
@@ -8204,32 +8201,10 @@ def _no_value_message(
             "complex result prints as a table instead; reduce it with e.g. "
             "vecmax()/mean()/db()/<expr>[0])"
         )
-        message += _unsupported_function_hint(spec["expr"])
+        message += unsupported_function_hint(spec["expr"])
     if save_mode == "netlist":
         message += SAVE_MODE_NETLIST_NO_VALUE_HINT
     return message
-
-
-#: ngspice control-language functions that do not exist, with the working
-#: replacement (issue #4290; docs/cli/sim.md "Functions `expr` does not have").
-_UNSUPPORTED_EXPR_FUNCTIONS = {
-    "sum": "mean(x)*length(x)",
-    "sgn": "(x gt 0) - (x lt 0)",
-    "max": "vecmax(x) (max() takes two arguments)",
-    "min": "vecmin(x) (min() takes two arguments)",
-}
-
-
-def _unsupported_function_hint(expr: str) -> str:
-    """Name the replacement for any unsupported ngspice function in ``expr``."""
-    found = [
-        f"{name}() -> {fix}"
-        for name, fix in _UNSUPPORTED_EXPR_FUNCTIONS.items()
-        if re.search(rf"(?<![\w.]){name}\(", expr)
-    ]
-    if not found:
-        return ""
-    return " -- ngspice has no such function; use: " + "; ".join(found)
 
 
 def _read_log_file(path: str) -> str:
@@ -9493,7 +9468,9 @@ def _classify_diagnostics(
                 # The follow-on "could not find a valid modelname" is a
                 # consequence of the superseding cause, not a bin range.
                 continue
-            message = _diagnose_modelname_error(netlist_path) or message
+            message = _diagnose_modelname_error(netlist_path) or _line_containing(
+                log_text, match.end() - 1
+            )
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:
@@ -9820,9 +9797,7 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     return values
 
 
-#: The only ``measurements[].limits`` keys :func:`_evaluate_limits` applies.
-#: Anything else in a ``limits`` object is silently inert -- which is exactly
-#: why :func:`_build_coverage` reports it (issue #1996).
+#: The numeric bounds that contribute coverage checks (issue #1996).
 _RECOGNISED_LIMIT_KEYS = ("min", "max")
 
 
@@ -9840,7 +9815,7 @@ def _measurement_coverage(
     """
     name = spec["name"]
     identity = work_id("measurement", corner_index, corner["corner_id"], name)
-    limits = spec.get("limits") or {}
+    limits = sim_supply_relative.coverage_bounds(spec.get("limits"))
     measurement = next(
         (m for m in corner.get("measurements", []) if m["name"] == name), {}
     )
@@ -9964,11 +9939,11 @@ def _summarise_limits(
     limits_declared = 0
     measurements_with_limits = 0
     for spec in measurements_spec:
-        limits = spec.get("limits")
-        if not isinstance(limits, dict) or not limits:
+        limits = sim_supply_relative.coverage_bounds(spec.get("limits"))
+        if not limits:
             continue
         limits_declared += 1
-        unknown = sorted(k for k in limits if k not in _RECOGNISED_LIMIT_KEYS)
+        unknown = sorted(limits.keys() - _RECOGNISED_LIMIT_KEYS)
         if unknown:
             unrecognized.append({"measurement": spec.get("name"), "keys": unknown})
         if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):
