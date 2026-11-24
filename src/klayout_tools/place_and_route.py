@@ -713,22 +713,20 @@ def run_place_and_route(
     mirroring ``klt extract``'s identical pair and ``klt synthesize``'s own
     ``run_synthesize`` kwargs) optionally pin a specific installed PDK
     variant/root, passed straight through to :func:`_resolve_liberty`'s own
-    ``find_pdk()`` call. ``None`` (the default) leaves ``find_pdk()``'s own
-    default search order in effect, unchanged from before this parameter
-    existed.
+    ``find_pdk()`` call; ``None`` (the default) leaves ``find_pdk()``'s
+    default search order in effect.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/place-and-route.md`` /
     ``docs/design/digital-flow-contracts-spike.md`` section 5). Raises
-    :class:`PlaceAndRouteError` for anything that prevents the run from
-    reaching the requested ``target_stage`` -- see that exception's
-    docstring for the exact scope.
+    :class:`PlaceAndRouteError` for anything preventing the run from
+    reaching the requested ``target_stage``, per that exception's docstring.
 
     Generated Tcl scripts, ODB checkpoints, raw OpenROAD ``-metrics`` JSON
     dumps, the final DEF, and the merged GDS are all written to
     ``.klt/place-and-route/`` next to the request file (the same
-    "next to the input" convention ``klt synthesize``'s ``.klt/synthesize/``
-    already uses) and kept as debuggable artifacts, never deleted.
+    "next to the input" convention ``klt synthesize``'s
+    ``.klt/synthesize/`` uses) and kept as debuggable artifacts.
 
     **Output-directory ownership (issue #2770).** That fixed
     ``.klt/place-and-route/`` directory is owned for the whole run through
@@ -741,20 +739,20 @@ def run_place_and_route(
     **Physical rebuild per corner (issue #3507).** A request carrying
     ``pdk.rebuild_corners`` runs the whole flow once per named corner, each
     into its own ``.klt/place-and-route/<corner>/`` directory, and returns
-    one aggregated report (:func:`_run_rebuild_corners`). Without the field
-    the request takes the single-run path, byte-for-byte unchanged.
+    one aggregated report (:func:`_run_rebuild_corners`); without the field
+    the single-run path is taken, byte-for-byte unchanged.
 
     **Batch dispatch (issue #3518).** ``backend`` (the CLI's ``--backend``) >
     ``request.backend`` > ``$KLT_SIM_BACKEND`` > ``local`` selects where the
     ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
-    to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
-    never falls back to running a unit on this host. A single-unit request
-    stays local under a host-default ``batch``; an explicit ``batch`` runs
-    the whole flow as one job (issue #5799).
+    to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`),
+    never running a unit on this host. A single-unit request stays local
+    under a host-default ``batch``; an explicit ``batch`` runs the whole
+    flow as one job (issue #5799).
 
     **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
     stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
-    matches the stage's input hash and whose artifacts are on disk, and adds
+    matches the stage's input hash and whose artifacts are on disk, adding
     ``resume: {"resumed_stages": [...]}`` to the response.
     """
     request = load_request(request_path, threads=threads)
@@ -1717,13 +1715,10 @@ def _run_single_corner(
         # Additive field (issue #2781): see `_coverage_declaration`.
         "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction
-        # corner actually resolved (`"min"`/`"nom"`/`"max"`,
-        # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct
-        # from the *liberty* (device) corner, which `deck_name` above
-        # already encodes (e.g. `sky130_fd_sc_hd__ss_125C_3v00`). A caller
-        # requesting `corner: "ss_125C_3v00"` and `interconnect_corner:
-        # "max"` in the same request sees both values independently here,
-        # never conflated.
+        # corner actually resolved (`"min"`/`"nom"`/`"max"`, request
+        # `pdk.interconnect_corner`, default `"nom"`) -- distinct from the
+        # *liberty* (device) corner `deck_name` above already encodes, so
+        # a caller sweeping both axes sees both values independently.
         "interconnect_corner": interconnect_corner,
         **top_metrics,
         "stages": stages,
@@ -1786,7 +1781,7 @@ def _run_single_corner(
         # could not resolve pin geometry for (no layer map, an undeclared
         # LEF macro/pin, a pin centre not covered by drawn conductor) --
         # those keep the pre-#1488 fallback rather than failing the merge.
-        # `null` unless `stage_reached` is `"route"`, mirroring `layer_map`.
+        # `null` unless `stage_reached` is `"route"`.
         "def_net_names": def_net_names_info,
         # Additive field (issue #2139): what the DEF->GDS merge's own
         # post-route minimum-*area* repair pass did, so a caller can tell a
@@ -1794,9 +1789,9 @@ def _run_single_corner(
         # from one that merely was not measured. `status` is `"clean"`,
         # `"violations"` (see `unrepaired`) or `"skipped"` (with a
         # `reason`); `patches`/`repaired`/`remaining` count what was drawn
-        # and what is left; `rules[]` carries the per-rule before/after
-        # detail. A `"skipped"` pass is deliberately NOT reported as clean
-        # -- an unmeasured layer and a measured-and-clean one are different
+        # and what is left; `rules[]` the per-rule before/after detail. A
+        # `"skipped"` pass is deliberately NOT reported as clean -- an
+        # unmeasured layer and a measured-and-clean one are different
         # answers. `null` unless `stage_reached` is `"route"`, mirroring
         # `layer_map`.
         "min_area_repair": min_area_repair_info,
@@ -1807,6 +1802,11 @@ def _run_single_corner(
         # `stage_reached` is `"route"`.
         "via_pad_trim": merge_info.get("via_pad_trim"),
         "power_stack_repair": merge_info.get("power_stack_repair"),
+        # Additive field (issue #7817): the DEF->GDS merge's ASAP7-only
+        # post-route M4 track-grid repair (the M4.AUX.1/AUX.2/W.3 families
+        # no `request.*` field reaches); see docs/cli/place-and-route.md.
+        # `null` unless `stage_reached` is `"route"`.
+        "m4_grid_repair": merge_info.get("m4_grid_repair"),
         # Derived-map pin coverage on conductor; null before route (#5700).
         # Status/layers/reason are documented in docs/cli/place-and-route.md.
         "pin_conductor": merge_info.get("pin_conductor"),

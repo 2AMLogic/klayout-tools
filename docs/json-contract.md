@@ -1346,8 +1346,8 @@ stability statement, concrete precedents, and drift-detection guidance, and
   recorded next to `klayout_version` so the wheel's version is not lost
   without presenting it as the engine that ran the deck. Absent for every
   other engine, so their provenance is byte-identical to before.
-- `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
-  below) — `true` when this run's `klayout_version` differs from
+- `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs`/`klt extract`
+  — see below) — `true` when this run's `klayout_version` differs from
   `klayout_version_expected` (`klt version --format json`, next section):
   the version this `klayout-tools` build/commit was tested against, else
   `false`. Always a plain boolean, never `null`: an unresolvable expected
@@ -1356,7 +1356,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   result also prints a one-line warning to stderr, so the drift is visible
   even without inspecting the JSON — for `--engine klayout` runs the warning
   names the standalone application and its remedy, not `--with klayout==`
-  (issue #5660: pinning the wheel does not pin that engine). Under
+  (issue #5660: pinning the wheel does not pin that engine); for `klt
+  extract` (default in-process engine, issue #7824) the consequence the
+  warning names is the extracted netlist's own device parameters and
+  parasitic R/C, not DRC/LVS report counts alone. Under
   `--format json` that warning follows the "Error shape" delivery rule
   above (issue #6935): still on stderr ahead of a report — any report,
   including a violations report's exit `3` — but dropped when the
@@ -1756,7 +1759,8 @@ including why a hard pin was rejected).
   commit's test suite ran against). `null` when unresolvable — a build made
   before this field existed, or a checkout with no reachable `uv.lock`.
 
-A caller committing `klt drc`/`klt lvs` output as evidence does not need to
+A caller committing `klt drc`/`klt lvs`/`klt extract` output as evidence
+does not need to
 call `klt version` separately to detect drift: `provenance.klayout_version_mismatch`
 (previous section) carries the same comparison inline on every report, with
 a stderr warning when it is `true`. The warning prints the install command

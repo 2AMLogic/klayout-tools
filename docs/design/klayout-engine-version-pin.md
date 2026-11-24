@@ -152,16 +152,25 @@ history table. `klt version --format json`'s `klayout_version_expected`
 keeps the live-probe fallback, since it is a single explicit command, not a
 per-report hot path.
 
-## Why only `drc`/`lvs`, not every `build_provenance` caller
+## Why only `drc`/`lvs`/`extract`, not every `build_provenance` caller
 
 `klayout_version_mismatch` is opt-in
 (`build_provenance(include_klayout_version_mismatch=True)`, default `False`)
-and is passed only by `klt drc` and `klt lvs`. Those are the two verbs whose
+and is passed by `klt drc` and `klt lvs`. Those are the two verbs whose
 output is most commonly committed as a byte-comparable regression baseline
 and re-verified later (`docs/json-contract.md`'s `--check`/`--rerun`
 section) — extending the same field to every provenance-carrying verb
-(`extract`, `sim`, `size`, `precheck`, …) is a reasonable future extension
+(`sim`, `size`, `precheck`, …) is a reasonable future extension
 but is out of this issue's scope; this decision does not preclude it.
+
+`klt extract`'s default in-process engine joined them in issue #7824: an
+extracted netlist's measured device parameters and parasitic R/C are
+first-class KLayout engine outputs (not bookkeeping around a verdict), so
+a pinned `klayout-tools==X.Y.Z` used as an evidence standard has the same
+provenance hole DRC/LVS had — the pin does not cover the engine, and the
+drift is otherwise only discovered by byte-diffing committed reports. The
+`--engine klayout-runset` path stays out: its engine is the standalone
+`klayout` application, which `--with klayout==` does not pin.
 
 ## Interaction with `--check`/`--rerun` (`_report_verify.py`)
 
