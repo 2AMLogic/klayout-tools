@@ -4290,12 +4290,20 @@ for which skipped rules make a run partial and which do not.
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
 
-`layers_checked` and `layers_in_stream_without_rules` are computed from the
-input stream's own layer table (reusing the same per-layer enumeration
-`klt layers` uses — see [`klt layers`](layers.md)), not from shape counts: a
-layer present in the stream's layer table with zero shapes still counts as
-"in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
-semantics.
+`layers_checked` and `layers_in_stream_without_rules` share one per-layer
+presence test, and what counts as "in the stream" depends on `--top`:
+
+- **`--top` omitted:** presence is the input stream's own layer table, not
+  shape counts. A layer-table entry with zero shapes still counts as "in the
+  stream", matching `Layout.find_layer(...)`'s own semantics.
+- **`--top <cell>` (curated engine):** presence is shapes in the selected
+  hierarchy. A layer counts only if it carries at least one shape (text labels
+  included) in that cell or any of its descendants. A layer that is in the
+  stream's layer table but empty across that hierarchy, such as one drawn only
+  in a sibling top cell, is absent from both fields. Each rule uses the
+  selected hierarchy to determine applicability. For example, a contact in
+  that hierarchy can violate its enclosure rule when the enclosing metal
+  appears only in a sibling cell.
 
 #### `coverage.skipped` vs. `coverage.inapplicable`
 
