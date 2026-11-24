@@ -314,11 +314,15 @@ from .signoff_runset import (
 from .signoff_spec_row_table import _members_rows_declared, build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
-    sta_annotation_refusal,
     sta_citation_detail,
-    sta_constraint_refusal,
     sta_exception_disclosure,
     sta_item_exception_detail,
+)
+from .signoff_sta_geometry import (
+    STA_BOOL_OPTIONS,
+    sta_opt_in_refusal,
+    sta_status_detail,
+    sta_status_ok,
 )
 
 # The store-pin companion resolution (issue #5963): a `klt yield` citation
@@ -2211,6 +2215,8 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
     `klt signoff` never widens a claim to corners the claimant did not run,
     and never narrows one to a nominal corner the claimant did run.
     """
+    if not sta_status_ok(envelope):  # #7711: a present non-"ok" status fails
+        return False
     corners = envelope.get("corners")
     if isinstance(corners, list):
         if not corners:
@@ -2607,12 +2613,11 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
       it is surfaced informationally in :func:`_detail` instead.
-    - ``sta`` (issue #1959) carries no pass/fail ``status`` of its own at
-      all (``docs/cli/sta.md``: ``status`` is always ``"ok"``), so this
-      derives a verdict from the reported timing -- see
+    - ``sta`` (issue #1959) has no pass/fail ``status`` of its own
+      (``docs/cli/sta.md``: always ``"ok"``; a present non-``"ok"`` one fails,
+      #7711), so this derives a verdict from the reported timing -- see
       :func:`_sta_timing_passed`: every reported corner must be
-      ``timing_status == "constrained"`` with non-negative setup and hold
-      slack.
+      ``timing_status == "constrained"`` with non-negative setup and hold slack.
     - ``functional-verification`` passes on ``status == "pass"`` with
       consistent per-test counts, at least one passing test and no failures
       (skips are allowed) -- see :func:`_functional_verification_passed`.
@@ -4257,8 +4262,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     malformed (degrading this one item to ``invalid_evidence``) rather than
     silently reading as "off" -- an opt-in requirement must never fail open.
 
-    ``require_annotation_complete`` is issue #3258;
-    ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
+    The ``sta`` booleans (:data:`.signoff_sta_geometry.STA_BOOL_OPTIONS`; issues
+    #3258/#5234/#7711) are boolean-only; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
     ``coverage_disclosed`` (issue #5789) is validated lazily by
     :mod:`.signoff_coverage_disclosure`, so it is read only when the
@@ -4266,11 +4271,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     name the committed store manifest and optional member for a yield samples
     pin. Both must be strings when present, and the manifest path must be non-empty.
     """
-    require_annotation = raw.get("require_annotation_complete", False)
-    if not isinstance(require_annotation, bool):
-        return None
-    require_constraints = raw.get("require_complete_constraints", False)
-    if not isinstance(require_constraints, bool):
+    flags = {key: raw.get(key, False) for key in STA_BOOL_OPTIONS}
+    if not all(isinstance(value, bool) for value in flags.values()):
         return None
     cell_exceptions = foundry_cell.normalize_exceptions(
         raw.get("foundry_cell_exceptions")
@@ -4283,8 +4285,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         if key in raw and not isinstance(raw[key], str):
             return None
     return {
-        "require_annotation_complete": require_annotation,
-        "require_complete_constraints": require_constraints,
+        **flags,
         "foundry_cell_exceptions": cell_exceptions,
         "coverage_disclosed": raw.get("coverage_disclosed"),
         "artifact_manifest": raw.get("artifact_manifest"),
@@ -4800,9 +4801,7 @@ def _grade_evidence(
         )
         return unmet
 
-    sta_refusal = sta_annotation_refusal(
-        check_kind, spec, envelope
-    ) or sta_constraint_refusal(check_kind, spec, envelope)
+    sta_refusal = sta_opt_in_refusal(check_kind, spec, envelope)
     if sta_refusal is not None:
         return sta_refusal
 
@@ -4895,6 +4894,7 @@ def _grade_check_outcome(
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
+    failure_detail.update(sta_status_detail(kind, envelope))
     exceptions = spec.get("foundry_cell_exceptions")
     if exceptions and _foundry_cell_exception_eligible(kind, envelope):
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
