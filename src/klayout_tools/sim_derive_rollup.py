@@ -335,8 +335,13 @@ def _group_coverage(
         inapplicable.append(
             {"id": observation + "/limits", "reason": "characterization_without_limits"}
         )
-        if group["status"] == "error":
-            skipped.append({"id": observation, "reason": "unavailable_measurement"})
+        if group["value"] is None:
+            reason = (
+                REASON_SOURCE_INCONCLUSIVE
+                if group["reason"] == REASON_SOURCE_INCONCLUSIVE
+                else "unavailable_measurement"
+            )
+            skipped.append({"id": observation, "reason": reason})
         else:
             checked.append(observation)
     for key, value in limits.items():
