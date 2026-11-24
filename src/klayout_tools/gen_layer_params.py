@@ -22,9 +22,16 @@ from __future__ import annotations
 from typing import Any
 
 from .gen_base import WELL_ENCLOSURE_MARGIN_UM, GenError
+from .gen_diff_pair_describe import (  # noqa: F401 -- re-exported
+    # `_diff_pair_layer_params` moved to `gen_diff_pair_describe.py`
+    # (file-size ratchet); re-exported here so `gen`'s
+    # `from .gen_layer_params import _diff_pair_layer_params` keeps working
+    # (the `gen_snap.py` pattern).
+    _diff_pair_layer_params,
+)
 
 # Data tables live in gen_layer_tables.py (#3722); re-exported here.
-from .gen_layer_mv_ring import apply_hv_mark_margins, apply_mos_array_mv_ring_margins
+from .gen_layer_mv_ring import apply_mos_array_mv_ring_margins
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
@@ -2485,18 +2492,6 @@ def _ring_layer_params(
             _ring_implant_margin_um(family) if ring_implant is not None else 0.0
         ),
     }
-
-
-def _diff_pair_layer_params(
-    pdk_info: dict[str, Any], params: dict[str, Any]
-) -> dict[str, Any]:
-    """``diff_pair`` composes a unit-device array and an optional guard ring
-    -- union of both their hidden layer params."""
-    layer_params = _device_layer_params(pdk_info, params)
-    layer_params.update(
-        _ring_layer_params(pdk_info, params, generator_name="diff_pair")
-    )
-    return apply_hv_mark_margins(layer_params, _pdk_family(pdk_info["variant"]), params)
 
 
 def _mos_array_layer_params(

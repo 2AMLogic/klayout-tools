@@ -3,7 +3,8 @@
 ``worst_hold_path`` records reduced from it (issue #2740), the unreduced
 ``worst_paths_by_group`` list (issue #5424), and the per-port ``port_paths``
 block and records a ``constraints.report_ports`` request emits (issue
-#3042).
+#3042). The bounded ``violating_endpoints`` list (issue #7418) lives in
+its own :mod:`klayout_tools.post_route_sta_violating_endpoints`.
 
 Split out of :mod:`klayout_tools.post_route_sta` to keep that module under its
 file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`

@@ -1,6 +1,8 @@
 """Connectivity of route trees on separate pads of one abstracted pin (#6742),
-and the landing evidence a mixed named/anonymous join requires (#7561)."""
+the landing evidence a mixed named/anonymous join requires (#7561), and the
+end-to-end extract-then-LVS regression for the fresh-extraction short (#7556)."""
 
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import Mock
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import lvs
 from klayout_tools.extract import run_extract
 from klayout_tools.extract_abstract_pin_join import AbstractPinJoins
 
@@ -343,3 +346,72 @@ def test_isolated_lef_pad_control_leaves_the_sink_on_its_own_net(tmp_path):
     warnings = report["warnings"]
     assert not any("joined routed pads" in entry for entry in warnings)
     assert not any("kept separate" in entry for entry in warnings)
+
+
+#: The independent two-net reference for the #7556 public reproduction: the
+#: first route reaches the driver and one sink, the second sink is isolated.
+#: Hand-written from the routed design's connectivity, never from the
+#: extractor's output -- a fresh abstract-cell extraction must reproduce it.
+_TWO_NET_REFERENCE = """\
+.subckt PAD_DRIVER VNB
+.ends PAD_DRIVER
+.subckt PAD_SINK S
+.ends PAD_SINK
+.subckt TOP VGND
+XPAD_DRIVER_0 VGND PAD_DRIVER
+XPAD_SINK_0 VGND PAD_SINK
+XPAD_SINK_1 SIGNAL PAD_SINK
+.ends TOP
+"""
+
+
+def _lvs_extracted_against_two_net_reference(tmp_path, netlist_name):
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {"netlist": netlist_name, "top": "TOP"},
+                "reference": {"netlist": "reference.spice", "top": "TOP"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return lvs.run_lvs(str(request))
+
+
+def test_fresh_extraction_matches_the_independent_two_net_reference(tmp_path):
+    """The #7556 two-command regression: ``klt extract --abstract-cells``
+    then ``klt lvs`` on the unsupported-landing geometry.
+
+    Before #7573 (merged ``900a15358``) the second sink's route joined the
+    VGND rail, so the as-extracted verdict depended on which netlist was
+    fed to the comparator: nine errors (six topology, three unmatched
+    nets). The extractor must now leave it on its own net, and the
+    comparison against the hand-written reference must come back clean.
+    """
+    report = _extract_lef_pads(tmp_path, isolated_pad=False)
+    (tmp_path / "reference.spice").write_text(_TWO_NET_REFERENCE, encoding="utf-8")
+    matched = _lvs_extracted_against_two_net_reference(
+        tmp_path, Path(report["netlist_path"]).name
+    )
+    assert matched["status"] == "match"
+    assert matched["error_count"] == 0
+    assert not matched["category_error_counts"]
+
+
+def test_the_shorted_pre_fix_shape_still_fails_the_two_net_reference(tmp_path):
+    """The comparator leg of #7556: rewriting only the second sink's net to
+    VGND -- the netlist a pre-#7573 extraction produced -- must fail, so the
+    regression above cannot pass through a comparator that stopped seeing
+    the short."""
+    report = _extract_lef_pads(tmp_path, isolated_pad=False)
+    text = Path(report["netlist_path"]).read_text()
+    isolated = _x_line_net(text, "PAD_SINK_1")
+    assert isolated != "VGND"
+    (tmp_path / "reference.spice").write_text(_TWO_NET_REFERENCE, encoding="utf-8")
+    (tmp_path / "shorted.spice").write_text(
+        text.replace(f"XPAD_SINK_1 {isolated} ", "XPAD_SINK_1 VGND "), encoding="utf-8"
+    )
+    mismatched = _lvs_extracted_against_two_net_reference(tmp_path, "shorted.spice")
+    assert mismatched["status"] == "mismatch"
+    assert mismatched["category_error_counts"] == {"topology": 6, "net.unmatched": 3}

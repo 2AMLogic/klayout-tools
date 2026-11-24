@@ -6,9 +6,10 @@ per-file size ratchet.
 
 from __future__ import annotations
 
-import sys
 import threading
 from typing import Any
+
+from . import _warn
 
 SERIAL_BOUND_WARNED = threading.Event()
 
@@ -23,7 +24,7 @@ def warn_over_serial_bound_once(
     if SERIAL_BOUND_WARNED.is_set():
         return
     SERIAL_BOUND_WARNED.set()
-    print(
+    _warn.warn(
         f"klt sim: warning: request.batch.max_units_per_job {requested} "
         f"leaves jobs of {largest} units, over the {per_job}-unit "
         f"serial upper bound for the fleet's "
@@ -31,6 +32,5 @@ def warn_over_serial_bound_once(
         "options.timeout_s x units, not a runtime estimate; lower "
         "options.timeout_s to tighten it); a job still running at the "
         "ceiling is killed and every unit is reported batch_job_timeout "
-        "(shown once per run)",
-        file=sys.stderr,
+        "(shown once per run)"
     )
