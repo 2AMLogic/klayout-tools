@@ -225,9 +225,9 @@ def requires_outcome(
     member carries one or every one is satisfied."""
     outcome = evaluate_requires(graded, met_envelopes)
     if outcome.problem is not None:
-        detail = {"problem": outcome.problem}
-        return "unmet", _REASON_INVALID_EVIDENCE, None, detail, extra
+        invalid: dict[str, Any] = {"problem": outcome.problem}
+        return "unmet", _REASON_INVALID_EVIDENCE, None, invalid, extra
     if outcome.unmet:
-        detail = {**row_info, "requires_unmet": outcome.unmet}
-        return "unmet", _REASON_PARTIAL_COVERAGE, None, detail, extra
+        partial = {**row_info, "requires_unmet": outcome.unmet}
+        return "unmet", _REASON_PARTIAL_COVERAGE, None, partial, extra
     return None
