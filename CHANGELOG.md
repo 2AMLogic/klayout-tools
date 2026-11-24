@@ -14,21 +14,6 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt signoff` item 5: an evidence member can assert the run scope it must
-  cover with `requires`** (issue #7807, 2026-11-24, additive — `klt signoff`
-  `schema_version` unchanged): a citation's `content_hash` pins the request
-  netlist, which is byte-identical across a 2-coordinate probe and the
-  complete matrix minted from the same request (or a tighter-tolerance
-  companion), so a reduced-coverage run graded `met` exactly like the
-  complete one. A member may now carry `requires.grid` (the `joint_grid`
-  axis shape, read by the same code) and/or `requires.ngspice_options` (a
-  subset check against `environment.ngspice_options`; an absent echo is
-  unmet). A shortfall is `unmet` / `partial_coverage` with
-  `detail.requires_unmet` (`member`, `missing_points`, and `ngspice_options`
-  `{required, observed}`); a malformed `requires`, `requires` on another
-  item, or a Monte Carlo member under `requires.grid` is `invalid_evidence`.
-  A member without `requires` — and `joint_grid` and item 7's `corner_box` —
-  grade exactly as before. See `docs/cli/signoff.md`.
 - **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
   revision token case-insensitively** (issue #6362, 2026-11-24, additive —
   `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already
