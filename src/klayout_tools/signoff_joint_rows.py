@@ -220,17 +220,17 @@ def has_mc_corners(envelope: Mapping[str, Any] | None) -> bool:
     )
 
 
-def member_shortfall(
-    envelope: Mapping[str, Any] | None,
-    joint: Mapping[str, Any],
-    row_id: str,
-) -> tuple[list[str], bool]:
-    """``(missing_point_labels, probe_missing)`` for one member's envelope
-    against the declared grid and the row's condition probe. An unavailable
-    envelope misses every point and the probe: nothing else proves them."""
-    points = required_grid_points(joint)
+def missing_grid_points(
+    envelope: Mapping[str, Any] | None, grid: Mapping[str, Any]
+) -> list[str]:
+    """Labels (the envelope's own ``corner_id`` PVT spelling) of the ``grid``
+    points ``envelope`` does not prove: no corner sits at the point, or any
+    corner there is not ``pass``. An unavailable envelope misses every point.
+    Shared by the ``joint_grid`` row (:func:`member_shortfall`) and the
+    per-citation ``requires.grid`` assertion (issue #7807)."""
+    points = required_grid_points(grid)
     if not isinstance(envelope, dict):
-        return [_point_label(*point) for point in points], True
+        return [_point_label(*point) for point in points]
     corners = _envelope_corners(envelope)
     missing: list[str] = []
     for point in points:
@@ -239,6 +239,20 @@ def member_shortfall(
         # *every* corner sitting on it, not at any one of them.
         if not at_point or not all(c.get("status") == "pass" for c in at_point):
             missing.append(_point_label(*point))
+    return missing
+
+
+def member_shortfall(
+    envelope: Mapping[str, Any] | None,
+    joint: Mapping[str, Any],
+    row_id: str,
+) -> tuple[list[str], bool]:
+    """``(missing_point_labels, probe_missing)`` for one member's envelope
+    against the declared grid and the row's condition probe. An unavailable
+    envelope misses every point and the probe: nothing else proves them."""
+    missing = missing_grid_points(envelope, joint)
+    if not isinstance(envelope, dict):
+        return missing, True
     _has_tags, covering = envelope_tagged_rows(envelope)
     return missing, row_id not in covering
 
