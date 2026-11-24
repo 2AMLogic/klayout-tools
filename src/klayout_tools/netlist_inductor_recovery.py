@@ -21,7 +21,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from ._spice_text import strip_spice_inline_comment
 from .netlist_class_registry import shared_device_class
+from .netlist_normalize_scan import recovery_subckt_names
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -40,6 +42,25 @@ def inductor_classes_for_deck(deck: ExtractionDeck | None) -> dict[str, str]:
     if deck is None:
         return {}
     return {inductor.name.upper(): inductor.name for inductor in deck.inductors}
+
+
+def bare_inductor_x_cards(
+    cards: list[str], text: str, path: str, classes: Mapping[str, str]
+) -> list[str]:
+    """Find undefined three-net X calls matching the deck's parameterless windings."""
+    missing = classes.keys() - recovery_subckt_names(text, path, set(classes))
+    if not missing:
+        return []
+    found = []
+    for line in cards:
+        tokens = strip_spice_inline_comment(line).split()
+        if tokens and tokens[-1].upper() == "PARAMS:":
+            tokens.pop()
+        if len(tokens) == 5 and tokens[0][0].upper() == "X":
+            model = tokens[4].upper()
+            if model in missing:
+                found.append(f"{tokens[0]} ({classes[model]})")
+    return found
 
 
 def recover_inductor_x_card(

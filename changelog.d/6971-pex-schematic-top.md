@@ -1,0 +1,1 @@
+- PEX testbench runs can associate a differently named schematic subcircuit with the layout top using `--schematic-top`, including when flattening a hierarchical schematic (#6971).

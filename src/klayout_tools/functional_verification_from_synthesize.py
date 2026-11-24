@@ -196,7 +196,7 @@ def resolve_sources_with_synthesize(
     models, *caller sources]`` -- netlist and models both precede the
     testbench's own sources, and the models' own order is the resolver's
     dependency order (``primitives.v`` before ``<lib>.v``). A model the
-    caller already lists in ``sources`` verbatim is not prepended twice.
+    caller lists in ``sources`` through a symlink also compiles once.
 
     ``pdk_input`` is the merged :class:`~.functional_verification_pdk.PdkInput`
     or ``None`` (no pdk input: byte-identical to before the issue)."""
@@ -222,7 +222,10 @@ def resolve_sources_with_synthesize(
     # resolver's dependency order -- the caller's copy moves to the model
     # block rather than staying put (which would leave ``<lib>.v`` compiling
     # before the ``primitives.v`` UDPs it instantiates).
-    sources = [source for source in sources if source not in models]
+    model_paths = {os.path.realpath(model) for model in models}
+    sources = [
+        source for source in sources if os.path.realpath(source) not in model_paths
+    ]
     if synth is None:
         return [*models, *sources], None
     return [synth[0], *models, *sources], synth[1]

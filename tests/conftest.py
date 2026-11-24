@@ -25,6 +25,25 @@ from klayout_tools import _paths as paths_module
 from klayout_tools import _version_scheme, build_identity, sim_batch_image
 
 
+@pytest.fixture(scope="session")
+def built_wheel(tmp_path_factory):
+    """Build the distribution once for tests that exercise its installed layout."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("needs the `uv` CLI to build a wheel")
+    out = tmp_path_factory.mktemp("dist")
+    build = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(out)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert build.returncode == 0, f"uv build failed:\n{build.stdout}\n{build.stderr}"
+    (wheel,) = out.glob("*.whl")
+    return wheel
+
+
 @pytest.fixture
 def real_build_identity_git(monkeypatch):
     """Keep source-build Git probes independent of global engine-run stubs.

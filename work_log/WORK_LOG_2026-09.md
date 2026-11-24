@@ -2,6 +2,62 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-24
+
+- **PR #2455**: sim_batch: run one ngspice per physical core on the batch job instance
+- **PR #2454**: sim: $KLT_SIM_BACKEND host default, so fleet workers send SPICE grids to Spot (2am#1004)
+- **PR #2450**: fix(gen): snap guard-ring placement offsets to the dbu grid
+- **PR #2448**: feat(pnr): support request.power on sg13g2_stdcell by skipping only tapcell
+- **PR #2446**: feat(extract): measure MoM-capacitor mmin/mmax from drawn finger geometry
+- **PR #2440**: feat(lvs): diagnose a reference that mixes deck-option-selected device classes
+- **PR #2439**: docs: pin MoM-cap card's W/L-only parameter set as a cited limitation
+- **PR #2438**: fix(equiv,sim): resolve yosys/ngspice/iverilog/vvp binaries instead of hardcoding names
+- **PR #2436**: fix(gen): per-flavour res_array width floor for sky130's narrow poly-resistor primitives
+- **PR #2434**: fix(extract): restore an abstracted macro's own well tie for body pins
+- **PR #2433**: fix(extract): capture the capacitor top-plate-via exclusion before --abstract-cells erasure
+- **PR #2432**: fix(signoff): let a generic envelope opt in to input_verified via provenance.input.path
+- **PR #2431**: fix(signoff): match item 11 supply pairing by net_correspondence alias membership
+- **PR #2430**: feat(pex): report a model_mismatch diagnostic for device model divergence
+- **PR #2429**: feat(synthesize): request-level standard-cell exclusion (constraints.dont_use)
+- **PR #2428**: feat(provenance): record the fully resolved deck-option set, not just overrides
+- **PR #2426**: feat(erc): disclose drawn layers the supply spec declares nowhere
+- **PR #2425**: fix(lvs): case-fold circuit/device names in capacitor recovery map key
+- **PR #2424**: fix(lvs): stop combine_devices adopting a dup() copy's wrong parameters
+- **PR #2422**: fix(lvs): resolve the netgen binary instead of hardcoding the name
+- **PR #2420**: feat(gen-compose): add explicit-placement bbox targets as an origins_um alternative
+- **PR #2390**: fix(drc): enforce the max half of gf180mcu's CO.1/Vn.1 fixed-size cut rules (#2370)
+- **PR #2385**: feat(place-and-route): name the library-only limit alongside existing design-rule violation counts
+- **PR #2384**: fix(decks): check gf180mcu Nplus/Pplus implant width, space, overlap
+- **PR #2383**: fix(erc): grade a ties[] entry whose well_layer has no geometry as skipped, not clean
+- **PR #2214**: .github/workflows: Migrate workflows to Blacksmith runners
+- **PR #1829**: build(deps): bump eecircuit-engine from 1.7.0 to 1.8.0 in /site
+- **Issue #2456** (closed): signoff report gained fields without a schema_version bump — consumers that byte-compare a committed report can't tell a renderer change from a verdict change
+- **Issue #2442** (closed): gf180mcu: off-grid guard-ring padding trips contact.width.1 max-width bound
+- **Issue #2441** (closed): klt place-and-route: request.power (PDN) unsupported on sg13g2_stdcell — no tap/endcap cell masters
+- **Issue #2435** (closed): extract: recover MoM-capacitor mmin/mmax (and cap_cmomi feed) from drawn finger geometry
+- **Issue #2423** (closed): Friction: klt equiv (yosys) and klt sim (ngspice/iverilog/vvp) hardcode their engine binary names, with no option or env override
+- **Issue #2421** (closed): Friction: klt lvs gives no diagnostic when a reference netlist mixes device classes that a single deck option makes mutually exclusive
+- **Issue #2410** (closed): gen-compose: placement.strategy "explicit" has no bbox-target alternative to raw origins_um
+- **Issue #2408** (closed): extract --pdk: unbound MoM-capacitor cards omit mmin/mmax/feed/subblock/mm_ok PDK subckt parameters
+- **Issue #2407** (closed): res_array: width_um floor of 0.42 excludes PDK-native narrower poly-resistor variants (sky130 res_high_po 0.35 um)
+- **Issue #2406** (closed): CI wall-clock budget: per-job Tests (Python 3.1x) breaches recurring across unrelated PRs
+- **Issue #2405** (closed): klt signoff item 11's LVS supply pairing can never match klt lvs's own alias-joined net_correspondence rows
+- **Issue #2403** (closed): signoff: a generic envelope's freshness can never be anchored to an artifact, so input_verified is always null for item 8
+- **Issue #2402** (closed): Friction: klt pex does not flag a MOS model-flavour divergence between the extracted and reference netlists, so an unrelated-device delta reports as gradeable
+- **Issue #2398** (closed): extract: --abstract-cells erases a macro's well tap, so a well-labelled body pin binds to an isolated island the parent's routing can't reach
+- **Issue #2397** (closed): lvs: #1921's capacitor class recovery never fires for a lowercase .SUBCKT name (reader case-folds circuit names, recovery map does not)
+- **Issue #2396** (closed): extract: --abstract-cells erases a MiM capacitor's top plate but keeps its top-plate via, so every cap in the black box shorts top plate to bottom plate
+- **Issue #2394** (closed): Friction: --deck-option values are absent from provenance — two runs that extract different device classes and parameter values are provenance-identical
+- **Issue #2389** (closed): klt erc: the envelope never names a drawn conductor layer the spec's stackup omits, so a committed supply spec silently narrows as a layout is re-routed
+- **Issue #2386** (closed): klt extract: written SPICE deck drops the device class from C cards while M/R cards keep theirs
+- **Issue #2382** (closed): klt synthesize: no request-level standard-cell exclusion (`dont_use`), and the needed exclusion is corner-dependent so a hardcoded per-library table cannot cover it
+- **Issue #2377** (closed): klt erc: a ties[] entry whose well_layer has no geometry is graded as checked work, not as a skip
+- **Issue #2374** (closed): lvs: options.combine_devices silently mis-accumulates a combined device's parameters, nondeterministically, when combine runs against a Netlist.dup() copy (#1185 retry path)
+- **Issue #2373** (closed): Friction: klt lvs netgen engine hardcodes the binary name 'netgen', unreachable on Debian/Ubuntu where the package installs 'netgen-lvs'
+- **Issue #2370** (closed): gf180mcu DRC deck: CO.1/Vn.1 contact/via size checked as minimum-only — width_check needs a max-bound mode
+- **Issue #2369** (closed): gf180mcu DRC deck: add missing Nplus/Pplus implant width/space/gate-overlap rules (NP.1/2/3a/5a/5b, PP.1/2/3a/5a/5b)
+- **Issue #2357** (closed): place-and-route: per-corner max_transition/max_capacitance violation counts do not say which limit they were checked against
+
 ### 2026-09-23
 
 - **PR #2418**: feat: grade erc net island count against a declared nets[].islands
