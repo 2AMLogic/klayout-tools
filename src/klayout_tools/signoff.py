@@ -403,7 +403,6 @@ from .signoff_unmet_reasons import (
     _REASON_STALE_EVIDENCE,
     _REASON_TIER_NOT_SUPPORTED,
     _REASON_UNANCHORED_EVIDENCE,
-    _REASON_UNGRADEABLE_BY_BUILD as _REASON_UNGRADEABLE_BY_BUILD,
     _REASON_UNREADABLE_EVIDENCE,
     _REASON_UNRECOGNIZED_ENVELOPE,
     _REASON_UNVERIFIABLE_PROVENANCE,
@@ -412,6 +411,9 @@ from .signoff_unmet_reasons import (
 )
 from .signoff_unmet_reasons import (
     _REASON_EVIDENCE_NOT_KLT_NATIVE as _REASON_EVIDENCE_NOT_KLT_NATIVE,
+)
+from .signoff_unmet_reasons import (
+    _REASON_UNGRADEABLE_BY_BUILD as _REASON_UNGRADEABLE_BY_BUILD,
 )
 from .signoff_unmet_reasons import (
     _REASON_WRONG_ITEM as _REASON_WRONG_ITEM,
