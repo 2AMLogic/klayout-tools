@@ -15,28 +15,27 @@ none of them draws on it.
 from __future__ import annotations
 
 import itertools
-import math
 import re
 from typing import Any
 
 from . import sim_analysis_overrides as _sao
 from . import sim_echo_messages, sim_supply_waveform
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .sim_corner_axes import (
     _expand_corner_units,
-    _expand_options_axis,
     _is_excluded,
-    _normalize_option_row,
     _parse_process_entry,
-    _validate_exclude_options,
-    _validate_exclude_params,
+    _validate_corner_option_name,
+    _validate_exclude_numeric_axis,
 )
 from .sim_corner_point import (
     CornerPoint,
     _bind_temperature_param,
-    _expand_param_axis,
-    _normalize_param_row,
+    _check_param_supply_columns,
+    _expand_numeric_axis,
+    _normalize_numeric_row,
     _temperature_param_name,
+    _validate_param_name,
 )
 from .sim_corner_variants import _parse_variants
 from .sim_echo_messages import zipped_length_message
@@ -125,8 +124,11 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
         # Issue #3035: validated here again, at the receiving worker, with
         # the same rules the caller applied (a wire payload is not trusted).
         params = (
-            _normalize_param_row(
-                raw_params, "request._explicit_points[].params", supply_v
+            _normalize_numeric_row(
+                raw_params,
+                "request._explicit_points[].params",
+                validate_name=_validate_param_name,
+                supply_v=supply_v,
             )
             if raw_params is not None
             else {}
@@ -148,7 +150,11 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
         )
         raw_options = entry.get("options")
         options = (
-            _normalize_option_row(raw_options, "request._explicit_points[].options")
+            _normalize_numeric_row(
+                raw_options,
+                "request._explicit_points[].options",
+                validate_name=_validate_corner_option_name,
+            )
             if raw_options is not None
             else {}
         )
@@ -174,6 +180,34 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
     return points
 
 
+def _refuse_duplicate_corner_id(
+    seen: dict[str, int], points: list[CornerPoint], point: CornerPoint
+) -> None:
+    """Record ``point``'s ``corner_id`` in ``seen``, refusing a point whose
+    ID a previous crossed point already claimed (issue #5870).
+
+    ``corners.units`` refuses duplicates the same way
+    (``_expand_corner_units``): colliding points would share one artifact
+    directory and one ``--resume`` checkpoint key, and one simulation would
+    be mis-attributed to every one of them. The lossless supply spelling
+    makes this unreachable for well-formed grids; it is the invariant
+    backstop that keeps a future lossy formatter from silently corrupting
+    a grid again.
+    """
+    corner_id = point.corner_id
+    if corner_id not in seen:
+        seen[corner_id] = len(points)
+        return
+    raise SimError(
+        f"corner point {len(points)} duplicates point "
+        f"{seen[corner_id]} (both resolve to corner_id "
+        f"'{corner_id}'): distinct declared points must "
+        "resolve to distinct corner_ids, or they would "
+        "share one artifact directory and one "
+        "simulation would be mis-attributed to each"
+    )
+
+
 def _expand_corners(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
@@ -196,6 +230,12 @@ def _expand_corners(
 
     ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
     explicit list of points executed exactly as given -- see `_expand_corner_units`.
+
+    Like ``corners.units``, duplicates are judged on ``corner_id``
+    (issue #5870): two crossed points that resolve to one ID are refused
+    rather than silently merged -- colliding points would otherwise share one
+    artifact directory and one checkpoint key, and one simulation would be
+    mis-attributed to every one of them.
     """
     sim_echo_messages.require_corners_object(corners_spec)
     if "units" in corners_spec:
@@ -228,15 +268,31 @@ def _expand_corners(
 
     # Issue #3035: the innermost axis. Its rows are validated before the
     # exclusion rules so a selector can be checked against the declared names.
-    param_rows = _expand_param_axis(corners_spec)
+    param_rows = _expand_numeric_axis(
+        corners_spec,
+        key="params",
+        noun="parameter",
+        validate_name=_validate_param_name,
+        check_columns=_check_param_supply_columns,
+    )
     temperature_param = _temperature_param_name(corners_spec)
     declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
-    _validate_exclude_params(exclude_spec, declared_params)
+    _validate_exclude_numeric_axis(
+        exclude_spec, declared_params, key="params", noun="parameter"
+    )
     # Issue #3125: the solver-option axis, innermost of all.
-    option_rows = _expand_options_axis(corners_spec)
-    _validate_exclude_options(exclude_spec, set(option_rows[0]))
+    option_rows = _expand_numeric_axis(
+        corners_spec,
+        key="options",
+        noun="solver option",
+        validate_name=_validate_corner_option_name,
+    )
+    _validate_exclude_numeric_axis(
+        exclude_spec, set(option_rows[0]), key="options", noun="option"
+    )
 
     points: list[CornerPoint] = []
+    seen: dict[str, int] = {}
     for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
             for variant_name, variant_sources in variants:
@@ -260,6 +316,7 @@ def _expand_corners(
                             supply_waveforms=supply_waveforms,
                         )
                         if not _is_excluded(point, exclude_spec):
+                            _refuse_duplicate_corner_id(seen, points, point)
                             points.append(point)
     return points
 
@@ -292,7 +349,7 @@ def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
                 f"{where} names node {lowered!r} more than once "
                 "(node names are case-insensitive)"
             )
-        if not is_number(volts) or not math.isfinite(volts):
+        if not is_finite_number(volts):
             raise SimError(f"{where}.{node} must be a finite number of volts")
         values[lowered] = float(volts)
     return dict(sorted(values.items()))

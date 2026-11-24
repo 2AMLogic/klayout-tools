@@ -61,11 +61,11 @@ from __future__ import annotations
 
 import bisect
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 
@@ -135,12 +135,7 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
         )
     sim_crossings._validate_signal(name, body.get("signal"))
     tol = body.get("tol_pct")
-    if (
-        isinstance(tol, bool)
-        or not isinstance(tol, (int, float))
-        or not math.isfinite(tol)
-        or tol < 0
-    ):
+    if not is_finite_number(tol) or tol < 0:
         raise SimError(
             f"measurement '{name}': settled.{key}.tol_pct is required and "
             f"must be a finite number >= 0, in percent (got {tol!r})"
@@ -407,39 +402,26 @@ def extract_corner_settleds(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["settled"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=(
-                f"measurement '{name}': its clock ({body['clock']!r}), mean "
-                f"signal ({body['mean']['signal']!r}) or peak signal "
-                f"({body['peak']['signal']!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch names"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=f"measurement '{name}': could not read its settled rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 4 or not points:
-        return SettledOutcome(
-            code="settled_vector_missing",
-            error=f"measurement '{name}': its vectors yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=4,
+        missing_error=(
+            f"measurement '{name}': its clock ({body['clock']!r}), mean "
+            f"signal ({body['mean']['signal']!r}) or peak signal "
+            f"({body['peak']['signal']!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch names"
+        ),
+        empty_error=(f"measurement '{name}': its vectors yielded no samples"),
+        rawfile_label="settled rawfile",
+    )
+    if columns is None:
+        return SettledOutcome(code="settled_vector_missing", error=error)
     outcome = compute_settled(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
-        [point[3] for point in points],
+        *columns,
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="settled"),

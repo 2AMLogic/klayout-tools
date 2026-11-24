@@ -3,8 +3,7 @@
 Option parsing, the KLayout-internal-error-tolerant ``combine_devices()``
 wrapper, the parameter-conservation/correction helpers, series-fold
 disclosure, and the netlist flatten/purge helpers. Split out of ``lvs.py``
-(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``); the
-names are re-imported there, so ``klayout_tools.lvs`` keeps exposing them.
+(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``).
 """
 
 from __future__ import annotations
@@ -15,6 +14,14 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._jsonnum import is_int
+from .lvs_base import (
+    CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED,
+    CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+    CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED,
+    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+    CATEGORY_TOPOLOGY_FLATTENED,
+    LvsError,
+)
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -114,8 +121,6 @@ def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
     more likely a mistake than an intent.
     """
 
-    from .lvs import LvsError
-
     value = options.get("combine_devices", False)
     if isinstance(value, bool):
         return value
@@ -159,8 +164,6 @@ def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
     retry budget the caller believes is in force but is not would defeat the
     whole point of exposing it.
     """
-
-    from .lvs import LvsError
 
     if "combine_devices_max_attempts" not in options:
         return _COMBINE_DEVICES_MAX_ATTEMPTS
@@ -221,8 +224,6 @@ def _parse_combine_devices_per_circuit(
     ``options.combine_devices`` (enforced by ``run_lvs`` itself, not here,
     so the error names both option paths together).
     """
-
-    from .lvs import LvsError
 
     if "combine_devices_per_circuit" not in options:
         return None
@@ -289,8 +290,6 @@ def _unmatched_combine_devices_per_circuit_warnings(
     """Build the ``combine_devices_per_circuit.unmatched`` warning entries
     for ``unmatched_patterns`` (issue #1552) -- see
     :func:`_resolve_combine_devices_per_circuit_targets`."""
-
-    from .lvs import CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED
 
     return [
         _mismatch(
@@ -363,8 +362,6 @@ def _combine_circuit_devices_safely(
     whole-netlist ``combine_devices`` path's own ``if not
     combine_incomplete:`` gating (see ``run_lvs``).
     """
-
-    from .lvs import CATEGORY_DEVICE_COMBINE_INCOMPLETE
 
     warnings: list[dict[str, Any]] = []
     combined_circuit_names: list[str] = []
@@ -440,8 +437,6 @@ def _validate_combine_device_classes(
     model), and restricting to it there is exactly the asymmetry a caller
     reaching for this option may be trying to express.
     """
-
-    from .lvs import LvsError
 
     known: dict[str, str] = {}
     for netlist in netlists.values():
@@ -855,8 +850,6 @@ def _combine_devices_safely(
     unchanged immediately (no retry), so an unrelated failure is never
     silently swallowed or masked as this issue's shape.
     """
-
-    from .lvs import CATEGORY_DEVICE_COMBINE_INCOMPLETE
 
     # Issue #2374: captured before attempt 0 mutates `netlist` in place, so
     # every *retry* below copies from the pristine pre-combine state rather
@@ -1283,8 +1276,6 @@ def _correct_combine_parameters(
 
     import klayout.db as kdb_module
 
-    from .lvs import CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
-
     rules = _combine_conservation_rules(kdb_module)
     expected = _combine_parameter_expectations(pre_combine_netlist, rules)
     survivors = _combine_group_survivors(netlist, rules, circuit_names)
@@ -1397,8 +1388,6 @@ def _series_fold_offset_absorbed_warnings(
     nothing).
     """
 
-    from .lvs import CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED
-
     offsets = {
         resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
         for resistor in deck.resistors
@@ -1510,7 +1499,6 @@ def _flatten_netlist_safely(
     layout side), in which case there is nothing to disclose.
     """
 
-    from .lvs import CATEGORY_TOPOLOGY_FLATTENED
     from .lvs_flatten import flatten_keeping
 
     circuits_before, circuits_after, kept_note = flatten_keeping(netlist, keep)

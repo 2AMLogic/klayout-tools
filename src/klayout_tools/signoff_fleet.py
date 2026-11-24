@@ -17,12 +17,13 @@ and ``signoff_fleet_check.py`` owns the ``--check`` drift comparison of a
 committed report against a fresh one (issue #2249).
 
 Everything this module needs back from ``signoff.py``
-(:class:`SignoffError`, :func:`build_tier_report`, the fleet-envelope
-schema version and build identity) is imported into the function that
-needs it -- deferred into each function body, not at module level,
-because ``signoff.py`` imports this module at its own top level (the
-same circular-import hazard ``signoff_power_delivery.py`` documents for
-its own back-references into ``signoff.py``).
+(:func:`build_tier_report`, the build identity) is imported into the
+function that needs it -- deferred into each function body, not at module
+level, because ``signoff.py`` imports this module at its own top level
+(the same circular-import hazard ``signoff_power_delivery.py`` documents
+for its own back-references into ``signoff.py``). The error contract, the
+fleet-envelope schema version and the JSON reader come from the
+:mod:`.signoff_base` leaf (issue #7371), imported at module level.
 """
 
 from __future__ import annotations
@@ -31,6 +32,11 @@ from pathlib import Path
 from typing import Any
 
 from .design_evidence_tiers import doc_source_label
+from .signoff_base import (
+    FLEET_REPORT_SCHEMA_VERSION,
+    SignoffError,
+    _read_json_source,
+)
 
 # The per-block blocker reduction and the ``--check`` drift comparison
 # live in the sibling modules below; both are re-imported here *by name*
@@ -122,6 +128,14 @@ def build_fleet_report(
                     "block": "sky130-bandgap",
                     "source": "manifests/sky130-bandgap.json",
                     "kind": "analog",
+                    # Issue #6972: present only when this block's manifest
+                    # declared one -- the upstream repository and pinned
+                    # commit its design sources were consumed at, echoed
+                    # verbatim from the block's tier report.
+                    "upstream_source": {
+                        "repository": "https://github.com/2AMLogic/example-blocks",
+                        "commit": "0123456789abcdef0123456789abcdef01234567",
+                    },
                     "tier": "T1",
                     "t1_item_count": 11,
                     # What this build's own doc would have rendered
@@ -255,17 +269,13 @@ def build_fleet_report(
     field. Also propagates :class:`SignoffError` /
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     from :func:`build_tier_report` for a structurally invalid per-block
-    manifest (e.g. a missing/invalid ``kind``) -- a malformed block is a
+    manifest (e.g. a missing/invalid ``kind``, or a malformed
+    ``upstream_source`` pin) -- a malformed block is a
     fleet-manifest authoring error, not a "no evidence yet" grading outcome,
     so it aborts the whole roll-up rather than rendering that one block as
     silently unmet.
     """
-    from .signoff import (
-        FLEET_REPORT_SCHEMA_VERSION,
-        SignoffError,
-        _build_identity,
-        build_tier_report,
-    )
+    from .signoff import _build_identity, build_tier_report
 
     if not isinstance(fleet, dict):
         raise SignoffError(
@@ -313,6 +323,18 @@ def build_fleet_report(
                 "block": block_name,
                 "source": source,
                 "kind": tier_report["kind"],
+                # Issue #6972: the block's declared upstream pin, echoed
+                # verbatim from its tier report -- present only when the
+                # block's manifest declared one. The row's own `source`
+                # above stays what it always was: the local manifest path
+                # (or `None` for an inline manifest) -- a locator for the
+                # *pin record*, while this is the locator for the *design
+                # sources the pin names*. Never graded.
+                **(
+                    {"upstream_source": tier_report["upstream_source"]}
+                    if tier_report.get("upstream_source")
+                    else {}
+                ),
                 "tier": tier_report["tier"],
                 "t1_item_count": tier_report["t1_item_count"],
                 # Issue #2202: carried here too, unlike per-item
@@ -324,6 +346,28 @@ def build_fleet_report(
                 **(
                     {"t1_not_applicable_count": tier_report["t1_not_applicable_count"]}
                     if tier_report.get("t1_not_applicable_count")
+                    else {}
+                ),
+                # Issue #5599: carried like `t1_not_applicable_count` above --
+                # omitted when zero, so a roll-up over manifests declaring no
+                # justified gap is byte-identical to the previous rendering.
+                **(
+                    {"t1_justified_gap_count": tier_report["t1_justified_gap_count"]}
+                    if tier_report.get("t1_justified_gap_count")
+                    else {}
+                ),
+                # Issue #6927: rows met by composition
+                # (`signoff_composition.py`), carried the same way -- omitted
+                # when zero, so a roll-up over manifests that compose nothing
+                # is byte-identical to the previous rendering.
+                **(
+                    {"t1_composed_count": tier_report["t1_composed_count"]}
+                    if tier_report.get("t1_composed_count")
+                    else {}
+                ),
+                **(
+                    {"findings": tier_report["findings"]}
+                    if tier_report.get("findings")
                     else {}
                 ),
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
@@ -356,8 +400,6 @@ def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, 
     from, or ``None`` for an inline manifest object. Raises
     :class:`SignoffError` if ``raw_entry`` is neither a string nor a JSON
     object, or a string entry cannot be read/parsed as JSON."""
-    from .signoff import SignoffError, _read_json_source
-
     if isinstance(raw_entry, dict):
         return None, raw_entry
     if isinstance(raw_entry, str):

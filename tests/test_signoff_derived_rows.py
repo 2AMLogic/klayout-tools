@@ -15,7 +15,10 @@ import json
 import pytest
 
 from klayout_tools.signoff import build_tier_report
-from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
+from klayout_tools.signoff_derived_rows import multi_row_info
+from test_signoff import (
+    STA_MULTI_CORNER_CLEAN_ENVELOPE,
+)
 
 _LIM = {"min": 1.0}
 
@@ -73,6 +76,26 @@ def _item5(evidence, spec_rows=None, **overrides) -> dict:
     if spec_rows is not None:
         manifest["spec_rows"] = {"5": spec_rows}
     return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+
+
+def test_passing_measurements_credit_only_rows_with_recognised_bounds(tmp_path):
+    limits = {
+        "typo": {"maximum": 1.0},
+        "null": {"min": None, "max": None},
+        "zero": {"max": 0},
+        "lower": {"min": 1.0, "extra": 3},
+    }
+    measurements = [_meas(row, row, limits=bounds) for row, bounds in limits.items()]
+    envelope = _write(tmp_path, "bounds.json", _tagged_sim(measurements))
+    item = _item5(
+        {"5": [{"file": envelope, "rows": list(limits)}]},
+        [{"id": row} for row in limits],
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["row_sources"] == {"zero": "derived", "lower": "derived"}
+    assert set(item["detail"]["uncovered_rows"]) == {"typo", "null"}
 
 
 def test_item5_require_derived_rows_fails_an_asserted_row(tmp_path):
@@ -336,3 +359,84 @@ def test_item5_asserted_rows_are_reported_before_missing_kinds(tmp_path):
     assert item["reason"] == "partial_coverage"
     assert item["detail"]["asserted_rows"] == ["tclk"]
     assert "missing_kinds" not in item["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Justified declared gaps (issue #5599): `multi_row_info` splits the declared
+# gap set into the free-text form (`declared_gaps`, shape unchanged) and the
+# justified object form (`justified_gaps`, new key, omitted when empty).
+# --------------------------------------------------------------------------- #
+
+
+def _justified_row(row_id="pvt_ss_125c") -> dict:
+    """A *normalized* `spec_rows` row (as `_read_spec_rows` stores it): the
+    string `gap` is None and the object form rides in `justified_gap`."""
+    return {
+        "id": row_id,
+        "gap": None,
+        "justified_gap": {
+            "reason": "no liberty file ships for this PVT point",
+            "rationale": {
+                "file": "gaps/pvt_ss_125c.md",
+                "content_hash": "sha256:" + "0" * 64,
+            },
+            "issue": "#5858",
+        },
+        "ratified": True,
+        "timing_margin": False,
+    }
+
+
+def _free_text_row(row_id, gap=None, ratified=True) -> dict:
+    return {
+        "id": row_id,
+        "gap": gap,
+        "justified_gap": None,
+        "ratified": ratified,
+        "timing_margin": False,
+    }
+
+
+def test_multi_row_info_splits_free_text_and_justified_gaps():
+    info = multi_row_info(
+        [],
+        [],
+        [
+            _free_text_row("tdec"),
+            _free_text_row("zin", gap="later"),
+            _justified_row(),
+        ],
+    )
+
+    assert info["declared_gaps"] == [{"id": "zin", "gap": "later"}]
+    assert info["justified_gaps"] == [
+        {
+            "id": "pvt_ss_125c",
+            "reason": "no liberty file ships for this PVT point",
+            "rationale": {
+                "file": "gaps/pvt_ss_125c.md",
+                "content_hash": "sha256:" + "0" * 64,
+            },
+            "issue": "#5858",
+        }
+    ]
+    # A justified gap is still a gap: it is never uncovered, never failed.
+    assert info["uncovered_rows"] == ["tdec"]
+    assert info["failed_rows"] == []
+
+
+def test_multi_row_info_omits_justified_gaps_when_only_free_text():
+    info = multi_row_info([], [], [_free_text_row("zin", gap="later")])
+
+    assert "justified_gaps" not in info
+
+
+def test_multi_row_info_justified_gap_without_issue_link_is_null():
+    row = _justified_row()
+    row["justified_gap"] = {
+        k: v for k, v in row["justified_gap"].items() if k != "issue"
+    }
+
+    info = multi_row_info([], [], [row])
+
+    assert info["justified_gaps"][0]["issue"] is None

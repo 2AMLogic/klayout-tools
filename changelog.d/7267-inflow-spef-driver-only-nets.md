@@ -1,0 +1,2 @@
+- **In-flow SPEF coverage excludes driver-only nets** (#7267, 2026-11-22).
+  The in-flow `klt place-and-route` `spef_sta` design-side SPEF coverage now excludes confirmed driver-only internal nets, the same definition standalone `klt sta` uses (shared as one fragment, so the two verbs' `annotation_complete` verdicts cannot drift); nets with sinks or connected top-level ports still count, as do nets whose connectivity could not be verified.

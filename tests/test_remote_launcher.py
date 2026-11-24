@@ -5,9 +5,8 @@ Every test here is a pure unit test: the injectable `aws_runner` callable
 (`RemoteLauncher(aws_runner=...)`) is always replaced with an in-memory fake
 that records calls and returns canned output, so **no test in this file ever
 invokes the real `aws` CLI, makes a network call, or could provision a real
-AWS resource** -- see CLAUDE.md's "tests that would actually launch real EC2
-instances must NOT run in CI/tests" instruction. `subprocess.run` itself is
-never reached by any test below.
+AWS resource** -- CLAUDE.md: "tests that would actually launch real EC2
+instances must NOT run in CI/tests". `subprocess.run` is never reached.
 """
 
 from __future__ import annotations
@@ -275,11 +274,9 @@ def test_resolve_ami_accepts_sg13g2_variant(tmp_path):
 def test_resolve_ami_sg13g2_names_region_when_no_published_ami(tmp_path):
     """Acceptance criterion 5 (#2573): once SG13G2 is registered in
     `SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES`, a region with no published SG13G2
-    manifest entry already gets the region-aware "no published AMI for
-    pdk=... region=..." message with no new error-handling code -- this is a
-    regression test for that claim, not new behavior. Mirrors
-    `test_resolve_ami_missing_entry_names_both_variant_and_key`'s gf180mcu
-    case."""
+    entry already gets the region-aware "no published AMI for pdk=...
+    region=..." message -- a regression test for that claim, not new
+    behavior. Mirrors `test_resolve_ami_missing_entry_names_both_variant_and_key`."""
     manifest = _write_manifest(
         tmp_path,
         [
@@ -1819,6 +1816,9 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "klt_version": "0.7.0",
             "klt_ref": "v0.7.0",
             "pdk_variants": None,
+            "open_pdks_commit": None,
+            "ngspice_version": "46",
+            "pdk_snapshot": "sky130A-2026.10.01",
         }
     ]
     any_region = rl.published_runner_identities("sky130A", None, manifest)
@@ -1906,7 +1906,7 @@ def test_build_script_publishes_the_pinned_klt_ref_and_installed_version():
     script = _BUILD_SCRIPT.read_text()
     # The same $KLT_REF is what the build instance installs.
     assert 'klayout-tools@${KLT_REF}"' in script
-    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")' in script
+    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS" "$OPEN_PDKS_COMMIT")' in script
 
 
 def test_build_script_refuses_to_publish_an_unknown_version():

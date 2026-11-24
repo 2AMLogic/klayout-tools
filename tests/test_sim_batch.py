@@ -36,6 +36,7 @@ from helpers.subprocess_fakes import (
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
+from klayout_tools.sim_batch_contract_spec import _RELEASED_FEATURE_DETECTORS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "batch-job-spec.schema.json"
@@ -252,7 +253,6 @@ def test_build_batch_job_spec_shape(tmp_path):
         str(netlist),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
 
@@ -289,7 +289,6 @@ def test_build_batch_job_spec_tool_echoes_ngspice_binary_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == "/opt/ngspice-custom"
 
@@ -301,7 +300,6 @@ def test_build_batch_job_spec_tool_falls_back_without_an_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == sb.BATCH_JOB_TOOL == "ngspice"
 
@@ -312,7 +310,6 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # The redirect is load-bearing: the harness merges all stdout/stderr into
     # harness.log, so only $EDA_OUTPUT_DIR is a structured channel back.
@@ -328,7 +325,6 @@ def test_job_cmd_tees_stderr_into_outputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # klt's --format json error envelope goes to stderr, so it must reach a
     # collected file -- while still being forwarded to harness.log.
@@ -351,7 +347,6 @@ def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
     klt = (
@@ -372,7 +367,6 @@ def _exit_trap_spec(tmp_path, **request_extra):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
 
@@ -388,19 +382,15 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash not available")
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {"models": {}},
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.0",
-        )
-        proc = subprocess.run(
-            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
-        )
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.0",
+    )
+    proc = subprocess.run([bash, "-n", "-c", spec.cmd], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def _bash_n(script):
@@ -432,22 +422,20 @@ def test_runner_preflight_with_required_features_is_valid_bash(features, enforce
 
 def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
     """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {
-                "models": {},
-                "options": {"ngspice_init": "x"},
-                "measurements": [{"name": "a", "expr": "1"}],
-                "analysis": {"kind": "op"},
-            },
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.1.dev2264+gcba5e957d9ed",
-        )
-        proc = _bash_n(spec.cmd)
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis": {"kind": "op"},
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    proc = _bash_n(spec.cmd)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
@@ -463,7 +451,6 @@ def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.1.dev2264+gcba5e957d9ed",
     )
     klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
@@ -546,7 +533,6 @@ def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path)
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
     # ...and it lands before the redirect, as a klt argument.
@@ -563,7 +549,6 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
@@ -587,35 +572,24 @@ def test_job_cmd_respects_an_explicit_request_max_workers(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert "--max-workers" not in spec.cmd
 
 
-def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
+def test_job_cmd_always_collects_artifacts_into_output_dir(tmp_path):
+    """Issue #4369: artifacts and engine logs must always be collected —
+    `--outdir` points inside $EDA_OUTPUT_DIR so a deck abort is diagnosable,
+    and it precedes the report redirect."""
     spec = sb._build_batch_job_spec(
         {"models": {}},
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
     )
     assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
-
-
-def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
-    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -624,7 +598,6 @@ def test_job_json_omits_unset_optional_fields(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
     assert "pdk_variant" not in document
@@ -638,7 +611,6 @@ def test_job_json_round_trips_and_validates_against_schema(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=3,
         timeout_s=60.0,
-        keep_artifacts=True,
     )
     document = spec.to_job_json()
     assert json.loads(json.dumps(document)) == document
@@ -653,7 +625,6 @@ def test_job_json_inputs_are_not_part_of_the_contract(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
     assert "inputs" not in spec.to_job_json()
@@ -696,7 +667,6 @@ def test_build_batch_job_spec_stages_the_netlists_include_closure(tmp_path):
         str(_write_body_including_dut(tmp_path)),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
 
     by_name = {item.name: item for item in spec.inputs}
@@ -724,7 +694,6 @@ def test_build_batch_job_spec_refuses_an_unresolvable_include(tmp_path):
             str(netlist),
             corner_count=5,
             timeout_s=120.0,
-            keep_artifacts=False,
         )
     message = str(excinfo.value)
     assert "backend 'batch'" in message
@@ -746,7 +715,6 @@ def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
 
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -3531,7 +3499,6 @@ def test_build_batch_job_spec_without_opt_in_uploads_no_model_inputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(tmp_path),
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -3955,7 +3922,6 @@ def test_unusable_client_version_is_a_sim_error_not_a_traceback(tmp_path, versio
             str(_write_body(tmp_path)),
             corner_count=1,
             timeout_s=30.0,
-            keep_artifacts=False,
             client_version=version,
         )
 
@@ -3966,7 +3932,6 @@ def test_forwarded_request_keeps_ngspice_init_lines_unchanged(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version=_CLIENT_VERSION,
     )
     uploaded = next(i for i in spec.inputs if i.name == sb.BATCH_REQUEST_FILENAME)
@@ -4031,7 +3996,6 @@ def _init_spec(tmp_path, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=_CLIENT_VERSION,
         **kwargs,
     )
@@ -4170,7 +4134,6 @@ def _gate_spec(tmp_path, client_version, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client_version,
         **kwargs,
     )
@@ -5498,6 +5461,13 @@ def _publish_manifest(tmp_path: Path, monkeypatch, images: list[dict]) -> Path:
     path = tmp_path / "ami-manifest.json"
     path.write_text(json.dumps({"schema_version": 1, "images": images}))
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(path))
+    # These gate tests inject normalized candidates, including historical
+    # multi-image sets. The S3 reader itself is covered in test_sim_batch_image.
+    monkeypatch.setattr(
+        sb.sim_batch_image,
+        "read_batch_runner_images",
+        lambda pdk, region, *_: rl.published_runner_identities(pdk, region, path),
+    )
     return path
 
 
@@ -5665,30 +5635,6 @@ def test_prelaunch_unpinned_region_refuses_only_when_every_image_mismatches(
     assessment = sb._assess_published_runner(request, config)
     assert assessment["status"] == "mismatch"
     assert "0.5.0" in assessment["message"] and "0.6.2" in assessment["message"]
-
-
-def test_prelaunch_uses_the_latest_build_per_region(tmp_path, monkeypatch):
-    """An older entry for the same (pdk, region) is audit trail, exactly as
-    for `resolve_ami`: only the newest build is compared."""
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    old = _image(klt_version="0.7.0")
-    new = {**_image(klt_version="0.5.0"), "built_at": "2026-10-12T00:00:00Z"}
-    _publish_manifest(tmp_path, monkeypatch, [old, new])
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "mismatch"
-
-
-def test_prelaunch_missing_manifest_is_unknown_not_an_error(tmp_path, monkeypatch):
-    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
-    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "absent.json"))
-    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", tmp_path / "absent-user.json")
-    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", tmp_path / "absent-default.json")
-    assessment = sb._assess_published_runner(
-        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
-    )
-    assert assessment["status"] == "unknown"
 
 
 def test_prelaunch_sharded_request_refuses_once_with_zero_calls(tmp_path, monkeypatch):
@@ -5981,7 +5927,6 @@ def _feature_spec(tmp_path, request, client="0.7.1.dev384+gf386aca", **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client,
         **kwargs,
     )
@@ -6198,7 +6143,6 @@ def test_submit_progress_line_does_not_leak_the_bucket(tmp_path, capsys):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     sb.submit_job(_config(tmp_path), "job-1", spec, runner=_FakeRunner())
     err = capsys.readouterr().err
@@ -6236,9 +6180,8 @@ _PREDATED_REQUEST = {
 
 def test_released_registry_entries_all_have_detectors():
     for key, version in sb.REQUEST_FEATURE_MIN_RUNNER_VERSION.items():
-        assert (key.split(" (")[0] in sb._RUNNER_REQUEST_FEATURES) == (
-            version is not None
-        ), key
+        name = key.split(" (")[0]
+        assert (name in _RELEASED_FEATURE_DETECTORS) == (version is not None), key
 
 
 def test_request_features_detect_the_released_fields():
@@ -6944,7 +6887,7 @@ def test_run_sim_attach_requires_batch_backend(tmp_path):
     request = _batch_request(tmp_path)
     request["backend"] = "local"
     path = _write_request(tmp_path, request)
-    with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
+    with pytest.raises(sim.SimError, match="backend 'local'.*--backend batch"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
 
 
@@ -6997,7 +6940,9 @@ def test_pdk_variant_check_passes_when_listed_or_unknown(tmp_path, monkeypatch, 
         tmp_path, monkeypatch, [_image(pdk="gf180mcu", klt_version="0.7.0", **image)]
     )
     request = json.loads(path.read_text())
-    sb._validate_batch_pdk_variant(request, "us-east-1")  # does not raise
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path).runner_identities("gf180mcuC")
+    )  # does not raise
 
 
 def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
@@ -7005,7 +6950,9 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
 ):
     request = {"models": {"pdk": "gf180mcuC"}}
     monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "missing.json"))
-    sb._validate_batch_pdk_variant(request, None)
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )
     _publish_manifest(
         tmp_path,
         monkeypatch,
@@ -7014,9 +6961,13 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
             _image(region="us-west-2", pdk="gf180mcu", pdk_variants=["gf180mcuC"]),
         ],
     )
-    sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
+    sb._validate_batch_pdk_variant(
+        request, _config(tmp_path, region=None).runner_identities("gf180mcuC")
+    )  # any candidate lists it
     with pytest.raises(sim.SimError):
-        sb._validate_batch_pdk_variant(request, "us-east-1")
+        sb._validate_batch_pdk_variant(
+            request, _config(tmp_path).runner_identities("gf180mcuC")
+        )
 
 
 # --- engine_build_comparison (issue #3095) ---------------------------------
@@ -7326,20 +7277,33 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     launches_before = len(_launches(runner))
     assert launches_before == 2
 
-    # The failed job is still failed on the fleet when the set is re-run.
+    # The failed job is still failed on the fleet when the set is re-run
+    # (persistently -- issue #5775's harvest reads the status once before
+    # the dispatch's own re-attach poll would).
     failed = json.loads(manifest_path.read_text())["shards"][1]["job_id"]
-    runner.queue(
-        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
-    )
+    graded = sb._run_subprocess
+
+    def still_failed(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -") and failed in joined:
+            return fake_completed(_status("failed", exit_code="1"))
+        return graded(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", still_failed)
     resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
 
-    assert len(_launches(runner)) == launches_before + 1
+    # Issue #5775: the finished shard's two units are harvested (reused, never
+    # re-billed); the failed shard's two re-dispatch as one-unit shards (hosts=2).
+    assert len(_launches(runner)) == launches_before + 2
     entry = resumed["requests"][0]
     assert entry["status"] == "pass"
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    assert [shard["resumed"] for shard in fleet] == [True, False]
+    # Issue #6423: harvested entry first, then dispatch order; failed shard: none.
+    assert [shard["resumed"] for shard in fleet] == [True, False, False]
+    assert report["environment"]["resume"]["resumed_corners"] == 2
+    assert all(c["status"] == "pass" for c in report["corners"])
     assert not manifest_path.exists()  # swept clean: nothing left to re-attach
 
 
@@ -7590,25 +7554,6 @@ def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monke
     document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
     assert document["fingerprint"] == "fp-split"
     assert [e["state"] for e in document["shards"]] == ["collected"] * 3
-
-
-@pytest.mark.parametrize("lose_a_corner", [False, True])
-def test_shard_map_is_removed_only_when_the_sweep_finishes(
-    tmp_path, monkeypatch, lose_a_corner
-):
-    path = _resume_request(tmp_path)
-    manifest_path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text("{}")
-    probe = _install_fake_batch(monkeypatch, fleet=True)
-    first = _run(path, tmp_path, hosts=2)
-    assert probe
-    if lose_a_corner:
-        manifest_path.write_text("{}")
-        lost = first["corners"][1]["corner_id"]
-        _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
-        _run(path, tmp_path, hosts=2)
-    assert manifest_path.exists() is lose_a_corner
 
 
 # --------------------------------------------------------------------------- #
@@ -8161,12 +8106,12 @@ def test_corner_axis_fields_are_registry_features():
 def test_expr_no_value_offhost_carries_runner_hint():
     report: dict = {}
     corners = [{"measurements": [{"name": "v", "value": None}]}]
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
     )
     assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
     local: dict = {}
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
     )
     assert local == {}

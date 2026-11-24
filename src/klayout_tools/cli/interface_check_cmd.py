@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import argparse
 
+from .._layer_spec import parse_layer_spec
 from ..interface_check import (
     InterfaceCheckError,
-    parse_layer,
     parse_pair,
     parse_place,
     run_interface_check,
@@ -78,10 +78,14 @@ def run(args: argparse.Namespace) -> int:
     try:
         place = parse_place(args.place)
         layer_a = (
-            parse_layer(args.pin_layer_a, "--pin-layer-a") if args.pin_layer_a else None
+            parse_layer_spec(args.pin_layer_a, "--pin-layer-a", InterfaceCheckError)
+            if args.pin_layer_a
+            else None
         )
         layer_b = (
-            parse_layer(args.pin_layer_b, "--pin-layer-b") if args.pin_layer_b else None
+            parse_layer_spec(args.pin_layer_b, "--pin-layer-b", InterfaceCheckError)
+            if args.pin_layer_b
+            else None
         )
         pairs = [parse_pair(spec) for spec in (args.pair or [])]
         report = run_interface_check(

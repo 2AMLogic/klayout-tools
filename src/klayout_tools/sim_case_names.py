@@ -1,4 +1,5 @@
-"""Case-variant ``measurements[].name`` rejection for ``klt sim`` (issue #5373)."""
+"""Guards on ``measurements`` specs for ``klt sim`` (issues #5373, #6245, #6289,
+#6590)."""
 
 from __future__ import annotations
 
@@ -8,23 +9,77 @@ from .sim_errors import SimError
 
 # Forms whose own validators already reject duplicate names (any case) with a
 # more specific message; the generic check defers to them.
-_SELF_CHECKING_FORMS = ("snm", "transfer", "tian", "search")
+_SELF_CHECKING_FORMS = ("snm", "slope_band", "transfer", "tian", "search")
+
+
+def validate_measurement_shapes(
+    measurements: Any, *, error_cls: type[Exception] = SimError
+) -> list[dict[str, Any]]:
+    """``request.measurements`` must be an array of objects (issue #6245).
+
+    A present-but-malformed container (null, a scalar, or an array holding
+    a non-object entry) is invalid input, not an alias for an absent key;
+    the message names the offending path and its Python type. Returns the
+    list so callers can fold the guard into their iteration.
+
+    ``error_cls`` is the exception type raised, so a loader with its own
+    error type (``klt sim --op-lint``'s ``OpSanityError``, issue #6590)
+    reuses these diagnostics verbatim instead of translating ``SimError``.
+    """
+    if not isinstance(measurements, list):
+        raise error_cls(
+            "request.measurements must be an array of objects "
+            f"(got {type(measurements).__name__})"
+        )
+    for index, spec in enumerate(measurements):
+        if not isinstance(spec, dict):
+            raise error_cls(
+                f"measurements[{index}] must be an object (got {type(spec).__name__})"
+            )
+    return measurements
+
+
+def validate_request_measurements(
+    request: dict[str, Any], *, error_cls: type[Exception] = SimError
+) -> None:
+    """Shape-check a request's *optional* top-level ``measurements`` (issue #6590).
+
+    For loaders that do not require ``analysis`` (``klt sim --op-lint`` reads
+    the measurements only for node references): an absent key is valid, but a
+    supplied one must pass :func:`validate_measurement_shapes` -- ``null`` is
+    malformed input, not "none declared".
+    """
+    if "measurements" in request:
+        validate_measurement_shapes(request["measurements"], error_cls=error_cls)
 
 
 def validate_case_variant_names(measurements_spec: list[dict[str, Any]]) -> None:
-    """No two entries may differ *only* by letter case.
+    """No two entries may share a ``name``.
 
     ngspice lower-cases ``.meas`` names, so ``ta`` and ``tA`` are one
     measurement to it: the later card shadows the earlier and both response
-    entries report the same value. Byte-identical duplicates are left alone.
+    entries report the same value. Byte-identical duplicates are refused too
+    (issue #6289): they shadow exactly the same way, and before that issue
+    such a request escaped the JSON error envelope as an unhandled
+    ``ValueError`` from coverage's work-identity check instead of failing
+    here with a ``SimError``.
     """
     if any(f in spec for spec in measurements_spec for f in _SELF_CHECKING_FORMS):
         return
     spellings: dict[str, str] = {}
+    seen: set[str] = set()
     for spec in measurements_spec:
         name = spec.get("name")
         if not isinstance(name, str):
             continue
+        if name in seen:
+            raise SimError(
+                f"measurement '{name}' is declared more than once: the "
+                "later declaration would shadow the earlier and both "
+                "response entries would report the same value -- give "
+                "each measurement a unique name"
+            )
+        seen.add(name)
         first = spellings.setdefault(name.lower(), name)
         if first != name:
             raise SimError(

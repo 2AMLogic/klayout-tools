@@ -15,25 +15,44 @@ import re
 from typing import Any
 
 from . import place_and_route_clock as _vclk
+from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
+from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_base import (
+    _ANTENNA_VIOLATIONS_BEGIN,
+    _ANTENNA_VIOLATIONS_END,
+    _GLOBAL_PLACEMENT_DENSITY,
+    _HOLD_VIOLATIONS_BEGIN,
+    _HOLD_VIOLATIONS_END,
+    _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_VIOLATIONS_END,
+    _MAX_TRANSITION_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_VIOLATIONS_END,
+    _SETUP_VIOLATIONS_BEGIN,
+    _SETUP_VIOLATIONS_END,
+    PlaceAndRouteError,
+)
+from .place_and_route_cell_libraries import (
+    _ANTENNA_DIODE_CELLS,
+    _CTS_BUFFER_CELLS,
+    _FILLER_CELLS,
+    _NO_TAPCELL_LIBRARIES,
+    _ROW_RAIL_STRAP,
+    _TAPCELL_CELLS,
+)
+from .place_and_route_fences import placement_fence_lines
+from .place_and_route_groups import fixed_group_commands
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
+from .place_and_route_layers import _ROUTING_LAYER_RANGE
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
+from .place_and_route_power_pins import applied_power_pins
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
-from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_unconstrained import (
     cts_stage_lines,
     resizer_pass_lines,
     run_is_unconstrained,
 )
-
-# The stage-script emitters below read the per-library tables and the
-# violation-marker sentinels that stay defined in `place_and_route.py` (the
-# orchestration and the STA/audit subsystems share them). They are imported
-# inside each function, at call time: `place_and_route` re-exports this module
-# at import, so a module-level `from .place_and_route import ...` here would be
-# circular -- the same lazy-import idiom `place_and_route_request.py` uses.
-
 
 # --------------------------------------------------------------------------- #
 # Tcl script generation
@@ -56,20 +75,13 @@ _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
-    """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
-    spike section 5's ``constraints`` field) -- must run only **after** the
-    design is linked (``link_design``, or a ``read_db`` that already
-    restored a linked network): ``create_clock``'s own ``[get_ports ...]``
-    lookup raises ``STA-1570 No network has been linked`` otherwise
-    (confirmed live for issue #425's own worked example -- see
-    :func:`_stage_script_lines`'s call sites, never before ``link_design``).
-    """
+    """Create a clock after link_design/read_db resolves [get_ports] (#425)."""
     if clock_port is None:
         return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
     return [
         _UNIT_PIN_LINE,
-        f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]",
+        f"create_clock -name {_tcl_literal(clock_port)} "
+        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
     ]
 
 
@@ -160,15 +172,16 @@ def _io_delay_lines(
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
-            f"set klt_clock_port [get_ports {clock_port}]",
+            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_non_clock_inputs "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} -clock {clock_port} "
-            "$klt_non_clock_inputs",
+            f"set_input_delay {input_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
         ]
     if output_delay_ns is not None:
         lines.append(
-            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+            f"set_output_delay {output_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
 
@@ -176,7 +189,7 @@ def _io_delay_lines(
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
-        return [f"read_def -floorplan_initialize {floorplan['def_path']}"]
+        return [f"read_def -floorplan_initialize {_tcl_literal(floorplan['def_path'])}"]
 
     if method == "utilization":
         args = [f"-utilization {floorplan['utilization_pct']}"]
@@ -244,12 +257,6 @@ def _violation_count_lines() -> list[str]:
     with the WNS/TNS fields next to them. Unit: violating endpoints (one
     ``-format end`` row per endpoint per path group), not enumerated paths.
     """
-    from .place_and_route import (
-        _HOLD_VIOLATIONS_BEGIN,
-        _HOLD_VIOLATIONS_END,
-        _SETUP_VIOLATIONS_BEGIN,
-        _SETUP_VIOLATIONS_END,
-    )
 
     return _timing_violation_report_lines(
         setup_begin=_SETUP_VIOLATIONS_BEGIN,
@@ -320,15 +327,9 @@ def _design_rule_check_lines(
     pass gives a reader the other half of that comparison directly, instead
     of requiring a raw ``stdout.log`` read to recover it.
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_VIOLATIONS_END,
-        _MAX_TRANSITION_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_VIOLATIONS_END,
-    )
 
     # `None` selects the module's original marker pair, resolved here rather
-    # than as a default argument (the constants are imported lazily above).
+    # than as a default argument (the constants are module-scope imports).
     if transition_begin is None:
         transition_begin = _MAX_TRANSITION_VIOLATIONS_BEGIN
     if transition_end is None:
@@ -354,10 +355,6 @@ def _antenna_check_lines() -> list[str]:
     `check_antennas`'s own stdout summary line ("Found N net violations."),
     isolated the same `puts` marker way :func:`_violation_count_lines` isolates
     the setup/hold blocks."""
-    from .place_and_route import (
-        _ANTENNA_VIOLATIONS_BEGIN,
-        _ANTENNA_VIOLATIONS_END,
-    )
 
     return [
         f'puts "{_ANTENNA_VIOLATIONS_BEGIN}"',
@@ -416,10 +413,6 @@ def _tapcell_masters(
     hard failure rather than a silent all-``None`` that would look
     identical to the verified no-tapcell case.
     """
-    from .place_and_route import (
-        _NO_TAPCELL_LIBRARIES,
-        _TAPCELL_CELLS,
-    )
 
     if library is not None and "tapcell" in library:
         return library["tapcell"]
@@ -434,7 +427,6 @@ def _filler_masters(
     """Filler masters: ``request.library.filler`` (issue #4127), else the
     built-in :data:`_FILLER_CELLS` entry (``KeyError`` if neither; callers
     run after the up-front validation)."""
-    from .place_and_route import _FILLER_CELLS
 
     if library is not None and "filler" in library:
         return library["filler"]
@@ -540,8 +532,6 @@ def _power_delivery_lines(
     (``define_pdn_grid -macro``) are deliberately out of scope for this v1
     -- see the module docstring.
     """
-    from .place_and_route import _POWER_PIN_PATTERNS
-
     power_net = power["power_net"]
     ground_net = power["ground_net"]
 
@@ -552,12 +542,7 @@ def _power_delivery_lines(
         cell_library, power.get("tapcell_distance_um"), library
     )
 
-    pin_patterns = (
-        library["power_pins"]
-        if library is not None and "power_pins" in library
-        else _POWER_PIN_PATTERNS[cell_library]
-    )
-    for net_role, pin_pattern, is_primary in pin_patterns:
+    for net_role, pin_pattern, is_primary in applied_power_pins(cell_library, library):
         net = power_net if net_role == "power" else ground_net
         flag = ""
         if is_primary:
@@ -871,7 +856,6 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     router obstruction they provide completely unaffected -- this fallback
     only ever needed the physical shapes, never a new logical port.
     """
-    from .place_and_route import _ROW_RAIL_STRAP
 
     layer, width_um, pitch_um, offset_um, power_pin, ground_pin = _ROW_RAIL_STRAP[
         cell_library
@@ -892,19 +876,12 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     ]
 
 
-def _dont_use_lines(cell_library: str) -> list[str]:
-    """``set_dont_use`` lines for ``cell_library`` (issue #2378).
-
-    Reuses the same per-library table ``klt synthesize`` hands to ABC
-    (:data:`~klayout_tools.synthesize._ABC_DONT_USE_GLOBS`) so both commands
-    agree on the usable cell set. Each glob is brace-quoted (Tcl-safe: the
-    ``*``/``?``/``[]`` metacharacters reach OpenROAD's own pattern matcher
-    unexpanded). A library with no entry emits nothing.
-    """
-    from .synthesize import _ABC_DONT_USE_GLOBS
-
+def _dont_use_lines(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> list[str]:
+    """Brace-quote the patterns so Tcl passes them unchanged to OpenROAD."""
     return [
-        f"set_dont_use {{{glob}}}" for glob in _ABC_DONT_USE_GLOBS.get(cell_library, ())
+        f"set_dont_use {{{glob}}}" for glob in effective_patterns(cell_library, library)
     ]
 
 
@@ -919,7 +896,6 @@ def _route_diode_cell(cell_library: str, library: dict[str, Any] | None) -> str 
         return None
     if library is not None and "antenna_diode" in library:
         return library["antenna_diode"][0]
-    from .place_and_route import _ANTENNA_DIODE_CELLS
 
     return _ANTENNA_DIODE_CELLS[cell_library][0]
 
@@ -986,14 +962,9 @@ def _stage_script_lines(
     route_allow_congestion: bool = False,
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
+    instance_groups: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     from ._power_activity import power_activity_lines
-    from .place_and_route import (
-        _CTS_BUFFER_CELLS,
-        _GLOBAL_PLACEMENT_DENSITY,
-        _ROUTING_LAYER_RANGE,
-        _ROW_RAIL_STRAP,
-    )
 
     global_placement_call = _global_placement_call(
         placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
@@ -1006,7 +977,9 @@ def _stage_script_lines(
     # stages would make this verb's own `-metrics`/repair steps see a
     # different design than the floorplan did. Empty for every pre-#2635
     # request, leaving each stage script byte-identical.
-    macro_liberty_lines = [f"read_liberty {path}" for path in macro_liberty_paths or []]
+    macro_liberty_lines = [
+        f"read_liberty {_tcl_literal(path)}" for path in macro_liberty_paths or []
+    ]
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
@@ -1015,16 +988,16 @@ def _stage_script_lines(
         # LEFs (issue #438) are read alongside the tech/cell LEF, before
         # `read_verilog` -- `link_design` needs every macro's physical view
         # already loaded to resolve the netlist's own macro instances.
-        lines = [f"read_liberty {liberty_path}"]
+        lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
         lines += macro_liberty_lines
         lines += [
-            f"read_lef {tech_lef}",
-            f"read_lef {cell_lef}",
+            f"read_lef {_tcl_literal(tech_lef)}",
+            f"read_lef {_tcl_literal(cell_lef)}",
         ]
-        lines += [f"read_lef {macro['lef']}" for macro in macros]
+        lines += [f"read_lef {_tcl_literal(macro['lef'])}" for macro in macros]
         lines += [
-            f"read_verilog {netlist_path}",
-            f"link_design {hdl_toplevel}",
+            f"read_verilog {_tcl_literal(netlist_path)}",
+            f"link_design {_tcl_literal(hdl_toplevel)}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
         lines += _design_rule_constraint_lines(
@@ -1038,10 +1011,7 @@ def _stage_script_lines(
         # and after `link_design` (the instance must already exist in the
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision, not something to optimize away. The instance is
-        # brace-quoted so a bracketed name is passed literally here; the
-        # `-instances` site re-escapes it for glob + list parsing (issues
-        # #4701, #4715).
+        # caller decision. Brace quoting preserves a bracketed instance name.
         lines += [
             f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
@@ -1055,28 +1025,24 @@ def _stage_script_lines(
         # placement step sees it.
         lines += _macro_blockage_lines(macros)
         lines += _make_tracks_lines(floorplan)
-        # `request.power` (issue #1091): tapcell + PDN Tcl, right after
-        # `place_macro`/`make_tracks` and before this stage's own
-        # `write_db` -- the same insertion point OpenROAD-flow-scripts
-        # itself uses (see this module's own docstring "Power delivery"
-        # section for the live-verified citation).
+        # Insert tap cells and build the PDN after rows, macros and tracks exist.
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
+        lines += placement_fence_lines(instance_groups)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
-        lines += [f"write_db {checkpoint_out}"]
+        lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
 
     assert checkpoint_in is not None  # every non-floorplan stage has a checkpoint
-    # `read_db` already restores a linked network (built by the floorplan
-    # stage's own `link_design`), so `create_clock` may safely follow
-    # `read_liberty` directly here -- unlike the floorplan stage above.
-    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    # read_db restores the linked network before the clock constraints.
+    lines = [
+        f"read_db {_tcl_literal(checkpoint_in)}",  # issue #5708
+        f"read_liberty {_tcl_literal(liberty_path)}",
+    ]
     lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
-    # the first resizer-driven step (`global_placement -timing_driven`,
-    # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
-    # process rather than relying on any checkpoint to carry it.
-    lines += _dont_use_lines(cell_library)
+    # the first resizer-driven step, and is re-emitted in each OpenROAD process.
+    lines += _dont_use_lines(cell_library, library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
@@ -1084,8 +1050,11 @@ def _stage_script_lines(
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
 
+    declarations, place_fixed, check_fixed = fixed_group_commands(instance_groups or [])
+    lines += declarations
     if stage == "place":
         assert io_spec is not None
+        lines += place_fixed
         lines += pin_constraint_lines(io_spec.get("pin_constraints", []))
         lines += [
             f"place_pins -hor_layers {io_spec['layer_h']} "
@@ -1236,8 +1205,9 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
-    # Issue #4914: global switching activity for `report_power_metric`
-    # (empty, so byte-identical, when `constraints.power_activity` is omitted).
+    lines += check_fixed
+
+    # Apply any requested switching activity before reporting power (#4914).
     lines += power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,
@@ -1314,7 +1284,7 @@ def _stage_script_lines(
         # physical artifact to pair with. `verilog_path` therefore follows
         # `def_path`/`gds_path` exactly: populated at `"route"`, `null`
         # before it.
-        write_verilog_call = f"write_verilog {verilog_path}"
+        write_verilog_call = f"write_verilog {_tcl_literal(verilog_path)}"
         # `-remove_cells` (see above): also strips the row-rail fallback's
         # own `filler_placement` instances (issue #1442) -- that path never
         # inserts a tapcell/endcap (the fallback deliberately carries no
@@ -1332,7 +1302,7 @@ def _stage_script_lines(
         if physical_only_masters:
             removed = " ".join(physical_only_masters)
             write_verilog_call += f" -remove_cells {{{removed}}}"
-        lines += [f"write_def {def_path}", write_verilog_call]
+        lines += [f"write_def {_tcl_literal(def_path)}", write_verilog_call]
     elif stage == "place":
         # A placement-only DEF, written as a side artifact alongside the
         # `write_db` checkpoint below. Originally added purely so an
@@ -1353,7 +1323,7 @@ def _stage_script_lines(
         # out-of-band caller that already located it directly (as #785
         # intended) keeps working unmodified.
         place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
-        lines += [f"write_def {place_def_path}"]
+        lines += [f"write_def {_tcl_literal(place_def_path)}"]  # issue #5708
 
-    lines += [f"write_db {checkpoint_out}"]
+    lines += [f"write_db {_tcl_literal(checkpoint_out)}"]  # issue #5708
     return lines

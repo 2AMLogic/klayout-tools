@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-19T14:28:50.234101+00:00",
+  "slug": "gf180-adderless-cpu",
+  "name": "Gf180 Adderless Cpu",
+  "description": "Adderless control processor on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Data width",
+        "target": "8 bits"
+      },
+      {
+        "parameter": "Program address",
+        "target": "11 bits (2 KB of program)",
+        "stretch": "12 bits"
+      },
+      {
+        "parameter": "Registers",
+        "target": "16 general registers plus an accumulator"
+      },
+      {
+        "parameter": "Arithmetic",
+        "target": "increment, decrement, compare, shift, logic; no add or subtract instruction"
+      },
+      {
+        "parameter": "I/O",
+        "target": "8 output strobes, 8 input selects, one 8-bit data bus"
+      },
+      {
+        "parameter": "Interrupt",
+        "target": "one level, vectored"
+      },
+      {
+        "parameter": "Supply",
+        "target": "5 V",
+        "stretch": "3.3 V and 5 V"
+      },
+      {
+        "parameter": "Clock",
+        "target": "\u2265 10 MHz at 5 V",
+        "stretch": "\u2265 25 MHz"
+      },
+      {
+        "parameter": "Tooling",
+        "target": "assembler and instruction-level simulator in this repo, agreeing with the RTL on every test program"
+      },
+      {
+        "parameter": "AREA",
+        "target": "\u2264 0.05 mm\u00b2 core",
+        "stretch": "\u2264 0.03 mm\u00b2"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #1"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-adderless-cpu",
+    "ref": "0240848d42e10d57cff1d0b1810407307e72fd91",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

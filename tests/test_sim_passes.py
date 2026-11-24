@@ -108,6 +108,12 @@ def _deck(tmp_path: Path, passes) -> list[str]:
             [{"name": "a", "alter": [{"target": "VA", "value": float("inf")}]}],
             "finite number",
         ),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5994): refused as the SimError envelope, not an OverflowError.
+        (
+            [{"name": "a", "alter": [{"target": "VA", "value": 10**400}]}],
+            "finite number",
+        ),
         ([{"name": "a", "alter": [{"target": "VA", "value": 1, "x": 1}]}], "unknown"),
         (
             [{"name": "a", "alter": [{"target": "VA", "value": 1, "field": "q"}]}],
@@ -391,3 +397,38 @@ def test_a_failed_pass_is_reported_not_inherited(tmp_path):
     assert corner["status"] == "error"
     assert [p["status"] for p in corner["passes"]] == ["error", "error"]
     assert {d["code"] for d in corner["diagnostics"]} >= {"pass_failed"}
+
+
+@pytest.mark.parametrize("form", ["pass", "step"])
+@pytest.mark.parametrize("declaration", ["missing", "included", "unresolved"])
+def test_ac_target_lookup_respects_include_evidence(tmp_path, form, declaration):
+    """Both request forms reject a missing source only on conclusive evidence."""
+    base = {"kind": "ac", "args": _ARGS}
+    if form == "pass":
+        passes = [
+            {"name": name, "alter": [{"target": "VDRIVE", "value": value}]}
+            for name, value in (("first", 1), ("second", 2))
+        ]
+        analysis = {"analysis": {**base, "passes": passes}}
+    else:
+        analysis = {
+            "analysis_steps": [
+                {"name": name, "alter": {"VDRIVE.ac": value}, "analysis": base}
+                for name, value in (("first", 1), ("second", 2))
+            ]
+        }
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps({"netlist": "body.spice", **analysis}))
+    body = "R1 out 0 1k\n"
+    if declaration != "missing":
+        body += '.include "sources.spice"\n'
+    if declaration == "included":
+        (tmp_path / "sources.spice").write_text("vdrive out 0 DC 0 AC 1\n")
+    (tmp_path / "body.spice").write_text(body)
+    if declaration == "missing":
+        with pytest.raises(
+            sim.SimError, match=rf"{form} 'first'.*VDRIVE.*names no element"
+        ):
+            sim.run_sim(str(path), dry_run=True)
+    else:
+        assert sim.run_sim(str(path), dry_run=True)["status"] == "valid"

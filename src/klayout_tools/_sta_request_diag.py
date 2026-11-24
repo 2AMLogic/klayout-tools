@@ -2,7 +2,9 @@
 
 ``post_route_sta.py`` is under the per-file size ratchet (issue #2766), so
 the ``klt sta`` known-request-key list (issue #5065), the SPEF net-name
-mismatch hint, and the SPEF missing-nets sample parser live here.
+mismatch hint, the SPEF missing-nets sample parser, and the marker-block
+extractor every ``klt sta`` stdout parser shares (issue #6767) live here,
+alongside the connectivity test shared by both SPEF correlation loops.
 """
 
 from __future__ import annotations
@@ -35,6 +37,38 @@ SPEF_NAME_MISMATCH_HINT = (
 SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
 SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 
+#: Both STA flows exclude internal nets with no pins or just one output
+#: pin from design-side SPEF coverage (#6970, #7367). OpenSTA omits some
+#: physical terminals, including supply pins, from get_pins. Confirm empty
+#: connectivity against OpenDB before dropping a zero-pin net. A port
+#: keeps the net eligible. If connectivity cannot be queried, keep the net
+#: in the counts and missing-name sample.
+SPEF_SKIP_DRIVER_ONLY = (
+    "    if {![catch {",
+    "        set klt_pins [get_pins -quiet -of_objects $klt_design_net]",
+    "        expr {(([llength $klt_pins] == 0",
+    "                && [[sta::sta_to_db_net $klt_design_net] getTermCount] == 0)",
+    "            || ([llength $klt_pins] == 1",
+    '            && [get_property [lindex $klt_pins 0] direction] eq "output"))',
+    "            && [llength [get_ports -quiet -of_objects $klt_design_net]] == 0}",
+    "    } klt_no_load] && $klt_no_load} {continue}",
+)
+
+
+def extract_block(text: str, begin: str, end: str) -> str | None:
+    """The text between the ``begin``/``end`` markers, or ``None`` when
+    either marker is absent (an OpenROAD build that never reached that part
+    of the script, a truncated run, or a caller parsing a stream the markers
+    aren't in). Adjacent markers give ``""`` -- a present, empty block, which
+    callers must keep distinct from a missing one. The first ``begin`` and
+    the first ``end`` after it win when markers repeat."""
+    try:
+        start_idx = text.index(begin) + len(begin)
+        stop_idx = text.index(end, start_idx)
+    except ValueError:
+        return None
+    return text[start_idx:stop_idx]
+
 
 def parse_spef_missing_nets(stdout: str) -> list[str]:
     """A capped sample of design-side net names that failed to correlate
@@ -45,10 +79,7 @@ def parse_spef_missing_nets(stdout: str) -> list[str]:
     ``get_full_name``'s own output). Returns ``[]`` when the markers aren't
     found (defensive; should not happen for a successful run) or the block
     is empty (nothing missing)."""
-    try:
-        start_idx = stdout.index(SPEF_MISSING_NETS_BEGIN) + len(SPEF_MISSING_NETS_BEGIN)
-        stop_idx = stdout.index(SPEF_MISSING_NETS_END, start_idx)
-    except ValueError:
+    block = extract_block(stdout, SPEF_MISSING_NETS_BEGIN, SPEF_MISSING_NETS_END)
+    if block is None:
         return []
-    block = stdout[start_idx:stop_idx]
     return [line.strip() for line in block.splitlines() if line.strip()]

@@ -11,6 +11,10 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_coverage import _implausible_dimensions
+from .lvs_flatten import root_selected_circuit
+from .lvs_known_limits import count_unsupported_asap7_instances
+from .netlist_normalize import _sim_model_classes
 
 
 class _ReferenceStage(NamedTuple):
@@ -27,8 +31,20 @@ class _ReferenceStage(NamedTuple):
     reference_gate_level_case_folds: list[dict[str, str]]
     supply_universe: _lvs._SupplyPinUniverse | None
     unresolved_subckt_call_findings: list[dict[str, Any]]
+    dimensions: list[dict[str, Any]]
     reference_pin_order_files: list[str]
     reference_netlist: Any
+    reference_known_limit_counts: dict[str, int]
+
+
+def _flatten_reference(
+    netlist: Any, top: str | None, flatten: bool | list[str]
+) -> dict[str, Any] | None:
+    """Make a selected interior circuit the root before inlining its descendants."""
+    root_selected_circuit(netlist, top)
+    return _lvs._flatten_netlist_safely(
+        netlist, "reference", keep=flatten if isinstance(flatten, list) else None
+    )
 
 
 def _read_reference_stage(
@@ -175,6 +191,24 @@ def _read_reference_stage(
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
     )
+    dimensions = _implausible_dimensions(
+        reference_netlist,
+        _lvs._reachable_circuits(
+            reference_netlist, reference_spec.get("top"), "reference"
+        ),
+        "reference",
+    )
+    # Issue #5676: the mirror image of the X-card form guard inside
+    # `_read_reference_netlist` -- a plain-element reference whose `M` cards
+    # name the PDK's own simulation models cannot pair with a curated-deck
+    # extraction's class names, so refuse it here rather than let the compare
+    # spend a full unmatched-device/net cascade on it.
+    _reject_unpairable_sim_model_classes(
+        reference_netlist,
+        layout_netlist,
+        deck=reference_spec.get("deck"),
+        form=reference_form,
+    )
     # Issue #2952: scanned now, before any flatten/prune below erases the
     # hierarchy that names each offending instance. Appended to
     # `mismatches[]` and applied to `status` at the end of the compare.
@@ -313,13 +347,18 @@ def _read_reference_stage(
             if reference_parameter_correction is not None:
                 combine_per_circuit_warnings.append(reference_parameter_correction)
 
+    # Issue #6931: census of pinned unsupported ASAP7 masters beneath the
+    # selected reference top, taken while the netlist still carries its
+    # hierarchy (one SubCircuit per X card; `sliced_reference_file` has
+    # already restricted a FinFET reference read to the compared top's own
+    # subtree) -- the optional flatten right below is what discards it.
+    # Consumed by `note_known_limit` only on a mismatching FinFET compare.
+    reference_known_limit_counts = count_unsupported_asap7_instances(
+        reference_netlist, reference_spec.get("top")
+    )
     if opts.flatten_reference:
-        reference_flatten_warning = _lvs._flatten_netlist_safely(
-            reference_netlist,
-            "reference",
-            keep=opts.flatten_reference
-            if isinstance(opts.flatten_reference, list)
-            else None,
+        reference_flatten_warning = _flatten_reference(
+            reference_netlist, reference_spec.get("top"), opts.flatten_reference
         )
         if reference_flatten_warning is not None:
             flatten_warnings.append(reference_flatten_warning)
@@ -335,6 +374,69 @@ def _read_reference_stage(
         reference_gate_level_case_folds=reference_gate_level_case_folds,
         supply_universe=supply_universe,
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        dimensions=dimensions,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
+        reference_known_limit_counts=reference_known_limit_counts,
+    )
+
+
+def _reject_unpairable_sim_model_classes(
+    reference_netlist: Any,
+    layout_netlist: Any,
+    deck: str | None,
+    form: str,
+) -> None:
+    """Issue #5676: refuse a ``plain-element`` reference whose device classes
+    are the PDK's own MOS **simulation model** names (each plain ``M`` card's
+    model token, upper-cased by ``NetlistSpiceReader``) while the
+    ``layout_netlist`` -- a curated-deck extraction -- names its MOS classes
+    by the deck's generic names (``nfet``/``pfet``). The two class-name sets
+    are disjoint, so the compare provably pairs nothing and would report a
+    device/net-unmatched cascade that reads like a layout bug. Best-effort,
+    like ``_reject_bare_resistor_x_cards``: without a ``deck`` or for one
+    with no curated model table, return early and leave validation to the
+    reference read itself. Four clauses, all required:
+
+    1. ``form`` is ``plain-element`` (the two conversion forms already
+       rewrite the model tokens);
+    2. ``deck``'s lower-cased model-name -> device-class table
+       (:func:`klayout_tools.netlist_normalize._sim_model_classes`, issue
+       #3882) is non-empty;
+    3. some reference class name, case-folded, is a model in that table
+       *and* the class it maps to is registered on the layout side -- the
+       layout really does use the deck's generic class naming;
+    4. the reference does *not* itself register a class of that mapped
+       name -- a mixed reference (both ``sg13_lv_nmos`` and ``nfet``) keeps
+       its generic-named devices pairable, so it is not refused.
+    """
+    if form != "plain-element" or not deck:
+        return
+    sim_model_classes = _sim_model_classes(deck)
+    if not sim_model_classes:
+        return
+    reference_names = _lvs._device_class_names(reference_netlist)
+    reference_lowered = {name.lower() for name in reference_names}
+    layout_lowered = {name.lower() for name in _lvs._device_class_names(layout_netlist)}
+    offending = sorted(
+        (name, target)
+        for name in reference_names
+        if (target := sim_model_classes.get(name.lower())) is not None
+        and target.lower() in layout_lowered
+        and target.lower() not in reference_lowered
+    )
+    if not offending:
+        return
+    raise _lvs.LvsError(
+        "reference netlist is in plain-element form but names PDK "
+        "simulation model(s) "
+        + ", ".join(name for name, _ in offending)
+        + " as device classes, which cannot pair with the layout side's "
+        "deck class name(s) "
+        + ", ".join(target for _, target in offending)
+        + " -- every device and net would come back unmatched. Set "
+        'request.reference.form to "subckt-call", which rewrites an M '
+        "card's model token to the deck's device class even when the "
+        'reference contains no X cards -- see docs/cli/lvs.md, "Netlist '
+        'form".'
     )

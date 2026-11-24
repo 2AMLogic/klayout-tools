@@ -1,0 +1,1 @@
+- Batch ngspice reports with explicit init lines now identify each job's request digest evidence and disclose that simulator application is unverified.

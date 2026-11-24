@@ -1,13 +1,14 @@
 """Translate a reported RC topology into SPEF ground-cap and resistor cards.
 
-The writer imports this helper; identifier spelling and ExtractError stay in
-extract_spef. Import those inside the helper to avoid a module-load cycle.
+The writer owns SPEF identifier spelling. Import that helper lazily here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+
+from .extract_base import ExtractError
 
 
 def _spef_rc_lines(
@@ -18,7 +19,7 @@ def _spef_rc_lines(
     next_node_idx: int,
 ) -> tuple[list[str], list[str]]:
     """Translate ground caps and resistors, preserving the report's RC topology."""
-    from .extract_spef import ExtractError, _unescape_spice_safe_net_name
+    from .extract_spef import _unescape_spice_safe_net_name
 
     rc_model = entry.get("rc_model", "lumped")
     if rc_model not in ("lumped", "distributed"):

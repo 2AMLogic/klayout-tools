@@ -71,7 +71,10 @@ def run(args: argparse.Namespace) -> int:
         canonical_wrap = bool(getattr(args, "canonical_wrap", False))
         erc = bool(getattr(args, "erc", False))
         no_header = bool(getattr(args, "no_provenance_header", False))
+        output_dir = getattr(args, "output_dir", None)
         if backend == "batch":
+            if output_dir is not None:
+                raise NetlistError("--output-dir requires --backend local")
             if erc:
                 raise NetlistError(
                     "--erc is not supported with --backend batch; use --backend local"
@@ -110,6 +113,7 @@ def run(args: argparse.Namespace) -> int:
             report = run_netlist(
                 args.schematic,
                 args.output,
+                output_dir=output_dir,
                 check=args.check,
                 timeout_s=args.timeout_s,
                 xschem_binary=args.xschem_binary,
@@ -131,11 +135,13 @@ def run(args: argparse.Namespace) -> int:
         )
 
     for entry in report.get("warnings") or ():
-        if entry["code"] == PDK_VARIANT_UNESTABLISHED_CODE:
+        if entry["code"] in (PDK_VARIANT_UNESTABLISHED_CODE, "split_netlists_omitted"):
             _warn(entry["message"])
             continue
+        source = f"{entry['file']}: " if "file" in entry else ""
         _warn(
-            f"unevaluated expr(...) at line {entry['line']}: {entry['snippet']!r} "
+            f"{source}unevaluated expr(...) at line {entry['line']}: "
+            f"{entry['snippet']!r} "
             f"(xschem version: {entry['xschem_version'] or 'unknown'}); "
             "written anyway because --allow-unevaluated-expr was given"
         )
@@ -164,6 +170,30 @@ def _print_port_order_drift(drift: dict) -> None:
         )
 
 
+def _print_check_hashes(report: dict) -> None:
+    """The netlist line and, for ``--check``, the reconcilable hashes.
+
+    Under ``--check`` the netlist block describes the raw bytes just
+    generated, which are never written and are not what the verdict compared
+    (issue #5743): label it, and print the hashes that can be reconciled
+    instead.
+    """
+    label = (
+        "netlist (generated, not compared)" if report["mode"] == "check" else "netlist"
+    )
+    netlist = report["netlist"]
+    print(
+        f"{label}: {netlist['lines']} lines, {netlist['bytes']} bytes, "
+        f"{netlist['content_hash']}"
+    )
+    if "produced_files" in report:
+        print(f"produced files: {', '.join(report['produced_files'])}")
+    drift = report.get("drift")
+    if drift is not None:
+        print(f"committed: {drift['committed_content_hash'] or '-'} (the -o file)")
+        print(f"compared: {drift['compared_content_hash'] or '-'} (normalized)")
+
+
 def _print_text(report: dict) -> None:
     print(f"schematic: {report['schematic']}")
     print(f"output: {report['output']}")
@@ -182,12 +212,7 @@ def _print_text(report: dict) -> None:
     )
     print(f"  flags: {' '.join(xschem['forced_flags'])} (always forced)")
     _print_remote(report)
-
-    netlist = report["netlist"]
-    print(
-        f"netlist: {netlist['lines']} lines, {netlist['bytes']} bytes, "
-        f"{netlist['content_hash']}"
-    )
+    _print_check_hashes(report)
 
     pdk_block = report.get("pdk")
     if pdk_block is not None:

@@ -12,6 +12,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+#: Report written in each member's assigned directory once collection succeeds.
+REPORT_FILENAME = "report.json"
+
 #: Schema version of the manifest file.
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -51,13 +54,13 @@ class _Manifest:
             self._entries[index].update(fields)
             self._flush()
 
-    def finalize(self, index: int, **fields: Any) -> None:
-        """Write a member's last state, then ignore later writes from its
-        abandoned worker thread."""
+    def finalize(self, index: int, **fields: Any) -> dict[str, Any]:
+        """Freeze a member and return the recorded state at that instant."""
         with self._lock:
             self._entries[index].update(fields)
             self._frozen.add(index)
             self._flush()
+            return dict(self._entries[index])
 
     def job_ids(self, index: int) -> list[str]:
         with self._lock:
@@ -144,12 +147,22 @@ class _ShardTracker:
             if state == "interrupted":
                 job["interrupted_observations"] += 1
 
-    def stalled_job(self, budget_s: float) -> str | None:
-        """A job id that has sat in ``pending`` for more than ``budget_s``."""
+    def stalled_job(
+        self, budget_s: float, since_floor: float | None = None
+    ) -> str | None:
+        """A job id that has sat in ``pending`` for more than ``budget_s`` --
+        since its last state change, floored at ``since_floor`` when that is
+        later (issue #6324: the admission gate floors the window at the
+        member's abandonment, so a job already held then keeps a full window
+        measured from the abandonment while a shard accepted later gets its
+        own)."""
         now = self._clock()
         with self._lock:
             for job_id, job in self._jobs.items():
-                if job["last_state"] == "pending" and now - job["since"] > budget_s:
+                since = job["since"]
+                if since_floor is not None and since_floor > since:
+                    since = since_floor
+                if job["last_state"] == "pending" and now - since > budget_s:
                     return job_id
         return None
 
@@ -194,9 +207,9 @@ def _unfinished_entry(
 ) -> dict[str, Any]:
     """An ``error`` entry for a member that never produced a report. Its job
     ids come from the manifest so the caller can cancel or attach them."""
-    job_ids = list(manifest.job_ids(index))
-    manifest.finalize(index, status="error", error_code=code)
-    return {
+    member = manifest.finalize(index, status="error", error_code=code)
+    job_ids = member["job_ids"]
+    entry = {
         "index": index,
         "request": path,
         "status": "error",
@@ -207,6 +220,9 @@ def _unfinished_entry(
         "error": {"message": message, "code": code},
         "shards": tracker.summary(None),
     }
+    if code == NOT_LAUNCHED_CODE and job_ids:
+        entry["expected_report"] = os.path.join(member["dir"], REPORT_FILENAME)
+    return entry
 
 
 class _MemberScheduler:
@@ -244,15 +260,17 @@ class _MemberScheduler:
         )  # fmt: skip
 
     def _next_index(self) -> int | None:
-        with self.cond:
-            if self.stopping or not self.pending:
-                return None
-            index = self.pending.pop(0)
-            self.started.add(index)
-            return index
+        """Take the next pending member (caller holds ``cond``)."""
+        if self.stopping or not self.pending:
+            return None
+        index = self.pending.pop(0)
+        self.started.add(index)
+        return index
 
     def _worker(self) -> None:
-        while (index := self._next_index()) is not None:
+        with self.cond:
+            index = self._next_index()
+        while index is not None:
             try:
                 entry = self.run_member(index, self.trackers[index])
             except BaseException as exc:  # never lose the member's slot
@@ -265,6 +283,11 @@ class _MemberScheduler:
                     return  # superseded: a replacement worker took this slot
                 self.results[index] = entry
                 self.cond.notify_all()
+                # Issue #6278: record this result and take the next member
+                # under one hold of ``cond``, so a concurrent scan never sees
+                # an instant where no live member exists yet this worker is
+                # about to drain ``self.pending``.
+                index = self._next_index()
 
     def _spawn(self) -> None:
         threading.Thread(target=self._worker, daemon=True).start()
@@ -284,24 +307,36 @@ class _MemberScheduler:
         footprint matches its thread footprint instead of growing once per
         abandonment under congestion. A job that never launches cannot starve
         the rest: once one stays ``pending`` a further ``budget`` (the launch
-        budget, narrowed by the caller) past its member's abandonment, the
+        budget, narrowed by the caller) past its grace window -- measured from
+        the later of its acceptance and its member's abandonment, so a shard
+        accepted after the abandonment gets a full window of its own instead
+        of inheriting whatever was left of its member's (issue #6324) -- the
         unstarted members become ``not_launched`` entries naming the held job
-        rather than being submitted (caller holds ``cond``)."""
+        rather than being submitted (caller holds ``cond``).
+
+        Issue #6278: that conversion fires only once no live member remains
+        (a started member whose result is still ``None``). While one is live,
+        its worker keeps draining ``self.pending`` at the reduced concurrency,
+        so one held job does not end every unstarted member of a partially
+        healthy set."""
         held = self._held_job()
         if held is None:
             while self.replacement_debt > 0 and self.pending:
                 self.replacement_debt -= 1
                 self._spawn()
             return
-        now = time.monotonic()
         for index in sorted(self.abandoned):
             abandoned_at = self.abandoned_at.get(index)
-            job_id = self.trackers[index].pending_job()
-            if abandoned_at is None or job_id is None or now - abandoned_at <= budget:
-                continue  # inside the grace window, or not scan-abandoned
+            if abandoned_at is None:
+                continue  # interrupt-abandoned, not scan-abandoned
+            job_id = self.trackers[index].stalled_job(budget, since_floor=abandoned_at)
+            if job_id is None:
+                continue  # every held job is still inside its grace window
+            if any(self.results[i] is None for i in self.started):
+                return  # a live worker is still draining self.pending (#6278)
             message = (
                 f"batch job {job_id} of abandoned member {index} is still "
-                f"pending {budget:g}s after its abandonment; "
+                f"pending past its {budget:g}s grace window; "
                 "not submitting the remaining members while it holds fleet "
                 "capacity -- cancel or attach it by job id"
             )

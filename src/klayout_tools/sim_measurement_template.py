@@ -46,6 +46,7 @@ import re
 from typing import Any
 
 from .sim_errors import SimError
+from .sim_windowed import expand_windowed
 
 #: The option's request field: ``options.measurement_cases``.
 OPTION = "measurement_cases"
@@ -94,6 +95,11 @@ def placeholder_fields(spec: dict[str, Any]) -> list[str]:
 
 
 def expand_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Expand client-side measurement forms before local or off-host dispatch."""
+    return expand_windowed(_expand_cases(request))
+
+
+def _expand_cases(request: dict[str, Any]) -> dict[str, Any]:
     """Validate ``options.measurement_cases`` plus the templated
     ``measurements[]`` entries and rewrite ``request["measurements"]`` to the
     expanded per-case specs.
@@ -140,6 +146,8 @@ def expand_request(request: dict[str, Any]) -> dict[str, Any]:
 
 def _templated_entries(measurements: Any) -> list[tuple[dict[str, Any], list[str]]]:
     """``(spec, placeholder fields)`` per templated entry, in declared order."""
+    if not isinstance(measurements, list):
+        return []  # The form validator owns malformed measurement shapes.
     return [
         (spec, fields)
         for spec in measurements or []

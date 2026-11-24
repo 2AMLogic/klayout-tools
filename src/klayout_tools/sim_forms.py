@@ -41,6 +41,8 @@ EXCLUSIVE_FORMS = (
     "eye",
     "step_resolution",
     "settled",
+    "slope_band",
+    "windowed",
 )
 
 #: Every measurement form, in declaration order.

@@ -40,17 +40,17 @@ module of its own, so both inputs go through the same sim-report reader
 from __future__ import annotations
 
 import csv
-import gzip
 import hashlib
-import io
 import json
 import math
 import os
+from collections.abc import Iterator
 from typing import Any
-from zlib import error as zerror
 
-from ._jsonnum import is_int, is_number
+from ._jsongz import READ_ERRORS, open_text
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._native import _load_native_extension, native_provenance
+from .yield_csv_reader import draw_csv_rows
 from .yield_provenance import (
     _attach_spec_rows,
     _provenance_from,
@@ -110,11 +110,9 @@ def _load_json(path: str, what: str) -> Any:
     if os.path.isdir(path):
         raise YieldError(f"not a file: {path}")
     try:
-        with open(path, "rb") as raw:
-            opener = gzip.open if raw.read(2) == b"\x1f\x8b" else open
-        with opener(path, "rt", encoding="utf-8") as f:
+        with open_text(path) as f:
             return json.load(f)
-    except (OSError, EOFError, zerror, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except READ_ERRORS + (json.JSONDecodeError,) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
@@ -166,7 +164,7 @@ def _read_qualification_keys(
     if k is not None:
         if not is_number(k):
             raise YieldError(f"{prefix}target_sigma must be a number")
-        if not math.isfinite(k) or k <= 0:
+        if not is_finite_number(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
         out["target_sigma"] = float(k)
     n = raw.get("min_converged_samples")
@@ -377,9 +375,7 @@ def _is_distrusted(corner: dict[str, Any], measurement: dict[str, Any]) -> bool:
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
-    Only corners carrying a non-null ``monte_carlo`` block contribute samples
-    -- a report that mixes a plain PVT matrix with a Monte Carlo request has
-    both, and the deterministic corners are not draws from any distribution.
+    Only corners with a non-null ``monte_carlo`` block contribute draws.
     """
     corners = report.get("corners")
     if not isinstance(corners, list):
@@ -405,6 +401,8 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
     for entry in rollup:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             raise YieldError("sim report has a malformed 'measurements' entry")
+        if "statistic" in entry:  # Grid statistics have no per-draw observations.
+            continue
         name = entry["name"]
         samples, errored, inconclusive, source_corners = _draw_from_mc_corners(
             mc_corners, name
@@ -1098,15 +1096,14 @@ def _read_csv_bytes(csv_path: str) -> tuple[str, str]:
     return text, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def _csv_reader(text: str, csv_path: str, wanted: list[str]) -> csv.DictReader:
-    reader = csv.DictReader(io.StringIO(text, newline=""))
-    header = reader.fieldnames
+def _csv_reader(text: str, path: str, wanted: list[str]) -> Iterator[dict[str, Any]]:
+    header, reader = draw_csv_rows(text)
     if not header:
-        raise YieldError(f"CSV '{csv_path}' is empty (no header row)")
+        raise YieldError(f"CSV '{path}' is empty (no header row)")
     missing = [c for c in wanted if c not in header]
     if missing:
         raise YieldError(
-            f"CSV '{csv_path}' has no column(s) {', '.join(missing)}; "
+            f"CSV '{path}' has no column(s) {', '.join(missing)}; "
             f"header is: {', '.join(header)}"
         )
     return reader
