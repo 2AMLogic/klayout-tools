@@ -1235,27 +1235,12 @@ def _convert_capacitor_card(
         exclude += ("mf",)
     _reject_multiplicity(instance, subckt_name, params, exclude=exclude)
 
-    has_length_param = lookup.length_param in params
-    has_width_param = lookup.width_param in params
+    resolved = _resolve_call_geometry(
+        instance, subckt_name, lookup, params, geometry_style=geometry_style
+    )
     extra = ""
-    if has_length_param or has_width_param:
-        l_um = _resolve_geometry_dimension(
-            instance,
-            lookup.length_param,
-            params,
-            has_length_param,
-            lookup.fixed_length_um,
-            geometry_style=geometry_style,
-        )
-        w_um = _resolve_geometry_dimension(
-            instance,
-            lookup.width_param,
-            params,
-            has_width_param,
-            lookup.fixed_width_um,
-            geometry_style=geometry_style,
-        )
-        _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
+    if resolved is not None:
+        l_um, w_um = resolved
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
         extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
@@ -1357,8 +1342,7 @@ def _resolve_call_geometry(
 ) -> tuple[float, float] | None:
     """The call's resolved ``(L, W)`` in micrometres, or ``None`` when the
     call supplies neither dimension (the subcircuit's own default geometry
-    then applies). Used by the deck-derived resistor value (issue
-    #2905)."""
+    then applies)."""
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
     if not (has_length_param or has_width_param):
