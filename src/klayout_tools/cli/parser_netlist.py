@@ -38,13 +38,21 @@ def add_netlist_parser(
     netlist_parser.add_argument(
         "schematic", help="path to the xschem schematic to netlist (.sch)"
     )
-    netlist_parser.add_argument(
+    destination = netlist_parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
         "-o",
         "--output",
-        required=True,
         help=(
             "path to write the SPICE netlist to (the committed artifact). "
             "Under --check this file is read and compared, never written"
+        ),
+    )
+    destination.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help=(
+            "export the top-level and split SPICE netlists with their original "
+            "names and bytes (local generate only)"
         ),
     )
     netlist_parser.add_argument(

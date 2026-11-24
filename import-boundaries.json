@@ -630,6 +630,7 @@
         "klayout_tools.netlist_class_registry",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_diagnostics",
+        "klayout_tools.netlist_export",
         "klayout_tools.netlist_inductor_recovery",
         "klayout_tools.netlist_instances",
         "klayout_tools.netlist_inputs",
