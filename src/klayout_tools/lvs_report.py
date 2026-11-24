@@ -429,14 +429,16 @@ def assemble_lvs_report(
             # launches no subprocess.
             "netgen_binary": netgen_binary,
             "layout_sha256": sha256_file(layout_hash_source),
+            "reference_sha256": (
+                prepared_reference.source_sha256
+                if prepared_reference is not None
+                else sha256_file(reference_netlist_path)
+            ),
             "extracted_netlist": extracted_netlist_path,
             **(
-                prepared_reference.reference_environment
+                prepared_reference.module_names
                 if prepared_reference is not None
-                else {
-                    "reference_sha256": sha256_file(reference_netlist_path),
-                    **reference_module_names(reference_netlist_path, reference_form),
-                }
+                else reference_module_names(reference_netlist_path, reference_form)
             ),
         },
         # Issue #2693: built above the return (per-form `pin_order_sources`).

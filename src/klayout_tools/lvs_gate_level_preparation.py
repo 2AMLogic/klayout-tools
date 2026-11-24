@@ -36,7 +36,8 @@ class _GateLevelPreparation(NamedTuple):
     port_aliases: dict[str, dict[str, str]]
     case_folds: list[dict[str, str]]
     converted_text: str
-    reference_environment: dict[str, Any]
+    source_sha256: str
+    module_names: dict[str, dict[str, str]]
 
 
 def _prepare_reference_stage(
@@ -87,10 +88,8 @@ def _prepare_reference_stage(
         port_aliases=port_aliases,
         case_folds=case_folds,
         converted_text=converted,
-        reference_environment={
-            "reference_sha256": hashlib.sha256(source).hexdigest(),
-            **reference_module_names_from_text(text),
-        },
+        source_sha256=hashlib.sha256(source).hexdigest(),
+        module_names=reference_module_names_from_text(text),
     )
 
 
