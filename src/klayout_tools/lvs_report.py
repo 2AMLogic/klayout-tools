@@ -29,6 +29,26 @@ def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
     return out
 
 
+def _implicit_connect_disclosure(
+    enabled: bool, mismatches: list[dict[str, Any]]
+) -> dict[str, bool]:
+    """Disclose the policy even for labels on physically connected nets."""
+    if not enabled:
+        return {}
+    from .lvs_mismatch import _mismatch
+
+    mismatches.append(
+        _mismatch(
+            "layout.join_same_named_nets_applied",
+            "warning",
+            "Inline extraction joined same-named top-level nets by their labels. "
+            "Verify drawn metal continuity between those labels independently.",
+            "layout",
+        )
+    )
+    return {"join_same_named_nets": True}
+
+
 def assemble_lvs_report(
     *,
     mismatches: Any,
@@ -95,6 +115,7 @@ def assemble_lvs_report(
     from .lvs_label_coverage import pin_set_difference
     from .verilog_module_names import reference_module_names
 
+    join_echo = _implicit_connect_disclosure(opts.join_same_named_nets, mismatches)
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
     # entries of the same category into one number (e.g. `"topology": 8`
@@ -199,6 +220,7 @@ def assemble_lvs_report(
         # see `_label_layers_echo`. Absent when no override was applied, so
         # those reports stay byte-identical to before.
         **_label_layers_echo(opts.label_layers),
+        **join_echo,
         # Issue #4347: the applied `layout.def_net_names`/`def_pins` DEF-name
         # options. Absent when not requested (byte-identical reports).
         **({"def_net_names": True} if opts.def_net_names else {}),
