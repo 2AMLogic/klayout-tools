@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3122
+      "lines": 2556
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_gds_merge.py",
-      "lines": 775
+      "lines": 753
     },
     {
       "path": "src/klayout_tools/place_and_route_power_audit.py",
@@ -497,15 +497,15 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2167
+      "lines": 2116
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1344
+      "lines": 1329
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1151
+      "lines": 1118
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
