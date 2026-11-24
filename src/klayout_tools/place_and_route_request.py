@@ -39,6 +39,9 @@ from .netlist_construct_scan import (
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
+from .place_and_route_base import STAGE_ORDER
+from .place_and_route_base import PlaceAndRouteError as PlaceAndRouteError
+from .place_and_route_cell_libraries import _NO_TAPCELL_LIBRARIES
 from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
@@ -407,40 +410,6 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
         "connects": (),
     },
 }
-
-
-class PlaceAndRouteError(Exception):
-    """Raised when a place-and-route run cannot even reach the requested
-    ``target_stage``: a missing/malformed request file, an unresolvable/
-    unreadable netlist, an unresolvable ``pdk.cell_library``/``corner``/LEF,
-    a floorplan spec naming more than one method, or an OpenROAD engine
-    error partway through a stage.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching ``klt synthesize``'s ``SynthesizeError``. Per the
-    contract spike section 5's "Partial-completion design": a run that
-    reaches (or exceeds) the requested ``target_stage`` is *always* a
-    success (``exit 0``, ``stage_reached`` >= ``target_stage``) even when it
-    stopped short of a *later* stage the request never asked for -- this
-    exception is raised only when a run fails to reach the stage it was
-    actually asked to reach.
-
-    Optional fields carry a machine-readable ``code``, a batch ``job_id``
-    and structured ``details``, such as congestion evidence from a failed
-    local route.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
 
 
 # --------------------------------------------------------------------------- #
@@ -1111,10 +1080,6 @@ def _validate_tapcell(
 ) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _NO_TAPCELL_LIBRARIES
-
     if tapcell is None:
         return None
     if not isinstance(tapcell, dict):
@@ -1825,10 +1790,6 @@ def _validate_seed(seed: Any) -> int:
 
 def _validate_target_stage(target_stage: Any) -> str:
 
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import STAGE_ORDER
-
     if target_stage not in STAGE_ORDER:
         raise PlaceAndRouteError(
             "request.target_stage must be one of: " + ", ".join(STAGE_ORDER)
@@ -2081,7 +2042,7 @@ def _resolve_liberty(
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``post_route_sta.py``'s own ``_resolve_liberty``

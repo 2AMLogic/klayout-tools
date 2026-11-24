@@ -86,11 +86,11 @@ def _wire_end(kdb, edge, depth):
     return face + face.moved(across_x, across_y)
 
 
-def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair):
+def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, mode):
     first, second = pair.first, pair.second
     a, b = landings.get(first.bbox()), landings.get(second.bbox())
     if a is not None and b is not None:
-        if allow_pad_pair:
+        if mode == "s4":
             yield (a[0], b[0]), False
         return
     landing, wire_edge = (a, second) if a is not None else (b, first)
@@ -100,6 +100,10 @@ def _trial_sources(kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair):
     if not (kdb.Edges(wire_edge) & pad_sides).is_empty():
         return
     yield (landing[0],), True
+    if mode == "s2":
+        # The S.2 neighbour is already a long edge; no wire-end strip can
+        # change its class, so only the landing grows.
+        return
     wire = _wire_end(kdb, wire_edge, _nm_to_dbu_ceil(18, dbu))
     if (kdb.Region(wire) - nearby).is_empty():
         yield (landing[0], wire), True
@@ -127,20 +131,22 @@ def _try_extensions(kdb, source, mixed, vertical, target, nearby, cuts, dbu, win
     return None
 
 
-def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, allow_pad_pair):
+def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, mode):
     if pair.first.bbox() not in landings and pair.second.bbox() not in landings:
         return None
     if not pair.first.is_parallel(pair.second):
         return None
     target = _nm_to_dbu_ceil(_SHORT_MAX_NM, dbu)
     window = kdb.Region(pair.bbox().enlarged(2 * target))
-    nearby = metal.interacting(kdb.Region(window.bbox().enlarged(target)))
+    search = window.bbox().enlarged(target)
+    candidates = kdb.Region([shape.polygon for shape in metal.each_touching(search)])
+    nearby = candidates.interacting(kdb.Region(search))
     boundary = set(nearby.edges().each())
     if pair.first not in boundary or pair.second not in boundary:
         return None
     vertical = pair.first.p1.x == pair.first.p2.x
     for source, mixed in _trial_sources(
-        kdb, pair, landings, pad_sides, nearby, dbu, allow_pad_pair
+        kdb, pair, landings, pad_sides, nearby, dbu, mode
     ):
         added = _try_extensions(
             kdb, source, mixed, vertical, target, nearby, cuts, dbu, window
@@ -148,6 +154,15 @@ def _repair_pair(kdb, pair, landings, pad_sides, metal, cuts, dbu, allow_pad_pai
         if added is not None:
             return added, mixed
     return None
+
+
+def _merge_repair(kdb, metal, extra):
+    # A conductor outside the edit's bounds cannot join the added metal.
+    affected = list(metal.each_touching(extra.bbox()))
+    updated = kdb.Region([shape.polygon for shape in affected]) + extra
+    for shape in affected:
+        metal.erase(shape)
+    metal.insert(updated.merged())
 
 
 def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
@@ -164,7 +179,10 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     spacing = _nm_to_dbu_ceil(31, layout.dbu)
     narrow_pairs = narrow.space_check(spacing, True, kdb.Edges.Projection)
     tip_pairs = tip.separation_check(narrow, spacing, True, kdb.Edges.Projection)
-    if narrow_pairs.is_empty() and tip_pairs.is_empty():
+    side_pairs = classes["short"].separation_check(
+        classes["long"], _nm_to_dbu_ceil(25, layout.dbu), True, kdb.Edges.Projection
+    )
+    if narrow_pairs.is_empty() and tip_pairs.is_empty() and side_pairs.is_empty():
         return 0, 0
     landings = _landing_edges(kdb, top, metal_index, cut_index)
     if not landings:
@@ -176,16 +194,21 @@ def _repair_m1_pairs(kdb, layout, top, lef_to_gds):
     v0 = layout.find_layer(18, 0)
     if v0 is not None:
         cuts += kdb.Region(top.begin_shapes_rec(v0))
+    # Keep the full merged conductor polygons available for later boundary checks.
+    indexed_metal = kdb.Shapes()
+    indexed_metal.insert(metal)
     pad_count = wire_count = 0
-    for pairs, allow_pad_pair in ((narrow_pairs, True), (tip_pairs, False)):
+    # S.4/S.5 first: a pad edge shared by an S.4/S.5 pair and an S.2 pair is
+    # repaired once, and the S.2 pair is then already resolved.
+    for pairs, mode in ((narrow_pairs, "s4"), (tip_pairs, "s5"), (side_pairs, "s2")):
         for pair in sorted(pairs.each(), key=lambda item: item.bbox()):
             result = _repair_pair(
-                kdb, pair, landings, pad_sides, metal, cuts, layout.dbu, allow_pad_pair
+                kdb, pair, landings, pad_sides, indexed_metal, cuts, layout.dbu, mode
             )
             if result is not None:
                 extra, mixed = result
                 top.shapes(metal_index).insert(extra)
-                metal = (metal + extra).merged()
+                _merge_repair(kdb, indexed_metal, extra)
                 if mixed:
                     wire_count += 1
                 else:

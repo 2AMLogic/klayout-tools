@@ -210,13 +210,14 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_abstract_poly import connect_terminal_poly, terminal_poly
 from .extract_assemble import _describe_device_models as _describe_device_models
 from .extract_assemble import _describe_label_layers as _describe_label_layers
 from .extract_assemble import _hierarchy_fields as _hierarchy_fields
 from .extract_assemble import _pin_ties_field as _pin_ties_field
 
 # Final report assembly moved out of `run_extract` (issue #5196).
-from .extract_assemble import assemble_extract_report
+from .extract_assemble import assemble_extract_report, finfet_device_census
 from .extract_base import _METRIC_NAME_BY_FIELD as _METRIC_NAME_BY_FIELD
 from .extract_base import _MIN_PARASITIC_R_OHM as _MIN_PARASITIC_R_OHM
 from .extract_base import _PARAM_PRECISION_FARAD as _PARAM_PRECISION_FARAD
@@ -345,6 +346,7 @@ from .extract_pdk_resolve import (
     _require_pdk_for_device_models as _require_pdk_for_device_models,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
+from .extract_pin_clusters import _promoted_pin_nets_by_cluster
 from .extract_preflight import preflight_layout, require_declared_set_for_rename
 from .extract_progress import StageTimer, active_timer, stage
 from .extract_progress import _staged as _staged
@@ -365,8 +367,7 @@ from .extract_progress import _staged as _staged
 # rather than dropped. Because ruff's isort merges same-module plain-name
 # groups into one statement, the F401 suppression that marks them re-exports
 # sits on the whole group rather than on each line. `extract_report.py`'s own
-# three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
-# `_each_pin_net`) have no caller here and are deliberately not imported.
+# report-only helpers have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
     _describe_devices,
     _describe_matched_device_groups,
@@ -442,6 +443,7 @@ from .substrate_resistance import (
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+SPICE_GLOBAL_GROUND_NODE = _SPICE_GLOBAL_GROUND_NODE
 
 # `run_extract()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1848, adopting the #247 registry beyond its
@@ -451,9 +453,8 @@ if TYPE_CHECKING:
 # additive-vs-rename decision. `_METRIC_NAME_BY_FIELD` covers the three
 # fields always present; `_PARASITICS_METRIC_NAME_BY_FIELD` covers the eight
 # `--parasitics`-only fixed numeric fields (`parasitics_report`'s own keys,
-# not `run_extract()`'s top-level ones). `device_counts` (the per-device-class
-# dict) is deliberately excluded from both -- see `run_extract`'s docstring
-# "metrics" paragraph for why.
+# not `run_extract()`'s top-level ones). The "metrics" paragraph in
+# `run_extract` explains why both exclude the per-class `device_counts`.
 
 assert all(is_registered(name) for name in _METRIC_NAME_BY_FIELD.values())
 assert all(is_registered(name) for name in _PARASITICS_METRIC_NAME_BY_FIELD.values())
@@ -1427,14 +1428,14 @@ def run_extract(
     ``parasitic_variants`` (``klt extract --parasitic-variant <variant>``,
     repeatable, issue #3056) drops parasitic elements at injection time so a
     failing ``klt pex`` delta row can be attributed to R or C: ``drop-r:NET|*``
-    shorts a net's star legs into its hub, ``drop-c-ground:NET|*`` omits its
-    ground capacitor, ``drop-c-coupling`` omits every ``Ccc_*`` card. Anything
-    else raises :class:`ExtractError`, as does use without ``parasitics``; a
-    ``NET`` matching no net goes to ``warnings``, as does one that names a
-    ``--distributed-rc`` net (left unchanged). ``None``/empty (the default)
-    emits the network and report byte-identically to before this feature
-    existed; otherwise the report's ``parasitics`` block carries
-    ``parasitic_variant`` (the request, verbatim).
+    shorts a net's star legs into its hub, ``drop-r-body:NET|*`` keeps its
+    body/bulk terminals on the hub (class-aware, issue #7317),
+    ``drop-c-ground:NET|*`` omits its ground capacitor, ``drop-c-coupling``
+    omits every ``Ccc_*`` card. Anything else raises :class:`ExtractError`,
+    as does use without ``parasitics``; a ``NET`` matching no net goes to
+    ``warnings``, as does one naming a ``--distributed-rc`` net (unchanged).
+    ``None``/empty (the default) is byte-identical to before this feature
+    existed; otherwise ``parasitics.parasitic_variant`` echoes the request.
 
     ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
     issue #1700) scopes the *ground* R/C pass itself -- the base per-net
@@ -1872,12 +1873,10 @@ def run_extract(
     ``net_id`` is ``net.cluster_id`` -- unique across every net *object* in
     this circuit, the same convention ``parasitics.nets[].net_id`` already
     uses for the identical "several distinct nets share one label" shape
-    (issue #765/#811). ``pin_index`` is that net's 0-based position in the
-    written ``.SUBCKT``/instance-line port order (``circuit.each_pin()``,
-    the exact sequence ``NetlistSpiceWriter`` iterates) when it is a promoted
-    pin, ``None`` otherwise -- resolving a specific ``.SUBCKT`` port index
-    straight back to a ``nets[]`` entry, positionally, with no separate
-    ``klt lvs`` run against a reference schematic needed.
+    (issue #765/#811). For a promoted pin, ``pin_index`` is its 0-based
+    position in KLayout's ``Circuit.each_pin()`` order used by
+    ``NetlistSpiceWriter``. An explicit ``--pins`` order can reorder the
+    written top-level ``.SUBCKT`` header. Internal nets have ``pin_index=None``.
     ``label_positions_um`` is ``[{"text": str, "x_um": float, "y_um": float},
     ...]`` -- every drawn text-label shape naming this net, in this circuit's
     own local coordinate frame (same convention
@@ -2578,18 +2577,13 @@ def run_extract(
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
-        # The deck's two-term device-parameter corrections
-        # (`CapacitorDevice.perim_cap_f_um`, issue #512;
-        # `ResistorDevice.fixed_offset_ohm`, issue #518) were already applied
-        # to the `kdb.Device` objects by `_apply_device_parameter_corrections`
-        # inside `_extract_netlist` (issue #521), so `_describe_devices` just
-        # reads them back -- and the `netlist.write(...)` below therefore
-        # writes the *same* corrected values into the SPICE file that
-        # `devices[].params` reports.
+        # The extractor already applied the capacitor perimeter and resistor offset
+        # corrections (#512, #518). Both JSON and SPICE read those same devices.
         devices, device_counts = _describe_devices(circuit, device_instance_paths)
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
+    device_census = finfet_device_census(deck, circuit)  # before parasitic injection
     refuse_case_fold_nets(nets, parasitics and not no_netlist)
 
     # Snapshotted *here* -- before `_inject_parasitics` below can add a single
@@ -2791,6 +2785,7 @@ def run_extract(
         warnings=warnings,
     )
 
+    result.update(device_census)
     return result
 
 
@@ -3475,6 +3470,7 @@ def extract_netlist_from_layout(
     unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
     layout_coverage: dict[str, Any] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3668,24 +3664,9 @@ def extract_netlist_from_layout(
     skips the lateral pass entirely, byte-identical to before this feature
     existed.
 
-    ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net
-    <net>``, issue #798) forward straight to :func:`_extract_netlist`, which
-    computes ``mom_crosscheck`` alongside ``parasitic_nets`` for the same
-    "``l2n`` must still be alive" reason -- see its docstring. ``None`` (the
-    default) skips the cross-check entirely, ``mom_crosscheck`` is then
-    always ``None`` too, byte-identical to before this feature existed.
-
-    Shared by :func:`run_extract` (this module, which additionally writes the
-    netlist to disk and builds the ``devices``/``nets`` convenience view) and
-    ``klt lvs``'s inline-extraction path (``lvs.py``'s ``layout.file`` +
-    ``layout.deck`` request shape, per
-    ``docs/design/lvs-extraction-spike.md`` section 2b), which composes this
-    with ``NetlistComparer`` instead of ``NetlistSpiceWriter`` -- no need to
-    round-trip through a written SPICE file just to compare it.
-
-    Raises :class:`ExtractError` for a bad file, unknown deck, invalid
-    ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
-    identical error semantics to ``run_extract``.
+    The optional MOM cross-check runs while the extractor still owns its geometry.
+    LVS can request implicit joins between identically labelled top-level nets.
+    This shared entry point raises the same errors as `run_extract`.
     """
     # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
@@ -3765,6 +3746,7 @@ def extract_netlist_from_layout(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
     abstract_well_tie_cover: kdb.Region | None = None
+    terminal_poly_cover: kdb.Region | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3789,15 +3771,8 @@ def extract_netlist_from_layout(
                 )
                 for cell_index in matched_cell_indices
             }
-            # Also computed *before* erasure (issue #1911): the well /
-            # substrate-isolation cover the matched instances contribute
-            # (`_abstract_cell_body_identity_cover` -- reunioned into
-            # `_extract_netlist`'s whole-layout *classification* split so
-            # erasing a black box's well cannot silently reclassify a tie
-            # drawn outside it onto the deck's global substrate net), and
-            # the per-cell-type count of ports that only ever resolve
-            # through that global (`_abstract_cell_global_net_ports` --
-            # warned about instead of silently dropped).
+            # Capture terminal and body conductors before black-box erasure.
+            terminal_poly_cover = terminal_poly(layout, deck, abstract_instances)
             abstract_body_identity_cover = _abstract_cell_body_identity_cover(
                 layout, deck, abstract_instances
             )
@@ -3866,6 +3841,7 @@ def extract_netlist_from_layout(
         top_cell,
         deck,
         parasitics_deck,
+        join_same_named_nets=join_same_named_nets,
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
@@ -3878,6 +3854,7 @@ def extract_netlist_from_layout(
         abstract_body_identity_cover=abstract_body_identity_cover,
         abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
         abstract_well_tie_cover=abstract_well_tie_cover,
+        terminal_poly_cover=terminal_poly_cover,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -4047,6 +4024,7 @@ def _reconcile_top_pins(
     below_top_labels: set[str],
     *,
     demote: bool,
+    unresolved: Sequence[kdb.Net] = (),
 ) -> list[str]:
     """Reconcile the top circuit's pins against ``below_top_labels`` (issue
     #291), the label strings that name a net only from below an instance
@@ -4062,6 +4040,10 @@ def _reconcile_top_pins(
     Global/substrate nets (named by ``connect_global``, not by any drawn text)
     are never in ``below_top_labels``, so a substrate pin is left untouched.
     """
+    if demote:
+        for net in unresolved:
+            for pin_id in [ref.pin().id() for ref in net.each_pin()]:
+                net.circuit().remove_pin(pin_id)
     circuit = netlist.circuit_by_name(top_name)
     if circuit is None or not below_top_labels:
         return []
@@ -4125,26 +4107,6 @@ def _duplicated_declared_pin_names(
                 name_net_ids.setdefault(component, set()).add(net.cluster_id)
 
     return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
-
-
-def _promoted_pin_nets_by_cluster(circuit: Any) -> dict[int, tuple[Any, list[int]]]:
-    """Every promoted pin's net of ``circuit`` exactly once, keyed by
-    ``Net.cluster_id`` and in ``each_pin()`` order (deterministic for a given
-    netlist): two pins can resolve to one net object, and the rename pass
-    (issue #2854) must process -- and rename -- that net once. Values are
-    ``(net, [pin_id, ...])``.
-
-    A pin with no net, or whose net carries no name, is skipped: there is
-    nothing to match a declared name against.
-    """
-    pin_nets: dict[int, tuple[Any, list[int]]] = {}
-    for pin in circuit.each_pin():
-        net = circuit.net_for_pin(pin.id())
-        if net is None or not net.expanded_name():
-            continue
-        entry = pin_nets.setdefault(net.cluster_id, (net, []))
-        entry[1].append(pin.id())
-    return pin_nets
 
 
 def _declared_pin_short_finding(
@@ -6124,6 +6086,15 @@ def _flavour_mos_regions(
     return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
 
 
+def _extract_connected_netlist(
+    l2n: kdb.LayoutToNetlist, join_same_named_nets: bool
+) -> None:
+    """Apply any requested implicit top-level connections before extracting the nets."""
+    if join_same_named_nets:
+        l2n.join_net_names("*")
+    l2n.extract_netlist()
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6143,6 +6114,7 @@ def _extract_netlist(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
     abstract_well_tie_cover: kdb.Region | None = None,
+    terminal_poly_cover: kdb.Region | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -6161,6 +6133,7 @@ def _extract_netlist(
     tie_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -7631,6 +7604,7 @@ def _extract_netlist(
     # every other region registered above. Deliberately outside the
     # `tap_declared` gate: it is empty whenever the deck has no tap mechanism
     # at all, so the gate would be redundant.
+    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     _abstract_well_tie = _connect_abstract_well_tie(
         l2n, nwell, nwell_body_cover, contact, abstract_well_tie_cover
     )
@@ -7749,7 +7723,7 @@ def _extract_netlist(
                 l2n.connect(terminal_region, contact)
 
     try:
-        l2n.extract_netlist()
+        _extract_connected_netlist(l2n, join_same_named_nets)
     except RuntimeError as exc:
         # KLayout's own `LayoutToNetlist.extract_netlist()` raises a bare
         # `RuntimeError` (not one of *this* module's own exception types) for
@@ -7859,46 +7833,32 @@ def _extract_netlist(
     # stub from being purged as floating. See `_wire_abstract_cells`'s
     # docstring for the full contract.
     abstracted_cells: list[dict[str, Any]] = []
+    open_abstract_nets: list[kdb.Net] = []
     if abstract_instances:
         top_circuit = netlist.circuit_by_name(top_cell.name)
         assert top_circuit is not None, (
             "top circuit must exist immediately after l2n.extract_netlist()"
         )
-        # Metals bottom-up first, then poly/nwell/tap -- matches
-        # `_probe_abstract_pin_net`'s own documented fallback order (a
-        # standard cell's pins land on the lowest metal available). Getting
-        # this backwards is a confirmed correctness bug (PR #622 review): a
-        # parent-level well/tap shape (e.g. a guard ring) overlapping a
-        # LEF-fallback pin's footprint would silently win over the metal net
-        # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit. Well geometry includes the abstracted cells'
-        # preserved cover (#2082); it must still never outrank a LEF pin's
-        # drawn metal access. Poly/tap inside black boxes remain erased.
-        #
-        # This order is only the *fallback* for a candidate point with no
-        # role of its own. A LEF-resolved point whose `PORT LAYER` the
-        # active PDK's KLayout `.map` file translates into one of these
-        # `metal{i}` levels now carries that level as its role and is probed
-        # there first (issue #2658, `abstract_cell_lef_layer_roles`) --
-        # without which a parent power strap on a *low* metal under a hard
-        # macro's *upper*-metal port wins this bottom-up scan and collapses
-        # nearly every one of that macro's declared pins onto one net.
+        # Without a layer hint, probe lower metals before body layers.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
-        abstracted_cells, abstract_cell_warnings = _wire_abstract_cells(
-            layout,
-            deck,
-            l2n,
-            netlist,
-            top_circuit,
-            abstract_instances,
-            lef_macros or {},
-            probe_layers,
-            abstract_cell_local_candidates,
-            abstract_cell_global_net_ports,
-            abstract_cell_lef_layer_roles,
-            def_net_name_probes,
+        probe_layers.extend(poly_probes)
+        abstracted_cells, abstract_cell_warnings, open_abstract_nets = (
+            _wire_abstract_cells(
+                layout,
+                deck,
+                l2n,
+                netlist,
+                top_circuit,
+                abstract_instances,
+                lef_macros or {},
+                probe_layers,
+                abstract_cell_local_candidates,
+                abstract_cell_global_net_ports,
+                abstract_cell_lef_layer_roles,
+                def_net_name_probes,
+            )
         )
         warnings = warnings + abstract_cell_warnings
 
@@ -7947,7 +7907,11 @@ def _extract_netlist(
     netlist.make_top_level_pins()
     _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
-        netlist, top_cell.name, below_top_labels, demote=top_cell_pins_only
+        netlist,
+        top_cell.name,
+        below_top_labels,
+        demote=top_cell_pins_only,
+        unresolved=open_abstract_nets,
     )
     if demoted:
         joined = ", ".join(demoted)

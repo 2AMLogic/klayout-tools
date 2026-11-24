@@ -42,9 +42,12 @@ import contextlib
 import gzip
 import io
 import json
+import os
+import stat
 import sys
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, BinaryIO
+from uuid import uuid4
 
 from .. import _warn
 
@@ -106,6 +109,51 @@ def emit_success(
             text_renderer(payload)
 
 
+@contextlib.contextmanager
+def _report_destination(path: str) -> Iterator[BinaryIO]:
+    """Stage regular files next to their target. Keep symlinks and streams usable.
+
+    A failed write re-raises :class:`OSError` carrying the errno text but not
+    the ``.klt-<uuid>.tmp`` staging name, which never existed for the caller:
+    every verb's error message already names the destination (issue #7658).
+    """
+    try:
+        yield from _stage_report(path)
+    except OSError as exc:
+        if exc.filename is None:
+            raise
+        raise OSError(exc.errno, exc.strerror) from exc
+
+
+def _stage_report(path: str) -> Iterator[BinaryIO]:
+    target = os.path.realpath(path) if os.path.islink(path) else path
+    try:
+        mode = os.stat(target).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(target, "wb") as handle:
+            yield handle
+        return
+
+    if mode is not None:
+        # Directory write access alone must not grant write access to this file.
+        os.close(os.open(target, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)))
+    temporary = os.path.join(os.path.dirname(target), f".klt-{uuid4().hex}.tmp")
+    # New files inherit the caller's umask. Preserve access to an existing report.
+    permissions = 0o666 if mode is None else mode & 0o777
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, permissions)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            yield handle
+        if mode is not None:
+            os.chmod(temporary, permissions)
+        os.replace(temporary, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
 def write_json_file(payload: dict, path: str) -> None:
     """Write ``payload`` to ``path`` byte-identical to what
     :func:`emit_success` puts on stdout under ``--format json``.
@@ -115,16 +163,15 @@ def write_json_file(payload: dict, path: str) -> None:
     ``json.dump`` rather than building a second in-memory copy. Raises
     :class:`OSError` if ``path`` cannot be written.
     """
-    if path.endswith(".gz"):
-        with open(path, "wb") as raw:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
-                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
-                    json.dump(payload, text, indent=2)
-                    text.write("\n")
-    else:
-        with open(path, "w", encoding="utf-8", newline="") as handle:
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
+    with _report_destination(path) as raw:
+        stream = (
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0)
+            if path.endswith(".gz")
+            else raw
+        )
+        with io.TextIOWrapper(stream, encoding="utf-8", newline="") as text:
+            json.dump(payload, text, indent=2)
+            text.write("\n")
 
 
 def render_table(

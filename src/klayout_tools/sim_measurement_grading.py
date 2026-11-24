@@ -109,10 +109,16 @@ def _evaluate_limits(
     max_limit = limits.get("max")
 
     violations = []
-    if min_limit is not None and value < min_limit:
-        violations.append(value - min_limit)  # negative
-    if max_limit is not None and value > max_limit:
-        violations.append(max_limit - value)  # negative
+    if min_limit is not None and (
+        value < min_limit
+        or (value == min_limit and limits.get("exclusive_min") is True)
+    ):
+        violations.append(value - min_limit)
+    if max_limit is not None and (
+        value > max_limit
+        or (value == max_limit and limits.get("exclusive_max") is True)
+    ):
+        violations.append(max_limit - value)
 
     if violations:
         # Worst (most negative) violation.

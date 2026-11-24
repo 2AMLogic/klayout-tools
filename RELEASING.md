@@ -81,6 +81,21 @@ For each new changelog entry, add one Markdown bullet in
 entries, and removes the consumed files. The release commit includes the
 updated `CHANGELOG.md` and those deletions.
 
+When an open `release/vX.Y.Z` branch incorporates newer changes from
+`main`, refresh its notes before merging the release PR:
+
+```bash
+python3 -I scripts/release_prep.py refresh --version X.Y.Z
+```
+
+Commit the updated release section, signoff notes and fragment deletions on
+the release branch. The previous dated release heading supplies the version
+anchor. Refresh preserves the prepared version and its original release date.
+The release PR's lint job runs the same command with `--check` after each
+update. Exit 1 means there are pending edits, and exit 2 identifies invalid
+release inputs. An ordinary same-version `prepare` still leaves pending
+entries for a future cut.
+
 ## One-time prerequisite (human-only — completed before v0.1.0; kept for reference)
 
 `publish.yml` publishes using [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)

@@ -16,7 +16,9 @@ from ._spice_text import fold_spice_continuations
 
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(\S+)", re.IGNORECASE)
 _INCLUDE_LINE_RE = re.compile(r"^(\s*\.(?:include|inc)\s+)(\S.*?)\s*$", re.IGNORECASE)
-_LIB_SECTION_RE = re.compile(r"^\s*\.lib\s+\S+\s*$", re.IGNORECASE)
+_LIB_LINE_RE = re.compile(r"^\s*\.lib\s+(.+?)\s*$", re.IGNORECASE)
+# A `.lib` argument is a bare token or a single-/double-quoted string.
+_LIB_ARGUMENT_RE = re.compile(r'"([^"]*)"|\'([^\']*)\'|(\S+)')
 _ENDL_RE = re.compile(r"^\s*\.endl(?:\s|$)", re.IGNORECASE)
 
 
@@ -36,18 +38,66 @@ def _include_path(base_dir: str, target: str) -> str:
     return os.path.normpath(os.path.join(base_dir, target))
 
 
-def _scan_recovery_file(text: str, source_path: str) -> tuple[set[str], list[str]]:
+def _unquote(target: str) -> str:
+    if len(target) >= 2 and target[0] == target[-1] and target[0] in "\"'":
+        return target[1:-1]
+    return target
+
+
+def _lib_arguments(line: str) -> list[str] | None:
+    """The arguments of a ``.lib`` line, or ``None`` for any other line.
+
+    One argument is the section-opening form (``.lib tt``); two are the
+    corner-selected library reference (``.lib 'device corners.lib' tt``),
+    with quotes stripped so a path may contain spaces. Anything else is not
+    a form the scan follows.
+    """
+    match = _LIB_LINE_RE.match(line)
+    if match is None:
+        return None
+    return [
+        double or single or bare
+        for double, single, bare in _LIB_ARGUMENT_RE.findall(match.group(1))
+    ]
+
+
+def _scan_recovery_file(
+    text: str, source_path: str, section: str | None = None
+) -> tuple[set[str], list[tuple[str, str | None]]]:
+    """Deck class names defined in ``text`` and the directives to follow.
+
+    With ``section`` set -- this file was reached through a two-argument
+    ``.lib <file> <section>`` line -- only the named section's ``.SUBCKT``
+    names are collected (matched case-insensitively, like KLayout) and only
+    directives inside that section are followed, because KLayout reads
+    nothing else from a selected file. Without one -- the top-level file or
+    a plain include -- every ``.lib <name> ... .endl`` region is skipped:
+    an unselected section's definitions are not read that way either.
+
+    Each followed directive is returned as ``(path, section)`` with the
+    section the *target* is to be read in, ``None`` for a plain include.
+    """
     base_dir = os.path.dirname(source_path)
     names: set[str] = set()
-    paths: list[str] = []
+    children: list[tuple[str, str | None]] = []
     in_library_section = False
+    inside_selected = False
+    wanted = section.upper() if section is not None else None
     for line in fold_spice_continuations(text.splitlines()):
-        # A plain include does not select any named .lib section in that file.
-        if _LIB_SECTION_RE.match(line):
+        arguments = _lib_arguments(line)
+        if arguments is not None and len(arguments) == 1:
+            # One argument opens a named section. In a section-selected
+            # scan only the wanted section's region is active; in a plain
+            # scan every section's region is skipped.
             in_library_section = True
+            inside_selected = arguments[0].upper() == wanted
         elif _ENDL_RE.match(line):
             in_library_section = False
-        elif in_library_section:
+            inside_selected = False
+        elif not (inside_selected or (wanted is None and not in_library_section)):
+            # A selected scan reads nothing outside its section; a plain
+            # scan reads nothing inside any (unselected) section. Both
+            # match what KLayout's own reader does with the file.
             continue
         elif match := _SUBCKT_RE.match(line):
             names.add(match.group(1).upper())
@@ -55,8 +105,13 @@ def _scan_recovery_file(text: str, source_path: str) -> tuple[set[str], list[str
             target = match.group(2)
             if target[0] == target[-1] and target[0] in "\"'":
                 target = target[1:-1]
-            paths.append(_include_path(base_dir, target))
-    return names, paths
+            children.append((_include_path(base_dir, target), None))
+        elif arguments is not None and len(arguments) == 2:
+            # The two-argument form selects a section of another file.
+            children.append(
+                (_include_path(base_dir, _unquote(arguments[0])), arguments[1])
+            )
+    return names, children
 
 
 def _read_include(path: str) -> str:
@@ -74,7 +129,9 @@ def recovery_subckt_names(
     """Deck class names defined as circuits in this netlist or its includes.
 
     Start with the text and path passed to KLayout (possibly a converted
-    reference). Leave missing or unreadable include diagnostics to its reader.
+    reference). Follow ``.include``/``.inc`` and corner-selected
+    ``.lib <file> <section>`` directives alike. Leave missing or unreadable
+    include diagnostics to its reader.
     """
     if not candidates:
         return set()
@@ -82,20 +139,23 @@ def recovery_subckt_names(
     source_path = os.path.realpath(source_path)
     names, pending = _scan_recovery_file(text, source_path)
     defined = names & candidates
-    seen = {source_path}
+    seen: set[tuple[str, str | None]] = {(source_path, None)}
     while pending and defined != candidates:
-        path = pending.pop()
+        path, section = pending.pop()
         if not os.path.isfile(path):
             continue
+        # One file selected for two different sections is read twice -- the
+        # sections define different circuits -- so the visited key carries
+        # the selection.
         real_path = os.path.realpath(path)
-        if real_path in seen:
+        if (real_path, section) in seen:
             continue
-        seen.add(real_path)
+        seen.add((real_path, section))
         try:
             included = _read_include(real_path)
         except (OSError, EOFError, zlib.error):
             continue
-        names, children = _scan_recovery_file(included, real_path)
+        names, children = _scan_recovery_file(included, real_path, section)
         defined.update(names & candidates)
         pending.extend(children)
     return defined

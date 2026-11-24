@@ -42,7 +42,6 @@ in ``extract_base``.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
@@ -64,6 +63,32 @@ from .extract_cut_resistance import CutResistanceResolver, cut_resistance_resolv
 from .extract_detect_substrate_label import _is_synthesized_substrate_net_name
 from .extract_fragment_resistance import _n_squares as _n_squares
 from .extract_fragment_resistance import _region_n_squares
+from .extract_graph_ports import (
+    PinSite,
+    _boundary_sides,
+    _cut_edge_boxes,
+    add_promoted_pin_port,
+    promoted_pin_site,
+)
+from .extract_parasitic_body import (
+    ALL_NETS as ALL_NETS,
+)
+from .extract_parasitic_body import (
+    PARASITIC_VARIANT_GRAMMAR as PARASITIC_VARIANT_GRAMMAR,
+)
+from .extract_parasitic_body import ParasiticVariants as ParasiticVariants
+from .extract_parasitic_body import (
+    body_adjusted_star_weights as body_adjusted_star_weights,
+)
+from .extract_parasitic_body import (
+    body_terminal_flags as body_terminal_flags,
+)
+from .extract_parasitic_body import (
+    parse_parasitic_variants as parse_parasitic_variants,
+)
+from .extract_parasitic_body import (
+    star_hub_only_indices as star_hub_only_indices,
+)
 from .parasitic_integrity import (
     GROUND_OWNER,
     IntegrityRecordBuilder,
@@ -72,72 +97,9 @@ from .parasitic_integrity import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     import klayout.db as kdb
-
-
-@dataclass(frozen=True)
-class ParasiticVariants:
-    """Parsed ``--parasitic-variant`` request (issue #3056).
-
-    ``drop_r``/``drop_c_ground`` hold escaped net names (the spelling the
-    report uses) or :data:`ALL_NETS` for the ``*`` wildcard. ``raw`` is the
-    request as given, echoed back verbatim in the report.
-    """
-
-    raw: tuple[str, ...] = ()
-    drop_r: frozenset[str] = frozenset()
-    drop_c_ground: frozenset[str] = frozenset()
-    drop_c_coupling: bool = False
-
-    def drops_r(self, net: str) -> bool:
-        return ALL_NETS in self.drop_r or net in self.drop_r
-
-    def drops_c_ground(self, net: str) -> bool:
-        return ALL_NETS in self.drop_c_ground or net in self.drop_c_ground
-
-    def named_nets(self) -> frozenset[str]:
-        return (self.drop_r | self.drop_c_ground) - {ALL_NETS}
-
-
-#: ``*`` wildcard of the ``drop-r:``/``drop-c-ground:`` variant verbs.
-ALL_NETS = "*"
-
-#: Closed grammar of ``--parasitic-variant`` (issue #3056).
-PARASITIC_VARIANT_GRAMMAR = "drop-r:NET|*, drop-c-ground:NET|*, drop-c-coupling"
-
-
-def parse_parasitic_variants(
-    raw: Sequence[str] | None, error: type[Exception]
-) -> ParasiticVariants | None:
-    """Parse repeated ``--parasitic-variant`` values (issue #3056); ``None``
-    when none were given. Anything outside the closed grammar raises
-    ``error`` (the calling command's own error class)."""
-    if not raw:
-        return None
-    drop_r: set[str] = set()
-    drop_c_ground: set[str] = set()
-    drop_c_coupling = False
-    for item in raw:
-        verb, sep, net = item.partition(":")
-        if verb == "drop-c-coupling" and not sep:
-            drop_c_coupling = True
-        elif verb == "drop-r" and sep and net:
-            drop_r.add(net)
-        elif verb == "drop-c-ground" and sep and net:
-            drop_c_ground.add(net)
-        else:
-            raise error(
-                f"unknown --parasitic-variant {item!r} -- expected one of: "
-                f"{PARASITIC_VARIANT_GRAMMAR}"
-            )
-    return ParasiticVariants(
-        raw=tuple(raw),
-        drop_r=frozenset(drop_r),
-        drop_c_ground=frozenset(drop_c_ground),
-        drop_c_coupling=drop_c_coupling,
-    )
 
 
 #: Integer revision of the ``--parasitics`` R/C extraction model (issue #2957).
@@ -313,49 +275,6 @@ def _net_port_regions(
     return contacts, vias
 
 
-def _cut_edge_boxes(region: kdb.Region, drawn: kdb.Region | None) -> list[kdb.Box]:
-    """Axis-aligned boxes (zero width or height) for the merged runs of
-    ``region``'s edges lying strictly inside ``drawn`` -- the device-body cut
-    edges :func:`_fragment_port_points_um` reads as points, kept here as the
-    edge runs a graph port attaches along (issue #2982). Non-axis-aligned runs
-    are skipped: the graph builder rejects non-Manhattan geometry anyway."""
-    if drawn is None or drawn.is_empty():
-        return []
-    import klayout.db as kdb
-
-    boxes: list[kdb.Box] = []
-    for edge in region.merged().edges().inside_part(drawn).merged().each():
-        if edge.p1.x == edge.p2.x or edge.p1.y == edge.p2.y:
-            boxes.append(kdb.Box(edge.p1, edge.p2))
-    return boxes
-
-
-def _boundary_sides(box: kdb.Box, region: kdb.Region) -> list[kdb.Box]:
-    """The sides of ``box`` (as zero-width boxes, longest first, ties
-    left/right/bottom/top) that lie entirely on ``region``'s outline.
-
-    A contact/via with such a side shared by all its roles attaches along it
-    (Stage 3.D4's end-edge ports, issue #2982); one with none is attached by
-    its full bounding box instead (issue #4061)."""
-    import klayout.db as kdb
-
-    outline = region.merged().edges()
-    sides = [
-        kdb.Box(box.left, box.bottom, box.left, box.top),
-        kdb.Box(box.right, box.bottom, box.right, box.top),
-        kdb.Box(box.left, box.bottom, box.right, box.bottom),
-        kdb.Box(box.left, box.top, box.right, box.top),
-    ]
-    on_outline = [
-        side
-        for side in sides
-        if (side.width() or side.height())
-        and (kdb.Edges(kdb.Edge(side.p1, side.p2)) & outline).length()
-        == max(side.width(), side.height())
-    ]
-    return sorted(on_outline, key=lambda side: -max(side.width(), side.height()))
-
-
 def _graph_port_name(kind: str, box: kdb.Box, dbu: float) -> str:
     return f"{kind}@{box.center().x * dbu:.4f},{box.center().y * dbu:.4f}"
 
@@ -460,12 +379,23 @@ class _ResistanceGraphCollector:
 
     def __init__(
         self,
+        l2n: kdb.LayoutToNetlist,
         enabled: bool,
         r_cut_ohm: float | None = None,
         deck: ParasiticsDeck | None = None,
         *,
         caps: Mapping[str, int] | None = None,
     ) -> None:
+        self._l2n = l2n
+        self._label_layers = (
+            {
+                l2n.layer_index(name): name.removesuffix("_label")
+                for name in l2n.layer_names()
+                if name.endswith("_label")
+            }
+            if enabled
+            else {}
+        )
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
         self._deck = deck
@@ -502,7 +432,8 @@ class _ResistanceGraphCollector:
                 dbu,
                 entry["resistance_ohm"],
                 self._r_cut_ohm,
-                self._deck,
+                deck=self._deck,
+                pin_site=promoted_pin_site(self._l2n, net, self._label_layers),
                 caps=self._caps,
             )
 
@@ -551,6 +482,7 @@ def _resistance_graph_report(
     legacy_resistance_ohm: float,
     r_cut_ohm: float | None = None,
     deck: ParasiticsDeck | None = None,
+    pin_site: PinSite | None = None,
     *,
     caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -572,6 +504,7 @@ def _resistance_graph_report(
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
     ]
+    add_promoted_pin_port(ports, role_inputs, pin_site, dbu)
     graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
@@ -1209,6 +1142,7 @@ def _compute_parasitics(
     )
     contact_layer_index = layer_index.get("contact")
     graph_collector = _ResistanceGraphCollector(
+        l2n,
         resistance_graph,
         resistance_graph_r_cut_ohm,
         parasitics_deck,
@@ -2128,10 +2062,16 @@ def _inject_parasitics(
     emits the network exactly as described. Otherwise: ``drop-r`` leaves a
     lumped net's device terminals on the hub (no leg nets, no series
     resistor; the Gamma-shunt fallback gets no resistor either) and counts
-    zero resistance for it; ``drop-c-ground`` omits the net's ground
-    capacitor (and any ``--mom-rlc-inductance-nh`` inductor in series with
-    it); ``drop-c-coupling`` omits every ``cc_*`` card. A net on the
-    distributed ladder is left untouched by ``drop-r``/``drop-c-ground``.
+    zero resistance for it; ``drop-r-body`` (issue #7317) leaves only the
+    net's *body-class* terminals on the hub (class-aware, see
+    :func:`klayout_tools.extract_parasitic_body.body_terminal_flags`; a net
+    whose terminals are all body-class keeps the full star) and re-splits
+    its total R across the signal terminals, so the leg sum is unchanged;
+    ``drop-c-ground`` omits the net's ground capacitor (and any
+    ``--mom-rlc-inductance-nh`` inductor in series with it);
+    ``drop-c-coupling`` omits every ``cc_*`` card. A net on the
+    distributed ladder is left untouched by ``drop-r``/``drop-r-body``/
+    ``drop-c-ground``.
 
     After every ``parasitic_nets`` entry has its hub established, one
     two-terminal ``C`` card is created per ``coupled_pairs`` entry, directly
@@ -2470,12 +2410,19 @@ def _inject_parasitics(
             hub = net
             hub_name = entry["net"]
             positions = _terminal_star_positions_um(terminal_refs)
-            weights = _terminal_star_weights(positions)
+            # `drop-r`/`drop-r-body` (issues #3056/#7317): which terminals
+            # stay on the hub -- all of them under `drop-r`, only the
+            # body-class ones under `drop-r-body`, none otherwise.
+            hub_only = star_hub_only_indices(
+                variants, net_escaped, drop_r, terminal_refs
+            )
+            weights = body_adjusted_star_weights(positions, hub_only)
             for i, (term_ref, weight) in enumerate(
                 zip(terminal_refs, weights, strict=True)
             ):
-                if drop_r:
-                    # `drop-r` (issue #3056): the terminal stays on the hub.
+                if i in hub_only:
+                    # `drop-r` (issue #3056) / `drop-r-body` (issue #7317):
+                    # the terminal stays on the hub.
                     terminal_reports.append(
                         {
                             "device": term_ref.device().expanded_name(),

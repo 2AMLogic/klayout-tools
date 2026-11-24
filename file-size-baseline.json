@@ -192,10 +192,6 @@
       "lines": 1004
     },
     {
-      "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 512
-    },
-    {
       "path": "src/klayout_tools/components.py",
       "lines": 532
     },
@@ -289,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 1942
+      "lines": 1938
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -333,7 +329,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2672
+      "lines": 2656
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -346,10 +342,6 @@
     {
       "path": "src/klayout_tools/gen_compose.py",
       "lines": 4700
-    },
-    {
-      "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 695
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
@@ -457,7 +449,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1799
+      "lines": 1798
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -489,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3151
+      "lines": 3122
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -509,15 +501,15 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1347
+      "lines": 1344
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1172
+      "lines": 1151
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4532
+      "lines": 4364
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -573,7 +565,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10827
+      "lines": 10705
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -641,7 +633,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4411
+      "lines": 4370
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -649,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 593
+      "lines": 589
     },
     {
       "path": "src/klayout_tools/trajectory.py",
@@ -725,7 +717,7 @@
     },
     {
       "path": "tests/test_build_identity.py",
-      "lines": 702
+      "lines": 620
     },
     {
       "path": "tests/test_characterize.py",
@@ -973,7 +965,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12398
+      "lines": 12396
     },
     {
       "path": "tests/test_place_and_route_batch.py",
@@ -1037,7 +1029,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15827
+      "lines": 15823
     },
     {
       "path": "tests/test_sim_batch.py",

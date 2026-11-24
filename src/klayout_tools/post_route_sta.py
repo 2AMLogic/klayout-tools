@@ -57,8 +57,8 @@ utility modules, not verb modules, so importing their (underscore-prefixed)
 helpers by name does not violate the convention above. ``_resolve_liberty``
 (this module's own thin wrapper, below) follows the same precedent one level
 further: its body is a one-line call into
-:func:`klayout_tools.pdk.resolve_liberty_for_cell_library`, a *public* name
-in the ``pdk.py`` shared utility module (issue #1652) -- PDK-resolution
+:func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`, a *public* name
+in the ``pdk_cells.py`` shared utility module (issue #1652) -- PDK-resolution
 logic is the one part of the "self-contained" convention that must not
 drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
@@ -245,6 +245,7 @@ timing, which matters most in a ``request.pdk.corners`` sweep. See
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -254,11 +255,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from . import _liberty_warnings, _sta_spef_inputs, _sta_wire_load, env_provenance
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
-from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
 from ._openroad_engine import (
@@ -383,6 +384,11 @@ from .post_route_sta_stages import (
     _attach_worst_path_stages,
     _worst_path_lines,
     _worst_path_stage_lines,
+)
+from .post_route_sta_violating_endpoints import (
+    _validate_max_violating_endpoints,
+    _violating_endpoint_lines,
+    _violating_endpoints_corner_field,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -577,18 +583,11 @@ _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
 
 
 def load_request(request_path: str) -> dict[str, Any]:
-    """Read and minimally validate a ``klt sta`` request JSON file.
+    """Read the request as written and validate its shape for later hashing.
 
-    Reject unreadable files, malformed JSON, unknown top-level fields, and
-    requests missing ``pdk`` or ``constraints``. The schema field is optional.
-
-    Unlike ``pdk``/``constraints``, neither ``def`` nor ``verilog`` is a
-    required top-level field here -- exactly one of them is required, a
-    relationship :func:`validate_request_shape`'s flat "these keys must all
-    be present" check cannot express. :func:`run_sta` validates that
-    mutual-exclusion/require-one-of relationship itself, right after calling
-    this function (see its own "Request-field resolution" section, issue
-    #1825).
+    The loader requires ``pdk`` and ``constraints``, accepts an optional schema,
+    and rejects unknown fields, unreadable files and malformed JSON. After this
+    check, :func:`run_sta` requires exactly one of ``def`` and ``verilog`` (#1825).
     """
     request = _load_request_json(request_path, PostRouteStaError)
     request = validate_request_shape(
@@ -713,6 +712,9 @@ def run_sta(
         ),
         report_ports=_validate_report_ports(request["constraints"], clock_port),
         report_path_stages=_validate_report_path_stages(request["constraints"]),
+        max_violating_endpoints=_validate_max_violating_endpoints(
+            request["constraints"]
+        ),
         false_path_from=_validate_false_path_from(request["constraints"], clock_port),
         report_instances=_validate_report_instances(request["constraints"]),
     )
@@ -749,10 +751,10 @@ def run_sta(
             # Issue #3228: the map form (`{"min"|"nom"|"max": path}`) is the
             # interconnect axis of a liberty x interconnect matrix; there is
             # no single hoistable `spef_path` for it.
-            spef_map = _resolve_spef_map(spef_field, request_dir)
+            spef_map = _sta_spef_inputs.resolve_spef_map(spef_field, request_dir)
             spef_path = None
         else:
-            spef_path = _resolve_spef(spef_field, request_dir)
+            spef_path = _sta_spef_inputs.resolve_spef(spef_field, request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
     write_sdf = _validate_sdf(
         request.get("sdf"),
@@ -773,10 +775,8 @@ def run_sta(
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
 
-    # Issue #2879: the absolute `def_path`/`verilog_path`/`spef_path` above
-    # are *engine* paths -- what `read_def`/`read_verilog`/`read_spef` and
-    # the hashing below consume. What the response persists is derived from
-    # them exactly once, here, and never fed back to the engine.
+    # Build the report's path envelopes once. Hashing and OpenROAD use the
+    # original absolute paths, including when the report redacts them.
     report_paths = _ReportPaths.build(
         def_path=def_path,
         verilog_path=verilog_path,
@@ -784,7 +784,10 @@ def run_sta(
         spef_map=spef_map,
         repo_root=env_provenance.find_repo_root(request_dir),
     )
-    with report_paths.scrubbing_errors():
+    with (
+        report_paths.scrubbing_errors(),
+        _sta_spef_inputs.stable_input_hashes(spef_path, spef_map) as spef_hashes,
+    ):
         response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,
@@ -817,8 +820,14 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        _sta_spef_inputs.attach_hashes(response, spef_hashes)
         if constraints.boundary and "clock_driving_cell" in constraints.boundary:
             response["clock_driving_cell"] = constraints.boundary["clock_driving_cell"]
+        if multicycle:
+            canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            response["provenance"]["request_sha256"] = hashlib.sha256(
+                canonical.encode()
+            ).hexdigest()
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -830,6 +839,7 @@ def run_sta(
             input_delays=constraints.input_delays,
             output_delays=constraints.output_delays,
             clock_uncertainty=clock_uncertainty,
+            multicycle=multicycle,
         )
         return response
 
@@ -956,17 +966,14 @@ class _ReportPaths:
             raise PostRouteStaError(scrubbed) from exc
 
 
-def _identity(text: str) -> str:
-    return text
-
-
 @dataclass(frozen=True)
 class _StaConstraints:
-    """Issue #7023: the eleven validated port/path constraint values that
+    """Issue #7023: the twelve validated port/path constraint values that
     travel together unchanged from :func:`run_sta` into every corner
     session -- the scalar and per-port input/output delays, the scalar and
     per-port input transitions, the boundary settings, the report ports,
-    the path-stage flag, the false-path sources, and the report instances.
+    the path-stage flag, the violating-endpoint cap, the false-path
+    sources, and the report instances.
 
     Built once after request validation and passed as this one value
     through :func:`_dispatch_sta`, :func:`_run_multi_corner`, and
@@ -985,6 +992,7 @@ class _StaConstraints:
     boundary: dict[str, Any] | None
     report_ports: list[str] | None
     report_path_stages: bool
+    max_violating_endpoints: int | None
     false_path_from: list[str] | None
     report_instances: list[str] | None
 
@@ -1091,7 +1099,6 @@ def _dispatch_sta(
         timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
-        scrub=report_paths.scrub,
         sdf_stem=basename if write_sdf else None,
         report_paths=report_paths,
     )
@@ -1124,27 +1131,17 @@ def _dispatch_sta(
         # Additive field (issue #1825): `null` unless `request.verilog` was
         # given -- the mutually-exclusive counterpart to `def_path` above.
         "verilog_path": report_paths.verilog_path,
-        # Additive field (issue #1826): echo of `request.geometry_source` --
-        # see this module's own docstring "Pre-route DEFs" section. Always
-        # present (never `null`): `"routed"` is the default when the request
-        # omits it, matching this command's pre-#1826 behaviour byte-for-
-        # byte. Issue #1825 adds the third `"netlist_estimate"` value,
-        # forced (never caller-chosen) whenever `request.verilog` is given.
+        # Additive field (issue #1826): echo of `request.geometry_source`, never `null`
+        # (see the module docstring "Pre-route DEFs"); `"routed"` by default,
+        # `"netlist_estimate"` whenever `request.verilog` is given (issue #1825).
         "geometry_source": geometry_source,
-        # Additive fields (issue #1825): the wire-load estimate knob
-        # actually used, for provenance -- `null`/`null` unless
-        # `request.verilog` was given (see this module's own docstring
-        # "From-scratch netlist input" section). Never present on a
-        # `def`-mode response with anything but `null`/`null`, since a
-        # `def`-mode run's parasitics never come from a liberty wire-load
-        # model.
+        # Additive fields (issue #1825): the wire-load estimate knob used,
+        # `null`/`null` unless `request.verilog` was given (a `def`-mode run's
+        # parasitics never come from a liberty wire-load model).
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
-        # Additive field (issue #2635): echo of `request.macros`, resolved
-        # to absolute paths -- the identical shape `klt synthesize`'s own
-        # response carries (`klayout_tools.macros.macros_response`), so one
-        # declaration round-trips through both verbs' reports unchanged.
-        # `[]` when the request declared none.
+        # Additive field (issue #2635): echo of `request.macros`, resolved to
+        # absolute paths in `klt synthesize`'s own shape; `[]` when none declared.
         "macros": macro_spec.macros_response(macros),
         # Additive field (issue #5707): cells linked as untimed black boxes
         # (always present; their delay/power is excluded from the numbers).
@@ -1165,22 +1162,11 @@ def _dispatch_sta(
         "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
         "total_negative_hold_slack_ns": corner_fields["total_negative_hold_slack_ns"],
         "fmax_mhz": corner_fields["fmax_mhz"],
-        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
-        # `null` -- whether the four slack fields above are measurements at
-        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
-        # restated. A design whose only timing paths run input-port ->
-        # register / register -> output-port reports that sentinel unless
-        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
-        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
-        # gate would otherwise report "timing closed" on a design that was
-        # never timed. Check this field before trusting any slack number in
-        # this response.
+        # A positive OpenSTA sentinel can represent an unconstrained path.
         "timing_status": corner_fields["timing_status"],
-        # Additive field (issue #2780): constraint completeness -- unconstrained
-        # endpoints and unclocked registers, with counts and identities. A
-        # finite WNS (`timing_status: "constrained"`) only says *some* path
-        # was timed; this says whether any endpoint/register was left out.
+        # Measured slack can coexist with unclocked registers or unconstrained pins.
         "constraint_completeness": corner_fields["constraint_completeness"],
+        "liberty_warnings": corner_fields["liberty_warnings"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
@@ -1195,7 +1181,14 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
-    for field in ("wire_load", "port_paths", "instance_paths", "generated_clocks"):
+    # These fields are present only when the corner session produced them.
+    for field in (
+        "wire_load",
+        "port_paths",
+        "instance_paths",
+        "generated_clocks",
+        "violating_endpoints",
+    ):
         if field in corner_fields:
             response[field] = corner_fields[field]
     # Echo the exclusions only when requested (#2968).
@@ -1204,17 +1197,15 @@ def _dispatch_sta(
     if multicycle:  # additive (issue #6921): only when entries named
         for field in ("multicycle_paths", "multicycle_engine_sessions"):
             response[field] = corner_fields[field]
-    response["spef_annotation"] = corner_fields["spef_annotation"]
-    # Additive field (issue #2739): the propagated-clock evidence block --
-    # what propagation actually reached -- `null` unless the request asked
-    # for propagated-clock timing (see `_parse_clock_latency`).
-    response["clock_propagation"] = corner_fields["clock_propagation"]
-    # Additive field (issue #2886): the post-route SDF this corner's session
-    # wrote -- `{path, scope, content_hash}`, `null` unless `request.sdf`.
-    response["sdf"] = corner_fields["sdf"]
-    # Additive field (issue #3005): see `_electrical_checks_block`.
-    response["electrical_checks"] = corner_fields["electrical_checks"]
-    response["engine_log"] = corner_fields["engine_log"]
+    # Required corner fields can carry null when a requested measurement is unavailable.
+    for key in (
+        "spef_annotation",
+        "clock_propagation",
+        "sdf",
+        "electrical_checks",
+        "engine_log",
+    ):
+        response[key] = corner_fields[key]
 
     return response
 
@@ -1245,7 +1236,6 @@ def _run_corner_session(
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
-    scrub: Callable[[str], str] = _identity,
     sdf_stem: str | None = None,
     report_paths: _ReportPaths | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1256,12 +1246,11 @@ def _run_corner_session(
 
     ``propagated_clock`` (issue #2739) marks the request's created clock
     propagated in this session (:func:`_sta_script_lines` emits
-    ``set_propagated_clock`` for a ``def``-mode request; it is always
-    ``False`` for ``verilog`` mode -- :func:`_validate_propagated_clock`
-    rejects the option there) and adds the parsed ``clock_propagation``
-    evidence block to ``corner_fields``; ``False`` leaves the emitted Tcl
-    and every derived field byte-identical to the pre-#2739 session, with
-    ``clock_propagation: None``.
+    ``set_propagated_clock`` for a ``def``-mode request; it is always ``False``
+    for ``verilog`` mode -- :func:`_validate_propagated_clock` rejects the
+    option there) and adds the parsed ``clock_propagation`` evidence block to
+    ``corner_fields``; ``False`` leaves the emitted Tcl and every derived field
+    byte-identical to the pre-#2739 session, with ``clock_propagation: None``.
 
     Both the original scalar (``request.pdk.corner``) path and issue #1871's
     additive multi-corner (``request.pdk.corners``) path call this once per
@@ -1275,35 +1264,31 @@ def _run_corner_session(
       reported *per corner* (``worst_slack_ns``, ..., ``spef_annotation``) --
       the exact dict this module built inline before this refactor, now
       returned instead of assembled directly into ``response``.
-    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info":
-      dict}``, everything the caller needs to build its own
-      ``provenance``/``deck`` block(s); kept separate from ``corner_fields``
-      because the multi-corner caller hoists ``pdk_info`` to the top-level
-      response once (shared across every corner) while nesting only
-      ``deck`` per corner (see :func:`_run_multi_corner`).
+    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info": dict}``,
+      everything the caller needs to build its own ``provenance``/``deck`` block(s);
+      kept separate from ``corner_fields`` because the multi-corner caller hoists
+      ``pdk_info`` to the top-level response once (shared across every corner)
+      while nesting only ``deck`` per corner (see :func:`_run_multi_corner`).
 
     ``macros`` (issue #2635) adds one ``read_lef`` per declared hard macro
     -- which is what makes a macro-bearing ``def``/``verilog`` load at all
     instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
     not found`` -- plus one ``read_liberty`` per macro that declared a
-    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`). ``[]`` (the
-    default for every pre-#2635 request) emits neither and leaves the
-    generated script byte-identical.
+    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`).
+    ``[]`` (the default for pre-#2635 requests) emits neither, script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
-    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
-    this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
-    ``read_spef`` and adds its ``{path, scope, content_hash}`` identity to
-    ``corner_fields["sdf"]`` (``report_paths`` supplies the ``{path,
-    scope}`` resolution). Any previous file at that path is removed first,
-    so a missing or empty file after the run is this session's own failure
-    and is raised, never reported. ``None`` leaves the emitted Tcl
-    byte-identical to the pre-#2886 session, with ``sdf: None``.
+    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes this
+    session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after ``read_spef``
+    and adds its ``{path, scope, content_hash}`` identity to ``corner_fields["sdf"]``
+    (``report_paths`` supplies the ``{path, scope}`` resolution). Any previous file
+    at that path is removed first, so a missing or empty file after the run is
+    this session's own failure, raised, never reported. ``None`` leaves the
+    emitted Tcl byte-identical to the pre-#2886 session, with ``sdf: None``.
 
     Raises :class:`PostRouteStaError` for an unresolvable
     ``cell_library``/``corner_name``/LEF, a macro liberty with no entry for
     this corner, or an OpenROAD engine failure -- otherwise identical to
-    this command's pre-#1871 single-corner behaviour.
-    """
+    this command's pre-#1871 single-corner behaviour."""
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
@@ -1313,6 +1298,9 @@ def _run_corner_session(
     macro_liberty_paths = macro_blackbox.macro_liberty_paths(
         macros, corner, error_cls=PostRouteStaError
     )
+    decks = (liberty_path, *macro_liberty_paths)
+    # `str` is the no-op scrub for a report_paths-less call.
+    scrub = report_paths.scrub if report_paths is not None else str
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1352,6 +1340,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             propagated_clock=propagated_clock,
@@ -1387,6 +1376,7 @@ def _run_corner_session(
             boundary=constraints.boundary,
             report_ports=constraints.report_ports,
             report_path_stages=constraints.report_path_stages,
+            max_violating_endpoints=constraints.max_violating_endpoints,
             false_path_from=constraints.false_path_from,
             report_instances=constraints.report_instances,
             power_activity=power_activity,
@@ -1398,7 +1388,12 @@ def _run_corner_session(
         )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
+    completed = _run_openroad(
+        script_path,
+        metrics_path,
+        error_cls=PostRouteStaError,
+        repo_root=report_paths._repo_root if report_paths else None,
+    )
     with completed.diagnostics(PostRouteStaError):
         # Issue #2740: a rejected per-port map key stops the session before
         # any timing is reported -- surface that as the actionable request
@@ -1460,6 +1455,8 @@ def _run_corner_session(
         "constraint_completeness": _parse_constraint_completeness(
             completed.stdout or ""
         ),
+        # Additive field (issue #7411): see `_liberty_warnings`.
+        "liberty_warnings": _liberty_warnings.parse(completed, report_paths, decks),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
@@ -1482,17 +1479,18 @@ def _run_corner_session(
             stdout, wire_load_model, wire_load_mode, has_def=has_def
         )
     )
-    # Additive field (issue #3042): only present when the request named
-    # `constraints.report_ports`, so an unrequested response is unchanged.
+    # Optional timing-path details are included only when requested.
     if constraints.report_ports:
-        corner_fields["port_paths"] = _port_paths(
-            completed.stdout or "", constraints.report_ports
-        )
-    # Additive field (issue #5754): only present when the request named
-    # `constraints.report_instances`, so an unrequested response is unchanged.
+        corner_fields["port_paths"] = _port_paths(stdout, constraints.report_ports)
     corner_fields.update(
-        _instance_paths_corner_field(
-            completed.stdout or "", constraints.report_instances
+        _instance_paths_corner_field(stdout, constraints.report_instances)
+    )
+    corner_fields.update(
+        _violating_endpoints_corner_field(
+            stdout,
+            constraints.max_violating_endpoints,
+            setup_violation_count,
+            hold_violation_count,
         )
     )
     if spef_path is not None:
@@ -1653,7 +1651,6 @@ def _run_multi_corner(
             timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
-            scrub=report_paths.scrub,
             sdf_stem=basename if write_sdf else None,
             report_paths=report_paths,
         )
@@ -1953,53 +1950,6 @@ def _resolve_verilog(verilog_field: Any, request_dir: str) -> str:
         raise PostRouteStaError(
             f"could not read verilog '{verilog_field}': {exc}"
         ) from exc
-    return os.path.abspath(path)
-
-
-_INTERCONNECT_CORNERS = ("min", "nom", "max")
-
-
-def _resolve_spef_map(spef_field: dict[str, Any], request_dir: str) -> dict[str, str]:
-    """Issue #3228: validate map-form ``request.spef`` and return the engine
-    paths keyed by interconnect corner in canonical min/nom/max order."""
-    if not spef_field:
-        raise PostRouteStaError(
-            "request.spef must be a non-empty object when given as a map"
-        )
-    unknown = [key for key in spef_field if key not in _INTERCONNECT_CORNERS]
-    if unknown:
-        raise PostRouteStaError(
-            f"request.spef has unknown interconnect corner '{unknown[0]}' "
-            f"-- allowed keys are {', '.join(_INTERCONNECT_CORNERS)}"
-        )
-    resolved: dict[str, str] = {}
-    for key in _INTERCONNECT_CORNERS:
-        if key not in spef_field:
-            continue
-        value = spef_field[key]
-        if not isinstance(value, str) or not value:
-            raise PostRouteStaError(
-                f"request.spef.{key} must be a non-empty string when given"
-            )
-        path = value if os.path.isabs(value) else os.path.join(request_dir, value)
-        if not os.path.isfile(path):
-            raise PostRouteStaError(f"spef not found for request.spef.{key}: {value}")
-        resolved[key] = os.path.abspath(path)
-    return resolved
-
-
-def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
-    if spef_field is None:
-        return None
-    if not isinstance(spef_field, str) or not spef_field:
-        raise PostRouteStaError("request.spef must be a non-empty string when given")
-    path = (
-        spef_field
-        if os.path.isabs(spef_field)
-        else os.path.join(request_dir, spef_field)
-    )
-    if not os.path.isfile(path):
-        raise PostRouteStaError(f"spef not found: {spef_field}")
     return os.path.abspath(path)
 
 
@@ -2701,7 +2651,7 @@ def _resolve_liberty(
     Raises :class:`PostRouteStaError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``place_and_route.py``'s own ``_resolve_liberty``
@@ -3516,6 +3466,7 @@ def _sta_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     propagated_clock: bool = False,
@@ -3638,6 +3589,7 @@ def _sta_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     # Before the completeness query, which must stay the script's last
@@ -3670,6 +3622,7 @@ def _sta_netlist_script_lines(
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
     report_path_stages: bool = False,
+    max_violating_endpoints: int | None = None,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
@@ -3758,6 +3711,7 @@ def _sta_netlist_script_lines(
     lines += _violation_count_lines()
     lines += _worst_path_lines()
     lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
+    lines += _violating_endpoint_lines(max_violating_endpoints)  # issue #7418
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     lines += _generated.evidence_lines(clock_extras)

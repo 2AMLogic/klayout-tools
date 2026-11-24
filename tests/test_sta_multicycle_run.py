@@ -22,8 +22,8 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from test_post_route_sta import (
+    _LIVE_ONLY,
     _STA_METRICS,
-    _live_sky130_env,
     _setup_multi_corner_env,
     _setup_success_env,
     _setup_verilog_success_env,
@@ -168,6 +168,8 @@ def test_run_sta_omitted_and_empty_leave_tcl_and_response_unchanged(
     empty = run_sta(empty_path)
 
     assert scripts_plain[0] == scripts_empty[0]
+    assert "request_sha256" not in plain["provenance"]
+    assert "request_sha256" not in empty["provenance"]
     assert "multicycle_paths" not in empty
     assert "multicycle_engine_sessions" not in plain
     assert "multicycle_engine_sessions" not in empty
@@ -322,11 +324,7 @@ def _feedback_request(tmp_path, multicycle: bool, *, entry=_ENTRY) -> str:
     )
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 @pytest.mark.parametrize("entry", [_ENTRY, {**_ENTRY, "through": "u_mux/X"}])
 def test_live_engine_multicycle_feedback_four_periods(tmp_path, entry):
     """The #6908 release criterion on the pinned engine: the same-enable
@@ -371,11 +369,7 @@ def test_live_engine_multicycle_feedback_four_periods(tmp_path, entry):
     )
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_multicycle_resolution_errors(tmp_path):
     """Selector resolution on the linked netlist, live: an unclocked
     register and a matched-nothing selector are request errors naming the
@@ -414,11 +408,7 @@ def test_live_engine_multicycle_resolution_errors(tmp_path):
         assert fragment in str(excinfo.value)
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_multicycle_def_linked_resolution(tmp_path):
     """The same engine-side resolution on a DEF-linked design (the
     curator's unverified item #3): a matched-nothing selector is a request
