@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
+from ._jsonnum import is_int
 from .sim_errors import SimError
 from .sim_raw import parse_ascii_rawfile
 
@@ -116,11 +117,7 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
             f"{list(CYCLE_EDGES)} (got {edge!r})"
         )
     cycles = body.get("cycles")
-    if (
-        not isinstance(cycles, int)
-        or isinstance(cycles, bool)
-        or not 1 <= cycles <= MAX_CYCLES
-    ):
+    if not is_int(cycles) or not 1 <= cycles <= MAX_CYCLES:
         raise SimError(
             f"measurement '{name}': cycle_mean.cycles is required and must be "
             f"an integer in [1, {MAX_CYCLES}] (got {cycles!r})"

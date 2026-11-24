@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_raw import parse_ascii_rawfile
@@ -169,11 +169,7 @@ def validate_settled_spec(name: Any, body: Any) -> None:
             f"{list(sim_cycle_mean.CYCLE_EDGES)} (got {edge!r})"
         )
     cycles = body.get("cycles")
-    if (
-        not isinstance(cycles, int)
-        or isinstance(cycles, bool)
-        or not 1 <= cycles <= sim_cycle_mean.MAX_CYCLES
-    ):
+    if not is_int(cycles) or not 1 <= cycles <= sim_cycle_mean.MAX_CYCLES:
         raise SimError(
             f"measurement '{name}': settled.cycles is required and must be "
             f"an integer in [1, {sim_cycle_mean.MAX_CYCLES}] (got {cycles!r})"

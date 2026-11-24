@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+from ._jsonnum import is_int
 from ._vendor import mutation_variants as _mutation_variants
 
 #: `<proposals>` top-level required fields (spike §3b). `schema` is not
@@ -146,7 +147,7 @@ def _entry_errors(position: int, entry: dict[str, Any]) -> list[str]:
     for field in ("index", "line"):
         if field in entry:
             value = entry[field]
-            if not isinstance(value, int) or isinstance(value, bool):
+            if not is_int(value):
                 errors.append(f"{prefix}.{field} must be an integer")
     for field in ("category", "file"):
         if field in entry:
@@ -220,7 +221,7 @@ def parse_mutation_proposals(
                 )
                 continue
             index = entry.get("index")
-            if isinstance(index, int) and not isinstance(index, bool):
+            if is_int(index):
                 indices.append(index)
             entry_errors = _entry_errors(position, entry)
             errors.extend(entry_errors)

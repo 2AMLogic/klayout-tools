@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
+from ._jsonnum import is_int
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_raw import parse_ascii_rawfile
@@ -130,7 +131,7 @@ def validate_eye_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': eye.phase must satisfy 0 <= phase < eye.ui"
         )
     uis = body.get("uis")
-    if not isinstance(uis, int) or isinstance(uis, bool) or not 2 <= uis <= MAX_UIS:
+    if not is_int(uis) or not 2 <= uis <= MAX_UIS:
         raise SimError(
             f"measurement '{name}': eye.uis is required and must be an "
             f"integer number of unit intervals in [2, {MAX_UIS}] -- a single "

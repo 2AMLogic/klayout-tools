@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim
+from ._jsonnum import is_int
 from .characterize_leg import run_sim_leg
 
 
@@ -40,7 +41,7 @@ def resolve_split_grid(
         value, where = spec.get("split_grid", 1), "request.options.split_grid"
     else:
         value, where = cli_value, "--split-grid"
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise error_cls(f"{where} must be an integer >= 1, got {value!r}")
     return value
 

@@ -56,6 +56,7 @@ import time
 from typing import Any
 
 from ._engine_proc import run_in_group
+from ._jsonnum import is_int
 from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
@@ -356,11 +357,7 @@ def run_equiv(
 
     if engine == "yosys-sequential":
         induction_depth = request_doc.get("induction_depth", DEFAULT_INDUCTION_DEPTH)
-        if (
-            not isinstance(induction_depth, int)
-            or isinstance(induction_depth, bool)
-            or induction_depth < 1
-        ):
+        if not is_int(induction_depth) or induction_depth < 1:
             raise EquivError("request.induction_depth must be a positive integer")
         # Deferred: equiv_sequential imports shared helpers from this module (#3694).
         from .equiv_sequential import _run_sequential

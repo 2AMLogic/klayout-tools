@@ -93,7 +93,7 @@ from . import (
     sim_remote,
     sim_staging,
 )
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
 from .sim_errors import SimError
 
@@ -2171,11 +2171,7 @@ def run_deck_request(
             "--attach for a deck-list request -- the submitted job is one "
             "unit of work that is collected whole"
         )
-    if max_workers is not None and (
-        not isinstance(max_workers, int)
-        or isinstance(max_workers, bool)
-        or max_workers < 1
-    ):
+    if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
         request,
