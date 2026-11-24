@@ -2721,14 +2721,38 @@ to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
 
-**Warning delivery (issue #6935).** The CLI defers engine-version mismatch
-warnings (see [shared `provenance`](#shared-provenance-block)) and the
-`klt sim` advisories for ambiguous PDK installs and an ambient ngspice
-init file. When a command emits a JSON error, the CLI discards these
-warnings so the caller can parse the whole error stream as one JSON value.
-When a command produces a report, the CLI sends the warnings to stderr,
-including for a violations report with exit code `3`. Under `--format text`,
-the warnings print as they happen, ahead of the plain-text error line.
+**Warning delivery (issues #6935, #7203).** The CLI defers `klt`'s
+human-readable warning lines for the duration of a `--format json`
+invocation; every emitter that can fire ahead of an application error
+routes through the one deferral (`klayout_tools._warn`): the engine-version
+mismatch warning (see [shared `provenance`](#shared-provenance-block)); the
+`klt sim` advisories for ambiguous PDK installs and an ambient ngspice init
+file; the `klt sim` batch-planning warnings (runner-version,
+runner-feature and job-ceiling checks under `warn`, features the client
+could not verify, an over-the-serial-bound job split, and a batch receipt
+that could not be written); the `klt sim` request-lint and disclosure
+warnings (`--meas-at` lint echoes, the local worker-pool clamp notice,
+unseeded transient-noise sources, and the device-multiplier findings
+summary); the `klt extract` job-ceiling warning; `klt netlist` batch
+warnings; and the `klt erc`/`klt power` stackup and `devices[]` warnings
+(an empty `label_layer`, a body layer whose carve-out subtracted nothing,
+and a stackup no antenna-rule layer matches). When a command emits a JSON
+error, the CLI discards these warnings so the
+caller can parse the whole error stream as one JSON value. When a command
+produces a report, the CLI sends the warnings to stderr, including for a
+violations report with exit code `3`. Under `--format text`, and for
+library callers that never arm the deferral, the warnings print as they
+happen, byte-identical to before, ahead of the plain-text error line.
+
+Not deferred, by design: streaming batch progress/heartbeat lines and
+`klt sim: notice:` lifecycle narration print as they happen (they are
+progress, not one-shot warnings), and so do the `--resume` recovery hints
+(`_warn_unlaunched`, `apply_unrun_signal`). One residual: a resume-path
+hint can fire just before an error envelope while an exception propagates;
+it stays direct on purpose, because dropping it would lose the only pointer
+to the resume path for a sweep whose process died mid-submit. A consumer
+parsing stderr as one JSON document after such a `klt sim` failure may
+therefore still see that one hint line ahead of the envelope.
 
 ```json
 {
