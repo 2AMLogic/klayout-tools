@@ -1474,6 +1474,26 @@ is future work). A cancelled job read with `--job-status` reports
 fails fast with `error.code: "batch_job_cancelled"` instead of waiting on
 or collecting a job whose results will never come.
 
+**List jobs on the fleet.** Run `klt sim --list-jobs --format json` to see
+which jobs have pending or running instances and how much capacity is available.
+The command calls the provisioner's `status --json` once, using the same fleet
+configuration as `--job-status`. An optional request supplies batch configuration.
+A staged job without an instance is invisible until the fleet allocates one.
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `observed_at` | Version 1 and the observation time reported by the fleet. |
+| `fleet` | `instance_count`, `instance_cap` and their difference `instance_headroom`. `vcpus_in_use`, `vcpu_budget` and `vcpu_headroom` describe the shared vCPU budget. An unconfigured budget yields null for the budget and its headroom. |
+| `jobs[]` | Each group has a `job_id`, an `instance_count`, its earliest `launched_at` and the individual `instances`. Instances without a job tag appear together under a null job ID. |
+| `jobs[].instances[]` | Each row gives the instance `id`, `type`, `az`, `state`, `lifecycle`, `launch_time` and nullable `image_profile`. |
+
+Groups are ordered by earliest launch and then by job ID, with untagged
+groups last on ties. An empty fleet returns `jobs: []` and the capacity figures.
+If the inventory read fails, or the provisioner lacks JSON status support, the
+command exits with `batch_fleet_status_unreadable`. The command conflicts with
+`--dry-run`, `--submit-only`, `--wait-for-capacity`, `--attach`, `--job-status`,
+`--cancel`, `--op-lint`, `--pdk-root`, `--batch-set` and non-batch backends.
+
 **Progress and unit counts.** The fleet's `status.json` is written at state
 transitions only and carries no completed/total unit count; `outputs/` is
 uploaded only after the job ends, and `klt` does not estimate progress from

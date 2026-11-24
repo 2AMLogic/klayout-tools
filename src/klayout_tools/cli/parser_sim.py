@@ -100,9 +100,7 @@ def add_sim_parser(
     )
     sim_parser.add_argument(
         "--job-status",
-        dest="job_status",
         metavar="JOB_ID",
-        default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
             "state `pending` before the instance writes one) and exit. "
@@ -115,10 +113,13 @@ def add_sim_parser(
         ),
     )
     sim_parser.add_argument(
+        "--list-jobs",
+        action="store_true",
+        help="list active fleet instances by job and show available capacity",
+    )
+    sim_parser.add_argument(
         "--cancel",
-        dest="cancel",
         metavar="JOB_ID",
-        default=None,
         help=(
             "cancel one batch job by id through 2am's "
             "batch-fleet-provision.sh cancel --apply: its pending/running "
