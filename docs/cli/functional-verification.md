@@ -1045,8 +1045,8 @@ least one nonzero arc onto one of its bits, so the
 annotation, and counted** (issue #2363). A router inserts an antenna-effect
 diode on a pin whose net violates the antenna rules; the diode is a
 *physical-only* cell — its Verilog model has no `specify` block and no output
-pin at all — so it appears in the post-route netlist and SDF but can carry no
-timing:
+pin. The diode appears in the post-route netlist and SDF with no cell timing
+of its own:
 
 ```verilog
 sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
@@ -1059,9 +1059,9 @@ sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
 That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 (issue #1619 — a bit-selected top-level port as the entry's *source*), so
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
-alias-map normalization above resolves it, and it costs one `SDF ERROR:
-<file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0, re-measured with one-variable-per-case controls in issue #5705: the
+alias-map normalization above resolves the rejection of a non-survivor
+(`SDF ERROR: <file>:<line>: Could not find intermodpath!`). Icarus 13.0 was
+measured live with one-variable-per-case controls in issue #5705: the
 deciding variable is the port bit's net's **physical fanout**, not the
 `INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
 interconnect modpath per bit-selected top-level port net, for the
@@ -1091,10 +1091,9 @@ when its instance is the net's last-declared load; the drop does not rest on
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*
-  rvalue it carries is zero. A **non**-zero-delay entry onto the identical
-  physical-only pin (including one that is zero at `min`/`typ` but not at
-  `max`) is left in place, fails to annotate, and still fails the run with
-  exit 1.
+  rvalue it carries is zero. An entry with a non-zero delay at any corner
+  stays in the SDF. If it targets a non-survivor, it still fails the
+  diagnostic gate with exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
   ordinary `specify`-bearing standard cell — the general shape (b) case,
   which on a fanout-above-1 port-bit net fails whenever it is not the
@@ -1395,7 +1394,7 @@ the run and identify the affected cell arcs in `arcs`.
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
-| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a physical-only instance was removed before annotation. Icarus can annotate only the last-declared load on the port bit's net. Zero delay at every corner makes the removal timing-neutral even when the physical-only instance is that load. |
 | `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
 | `zero_delay_internal_bus_net_interconnect` | SDF-text normalization (issue #6075) | An `INTERCONNECT` entry running across a bit-select of an **internal** wire — both endpoints ordinary instance pins whose parsed netlist connections resolve to the same bit-select of a wire that is not a top-level port — carrying zero delay at every corner, was removed before annotation. Measured live on Icarus 13.0: Icarus inserts **no** intermodpath for *every* entry on such a net (0-of-N at any fanout, unlike a port bit's last-declared-survivor rule), and the entry text is byte-identical to an entry on a scalar net that annotates cleanly, so the decision is made from the same gate-level parse the run already compiles, not from the SDF text. A non-zero entry on the identical net is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |

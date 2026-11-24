@@ -118,7 +118,9 @@ def _revision_comparison_one(
     if not (isinstance(sha, str) and sha):
         return {**not_comparable, "worker_stamp": stamp}
     value = asserted.strip()
-    if value.lower() == sha.lower() or (token is not None and value == token):
+    if value.lower() == sha.lower() or (
+        token is not None and value.lower() == token.lower()
+    ):
         return {"status": "match", "worker_stamp": stamp}
     warning = (
         "the declared options.pdk_revision matches neither the worker-observed "
@@ -181,9 +183,10 @@ def pdk_revision_comparison_environment(
     failure (enforcement of a PDK pin is issue #3462's). Compared only when
     both sides are present: a run with no ``worker_environment`` block at all
     (local backends, the ``remote`` backend's missing capture) adds no field.
-    The asserted value matches the worker's ``stamp_sha256`` (ignoring case)
-    or the ``SOURCES`` revision token; anything else with a readable stamp is
-    a ``mismatch`` carrying the observed stamp.
+    The asserted value matches the worker's ``stamp_sha256`` or the
+    ``SOURCES`` revision token, each ignoring case (issue #6362) but
+    otherwise exact -- an abbreviated revision is not a match; anything else
+    with a readable stamp is a ``mismatch`` carrying the observed stamp.
     """
     if not isinstance(remote_environment, dict):
         return {}
