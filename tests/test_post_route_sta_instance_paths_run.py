@@ -23,9 +23,9 @@ from klayout_tools.cli import sta_cmd
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from klayout_tools.post_route_sta_instance_paths import _INSTANCE_PATHS_BEGIN
 from test_post_route_sta import (
+    _LIVE_ONLY,
     _WORST_PATH_CAPTURES,
     _boundary_constraints,
-    _live_sky130_env,
     _setup_multi_corner_env,
     _setup_verilog_success_env,
     _stub_openroad_capture,
@@ -247,11 +247,7 @@ def test_print_text_renders_instance_paths(capsys):
 # -- live engine ------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_report_instances(tmp_path):
     """Engine integration (issue #5754): the boundary request with
     ``report_instances=["ff_a", "ff_b"]`` against a real session must

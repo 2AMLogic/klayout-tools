@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 1942
+      "lines": 1938
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -485,7 +485,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3151
+      "lines": 3122
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -505,11 +505,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1347
+      "lines": 1344
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1172
+      "lines": 1151
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 10827
+      "lines": 10779
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -969,7 +969,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12398
+      "lines": 12396
     },
     {
       "path": "tests/test_place_and_route_batch.py",
@@ -1033,7 +1033,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15827
+      "lines": 15823
     },
     {
       "path": "tests/test_sim_batch.py",

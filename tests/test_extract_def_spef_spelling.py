@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from klayout_tools.extract import run_extract
 from test_extract import _make_inverter_layout, _write_gds
+from test_post_route_sta import _LIVE_ONLY
 
 
 def test_def_net_connections_hierarchical_escaped_net_keeps_def_spef_spelling(
@@ -61,18 +62,13 @@ def test_def_bus_bits_keep_literal_and_bus_brackets(tmp_path):
     assert connections[net][0][0].spef == r"clkbuf_0_u_out\/dly[10]"
 
 
+@_LIVE_ONLY
 def test_live_def_bus_bits_annotate_the_design(tmp_path):
     import json
     from pathlib import Path
 
-    import pytest
-
     from klayout_tools.extract_spef import _write_spef, def_net_instance_pins
     from klayout_tools.post_route_sta import run_sta
-    from test_post_route_sta import _live_sky130_env
-
-    if _live_sky130_env() is None:
-        pytest.skip("requires OpenROAD and the SKY130A PDK")
 
     fixture = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
     request = json.loads((fixture / "request.json").read_text())
