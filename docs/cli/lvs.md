@@ -346,8 +346,14 @@ differ, the work copy of the reference has its top `.subckt`/`.ends` renamed to
 `layout.top` so the runset can pair them (no `same_circuit` is emitted; your
 file is never modified). The report still echoes your `reference.top`. With
 equal or absent tops the reference passes through byte-for-byte as before.
-Not live-verified against the IHP `sg13g2.lvs` (not available on this host);
-covered by stub-deck unit tests in `tests/test_lvs_runset_reference.py`.
+Live-verified (issues #5405, #7636) with klayout 0.30.12 and the IHP
+`sg13g2.lvs` on the PDK's own `inductor` and `sg13_hv_svaricap` testcases:
+`X.. inductor` / `X.. sg13_hv_svaricap` references match with same and
+differing layout/reference tops, and a one-device-removed reference gives
+`mismatch`. The `DEVICE_LIST` pass-through itself is covered only by the
+stub-deck unit tests in `tests/test_lvs_runset_reference.py`: the IHP deck,
+the only one exercised here, declares no `DEVICE_LIST` (its RF devices go
+through the SG13G2 conversion described above).
 
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
