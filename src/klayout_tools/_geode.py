@@ -15,13 +15,13 @@ exception type (exit 1, error envelope).
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess
 from typing import Any
 
 from ._engine_proc import run_in_group
+from ._jsonnum import is_finite_number
 from ._paths import resolve_tool_binary
 
 #: The problem-spec schema version geode understands
@@ -98,11 +98,7 @@ def _validated_matrix(names: list[Any], matrix: Any) -> list[list[float]]:
         raise EmError(f"geode capacitance matrix is not {n}x{n}")
     for row in matrix:
         for v in row:
-            if (
-                isinstance(v, bool)
-                or not isinstance(v, (int, float))
-                or not math.isfinite(v)
-            ):
+            if not is_finite_number(v):
                 raise EmError(
                     "geode capacitance matrix has a non-finite or non-numeric entry"
                 )

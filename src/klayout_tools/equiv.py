@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._engine_proc import run_in_group
-from ._jsonnum import is_int
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
@@ -382,9 +382,7 @@ def run_equiv(
     effective_timeout_s = timeout_s
     if effective_timeout_s is None:
         effective_timeout_s = request_doc.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if not isinstance(effective_timeout_s, (int, float)) or isinstance(
-        effective_timeout_s, bool
-    ):
+    if not is_number(effective_timeout_s):
         raise EquivError("timeout_s must be a positive number")
     if effective_timeout_s <= 0:
         raise EquivError("timeout_s must be a positive number")

@@ -265,7 +265,7 @@ from . import _sta_clock_transition as _transition
 from . import _sta_generated_clocks as _generated
 from . import _sta_timing_derate as _derate
 from . import macros as macro_spec
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_number
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1935,11 +1935,7 @@ def _validate_constraints(
         clock_period_ns = validate_period(  # values reach create_clock -period
             clock_period_ns, "request.constraints", "clock_period_ns"
         )
-    elif (
-        isinstance(clock_period_ns, bool)
-        or not isinstance(clock_period_ns, (int, float))
-        or clock_period_ns <= 0
-    ):
+    elif not is_number(clock_period_ns) or clock_period_ns <= 0:
         raise PostRouteStaError(
             "request.constraints.clock_period_ns must be a positive number"
         )
@@ -2064,13 +2060,7 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     per-module-copy convention ``_clock_lines`` already follows."""
     if value is None:
         return None
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or value < 0
-        or value != value  # NaN
-        or value in (float("inf"), float("-inf"))
-    ):
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )

@@ -15,16 +15,24 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import (
+    _geode,
     _sta_clock_transition,
     _sta_clock_uncertainty,
     corner_matrix,
+    em,
     erc_spec,
+    fill,
+    gen_compose_footprints,
+    lvs_timeout,
     place_and_route_groups,
+    post_route_sta,
     resistance_path,
     signoff_attest,
     sim,
     sim_corner_point,
     sim_crossings,
+    sim_noise,
+    sim_slope_band_meas,
     sim_steps,
     sim_supply_relative,
     sim_tian,
@@ -221,6 +229,68 @@ CASES = [
         "yosys_timeout_s must be a finite number",
     ),
     (
+        "em_mesh_length_unit",
+        lambda: em._validate_mesh({"path": "m.msh", "length_unit_m": HUGE}),
+        em.EmError,
+        "length_unit_m must be a finite number",
+    ),
+    (
+        "geode_capacitance_matrix",
+        lambda: _geode._validated_matrix(["a"], [[HUGE]]),
+        em.EmError,
+        "non-finite or non-numeric entry",
+    ),
+    (
+        "fill_finite_positive",
+        lambda: fill._finite_positive(HUGE, "min_width_um"),
+        fill.FillError,
+        "min_width_um must be a finite number",
+    ),
+    (
+        "gen_compose_gate_bbox",
+        lambda: gen_compose_footprints._require_gate_bbox(
+            {"x0": 0, "y0": 0, "x1": HUGE, "y1": 1}, "where"
+        ),
+        ValueError,
+        "where.x1 must be a finite number",
+    ),
+    (
+        "lvs_compare_timeout",
+        lambda: lvs_timeout.parse_compare_timeout(
+            {"compare_timeout_s": HUGE}, "klayout"
+        ),
+        lvs_timeout.LvsError,
+        "compare_timeout_s must be a positive number",
+    ),
+    (
+        "pnr_io_delay",
+        lambda: pnr_request._validate_io_delay(HUGE, "input"),
+        pnr_request.PlaceAndRouteError,
+        "input_delay_ns must be a non-negative number",
+    ),
+    (
+        "post_route_sta_io_delay",
+        lambda: post_route_sta._validate_io_delay(HUGE, "output"),
+        post_route_sta.PostRouteStaError,
+        "output_delay_ns must be a non-negative number",
+    ),
+    (
+        "sim_slope_band_number",
+        lambda: sim_slope_band_meas.validate_slope_band_spec(
+            "m",
+            {
+                "y": "v(out)",
+                "x": "v(in)",
+                "anchor": HUGE,
+                "min_slope": 1,
+                "max_slope": 2,
+                "report": "y_span",
+            },
+        ),
+        SimError,
+        "slope_band.anchor must be a finite number",
+    ),
+    (
         "yield_analysis",
         lambda: yield_analysis._read_qualification_keys(
             {"target_sigma": HUGE}, {}, "where: "
@@ -239,3 +309,11 @@ def test_huge_int_is_a_documented_error_not_overflow_error(label, thunk, exc, ma
     else:
         with pytest.raises(exc, match=match):
             thunk()
+
+
+def test_huge_int_is_not_a_positive_number_for_noise_frequencies():
+    """``sim_noise._positive_number`` is a predicate, not a raiser: a huge int
+    used to pass its ``0 < value < inf`` test and then overflow in the
+    ``hz / f1`` interpolation."""
+    assert sim_noise._positive_number(HUGE) is False
+    assert sim_noise._positive_number(1e3) is True

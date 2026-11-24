@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .lvs_base import LvsError
 
 #: Seconds between stderr heartbeat lines.
@@ -59,11 +60,7 @@ def parse_compare_timeout(options: Mapping[str, Any], engine: str) -> float | No
     if "compare_timeout_s" not in options or options["compare_timeout_s"] is None:
         return None
     value = options["compare_timeout_s"]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 < value < float("inf")
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise LvsError("options.compare_timeout_s must be a positive number of seconds")
     if engine != "klayout":
         raise LvsError(

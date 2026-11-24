@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
 from .gen_compose_base import (
     _VIA_LANDING_SIZE_UM,
     GenComposeError,
@@ -77,7 +78,7 @@ def _parse_landing_pad_override(raw: Any, where: str) -> float | None:
     """
     if raw is None:
         return None
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+    if not is_number(raw) or raw <= 0:
         raise GenComposeError(f"{where} must be a positive number when given")
     return float(raw)
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 
 def strap_splits_warning(group_id: str) -> str:
     return (
@@ -12,10 +14,6 @@ def strap_splits_warning(group_id: str) -> str:
         "strapping leaves every sub-instance but one per device floating "
         "(issue #5557)"
     )
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def strap_declined_warning(
@@ -77,7 +75,7 @@ def apply_strap_splits(
     if group["generator"] != "diff_pair":
         return []
     splits = overrides.get("splits", 2)
-    if not (_is_number(splits) and splits > 1):
+    if not (is_number(splits) and splits > 1):
         return []
     from .gen_diff_pair_strap import STRAP_MIN_W_UM
 
@@ -92,7 +90,7 @@ def apply_strap_splits(
     unit_w: float | None
     if "w_um" in overrides:
         unit_w = overrides["w_um"]
-        if not (_is_number(unit_w) and unit_w > 0):
+        if not (is_number(unit_w) and unit_w > 0):
             return []  # the generator's own validator rejects it
     else:
         whole_w = derived.get("w_um")
@@ -100,7 +98,7 @@ def apply_strap_splits(
             # No netlist W and no override: the PCell's own default
             # (0.42 um) applies, which is under the floor.
             unit_w = None
-        elif _is_number(whole_w) and whole_w > 0:
+        elif is_number(whole_w) and whole_w > 0:
             unit_w = whole_w / splits
         else:
             return []
@@ -140,11 +138,7 @@ def apply_diff_pair_unit_w_um(
     ):
         return []
     resolved_splits = overrides.get("splits", 2)
-    is_valid_splits = (
-        isinstance(resolved_splits, (int, float))
-        and not isinstance(resolved_splits, bool)
-        and resolved_splits > 0
-    )
+    is_valid_splits = is_number(resolved_splits) and resolved_splits > 0
     if not is_valid_splits:
         # An invalid `splits` override (non-numeric, non-positive) is left
         # for `gen_describe.py`'s own `_diff_pair_validate` to reject

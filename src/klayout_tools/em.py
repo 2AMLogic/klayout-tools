@@ -5,12 +5,11 @@ The engine and mesher are subprocesses. See docs/cli/em.md for the contract.
 
 from __future__ import annotations
 
-import math
 import os
 import shutil
 import tempfile
 import time
-from typing import Any, TypeGuard
+from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope
 from ._digest import sha256_file
@@ -27,6 +26,7 @@ from ._geode import (
 from ._geode import (
     parse_capacitance_report as parse_capacitance_report,
 )
+from ._jsonnum import is_finite_number
 from ._paths import _load_request_json
 from .env_provenance import find_repo_root
 
@@ -42,14 +42,6 @@ DEFAULT_TIMEOUT_S = 1800
 _UNIT_SCALE = {"F": 1.0, "pF": 1e-12, "fF": 1e-15}
 
 __all__ = ["EmError", "run_em"]
-
-
-def _is_finite_number(value: object) -> TypeGuard[int | float]:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +62,7 @@ def _validate_mesh(raw: Any) -> dict[str, Any]:
     if not isinstance(path, str) or not path:
         raise EmError("mesh.path is required and must be a non-empty string")
     unit = raw.get("length_unit_m")
-    if not _is_finite_number(unit) or unit <= 0:
+    if not is_finite_number(unit) or unit <= 0:
         raise EmError(
             "mesh.length_unit_m must be a finite number > 0 "
             "(metres per mesh length unit)"
@@ -135,7 +127,7 @@ def _validate_eps_r(where: str, entry: dict[str, Any]) -> list[float]:
     if (
         not isinstance(eps, list)
         or len(eps) != 2
-        or not all(_is_finite_number(v) for v in eps)
+        or not all(is_finite_number(v) for v in eps)
     ):
         raise EmError(f"{where}.eps_r must be [re, im]: two finite numbers")
     if eps[1] != 0 or eps[0] <= 0:
@@ -192,7 +184,7 @@ def _validate_check_limits(where: str, limits: Any) -> dict[str, Any]:
     normalized = {"min": None, "max": None, **limits}
     for bound in ("min", "max"):
         v = normalized[bound]
-        if v is not None and not _is_finite_number(v):
+        if v is not None and not is_finite_number(v):
             raise EmError(f"{where}: limits.{bound} must be a finite number")
     return normalized
 
@@ -246,7 +238,7 @@ def _validate_options(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise EmError("request field 'options' must be an object")
     timeout = raw.get("timeout_s", DEFAULT_TIMEOUT_S)
-    if not _is_finite_number(timeout) or isinstance(timeout, float) or timeout <= 0:
+    if not is_finite_number(timeout) or isinstance(timeout, float) or timeout <= 0:
         raise EmError("options.timeout_s must be a positive integer")
     if not isinstance(raw.get("keep_artifacts", True), bool):
         raise EmError("options.keep_artifacts must be a boolean")
