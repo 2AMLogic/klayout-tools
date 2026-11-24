@@ -46,7 +46,6 @@ computed. Every failure is ``status: "error"``, ``value: null`` with a
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -192,6 +191,11 @@ class CycleMeanOutcome:
     error: str | None = None
     code: str | None = None
 
+    @property
+    def value(self) -> float | None:
+        """Scalar used to grade this measurement."""
+        return self.mean
+
     def report(self) -> dict[str, Any]:
         """The response's ``cycle_mean`` object for this measurement."""
         return {
@@ -282,37 +286,27 @@ def extract_corner_cycle_means(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["cycle_mean"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) or "
-                f"align ({body['align']!r}) did not resolve against this "
-                "transient's saved vectors (no rawfile was written) -- check "
-                "the node/branch names"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': could not read its cycle_mean rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 3 or not points:
-        return CycleMeanOutcome(
-            code="cycle_mean_vector_missing",
-            error=f"measurement '{name}': its signal/align vectors yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=3,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) or "
+            f"align ({body['align']!r}) did not resolve against this "
+            "transient's saved vectors (no rawfile was written) -- check "
+            "the node/branch names"
+        ),
+        empty_error=(
+            f"measurement '{name}': its signal/align vectors yielded no samples"
+        ),
+        rawfile_label="cycle_mean rawfile",
+    )
+    if columns is None:
+        return CycleMeanOutcome(code="cycle_mean_vector_missing", error=error)
     outcome = compute_cycle_mean(
-        [point[0] for point in points],
-        [point[1] for point in points],
-        [point[2] for point in points],
+        *columns,
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="cycle_mean"),

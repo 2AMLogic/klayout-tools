@@ -1,28 +1,23 @@
 """Item 9 (testbenches shipped) inventory extensions (issue #4848).
 
-Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Three
-additive pieces on top of the original ``testbenches`` path list plus one
-top-level ``cold_start``:
+Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Extends
+the ``testbenches`` path list and top-level ``cold_start`` with per-bench
+``{"path", "cold_start"}`` entries, ``unbenched_rows`` with owner issues,
+and command start/finish progress on stderr.
 
-* a ``testbenches`` entry may be ``{"path", "cold_start"}`` so a failure
-  names the bench it belongs to;
-* ``unbenched_rows`` declares spec rows that have no bench, with an owner issue;
-* a start/finish progress line per command run, written to stderr only.
-
-Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
-item's reproducibility-pin checks, which live here for the same reason. Plus
-(issue #5641) a ``cold_start`` accepting a list: several named cold starts
-over one inventoried file, so a shared implementation module can carry every
-graded cold start without minting hollow wrapper files. Plus (issue #5701) a
-bench entry's ``sources`` -- the implementation modules the bench is spread
-across -- hashed as ``role: "source"`` ``present`` checks attributed to the
-bench(es) that declared them.
-
-Plus (issue #5850) a bench entry's ``depends_on`` declarations, which live in
-:mod:`klayout_tools.signoff_attest_item9_depends_on` for the same reason.
+Also handles reproducibility pins, ``documented_argv`` disclosure (#5463),
+and named cold-start lists over one inventoried file (#5641), avoiding hollow
+wrapper files. A bench's ``sources`` (#5701) are hashed as ``role: "source"``
+``present`` checks attributed to every bench that declares them.
+The ``depends_on`` declarations (#5850) live in
+:mod:`klayout_tools.signoff_attest_item9_depends_on`.
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
+
+Since issue #5856 the gap-row shape validator and check builders are shared
+with item 8 through :mod:`klayout_tools.signoff_attest_gaprows`; the two
+functions below are thin delegations kept for their callers.
 """
 
 from __future__ import annotations
@@ -32,7 +27,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ._jsonnum import is_int
+from . import signoff_attest_gaprows as gaprows
 from .signoff_attest_item9_depends_on import (
     bench_depends_on_map,
     dependency_binding_checks,
@@ -121,6 +116,13 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
     it just does not yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk_value = pdk_pin(pins.get("pdk"))
+    pdk_extra: dict[str, Any] = {}
+    if "pdk" in pins and not isinstance(pins["pdk"], Mapping):
+        # Present but the wrong shape (issue #5688): say so, not "missing".
+        pdk_extra["reason"] = (
+            "wrong type: expected {name, revision} or {none, reason}, "
+            f"got {type(pins['pdk']).__name__}"
+        )
     tools = pins.get("tools")
     tools_value = None
     if (
@@ -138,6 +140,7 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
             "role": "pdk",
             "passed": pdk_value is not None,
             "value": pdk_value,
+            **pdk_extra,
         },
         {
             "check": "pin",
@@ -361,48 +364,21 @@ def validate_into(
 
 def validated_unbenched_rows(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``unbenched_rows``: ``[{"row": str, "issue": int}]`` (optional)."""
-    raw = inventory.get("unbenched_rows")
-    if raw is None:
+    if inventory.get("unbenched_rows") is None:  # Item 9 also accepts explicit null.
         return []
-    if not isinstance(raw, list):
-        raise _error("'unbenched_rows' must be a list of {row, issue}")
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        field = f"unbenched_rows[{index}]"
-        if not isinstance(entry, Mapping) or set(entry) != {"row", "issue"}:
-            raise _error(f"'{field}' must be an object with 'row' and 'issue'")
-        row, issue = entry["row"], entry["issue"]
-        if not isinstance(row, str) or not row.strip():
-            raise _error(f"'{field}.row' must be a non-empty string")
-        if not is_int(issue) or issue <= 0:
-            raise _error(f"'{field}.issue' must be a positive integer")
-        if row in seen:
-            raise _error(f"unbenched row '{row}' is declared more than once")
-        seen.add(row)
-        rows.append({"row": row, "issue": issue})
-    return rows
+    return gaprows.validated_gap_rows(inventory, "unbenched_rows", "unbenched")
 
 
 def unbenched_row_checks(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """One visible, passing check per declared bench-less row (sorted)."""
-    return [
-        {
-            "check": "unbenched_row",
-            "role": "row",
-            "row": entry["row"],
-            "issue": entry["issue"],
-            "passed": True,
-        }
-        for entry in sorted(rows, key=lambda e: e["row"])
-    ]
+    return gaprows.gap_row_checks(rows, "unbenched_row")
 
 
 def with_progress(
     run: Callable[..., dict[str, Any]], label_of: Callable[..., str]
 ) -> Callable[..., dict[str, Any]]:
-    """Wrap a command-check runner so each run writes a start and finish line
-    to stderr. Timing stays out of the returned check (reproducible envelope)."""
+    """Write start and finish lines to stderr. The CLI reports elapsed time
+    in live output and omits it from committed checks and drift comparisons."""
 
     def wrapped(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         label = label_of(role, identity)

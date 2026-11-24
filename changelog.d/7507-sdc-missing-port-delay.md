@@ -1,0 +1,1 @@
+- **Fixed** (#7507, 2026-11-23). The STA SDC drift check reports a missing input or output delay bound on a secondary clock even when the primary clock's wildcard delay matches the request.

@@ -252,7 +252,8 @@ def test_provenance_digests_single_source_with_source_role(tmp_path, monkeypatch
         "klayout_version",
     ):
         assert field in provenance
-    assert report["schema_version"] == 2  # additive block: no bump (issue #5550)
+    # Additive block: no bump of its own (issue #5550); 3 is #5784's retype.
+    assert report["schema_version"] == 4
 
 
 def test_provenance_multi_source_digest_is_combined_and_order_independent(

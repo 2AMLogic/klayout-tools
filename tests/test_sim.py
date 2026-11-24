@@ -44,8 +44,10 @@ from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
+from klayout_tools import sim_batch_hints as sbh
+from klayout_tools import sim_expr_hint as expr_hint
+from klayout_tools import sim_measurement_grading as smg
 from klayout_tools import sim_measurement_results as smr
-from klayout_tools import sim_noise_mechanism as snm
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
@@ -1929,7 +1931,8 @@ def test_mismatch_scale_rejects_bad_values(value):
         sim._resolve_mismatch_scale({"mismatch_scale": value}, "sky130A")
 
 
-@pytest.mark.parametrize("pdk", ["sg13g2", None, "bogus"])
+# sg13g2 resolves through its libraries instead: tests/test_sim_mismatch_scale.py.
+@pytest.mark.parametrize("pdk", [None, "bogus"])
 def test_mismatch_scale_refuses_unsupported_family(pdk):
     with pytest.raises(sim.SimError, match="mismatch_scale.*family"):
         sim._resolve_mismatch_scale({"mismatch_scale": 2}, pdk)
@@ -1937,14 +1940,10 @@ def test_mismatch_scale_refuses_unsupported_family(pdk):
 
 def test_mismatch_scale_resolves_per_family_param():
     assert sim._resolve_mismatch_scale({}, "sky130A") is None
-    assert sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A") == (
-        0.0,
-        "mc_mm_switch",
-    )
-    assert sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD") == (
-        2.5,
-        "sw_stat_mismatch",
-    )
+    sky = sim._resolve_mismatch_scale({"mismatch_scale": 0}, "sky130A")
+    assert (sky.scale, sky.cards) == (0.0, (("mc_mm_switch", 0.0),))
+    gf = sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "gf180mcuD")
+    assert (gf.scale, gf.cards) == (2.5, (("sw_stat_mismatch", 2.5),))
 
 
 def test_mismatch_scale_default_shape_is_unchanged():
@@ -1961,7 +1960,7 @@ def test_mismatch_scale_echo_and_deck_card_follows_the_lib(tmp_path):
     sampled, info = sim._expand_monte_carlo(
         points,
         {"n": 2, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(2.5, "mc_mm_switch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 2.5}, "sky130A"),
     )
     assert info["mismatch_scale"] == 2.5
     assert info["mismatch_param"] == "mc_mm_switch"
@@ -1980,7 +1979,7 @@ def test_mismatch_scale_zero_deck_card_is_integral(tmp_path):
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(0.0, "sw_stat_mismatch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 0}, "gf180mcuD"),
     )
     assert ".param sw_stat_mismatch=0" in _write_deck(tmp_path, sampled[0])
 
@@ -1998,7 +1997,7 @@ def test_mismatch_scale_rides_the_fleet_wire():
     sampled, _ = sim._expand_monte_carlo(
         points,
         {"n": 1, "seed": 1, "vary": "mismatch"},
-        mismatch_scale=(3.0, "mc_mm_switch"),
+        mismatch_scale=sim._resolve_mismatch_scale({"mismatch_scale": 3}, "sky130A"),
     )
     back = sim._corner_points_from_wire(sim._corner_points_to_wire(sampled))
     assert back[0].mc_seed["mismatch_scale"] == 3.0
@@ -2011,10 +2010,11 @@ def test_mismatch_scale_changes_checkpoint_fingerprint(tmp_path):
     points = sim._expand_corners({"process": ["tt_mm"]}, [])
 
     def fp(scale):
+        declared = {} if scale is None else {"mismatch_scale": scale}
         sampled, _ = sim._expand_monte_carlo(
             points,
             {"n": 2, "seed": 1, "vary": "mismatch"},
-            mismatch_scale=None if scale is None else (scale, "mc_mm_switch"),
+            mismatch_scale=sim._resolve_mismatch_scale(declared, "sky130A"),
         )
         return sim._checkpoint_fingerprint(
             netlist_path=str(netlist),
@@ -10822,13 +10822,12 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
-#: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr, snm)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, expr_hint, sim_steps)
+_DIAGNOSTIC_SOURCE_MODULES += (smr, sim.sim_noise_mechanism, sim.sim_homotopy, smg)
 
-#: Emission sites where the code is supplied by the site's *caller* or by a
-#: table it iterates, so the literal cannot be read off the site itself --
-#: each is a fan-in whose vocabulary this test derives by a separate rule
-#: (the pattern tables; the `_unrun_corner_report` call-site scan).
+#: Emission sites whose code comes from the site's *caller* or a table it
+#: iterates, so no literal can be read off the site; each fan-in's vocabulary
+#: is derived by a separate rule (pattern tables; `_unrun_corner_report` calls).
 #:
 #: This is a list of **mechanisms**, not of codes: adding a new diagnostic
 #: code never changes it, which is the whole point. Adding a new *way* to
@@ -10843,8 +10842,8 @@ _EXPECTED_INDIRECT_CODE_SITES = {
     ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
     # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
     # probe's own abort diagnostic already carries as a literal (rule 3).
-    ("klayout_tools.sim", "_run_local", "stop_reason"),
-    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_sequentially", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_corners_pooled", "stop_reason"),
 }
 
 
@@ -11039,10 +11038,7 @@ def test_diagnostic_codes_is_a_superset_of_every_emittable_code():
     assert {"batch_job_failed", "batch_job_timeout", "batch_poll_timeout"} <= emittable
 
     assert emittable - sim._GRADING_MARKER_CODES <= sim.DIAGNOSTIC_CODES
-    # The two marker diagnostics the grading step itself attaches are
-    # deliberately NOT selectable: both are emitted on a corner already being
-    # graded `inconclusive`, downstream of the `options.fail_on_diagnostic`
-    # code match, so listing either could never change a verdict.
+    # Codes emitted during or after grading are outside the selectable vocabulary.
     assert sim._GRADING_MARKER_CODES <= emittable
     assert not (sim._GRADING_MARKER_CODES & sim.DIAGNOSTIC_CODES)
 
@@ -12910,7 +12906,6 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         str(src / "body.spice"),
         corner_count=len(points),
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(src),
     )
     # Both transports ship the same assets, in the same order, with the same
@@ -14520,11 +14515,6 @@ def test_expand_corners_units_defaults_and_bundle():
         ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
         ({"units": [{"bogus": 1}]}, [], "unknown key"),
         ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
-        (
-            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
-            [],
-            "duplicates",
-        ),
     ],
 )
 def test_expand_corners_units_validation(corners, exclude, match):

@@ -87,9 +87,9 @@ def collect(
     ``err_cls`` carrying the runner's own error, else the tail of its
     ``stderr.log`` (the ``--progress`` lines show how far it got).
 
-    ``job_failure`` is the caller's own ``_job_failure`` wrapper, called with
-    the keyword arguments of :func:`._batch_common.job_failure` minus
-    ``err_cls`` / ``no_fallback``."""
+    ``job_failure`` is :func:`._batch_common.job_failure` with the
+    caller's ``err_cls`` / ``no_fallback`` pre-bound, called with the
+    remaining keyword arguments."""
     from . import sim_batch
 
     done = status.get("state") == "done" and (status_exit_code(status) in (0, None))

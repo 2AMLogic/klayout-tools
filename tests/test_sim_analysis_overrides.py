@@ -5,6 +5,8 @@ issue #4970). Unit tests need no simulator; the integration test runs the real
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,25 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 _TRAN = {"kind": "tran", "args": "1u 1m"}
 _CORNERS = {"temperature_c": [27, 85, 125]}
+
+
+def test_analysis_overrides_run_without_importing_sim():
+    probe = """
+from types import SimpleNamespace
+import sys
+from klayout_tools import sim_analysis_overrides as overrides
+
+point = SimpleNamespace(corner_id="tt", temperature_c=27, params={}, supply_v={})
+rules = overrides.validate_analysis_overrides(
+    [{"match": {"temperature_c": 27}, "args": "1u 2m"}],
+    {"kind": "tran", "args": "1u 1m"}, "ngspice",
+)
+overrides.resolve([point], rules)
+assert point.analysis_args == "1u 2m"
+overrides.require_echo([point], [{"analysis_args": "1u 2m"}], "batch")
+assert "klayout_tools.sim" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", probe], check=True)
 
 
 def _rule(match: dict, args: str) -> dict:

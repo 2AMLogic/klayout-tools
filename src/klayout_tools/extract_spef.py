@@ -12,11 +12,7 @@ summary (issue #948, Epic #700 Phase 3; survey doc:
 ``docs/design/post-route-sta-survey.md`` sections 3.1/4.1), not a second
 extraction pass.
 
-:class:`ExtractError` lives here rather than in ``extract.py`` purely to keep
-the dependency one-directional: :func:`_write_spef` raises it, and
-``extract.py`` re-exports it (``from klayout_tools.extract_spef import
-ExtractError``) so every existing ``from klayout_tools.extract import
-ExtractError`` / ``except ExtractError`` call site keeps working unchanged.
+The writer and its callers share :class:`~klayout_tools.extract_base.ExtractError`.
 """
 
 from __future__ import annotations
@@ -25,32 +21,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-
-class ExtractError(Exception):
-    """Raised when a layout cannot be extracted: bad file, unknown deck,
-    unresolvable PDK, missing/ambiguous top cell, or an engine error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback.
-
-    ``code`` / ``job_id`` / ``details`` are optional and set only by the
-    ``--backend batch`` path (:mod:`klayout_tools.extract_batch`), exactly as
-    :class:`klayout_tools.netlist.NetlistError` carries them: ``code`` becomes
-    the error envelope's ``error.code``, ``details`` is merged into it.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
-
+from .extract_base import ExtractError as ExtractError
 
 #: Standard Parasitic Exchange Format version this writer declares in its
 #: ``*SPEF`` header line (``klt extract --spef``, issue #948, Epic #700
@@ -266,10 +237,10 @@ def _renamed_def_name(name: str, original: str) -> str:
 
 
 def _def_name_to_spef(raw: str) -> str:
-    """``raw`` (a DEF identifier as spelled in the file) rendered as a SPEF
-    identifier: identical to ``_spef_name(_unescape_def_name(raw))`` except a
-    bare, unescaped ``/`` -- DEF's hierarchy divider -- stays ``/`` (SPEF
-    declares the same ``*DIVIDER /``). An escaped ``\\/`` stays escaped."""
+    """Keep the DEF's hierarchy and bus delimiters in SPEF. An escaped slash
+    or bracket is literal, while a bare slash or bracket is structural.
+    For example, a DEF memory word can have a literal index followed by a
+    bus bit. OpenSTA needs both spellings preserved in the same name."""
     out: list[str] = []
     i = 0
     while i < len(raw):
@@ -278,7 +249,7 @@ def _def_name_to_spef(raw: str) -> str:
             out.append(_spef_name(raw[i + 1]))
             i += 2
             continue
-        out.append("/" if char == "/" else _spef_name(char))
+        out.append(char if char in "/[]" else _spef_name(char))
         i += 1
     return "".join(out)
 
@@ -292,6 +263,9 @@ class DefNetConnections(dict):
     ``PINS`` record says ``- PortA + NET netA``."""
 
     port_pins: dict[str, tuple[str, ...]]
+    routed_signals: set[str]
+    wired_signal_count: int
+    complete: bool
 
     def __init__(
         self,
@@ -300,6 +274,20 @@ class DefNetConnections(dict):
     ) -> None:
         super().__init__(connections or {})
         self.port_pins = dict(port_pins or {})
+        self.routed_signals = set()
+        self.wired_signal_count = 0
+        self.complete = False
+
+    def record_wire(self, name: str, record: str, terminal_count: int) -> None:
+        """Track routed signal and clock nets and the OpenDB SIGNAL subset."""
+        use = re.search(r"\s\+\s+USE\s+(\w+)", record)
+        net_type = use[1] if use else "SIGNAL"
+        if net_type in {"SIGNAL", "CLOCK"} and re.search(
+            r"\s\+\s+(?:ROUTED|FIXED|COVER)\s", record
+        ):
+            self.routed_signals.add(name)
+            if net_type == "SIGNAL" and terminal_count >= 2:
+                self.wired_signal_count += 1
 
 
 def _record_def_net_refs(
@@ -321,52 +309,12 @@ def _record_def_net_refs(
 
 
 def def_net_instance_pins(def_path: str) -> DefNetConnections:
-    """Parse ``def_path``'s own ``NETS`` section for each net's real
-    ``(instance, pin)`` connectivity (issue #961's device-terminal
-    ``*CONN`` correlation): a small, targeted scan in the same style as
-    ``place_and_route.py``'s ``_def_pin_net_names`` (not a general DEF
-    parser -- this repo already reads DEF geometry through
-    ``klayout.db``'s own LEF/DEF reader for every other purpose).
+    """Read intended terminals from DEF NETS, preserving instance and port names.
 
-    Each ``NETS`` record is ``- <netName> ( <ref> <pin> ) ... ;``, where
-    ``<ref>`` is either a cell instance name or the literal ``PIN`` (a
-    top-level design-port connection -- already covered by
-    :func:`_write_spef`'s existing ``port_names``/``*P`` handling via
-    ``place_and_route.py``'s ``declared_pins``, so ``PIN`` entries are
-    dropped from the returned mapping rather than double-reported, but kept
-    on its :attr:`DefNetConnections.port_pins` so :func:`_write_spef` can
-    name the port by its PIN rather than its net). A record may span several
-    lines (a high-fanout net wraps in a real routed DEF), so this
-    accumulates a record's own text across lines until the terminating
-    ``;``, matching ``_def_pin_net_names``'s own multi-line handling.
-
-    Only the record's *connection-list prefix* is scanned: DEF's grammar
-    puts the whole ``( <ref> <pin> )`` list before any ``+``-prefixed
-    clause, and a real routed net continues with ``+ ROUTED <layer> ( x y )
-    ( * y ) NEW <layer> ( x y ) <via> ...`` whose coordinate and via tuples
-    have the identical ``( <a> <b> )`` shape as a connection. Scanning the
-    full record body would therefore turn wire points into fake
-    ``(instance, pin)`` pairs on essentially every routed signal net, so
-    the body is split at its first ``+`` token (:data:`_DEF_NET_CLAUSE_RE`)
-    and only the part before it is matched.
-
-    These are exactly the ``<inst>``/``<pin>`` identifiers OpenSTA's own
-    linked gate-level design already uses (DEF preserves the flow's
-    original instance/pin names verbatim), which is what makes
-    ``*I <inst>:<pin>`` entries built from this data resolvable against a
-    real OpenSTA session -- unlike this repo's own layout-driven ``Device``
-    naming (``$1517:G``), which has no asserted correlation to any
-    digital-flow instance name (see :func:`_write_spef`'s docstring).
-
-    Returns ``{}`` (never raises) for a missing file, a DEF with no
-    ``NETS`` section, or a section that parses to no connections at all --
-    the caller's own "no restriction" default, matching
-    :func:`place_and_route._def_pin_net_names`'s "absence is not proof of
-    zero" posture but expressed as an empty mapping (every lookup is a
-    ``.get(name, ())`` at the call site, so there is no behavioral
-    difference between "absent" and "empty" here the way there is for
-    ``declared_pins``, which must distinguish "no restriction" from "empty
-    restriction").
+    Only the prefix before the first + clause contains terminals. Subsequent
+    coordinate tuples have the same shape. Routed signal and clock membership
+    and completed section coverage are recorded for the physical route audit.
+    A missing or unreadable DEF returns an empty, incomplete mapping.
     """
     try:
         with open(def_path, encoding="utf-8", errors="replace") as handle:
@@ -376,23 +324,28 @@ def def_net_instance_pins(def_path: str) -> DefNetConnections:
 
     connections: dict[str, list[tuple[str, str]]] = {}
     port_pins: dict[str, list[str]] = {}
+    result = DefNetConnections()
+    records = 0
+    expected = 0
+    valid_records = True
     in_nets = False
     current_net: str | None = None
     current_body: list[str] = []
 
     def _flush() -> None:
-        nonlocal current_net, current_body
+        nonlocal current_net, current_body, records, valid_records
         if current_net is not None and current_body:
-            # Only the record's connection-list prefix -- everything before
-            # its first `+`-prefixed clause -- holds `( <ref> <pin> )`
-            # connections. A routed net's `+ ROUTED`/`NEW` geometry uses the
-            # identical `( <a> <b> )` shape for coordinates and vias, so
-            # scanning the whole body would invent connections out of wire
-            # points (see `_DEF_NET_CLAUSE_RE`).
-            body = _DEF_NET_CLAUSE_RE.split(" ".join(current_body), maxsplit=1)[0]
-            _record_def_net_refs(
-                connections, port_pins, current_net, _DEF_NET_CONN_RE.findall(body)
+            record = " ".join(current_body)
+            records += 1
+            valid_records &= record.rstrip().endswith(";")
+            body = _DEF_NET_CLAUSE_RE.split(record, maxsplit=1)[0]
+            prefix = _DEF_NET_START_RE.sub("", body, count=1)
+            valid_records &= (
+                not _DEF_NET_CONN_RE.sub("", prefix).strip().rstrip(";").strip()
             )
+            terminals = _DEF_NET_CONN_RE.findall(prefix)
+            result.record_wire(current_net, record, len(terminals))
+            _record_def_net_refs(connections, port_pins, current_net, terminals)
         current_net = None
         current_body = []
 
@@ -400,9 +353,11 @@ def def_net_instance_pins(def_path: str) -> DefNetConnections:
         if not in_nets:
             if _DEF_NETS_BEGIN_RE.match(line):
                 in_nets = True
+                expected = int(line.split()[1].rstrip(";"))
             continue
         if _DEF_NETS_END_RE.match(line):
             _flush()
+            result.complete = valid_records and records == expected
             break
         start_match = _DEF_NET_START_RE.match(line)
         if start_match:
@@ -413,10 +368,9 @@ def def_net_instance_pins(def_path: str) -> DefNetConnections:
         if line.rstrip().endswith(";"):
             _flush()
 
-    return DefNetConnections(
-        {name: tuple(pairs) for name, pairs in connections.items()},
-        {name: tuple(pins) for name, pins in port_pins.items()},
-    )
+    result.update({name: tuple(pairs) for name, pairs in connections.items()})
+    result.port_pins = {name: tuple(pins) for name, pins in port_pins.items()}
+    return result
 
 
 def _spef_net_topology_nodes(

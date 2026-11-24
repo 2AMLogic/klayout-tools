@@ -58,20 +58,26 @@ def _nm(value: float) -> int:
 class _Builder:
     """A layout with one top cell, where ``wire`` draws plain routed metal and
     ``pad`` draws a ``VIA_*`` cell's landing pad (the router-inserted geometry
-    the flag attributes violations to)."""
+    the flag attributes violations to). ``dbu`` (issue #7405) builds the same
+    geometry at another database unit, for the micron-unit checks."""
 
-    def __init__(self) -> None:
+    def __init__(self, dbu: float = DBU) -> None:
         self.layout = kdb.Layout()
-        self.layout.dbu = DBU
+        self.layout.dbu = dbu
+        self.dbu = dbu
         self.top = self.layout.create_cell("top")
         self._vias = 0
 
     def _index(self, layer: tuple[int, int]) -> int:
         return self.layout.layer(*layer)
 
+    def _u(self, nm: float) -> int:
+        """Nanometres at the DRM's 1x drawing scale -> database units."""
+        return int(round(nm / 1000.0 / self.dbu))
+
     def wire(self, layer, x0, y0, x1, y1) -> None:
         self.top.shapes(self._index(layer)).insert(
-            kdb.Box(_nm(x0), _nm(y0), _nm(x1), _nm(y1))
+            kdb.Box(self._u(x0), self._u(y0), self._u(x1), self._u(y1))
         )
 
     def pad(self, layer, x0, y0, x1, y1, cut: bool = True) -> None:
@@ -79,14 +85,16 @@ class _Builder:
         via = self.layout.create_cell(f"VIA_VIA12_{self._vias}")
         w, h = (x1 - x0) / 2.0, (y1 - y0) / 2.0
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        via.shapes(self._index(layer)).insert(kdb.Box(_nm(-w), _nm(-h), _nm(w), _nm(h)))
+        via.shapes(self._index(layer)).insert(
+            kdb.Box(self._u(-w), self._u(-h), self._u(w), self._u(h))
+        )
         if cut:
             side = min(w, h)
             via.shapes(self._index(V1)).insert(
-                kdb.Box(_nm(-side), _nm(-side), _nm(side), _nm(side))
+                kdb.Box(self._u(-side), self._u(-side), self._u(side), self._u(side))
             )
         self.top.insert(
-            kdb.CellInstArray(via.cell_index(), kdb.Trans(_nm(cx), _nm(cy)))
+            kdb.CellInstArray(via.cell_index(), kdb.Trans(self._u(cx), self._u(cy)))
         )
 
     def run(self, variant: str = "asap7", drcfill_regions=None) -> dict:
@@ -112,11 +120,13 @@ def _attributed(report: dict) -> dict[str, int]:
     return {entry["rule"]: entry["via_pads"] for entry in report["rules"]}
 
 
-def _pad_tip_near_wire_side(layer, gap: float, x: float = 0.0) -> _Builder:
+def _pad_tip_near_wire_side(
+    layer, gap: float, x: float = 0.0, dbu: float = DBU
+) -> _Builder:
     """A landing pad whose 18 nm (narrow) tip edge faces the side of a long
     wire ``gap`` nm away -- the ``S.2`` tip-to-side case issue #4495 reports,
     with the pad fed from below so it is connected metal, not an island."""
-    b = _Builder()
+    b = _Builder(dbu)
     b.pad(layer, x - 9, -20, x + 9, 20)
     b.wire(layer, x - 9, -200, x + 9, -20)
     b.wire(layer, x - 200, 20 + gap, x + 200, 20 + gap + 18)
@@ -225,6 +235,8 @@ def test_pair_touching_pad_and_patch_counts_in_both_subsets():
     assert entry["violations"] == 1
     assert entry["via_pads"] == 1 and entry["router_fill"] == 1
     assert result["via_pad_violations"] == 1 and result["router_fill_violations"] == 1
+    marker = entry["markers"][0]
+    assert marker["via_pad"] is True and marker["router_fill"] is True
 
 
 def test_missing_region_for_a_layer_reports_zero_not_a_guess():
@@ -441,9 +453,11 @@ def test_counts_match_the_real_deck(tmp_path):
     path = tmp_path / "tips.gds"
     b.layout.write(str(path))
 
-    deck = collections.Counter(
-        violation["rule"]
+    deck_violations = [
+        violation
         for violation in run_drc_klayout_engine(str(path), str(DECK_PATH))["violations"]
         if re.fullmatch(r"M[123]\.S\.[2345]", violation["rule"])
-    )
-    assert _by_rule(b.run()) == dict(deck)
+    ]
+    deck = collections.Counter(violation["rule"] for violation in deck_violations)
+    report = b.run()
+    assert _by_rule(report) == dict(deck)

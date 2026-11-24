@@ -5,12 +5,76 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import time
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+GDS_ERROR = "HTTP Error 503: Backend.max_conn reached"
+FETCHED = {"artifacts": {"gds": {"url": "https://example.org/a.oas", "sha256": "abc"}}}
+UNFETCHED = {
+    "artifacts": {"gds": {"url": "https://example.org/a.oas", "error": GDS_ERROR}}
+}
+
+
+def load_sample():
+    return json.loads((ROOT / "tests/corpus/tt_gf0p2_drc_sample.json").read_text())
+
+
+def write_manifest(cache, sample, macro, manifest):
+    """Write ``manifest`` for one design: a dict, raw text, or ``None`` for none."""
+    if manifest is None:
+        return
+    path = cache / "manifests" / sample["id"] / f"{macro}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(manifest if isinstance(manifest, str) else json.dumps(manifest))
+
+
+def stage_run(results, sample, cache):
+    """Lay out what ``tt_corpus_run.py`` leaves behind.
+
+    Like ``resolve_layout``, a design whose manifest has no layout is recorded
+    ``skipped`` with no envelope; every other design passes.
+    """
+    records = []
+    for project in sample["projects"]:
+        macro = project["macro"]
+        manifest = cache / "manifests" / sample["id"] / f"{macro}.json"
+        record = {
+            "macro": macro,
+            "shuttle": sample["id"],
+            "stage": "drc",
+            "outcome": "skipped",
+            "exit_code": None,
+            "duration_s": 0.0,
+        }
+        if (json.loads(manifest.read_text())["artifacts"]["gds"] or {}).get("sha256"):
+            directory = results / sample["id"] / macro
+            directory.mkdir(parents=True)
+            (directory / "drc.envelope.json").write_text(
+                json.dumps({"status": "clean", "violation_count": 0})
+            )
+            record.update(outcome="pass", exit_code=0, duration_s=51.2)
+        records.append(record)
+    (results.parent / "run.json").write_text(json.dumps({"records": records}))
+
+
+def stub_scripts(monkeypatch, sample_tool, on_fetch, on_run):
+    """Replace both subprocesses with ``on_fetch(attempt)`` and ``on_run()``."""
+    calls = []
+
+    def fake(command, **kwargs):
+        name = Path(command[1]).name
+        calls.append(name)
+        if name == "tt_corpus_fetch.py":
+            on_fetch(calls.count(name))
+        else:
+            on_run()
+
+    monkeypatch.setattr(sample_tool.subprocess, "run", fake)
+    return calls
 
 
 @pytest.fixture
@@ -106,11 +170,128 @@ def test_nonzero_tool_exit_fails(sample_tool, result):
         sample_tool.verify(*result)
 
 
+@pytest.mark.parametrize(
+    "manifest, reason",
+    [
+        (FETCHED, None),
+        (UNFETCHED, GDS_ERROR),
+        ({"artifacts": {"gds": None}}, "the fetch recorded no GDS"),
+        (
+            {"excluded": True, "exclusion_reason": "source fetch failed: 503"},
+            "source fetch failed: 503",
+        ),
+        (None, "no readable manifest"),
+        ("{not json", "no readable manifest"),
+    ],
+    ids=["fetched", "fetch-error", "no-gds", "excluded", "no-manifest", "bad-json"],
+)
+def test_missing_gds_reports_why_a_design_has_no_layout(
+    sample_tool, tmp_path, manifest, reason
+):
+    sample = load_sample()
+    first, second = [project["macro"] for project in sample["projects"]]
+    write_manifest(tmp_path, sample, first, manifest)
+    write_manifest(tmp_path, sample, second, FETCHED)
+    missing = {} if reason is None else {first: reason}
+    assert sample_tool._missing_gds(sample, tmp_path) == missing
+
+
+def test_clean_fetch_runs_each_script_once(sample_tool, tmp_path, monkeypatch):
+    output = tmp_path / "out"
+    sample = load_sample()
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    def fetch(attempt):
+        for project in sample["projects"]:
+            write_manifest(output / "cache", sample, project["macro"], FETCHED)
+
+    calls = stub_scripts(
+        monkeypatch,
+        sample_tool,
+        fetch,
+        lambda: stage_run(output / "results", sample, output / "cache"),
+    )
+    assert sample_tool.main(["--output-dir", str(output)]) == 0
+    assert calls == ["tt_corpus_fetch.py", "tt_corpus_run.py"]
+    assert sleeps == []
+
+
+def test_transient_fetch_error_is_retried(sample_tool, tmp_path, monkeypatch, capsys):
+    output = tmp_path / "out"
+    sample = load_sample()
+    clean, flaky = [project["macro"] for project in sample["projects"]]
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    def fetch(attempt):
+        write_manifest(output / "cache", sample, clean, FETCHED)
+        write_manifest(
+            output / "cache", sample, flaky, FETCHED if attempt > 1 else UNFETCHED
+        )
+
+    calls = stub_scripts(
+        monkeypatch,
+        sample_tool,
+        fetch,
+        lambda: stage_run(output / "results", sample, output / "cache"),
+    )
+    assert sample_tool.main(["--output-dir", str(output)]) == 0
+    assert calls == ["tt_corpus_fetch.py"] * 2 + ["tt_corpus_run.py"]
+    logged = capsys.readouterr().out
+    assert f"{flaky}: {GDS_ERROR}" in logged
+    assert "retrying" in logged
+    assert sleeps == [sample_tool.RETRY_DELAY_S]
+
+
+@pytest.mark.parametrize("unfetched", [[1], [0, 1]], ids=["one-design", "every-design"])
+@pytest.mark.parametrize(
+    "manifest, recorded",
+    [(UNFETCHED, GDS_ERROR), (None, "no readable manifest")],
+    ids=["fetch-error", "no-manifest"],
+)
+def test_exhausted_retries_is_an_infrastructure_error(
+    sample_tool, tmp_path, monkeypatch, capsys, unfetched, manifest, recorded
+):
+    output = tmp_path / "out"
+    sample = load_sample()
+    macros = [project["macro"] for project in sample["projects"]]
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    def fetch(attempt):
+        for index, macro in enumerate(macros):
+            write_manifest(
+                output / "cache",
+                sample,
+                macro,
+                FETCHED if index not in unfetched else manifest,
+            )
+
+    calls = stub_scripts(
+        monkeypatch,
+        sample_tool,
+        fetch,
+        lambda: stage_run(output / "results", sample, output / "cache"),
+    )
+    assert sample_tool.main(["--output-dir", str(output)]) == 1
+    assert calls == ["tt_corpus_fetch.py"] * sample_tool.MAX_FETCH_ATTEMPTS
+    error = capsys.readouterr().err
+    assert "infrastructure" in error
+    assert "DRC did not pass" not in error
+    for index in unfetched:
+        assert f"{macros[index]}: {recorded}" in error
+    assert sleeps == [sample_tool.RETRY_DELAY_S * attempt for attempt in (1, 2)]
+
+
 @pytest.mark.parametrize("failed_script", ["tt_corpus_fetch.py", "tt_corpus_run.py"])
 def test_nonzero_fetch_or_runner_fails(
     sample_tool, tmp_path, monkeypatch, failed_script
 ):
     calls = []
+    sample = load_sample()
+    for project in sample["projects"]:
+        write_manifest(tmp_path / "cache", sample, project["macro"], FETCHED)
 
     def fail(command, **kwargs):
         calls.append(command)

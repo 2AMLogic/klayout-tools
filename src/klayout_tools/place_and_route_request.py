@@ -2,12 +2,9 @@
 resolvers that take a request dict (or one of its sections) and return
 validated values or raise :class:`PlaceAndRouteError`.
 
-Split out of ``place_and_route.py`` (issue #3699), following the sibling-module
-precedent of ``place_and_route_sta.py`` (issue #1808). Nothing here invokes
-OpenROAD or emits a stage script -- that stays in ``place_and_route.py``. Every
-public-by-convention name here is re-exported from
-:mod:`klayout_tools.place_and_route`, so ``place_and_route.<name>`` (the CLI,
-:mod:`klayout_tools.eval`, the batch backend, tests) keeps resolving unchanged.
+The main :mod:`klayout_tools.place_and_route` module re-exports these validators
+for its CLI, batch backend, eval and test callers. Stage rendering lives in
+:mod:`klayout_tools.place_and_route_script`.
 
 :class:`PlaceAndRouteError` and the validation-only tables
 (``_MACRO_ORIENTATIONS``, ``_FLOORPLAN_METHOD_FIELDS``,
@@ -23,9 +20,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from . import macros as macro_spec
+from . import place_and_route_groups as groups_spec
+from ._dont_use import validate_patterns
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
@@ -38,8 +38,11 @@ from .netlist_construct_scan import (
 )
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .place_and_route_asap7 import RVT_LIBRARIES, RVT_LIBRARY_DEFAULTS
+from .place_and_route_base import STAGE_ORDER
+from .place_and_route_base import PlaceAndRouteError as PlaceAndRouteError
+from .place_and_route_cell_libraries import _NO_TAPCELL_LIBRARIES
 from .place_and_route_clock import validate_clock_constraints
-from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
 from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
@@ -280,7 +283,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
-        "also_cell_libraries": ("asap7sc7p5t_rvt",),
+        "also_cell_libraries": RVT_LIBRARIES,
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -306,9 +309,9 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
             # 0.513. The packaged deck's V4.M5.AUX.2 wants a V4 exactly as
             # wide as M5, and the tech LEF only ships a wide V4 bar for an M5
             # strap of width 0.216 (VIARULE M5_M4widePWR0p864), so M5 is 0.216
-            # wide. Widths + spacings, pitches and offsets are multiples of
-            # the deck's 24 nm (M5) / 32 nm (M6) edge grids; the M6 offset is
-            # measured against a core whose origin is a multiple of 0.96 um.
+            # wide. pdngen measures offsets from the snapped core origin.
+            # The first M5 edge is core_x + 312 - 108 nm (24 nm grid).
+            # The first M6 edge is core_y + 344 - 144 nm (32 nm grid).
             {
                 "layer": "M5",
                 "width_um": 0.216,
@@ -407,41 +410,6 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
         "connects": (),
     },
 }
-
-
-class PlaceAndRouteError(Exception):
-    """Raised when a place-and-route run cannot even reach the requested
-    ``target_stage``: a missing/malformed request file, an unresolvable/
-    unreadable netlist, an unresolvable ``pdk.cell_library``/``corner``/LEF,
-    a floorplan spec naming more than one method, or an OpenROAD engine
-    error partway through a stage.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching ``klt synthesize``'s ``SynthesizeError``. Per the
-    contract spike section 5's "Partial-completion design": a run that
-    reaches (or exceeds) the requested ``target_stage`` is *always* a
-    success (``exit 0``, ``stage_reached`` >= ``target_stage``) even when it
-    stopped short of a *later* stage the request never asked for -- this
-    exception is raised only when a run fails to reach the stage it was
-    actually asked to reach.
-
-    ``code``, ``job_id`` and ``details`` are optional and set only by the
-    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
-    machine-readable ``error.code`` for the CLI's error envelope, the batch
-    job id, and extra structured envelope fields.
-    """
-
-    def __init__(
-        self,
-        *args: object,
-        code: str | None = None,
-        job_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(*args)
-        self.code = code
-        self.job_id = job_id
-        self.details = details
 
 
 # --------------------------------------------------------------------------- #
@@ -660,25 +628,25 @@ def _validate_io(
     return result
 
 
-def _validate_instance_groups(raw: Any) -> list[dict[str, Any]]:
+def _validate_instance_groups(raw: Any, stage: str = "route") -> list[dict[str, Any]]:
     """Shape-validate ``request.instance_groups`` (issue #4344)."""
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise PlaceAndRouteError("request.instance_groups must be an array")
-    groups: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        groups.append(
-            _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
-        )
+    groups = [
+        _validate_instance_group(entry, f"request.instance_groups[{index}]", seen)
+        for index, entry in enumerate(raw)
+    ]
+    groups_spec.validate_fixed_members(groups, PlaceAndRouteError, stage)
     return groups
 
 
 def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise PlaceAndRouteError(f"{where} must be a JSON object")
-    reject_unknown_group_keys(entry, where, PlaceAndRouteError)
+    groups_spec.reject_unknown_group_keys(entry, where, PlaceAndRouteError)
     name = entry.get("name")
     if not (isinstance(name, str) and name.strip()):
         raise PlaceAndRouteError(f"{where}.name must be a non-empty string")
@@ -699,7 +667,9 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
     if bound is not None:
         _check_max_extent_um(bound, where)
         item["max_extent_um"] = bound
-    item.update(validate_group_geometry(entry, instances, where, PlaceAndRouteError))
+    item.update(
+        groups_spec.validate_group_geometry(entry, instances, where, PlaceAndRouteError)
+    )
     return item
 
 
@@ -1110,10 +1080,6 @@ def _validate_tapcell(
 ) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import _NO_TAPCELL_LIBRARIES
-
     if tapcell is None:
         return None
     if not isinstance(tapcell, dict):
@@ -1646,17 +1612,6 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
-_LIBRARY_KEYS = (
-    "cts_buffer",
-    "power_pins",
-    "wire_rc",
-    "route_layers",
-    "antenna_diode",
-    "tapcell",
-    "filler",
-)
-
-
 def _positive_number(value: Any, where: str) -> float:
     if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
@@ -1799,6 +1754,7 @@ def _validate_library_cts_buffer(buf: Any) -> str:
 
 _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
     "cts_buffer": _validate_library_cts_buffer,
+    "dont_use": partial(validate_patterns, error_cls=PlaceAndRouteError),
     "power_pins": _validate_library_power_pins,
     "wire_rc": _validate_library_wire_rc,
     "route_layers": _validate_library_route_layers,
@@ -1808,33 +1764,22 @@ _LIBRARY_VALIDATORS: dict[str, Callable[[Any], Any]] = {
 }
 
 
-def _validate_library(library: Any) -> dict[str, Any] | None:
-    """Optional ``request.library`` (issue #4086): per-library inputs for a
-    standard-cell library the built-in tables
-    (``_CTS_BUFFER_CELLS``/``_POWER_PIN_PATTERNS``) do not cover, or an
-    override of a built-in entry. ``None`` (field omitted) leaves every
-    generated script byte-identical. Returns only the keys that were given:
-    ``cts_buffer`` (str), ``power_pins`` (list of ``(net_role, pattern,
-    primary)``), ``wire_rc`` (``(resistance, capacitance)``),
-    ``route_layers`` (``"low-high"``), ``antenna_diode`` (``(cell, pin)``, or ``None`` =
-    the library has no antenna diode, so no antenna repair; issue #4274),
-    ``tapcell`` (``(tap, endcap, distance_um)``, all ``None`` = the library
-    has no tap cells) and ``filler`` (tuple of masters; issue #4127).
-    """
-    if library is None:
+def _validate_library(library: Any, cell_library: str = "") -> dict[str, Any] | None:
+    """Normalize effective library inputs for stage Tcl, STA and the power audit."""
+    if library is None and cell_library not in RVT_LIBRARIES:
         return None
-    if not isinstance(library, dict):
-        raise PlaceAndRouteError("request.library must be a JSON object")
-    unknown = sorted(set(library) - set(_LIBRARY_KEYS))
-    if unknown:
-        raise PlaceAndRouteError(
-            f"request.library has unknown key(s): {', '.join(unknown)}"
-        )
-    out: dict[str, Any] = {}
-    for key, validate in _LIBRARY_VALIDATORS.items():
-        if key in library:
-            out[key] = validate(library[key])
-    return out
+    raw = _library_object(
+        {} if library is None else library,
+        "request.library",
+        tuple(_LIBRARY_VALIDATORS),
+    )
+    if cell_library in RVT_LIBRARIES:
+        raw = RVT_LIBRARY_DEFAULTS | raw
+    return {
+        key: validate(raw[key])
+        for key, validate in _LIBRARY_VALIDATORS.items()
+        if key in raw
+    }
 
 
 def _validate_seed(seed: Any) -> int:
@@ -1844,10 +1789,6 @@ def _validate_seed(seed: Any) -> int:
 
 
 def _validate_target_stage(target_stage: Any) -> str:
-
-    # Deferred: defined in `place_and_route.py`, which imports this module at
-    # its own module scope (same pattern as `place_and_route_sta.py`).
-    from .place_and_route import STAGE_ORDER
 
     if target_stage not in STAGE_ORDER:
         raise PlaceAndRouteError(
@@ -1864,8 +1805,8 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     ``sta::check_percent`` enforces). Omitted/``None`` defaults to ``0``,
     matching ``global_route``'s own default and this module's prior
     behaviour exactly -- the explicit A/B disable path this issue's
-    acceptance criteria require. See this module's own docstring, "Timing-
-    driven global routing + bounded antenna-repair iteration"."""
+    acceptance criteria require. See "Timing-driven/repair-iteration routing flags"
+    in ``docs/cli/place-and-route.md``."""
     if value is None:
         return 0
     if not is_int(value):
@@ -1939,8 +1880,8 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
     Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
-    See this module's own docstring, "Timing-driven
-    global routing + bounded antenna-repair iteration"."""
+    See "Timing-driven/repair-iteration routing flags" in
+    ``docs/cli/place-and-route.md``."""
     if value is None:
         return 1
     if not is_int(value):
@@ -1958,9 +1899,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
 def _validate_sweep_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.sweep_corners`` (issue #1092) -- scopes the
     post-route multi-corner sweep (issue #949, :func:`_run_corner_sweep`) to
-    a caller-named subset of the ``.lib`` corners ``request.pdk.cell_library``
-    ships, instead of always sweeping every shipped corner
-    (:func:`klayout_tools.pdk.list_lib_corners`'s own unfiltered return).
+    a caller-named subset of the library's available corners. The full set
+    comes from the PDK descriptor's corner keys for a mapped library, otherwise
+    from the unfiltered :func:`klayout_tools.pdk_cells.list_lib_corners` enumeration.
 
     A design has exactly one operating supply -- for a cell library shipping
     several (e.g. 15 ``.lib`` files spanning three nominal-supply families),
@@ -1974,9 +1915,8 @@ def _validate_sweep_corners(value: Any) -> list[str] | None:
     own empty-``corners``-list short-circuit), distinct from omitting the
     field entirely.
 
-    Each requested name is validated against the *unfiltered* shipped-corner
-    set once ``cell_library``/``pdk_info`` are resolved (see the ``"route"``
-    stage branch in :func:`run_place_and_route`) -- an unknown name raises
+    Once ``cell_library`` and ``pdk_info`` are resolved, the post-route sweep
+    checks each requested name against that corner set. An unknown name raises
     :class:`PlaceAndRouteError` naming every corner that *is* valid, matching
     this module's existing unresolvable-request-field convention (e.g.
     :func:`_validate_route_critical_nets_percentage`'s sibling validators).
@@ -2026,9 +1966,9 @@ def _validate_post_route_spef(value: Any) -> bool:
     ``klt extract --parasitics`` runs against the merged routed GDS, its
     output is written as SPEF, and a fresh OpenSTA session seeded from the
     ``"route"`` stage's own checkpoint re-reports slack/violation counts via
-    ``read_spef`` -- *alongside*, never replacing, that stage's existing
-    ``estimate_parasitics -global_routing``-derived top-level fields (see
-    this module's own docstring and :func:`_post_route_spef_metrics`).
+    ``read_spef`` alongside the top-level fields from
+    ``estimate_parasitics -global_routing``. See "Post-route SPEF STA"
+    in ``docs/cli/place-and-route.md`` and :func:`_post_route_spef_metrics`.
 
     Omitted/``None`` defaults to ``False`` -- this feature adds real
     wall-clock cost on top of every existing ``"route"``-stage caller (a
@@ -2102,7 +2042,7 @@ def _resolve_liberty(
     Raises :class:`PlaceAndRouteError` (never
     :class:`~klayout_tools.pdk.PdkNotFoundError`).
 
-    Thin wrapper around :func:`klayout_tools.pdk.resolve_liberty_for_cell_library`
+    Thin wrapper around :func:`klayout_tools.pdk_cells.resolve_liberty_for_cell_library`
     (issue #1652) -- that shared implementation (including the IHP
     single-underscore liberty-filename fallback, issue #1790) is what
     ``synthesize.py`` and ``post_route_sta.py``'s own ``_resolve_liberty``

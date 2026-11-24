@@ -44,6 +44,7 @@ from typing import Any
 
 from . import sim_noise_leaves
 from .sim_errors import SimError
+from .sim_measurement_grading import SAVE_MODE_NETLIST_NO_VALUE_HINT
 
 
 def requested(spec: dict[str, Any]) -> bool:
@@ -83,18 +84,21 @@ def validate_top_n(name: Any, body: dict[str, Any]) -> None:
 def rank(
     body: dict[str, Any],
     sweep: str,
-    columns: dict[str, list[float]],
+    frequency: list[float],
+    columns: list[list[float]],
     leaves: list[sim_noise_leaves.Leaf],
 ) -> list[dict[str, Any]] | None:
     """The ``noise.contributors`` list of one entry, or None when there is
     nothing to report: no ``top_n`` was asked for, or the swept grid does not
     bracket the requested frequency (so no leaf reduces to a value).
 
-    The ``top_n`` largest leaves by reduced ``value``, descending, ties broken
-    by ``name`` ascending so the order never depends on rawfile order. Fewer
-    leaves than ``top_n`` returns them all. With a ``mechanism`` on the entry
-    only that mechanism's leaves compete; without one every leaf does, an
-    unclassified one reporting ``mechanism: None``.
+    ``columns`` is keyed by rawfile column **index** (``leaf.index``), never
+    by name: distinct columns may share a vector name and each is a separate
+    contributor (#6978). The ``top_n`` largest leaves by reduced ``value``,
+    descending, ties broken by ``name`` ascending so the order never depends
+    on rawfile order. Fewer leaves than ``top_n`` returns them all. With a
+    ``mechanism`` on the entry only that mechanism's leaves compete; without
+    one every leaf does, an unclassified one reporting ``mechanism: None``.
 
     ``name`` is the leaf's vector name minus its ``onoise`` prefix and the one
     separator after it -- never parsed further, because the separator ngspice
@@ -110,9 +114,7 @@ def rank(
     for leaf in leaves:
         if mechanism is not None and leaf.mechanism != mechanism:
             continue
-        value = sim_noise.reduce_density(
-            body, sweep, columns["frequency"], columns[leaf.name]
-        )
+        value = sim_noise.reduce_density(body, sweep, frequency, columns[leaf.index])
         if value is None:
             return None
         if value != 0.0:
@@ -150,8 +152,6 @@ def attach(
     fine. An entry that already has no value carries its own error and gets
     no second one. Results gain a ``noise`` member only when the list exists.
     """
-    from . import sim as _sim
-
     for position, spec in enumerate(measurements_spec):
         if not requested(spec) or spec["noise"].get("mechanism") is not None:
             continue
@@ -174,7 +174,7 @@ def attach(
             else f"measurement '{name}': no per-contributor noise spectra were read"
         )
         if save_mode == "netlist" and reason == "noise_mechanism_rawfile_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
         diagnostics.append(
             {
                 "severity": "warning",

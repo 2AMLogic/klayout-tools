@@ -31,7 +31,6 @@ Response shape (additive, no ``schema_version`` bump)
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -244,34 +243,28 @@ def extract_corner_stress(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StressOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["stress"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return StressOutcome(
-            error=(
-                f"measurement '{name}' produced no stress: node "
-                f"{body['a']!r} or {body.get('b')!r} did not resolve against "
-                "this transient's saved vectors (no rawfile was written) -- "
-                "check that the nodes exist in the deck"
-            )
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return StressOutcome(
-            error=f"measurement '{name}': could not read its stress rawfile: {exc}"
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return StressOutcome(
-            error=f"measurement '{name}' produced no stress: the voltage "
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}' produced no stress: node "
+            f"{body['a']!r} or {body.get('b')!r} did not resolve against "
+            "this transient's saved vectors (no rawfile was written) -- "
+            "check that the nodes exist in the deck"
+        ),
+        empty_error=(
+            f"measurement '{name}' produced no stress: the voltage "
             "vector yielded no samples"
-        )
+        ),
+        rawfile_label="stress rawfile",
+    )
+    if columns is None:
+        return StressOutcome(error=error)
     outcome = reduce_stress(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        *columns,
         start=sim_window.window_bound(name, body, "from", form="stress"),
         stop=sim_window.window_bound(name, body, "to", form="stress"),
     )

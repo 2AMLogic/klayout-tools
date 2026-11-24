@@ -567,8 +567,8 @@ def _mirror_failures(
             )
         elif lines != size and not (lines == carry_forward.get(path) and lines > size):
             failures.append(
-                f"{path}: baseline ceiling {lines} lines must equal the "
-                f"file's current size ({size} lines); set it to {size}"
+                f"{path}: ledger ({lines} lines) must equal file size ({size} lines). "
+                "Compare the candidate file and ledger with the comparison revision."
             )
     for path in sorted(expected_debts):
         if path not in proposed.debts:
@@ -768,10 +768,7 @@ def _cmd_update(repo_root: Path, baseline_path: Path) -> int:
             f"::warning::{len(untracked)} untracked governed source file(s) "
             f"are NOT measured (the inventory is git ls-files): "
             f"{', '.join(untracked[:10])}"
-            f"{' ...' if len(untracked) > 10 else ''}",
-            file=sys.stderr,
-        )
-        print(
+            f"{' ...' if len(untracked) > 10 else ''}\n"
             "Stage or commit them before regenerating, or the baseline "
             "will silently omit their debt.",
             file=sys.stderr,
@@ -780,36 +777,38 @@ def _cmd_update(repo_root: Path, baseline_path: Path) -> int:
     # Carry forward only vendor entries still matching actual candidate
     # bytes; regeneration never mints new exemptions.
     carried: dict[str, str] = {}
+    ceilings: dict[str, int] = {}
     if baseline_path.exists():
         try:
             existing = parse_baseline(
                 baseline_path.read_bytes(), f"existing baseline {baseline_path}"
             )
         except BaselineError as exc:
-            print(f"::error::{exc}", file=sys.stderr)
             print(
-                "Fix or hand-edit the baseline first; --update-baseline "
-                "refuses to build on malformed data.",
+                f"::error::{exc}\nFix or hand-edit the baseline first; "
+                "--update-baseline refuses to build on malformed data.",
                 file=sys.stderr,
             )
             return EXIT_UNUSABLE
+        ceilings = existing.debts
         for sha, recorded_path in existing.vendor_hashes.items():
             if candidate.hashes.get(recorded_path) == sha:
                 carried[sha] = recorded_path
 
+    # Carry a still-covering recorded ceiling verbatim so a shrinking PR
+    # leaves the ledger byte-identical (#7414); new or grown paths and
+    # paths with no entry record their exact measured size.
     debts = {
-        path: size
+        path: max(size, ceilings.get(path, 0))
         for path, size in candidate.sizes.items()
         if size > HARD_LIMIT and candidate.hashes[path] not in carried
     }
     write_baseline(baseline_path, debts, carried)
     print(
         f"Wrote {len(debts)} debt entr{'y' if len(debts) == 1 else 'ies'} "
-        f"and {len(carried)} vendor hash exemption(s) to {baseline_path}. "
-        "Regeneration never adds exemptions or authorizes growth -- "
-        "validate with check mode:"
-    )
-    print(
+        f"and {len(carried)} vendor hash exemption(s) to {baseline_path} "
+        "(still-covering ceilings carried verbatim). Regeneration never "
+        "adds exemptions or authorizes growth -- validate with check mode:\n"
         f"  python {BASELINE_RELATIVE} --comparison-rev "
         '"$(git merge-base HEAD origin/main)"'
     )
@@ -853,8 +852,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "regenerate the proposed baseline from the candidate tree "
-            "(after a reduction) instead of checking; never adds debt "
-            "permission or exemptions"
+            "instead of checking; carries still-covering ceilings and "
+            "matching pins verbatim, never adds debt permission"
         ),
     )
     args = parser.parse_args(argv)

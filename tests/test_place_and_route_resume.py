@@ -38,7 +38,7 @@ def _record_stage_runs(monkeypatch) -> list[str]:
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] != ["openroad", "-version"]:
-            name = os.path.basename(cmd[5])
+            name = os.path.basename(cmd[-1])
             for stage in STAGES:
                 if name.endswith(f"_{stage}.tcl"):
                     ran.append(stage)
@@ -67,6 +67,29 @@ def test_full_reuse_only_merges(tmp_path, monkeypatch):
     assert resumed["resume"] == {"resumed_stages": STAGES}
     assert _strip(resumed) == _strip(first)
     assert "resume" not in first
+
+
+def test_legacy_route_record_replays_only_route_once(tmp_path, monkeypatch):
+    request_path = _env(tmp_path, monkeypatch)
+    run_place_and_route(request_path)
+    path = tmp_path / "artifacts" / "gcd_route.commit.json"
+    record = json.loads(path.read_text())
+    original_report_path = record["stage_entry"].pop("library_limit_report_path")
+    path.write_text(json.dumps(record))
+
+    ran = _record_stage_runs(monkeypatch)
+    replay = run_place_and_route(request_path, resume=True)
+    assert replay["resume"]["resumed_stages"] == STAGES[:-1]
+    assert ran == ["route"]
+    assert (
+        json.loads(path.read_text())["stage_entry"]["library_limit_report_path"]
+        == original_report_path
+    )
+
+    ran.clear()
+    reused = run_place_and_route(request_path, resume=True)
+    assert reused["resume"]["resumed_stages"] == STAGES
+    assert ran == []
 
 
 def test_changed_input_invalidates_stage_and_later(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from .lvs_base import LvsError
 from .lvs_combine import _net_for_terminal_or_none
 from .pdk_models import MOS_FLAVOUR_PROPERTY, flavoured_mos_class_name
 
@@ -30,7 +31,6 @@ def parse_ignore_mos_bulk(options: Mapping[str, Any], engine: str) -> bool:
     have its gate/drain/source topology graded. A non-boolean, or ``true``
     with an engine other than ``klayout``, is a request error.
     """
-    from .lvs import LvsError
 
     value = options.get("ignore_mos_bulk", False)
     if not isinstance(value, bool):

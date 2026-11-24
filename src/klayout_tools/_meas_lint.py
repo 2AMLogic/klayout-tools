@@ -20,8 +20,12 @@ cards (emitted as ``meas`` commands inside a generated ``.control`` block).
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from ._meas_lint_expression import ARITH_OPS as _MEAS_ARITH_OPS
+from ._meas_lint_expression import control_expression, needs_parentheses
+from ._meas_lint_wrapper import widen_over_wrapper
 from .sim_errors import SimError
 
 #: A ``par('...')`` expression span in a `.meas` card (issue #5651). ngspice
@@ -48,12 +52,12 @@ _MEAS_LINE_CONTINUATION_RE = re.compile(r"(?m)^[ \t]*\+")
 
 #: ngspice's two-node voltage reference: ``v(a,b)``. Accepted in a
 #: ``print``/plot context but resolved as no vector in a `.meas` signal
-#: position (issue #5651); the expressible equivalent is ``v(a)-v(b)``.
-_MEAS_TWO_NODE_REF_RE = re.compile(r"([vViI])\s*\(\s*([^,()\s]+)\s*,\s*([^()]+?)\s*\)")
-
-#: The arithmetic operators a `.meas` signal-position expression may be
-#: built from.
-_MEAS_ARITH_OPS = ("+", "-", "*", "/")
+#: position (issue #5651); the expressible equivalent is ``v(a)-v(b)``. The
+#: leading ``\b`` keeps a longer name (``rev(a,b)``) from matching mid-word
+#: when the rewrite scans a whole expression for these references.
+_MEAS_TWO_NODE_REF_RE = re.compile(
+    r"\b([vViI])\s*\(\s*([^,()\s]+)\s*,\s*([^()]+?)\s*\)"
+)
 
 #: Words of a `.meas` card that are keywords, never functions: a signal
 #: position's keyword (``when``, ``find``, ``avg``, ...) and the card's
@@ -100,14 +104,6 @@ def _par_span_inner(span: str) -> str:
     return span[span.index("'") + 1 : span.rindex("'")]
 
 
-def _unwrap_par_spans(text: str) -> str:
-    """Replace every ``par('...')`` span in *text* with its quoted
-    expression, so a suggested rewrite holds one ``par('...')`` wrapper
-    around the whole expression (``par('v(a)-v(b)')-v(c)`` ->
-    ``v(a)-v(b)-v(c)``)."""
-    return _MEAS_PAR_SPAN_RE.sub(lambda m: _par_span_inner(m.group(0)), text)
-
-
 def _two_node_difference(text: str) -> str:
     """``v(a,b)`` -- ngspice's two-node voltage -- as the ``v(a)-v(b)`` a
     ``par('...')`` wrapper can hold (issue #5651: ``v(a,b)`` resolves no
@@ -118,6 +114,37 @@ def _two_node_difference(text: str) -> str:
         return text
     func, first, second = match.group(1), match.group(2), match.group(3)
     return f"{func}({first})-{func}({second})"
+
+
+def _substitute_operands(
+    text: str, pattern: re.Pattern[str], expand: Callable[[re.Match[str]], str]
+) -> str:
+    """*text* with every match of *pattern* replaced by ``expand(match)``,
+    parenthesised where the operators around the match would otherwise
+    rebind its terms (issue #6444: ``2*par('v(a)-v(b)')`` must become
+    ``2*(v(a)-v(b))``, not ``2*v(a)-v(b)``)."""
+
+    def replace(match: re.Match[str]) -> str:
+        inner = expand(match)
+        prefix = text[: match.start()]
+        after = text[match.end() :].lstrip()[:1]
+        return f"({inner})" if needs_parentheses(inner, prefix, after) else inner
+
+    return pattern.sub(replace, text)
+
+
+def _quoted_expression(expression: str) -> str:
+    """The author's *expression* as the one text a ``par('...')`` span holds:
+    every inner ``par('...')`` span is unwrapped and every two-node
+    ``v(a,b)`` becomes ``v(a)-v(b)``, each parenthesised when an outer
+    operator would otherwise change its meaning (``par('v(a)-v(b)')-v(c)``
+    -> ``v(a)-v(b)-v(c)``, but ``v(a,b)*2`` -> ``(v(a)-v(b))*2``)."""
+    unwrapped = _substitute_operands(
+        expression, _MEAS_PAR_SPAN_RE, lambda m: _par_span_inner(m.group(0))
+    )
+    return _substitute_operands(
+        unwrapped, _MEAS_TWO_NODE_REF_RE, lambda m: _two_node_difference(m.group(0))
+    )
 
 
 def _balanced_close(spice: str, open_at: int) -> int | None:
@@ -140,14 +167,27 @@ def _callee_start(spice: str, open_at: int) -> int | None:
     is a bare parenthesised group. A `.meas` card keyword (``when``,
     ``avg``, ...) sitting right before the ``(`` is not a callee: the group
     after it is a bare group, so the keyword stays outside any ``par('...')``
-    span built from it."""
+    span built from it. ``max``/``min`` are also ngspice functions, so a
+    depth-0 comma in their group marks the two-argument call form, a
+    callee (issue #6622); their keyword reading never has one."""
     cursor = open_at
     while cursor > 0 and spice[cursor - 1].isspace():
         cursor -= 1
     match = re.search(r"[A-Za-z0-9_.]+$", spice[:cursor])
-    if match is None or match.group(0).lower() in _MEAS_CARD_KEYWORDS:
+    if match is None:
         return None
-    return match.start()
+    word = match.group(0).lower()
+    if word not in _MEAS_CARD_KEYWORDS:
+        return match.start()
+    if word not in ("max", "min"):
+        return None
+    close = _balanced_close(spice, open_at)
+    if close is None:
+        return None
+    inner = spice[open_at + 1 : close]
+    while "(" in inner:
+        inner = re.sub(r"\([^()]*\)", "", inner)
+    return match.start() if "," in inner else None
 
 
 def _token_end(spice: str, start: int) -> int | None:
@@ -225,23 +265,24 @@ def _extend_left_over_operand(spice: str, start: int) -> tuple[int, str]:
 
 
 def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
-    """Widen *end* over one operand bound by an arithmetic operator,
-    returning whether the walk may continue."""
+    """Widen *end* over one operand bound by an arithmetic operator, which
+    may carry chained unary signs (``* - -v(a)``), returning
+    whether the walk may continue."""
     right = end
     while right < len(spice) and spice[right].isspace():
         right += 1
     if right >= len(spice) or spice[right] not in _MEAS_ARITH_OPS:
         return end, False
     cursor = right + 1
-    while cursor < len(spice) and spice[cursor].isspace():
+    while cursor < len(spice) and (spice[cursor].isspace() or spice[cursor] in "+-"):
         cursor += 1
     found = _token_end(spice, cursor)
     return (end, False) if found is None else (found, True)
 
 
 def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
-    """Widen a lone flagged reference over the operand it is bound to by an
-    outer arithmetic operator (``2*v(a)`` or ``v(a)*2``), so the refusal's
+    """Widen a flagged span over the operand it is bound to by an outer
+    arithmetic operator (``2*v(a)`` or ``v(a)*2``), so the refusal's
     example rewrite wraps the whole local expression in ``par('...')``
     rather than only the reference."""
     while True:
@@ -286,6 +327,21 @@ def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, i
             return start, end
 
 
+def _expand_to_local_expression(spice: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a flagged span over its operands and enclosing calls until
+    neither moves it (issue #6444). One pass of each is not enough: the call
+    a group widens to (``abs(v(a)-v(b))``) can itself be an operand of an
+    outer operator (``2*abs(...)``), and an operand taken in can sit in a
+    call of its own. A span left with an outer operator beside it would be
+    refused again as a rewrite."""
+    while True:
+        lo, hi = _extend_over_operands(spice, start, end)
+        lo, hi = _widen_over_enclosing_call(spice, lo, hi)
+        if (lo, hi) == (start, end):
+            return lo, hi
+        start, end = lo, hi
+
+
 def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
     """Locate an arithmetic expression in a `.meas` card's signal position.
 
@@ -325,14 +381,15 @@ def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
                 continue
         groups.append(_MeasGroup(start, end, comma=comma))
     for group in groups:
-        if group.count >= 2 or group.comma:
-            lo, hi = _widen_over_enclosing_call(spice, group.start, group.end)
-            return (lo, hi, spice[lo:hi])
         before = blanked[: group.start].rstrip()
         after = blanked[group.end :].lstrip()
-        if before.endswith(_MEAS_ARITH_OPS) or after.startswith(_MEAS_ARITH_OPS):
-            lo, hi = _extend_over_operands(spice, group.start, group.end)
-            lo, hi = _widen_over_enclosing_call(spice, lo, hi)
+        if (
+            group.count >= 2
+            or group.comma
+            or before.endswith(_MEAS_ARITH_OPS)
+            or after.startswith(_MEAS_ARITH_OPS)
+        ):
+            lo, hi = _expand_to_local_expression(spice, group.start, group.end)
             return (lo, hi, spice[lo:hi])
     return None
 
@@ -369,10 +426,11 @@ def check_meas_signal_position(
     found = _find_meas_signal_expression(spice)
     if found is None:
         return
-    start, end, expression = found
-    inner = _two_node_difference(_unwrap_par_spans(expression))
+    start, end, expression = widen_over_wrapper(spice, found[0], found[1])
+    inner = _quoted_expression(expression)
     rewrite = _splice_replacement(spice, start, end, f"par('{inner}')")
     if control_scope:
+        inner = control_expression(inner)
         reference = _splice_replacement(spice, start, end, "vdiff")
         raise SimError(
             f"measurement '{name}': a control-scope meas command's signal "
@@ -395,6 +453,7 @@ def check_meas_signal_position(
         'supply-relative level ({"frac_of": "vdd", "fraction": 0.5}) that '
         "`klt sim` resolves per corner, a measurements[].crossings entry "
         "also fits -- but a crossings entry's value is the *count* of "
-        "crossings, not a time (the crossing times are reported on its "
-        "crossings.times[] array)"
+        "crossings, not a time, unless crossings.value_from grades the "
+        "period.mean / frequency reduction instead (the crossing times are "
+        "reported on its crossings.times[] array)"
     )

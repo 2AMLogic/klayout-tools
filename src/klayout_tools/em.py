@@ -1,42 +1,34 @@
-"""``klt em``: field-solver verb, first slice (issue #5616, Epic #708 brief 1.A).
+"""Run a quasi-static capacitance request on a supplied mesh or a GDS region.
 
-Wraps the released ``geode`` binary (geode-fem) as a subprocess, the way
-``klt sim`` wraps ``ngspice`` -- no FEM numerics live in this repo. This
-slice supports exactly ``engine: "geode_fem"``, ``solve_mode:
-"quasi_static"``, ``outputs: ["c"]`` on a **caller-supplied** mesh plus
-terminals; the GDS + stackup -> mesh path is a later brief.
-
-Request validation, checks and the entry point live here; everything
-geode-specific (spec writing, command line, report parsing) is isolated
-in :mod:`klayout_tools._geode` so a change in the engine's CLI touches
-that module only. ``docs/cli/em.md`` is the contract (request, response,
-exit codes); ``docs/design/em-field-sim-spike.md`` §4 is the proposal it
-shipped from.
+The engine and mesher are subprocesses. See docs/cli/em.md for the contract.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import shutil
-import subprocess
 import tempfile
+import time
 from typing import Any, TypeGuard
 
 from ._artifact_envelope import hashed_path_envelope
 from ._digest import sha256_file
 from ._geode import (
     EmError,
-    _engine_error_message,
     _probe_version,
     _reorder_matrix,
-    build_geode_command,
     build_geode_spec,
-    parse_capacitance_report,
+    generate_mesh,
     resolve_geode_binary,
+    solve_mesh,
+    write_geode_json,
+)
+from ._geode import (
+    parse_capacitance_report as parse_capacitance_report,
 )
 from ._paths import _load_request_json
+from .env_provenance import find_repo_root
 
 SCHEMA_VERSION = 1
 
@@ -286,16 +278,29 @@ def load_request(request_path: str) -> dict[str, Any]:
             f"unsupported outputs {outputs!r}: this slice supports only "
             f"{list(SUPPORTED_OUTPUTS)}"
         )
-    request["_mesh"] = _validate_mesh(request.get("mesh"))
-    terminals = _validate_conductors(request.get("terminals"), "terminals")
-    ground = _validate_conductors(request.get("ground"), "ground")
-    _check_conductor_disjoint(terminals, ground)
-    request["_materials"] = _validate_materials(request.get("materials"))
+    if any(field in request for field in ("layout", "region", "stackup")):
+        from ._em_layout import prepare_layout
+
+        conflicts = {"mesh", "terminals", "materials"} & request.keys()
+        if conflicts:
+            raise EmError(f"layout input cannot be combined with {sorted(conflicts)}")
+        geometry = prepare_layout(
+            request, os.path.dirname(os.path.abspath(request_path))
+        )
+        request["_geometry"] = geometry
+        terminals = geometry.terminals
+    else:
+        request["_geometry"] = None
+        request["_mesh"] = _validate_mesh(request.get("mesh"))
+        terminals = _validate_conductors(request.get("terminals"), "terminals")
+        ground = _validate_conductors(request.get("ground"), "ground")
+        _check_conductor_disjoint(terminals, ground)
+        request["_ground"] = ground
+        request["_materials"] = _validate_materials(request.get("materials"))
     request["_checks"] = _validate_checks(
         request.get("checks"), {t["name"] for t in terminals}
     )
     request["_terminals"] = terminals
-    request["_ground"] = ground
     request["_options"] = _validate_options(request.get("options") or {})
     return request
 
@@ -335,28 +340,9 @@ def _evaluate_check(
 # ---------------------------------------------------------------------------
 
 
-def run_em(request_path: str) -> dict[str, Any]:
-    """Run one ``klt em`` request; returns the response payload.
-
-    Raises :class:`EmError` for every application-level failure (including a
-    missing ``geode`` binary, a failed/timed-out solve, a malformed report).
-    """
-    request = load_request(request_path)
-    request_dir = os.path.dirname(os.path.abspath(request_path))
-    options = request["_options"]
-    terminals = request["_terminals"]
-    names = [t["name"] for t in terminals]
-    surfaces = [t["surface"] for t in terminals]
-
-    mesh = request["_mesh"]["path"]
-    if not os.path.isabs(mesh):
-        mesh = os.path.join(request_dir, mesh)
-    if not os.path.isfile(mesh):
-        raise EmError(f"mesh not found: {request['_mesh']['path']}")
-
-    binary = resolve_geode_binary(options, request_dir)
-    version = _probe_version(binary)
-
+def _output_directory(
+    request_path: str, request_dir: str, options: dict, generated: bool
+) -> str:
     keep = options.get("keep_artifacts", True)
     if keep:
         stem = os.path.splitext(os.path.basename(request_path))[0]
@@ -366,55 +352,82 @@ def run_em(request_path: str) -> dict[str, Any]:
         if not os.path.isabs(outdir):
             outdir = os.path.join(request_dir, outdir)
         os.makedirs(outdir, exist_ok=True)
-    else:
-        outdir = tempfile.mkdtemp(prefix="klt-em-")
+        if generated:
+            return tempfile.mkdtemp(prefix="run-", dir=outdir)
+        return outdir
+    return tempfile.mkdtemp(prefix="klt-em-")
 
+
+def run_em(request_path: str) -> dict[str, Any]:
+    """Run one ``klt em`` request; returns the response payload.
+
+    Raises :class:`EmError` for every application-level failure (including a
+    missing ``geode`` binary, a failed/timed-out solve, a malformed report).
+    """
+    request = load_request(request_path)
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #6764: every artifact envelope is relative to the *request's*
+    # repo, never the cwd's, so one request yields one committed report.
+    repo_root = find_repo_root(request_dir)
+    options = request["_options"]
+    terminals = request["_terminals"]
+    names = [t["name"] for t in terminals]
+    surfaces = [t["surface"] for t in terminals]
+
+    geometry = request["_geometry"]
+    if geometry is None:
+        mesh = os.path.join(request_dir, request["_mesh"]["path"])
+        if not os.path.isfile(mesh):
+            raise EmError(f"mesh not found: {request['_mesh']['path']}")
+
+    binary = resolve_geode_binary(options, request_dir)
+    version = _probe_version(binary)
+
+    keep = options.get("keep_artifacts", True)
+    outdir = _output_directory(request_path, request_dir, options, geometry is not None)
     try:
-        spec_path = os.path.join(outdir, "spec.json")
-        _write_json(spec_path, build_geode_spec(request, mesh))
-
-        report_path = os.path.join(outdir, "report.json")
-        cmd = build_geode_command(binary, spec_path, report_path)
         timeout = options.get("timeout_s", DEFAULT_TIMEOUT_S)
-        log_path = os.path.join(outdir, "solve.log")
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, check=False
+        environment = {}
+        diagnostics = []
+        files = {"spec": "spec.json", "report": "report.json", "log": "solve.log"}
+        if geometry is None:
+            write_geode_json(
+                os.path.join(outdir, "spec.json"), build_geode_spec(request, mesh)
             )
-        except subprocess.TimeoutExpired as exc:
-            _write_log(log_path, exc.stdout, exc.stderr)
-            raise EmError(
-                f"geode timed out after {timeout}s (log: {log_path})"
-            ) from exc
-        except OSError as exc:
-            raise EmError(f"could not run geode at '{binary}': {exc}") from exc
-
-        # Failure evidence is retained and referenced, not discarded. A
-        # failed run still writes its ``kind: "error"`` report to the
-        # output path; its message beats a bare exit code.
-        _write_log(log_path, proc.stdout, proc.stderr)
-        if proc.returncode != 0:
-            detail = (
-                _engine_error_message(_read_file(report_path))
-                or (proc.stderr or "").strip()[-500:]
-                or "engine wrote no diagnostics"
+        else:
+            deadline = time.monotonic() + timeout
+            mesh, stats = generate_mesh(
+                binary, geometry.document, outdir, timeout, keep
             )
-            where = f" (log: {log_path})" if keep else ""
-            raise EmError(
-                f"geode capacitance exited {proc.returncode}: {detail}{where}"
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise EmError("geode exhausted options.timeout_s while meshing")
+            environment = {**geometry.environment, "mesh_stats": stats}
+            diagnostics = geometry.diagnostics
+            files.update(
+                layout="layout.json",
+                mesh_report="mesh-report.json",
+                mesh_log="mesh.log",
             )
-
-        engine_names, engine_matrix = parse_capacitance_report(_read_file(report_path))
+        engine_names, engine_matrix = solve_mesh(binary, outdir, timeout, keep)
         matrix = _reorder_matrix(engine_names, engine_matrix, surfaces)
 
         check_results = [_evaluate_check(c, names, matrix) for c in request["_checks"]]
         status = "fail" if any(c["status"] == "fail" for c in check_results) else "pass"
 
-        artifacts: dict[str, Any] = {"mesh": hashed_path_envelope(mesh)}
+        mesh_digest = sha256_file(mesh)
+        artifacts: dict[str, Any] = {}
+        if keep or geometry is None:
+            artifacts["mesh"] = hashed_path_envelope(mesh, repo_root=repo_root)
         if keep:
-            artifacts["spec"] = hashed_path_envelope(spec_path)
-            artifacts["report"] = hashed_path_envelope(report_path)
-            artifacts["log"] = hashed_path_envelope(log_path)
+            artifacts.update(
+                {
+                    k: hashed_path_envelope(
+                        os.path.join(outdir, v), repo_root=repo_root
+                    )
+                    for k, v in files.items()
+                }
+            )
     finally:
         if not keep:
             shutil.rmtree(outdir, ignore_errors=True)
@@ -428,32 +441,11 @@ def run_em(request_path: str) -> dict[str, Any]:
             "engine_version": version,
             "solve_mode": SOLVE_MODE,
             "binary": os.path.basename(binary),
-            "mesh_sha256": sha256_file(mesh),
+            "mesh_sha256": mesh_digest,
+            **environment,
         },
         "results": {"c": {"unit": "F", "terminals": names, "matrix": matrix}},
         "checks": check_results,
-        "diagnostics": [],
+        "diagnostics": diagnostics,
         "artifacts": artifacts,
     }
-
-
-def _write_json(path: str, doc: dict[str, Any]) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(doc, handle, indent=2)
-        handle.write("\n")
-
-
-def _read_file(path: str) -> str:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-    except OSError:
-        return ""
-
-
-def _write_log(path: str, out: Any, err: Any) -> None:
-    def text(v: Any) -> str:
-        return v.decode("utf-8", "replace") if isinstance(v, bytes) else (v or "")
-
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(f"--- stdout ---\n{text(out)}\n--- stderr ---\n{text(err)}\n")

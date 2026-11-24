@@ -1,22 +1,73 @@
 # `klt em`
 
-Field-solver verb ([#5616](https://github.com/2AMLogic/klayout-tools/issues/5616),
-brief 1.A of Epic [#708](https://github.com/2AMLogic/klayout-tools/issues/708)).
-Wraps the released `geode` binary (geode-fem) as a subprocess, the way `klt sim`
-wraps `ngspice`; no FEM numerics live in this repo. The contract is the one
-proposed in [`docs/design/em-field-sim-spike.md`](../design/em-field-sim-spike.md)
-§4.
+Compute a Maxwell capacitance matrix in farads with the released Geode CLI.
+A request can supply a tagged mesh or ask `klt em` to mesh a labelled GDS
+region using its PDK stackup. Both paths use `engine: "geode_fem"`,
+`solve_mode: "quasi_static"` and `outputs: ["c"]`.
 
-**Shipped slice:** `engine: "geode_fem"`, `solve_mode: "quasi_static"`,
-`outputs: ["c"]` on a **caller-supplied** mesh and terminals. GDS + stackup →
-mesh is not part of this slice; any other engine, solve mode or output is
-rejected (exit 1).
+How close those numbers are to the true answer is answered by
+[`docs/design/em-validation.md`](../design/em-validation.md)
+([#5618](https://github.com/2AMLogic/klayout-tools/issues/5618)): the
+closed-form parallel-plate bar through this repo's own GDS + stackup path,
+the convergence-order gate on the exact coax oracle, and the independent
+`klt mom` cross-check with its committed evidence.
 
 ```
 klt em request.json --format json
 ```
 
-## Request
+## Layout request
+
+With sky130A installed, save this request at the repository root to run the
+inverter example. Its layout path is relative to the request file.
+
+```json
+{
+  "layout": "tests/corpus/sky130/sky130_fd_sc_hd__inv_1.gds",
+  "region": {"cell": "sky130_fd_sc_hd__inv_1", "bbox_um": [0.1, 1.1, 1.2, 1.65]},
+  "stackup": "sky130A"
+}
+```
+
+The selected region contains the nets `A`, `VPWR` and `Y`. Add
+`"ground": ["VPWR"]` to hold the power rail at 0 V and return a two-terminal
+matrix for `A` and `Y`. Checks use these same GDS labels.
+
+| Field | Meaning |
+| --- | --- |
+| `layout` | GDSII or OASIS stream. |
+| `region.cell` | Cell to flatten, in its local coordinates. Defaults to the unique top cell. |
+| `region.bbox_um` | Optional `[left, bottom, right, top]` crop in micrometres, rounded to the database grid. `null` or omission includes the whole cell. |
+| `stackup` | Installed PDK variant resolved by `klt pdk stackup`, using its default corner and curated contiguous elevations. |
+| `ground` | Optional array of selected net labels to ground in addition to Geode's six grounded outer walls. All other selected nets are terminals, in label order. |
+
+Conductors and vias use the stackup's GDS layers, elevations and thicknesses.
+The extraction deck identifies each metal's label purpose and the layers each
+via connects. Connectivity and label association are resolved before clipping,
+so a label can lie outside the crop. Each selected connected conductor must
+have one distinct nonblank label. Conflicting labels, unlabeled conductors and a
+label shared by disconnected selected nets produce an application error.
+Geode's physical-group identifiers (`net_0`, `net_1`, …) follow sorted label
+order, including ground nets. Rectilinear holes are preserved.
+
+**Dielectric and boundary model.** Each planar slab uses its own stackup
+permittivity. The bottom of the dielectric stack is the grounded substrate
+surface. At the first unknown permittivity the domain ends, and the response
+records this in `diagnostics`. In sky130A that puts the grounded top at
+5.3711 µm, the start of the conformal passivation. A selected conductor
+reaching that boundary gives exit 1. Geode v1 describes horizontal slabs
+and cannot express conformal coatings. The lateral walls lie one stack
+height beyond the clipped conductors. The maximum mesh size is half that
+height, and the surface target is the thinnest selected conductor or via.
+
+**Meshing dependency.** The adapter runs `geode mesh --analysis capacitance`
+and passes its generated starter spec directly to `geode capacitance`.
+This path was tested with Geode 0.9.0. Install Gmsh 4.11 or newer with
+OpenCASCADE and put `gmsh` on `PATH`, or set `GEODE_GMSH` to its executable.
+A missing or unrunnable Gmsh returns exit 1 with Geode's diagnostic in the
+standard error envelope. [Geode meshing documentation](https://github.com/rjwalters/geode-fem/blob/v0.9.0/crates/geode-cli/examples/mesh/README.md)
+
+## Supplied mesh request
 
 ```json
 {
@@ -42,10 +93,10 @@ klt em request.json --format json
 | `terminals[]` | `name` (caller-facing) and the mesh dimension-2 physical group `surface` it binds to. `surface` values go into the geode spec in matrix row/column order; `name` never reaches the engine. |
 | `ground[]` | The 0 V reference conductor(s), same `{name, surface}` shape. At least one is required (geode schema v1 rejects a ground-less spec at load). A conductor is a terminal or ground, never both. |
 | `materials[]` | Optional dielectrics: `{physical_group, eps_r: [re, im]}`; `eps_r` defaults to vacuum `[1, 0]` — omitting `materials` leaves every unlisted region at vacuum. `im` must be 0 and `re` > 0: the electrostatic solve is real and lossless. |
-| `checks[]` | `name`, `output: "c"`, `terminal_pair` (`[a, a]` = self term), `unit` (`F`/`pF`/`fF`, default `fF`), `limits` (`min`/`max`, either optional; none = reported, never fails). |
+| `checks[]` | `name`, `output: "c"`, `terminal_pair` (`[a, a]` = self term), `unit` (`F`/`pF`/`fF`, default `fF`), `limits` (`min`/`max`, either optional; none = reported, never fails). Maxwell off-diagonals are `<= 0` (the mutual capacitance is `-c_farad[i][j]`), so a mutual-coupling check's `limits` must be negative, as in the `c_sig_gnd` example above. |
 | `options.geode_binary` | Binary name/path; see resolution below. |
-| `options.timeout_s` | Wall-clock budget (default 1800). |
-| `options.keep_artifacts` | Default `true`: keep spec/report/log under `output_dir` (default `.klt/em/<request-stem>/` beside the request). `false` keeps only the mesh reference. |
+| `options.timeout_s` | Wall-clock budget shared by meshing and solving, in seconds (default 1800). |
+| `options.keep_artifacts` | Default `true`. Keep outputs under `output_dir` (default `.klt/em/<request-stem>/` beside the request). Layout runs use a fresh `run-*` directory. With `false`, temporary outputs are removed and a caller-supplied mesh still appears in `artifacts`. |
 | `options.output_dir` | Artifact directory; must be a string when present. |
 
 ### Resolving `geode`
@@ -59,10 +110,11 @@ install guidance. It never produces a result without running the engine.
 
 - `status`: `pass` or `fail` (`fail` = trustworthy result, a check missed its limits).
 - `environment`: `engine`, `engine_version` (from `geode --version`, `null` if unparseable), `solve_mode`, `binary`, `mesh_sha256`.
-- `results.c`: `unit` (`"F"`), `terminals` (request order), `matrix` (Maxwell capacitance, farads).
+- For layout requests, `environment` also includes `stackup`, `layout_sha256` (stream bytes), `stackup_sha256` (the full resolved stackup JSON, UTF-8 with sorted keys, compact separators and ASCII escaping), and `mesh_stats` with Geode's `nodes`, `tets` and boundary `triangles` counts.
+- `results.c`: `unit` (`"F"`), `terminals` (label order for a layout, request order for a supplied mesh), `matrix` (Maxwell capacitance, farads).
 - `checks[]`: `name`, `output`, `terminal_pair`, `unit`, `limits`, `status`, `value`, `margin` (positive headroom, negative violation, `null` without limits).
-- `diagnostics[]`: reserved, currently empty.
-- `artifacts`: `mesh`, and with `keep_artifacts` `spec`, `report`, `log`, each a hashed `{path, scope, sha256}` envelope. Fields/meshes are never inlined.
+- `diagnostics[]`: model limitations encountered while translating the stackup.
+- `artifacts`: `mesh`, and with `keep_artifacts` `spec`, `report`, `log`, each a hashed `{path, scope, sha256}` envelope. Retained layout runs also reference the generated Geode layout JSON (`layout`), `mesh_report` and `mesh_log`. The mesh hash and statistics survive temporary artifact cleanup. Every envelope's `repo` scope is relative to the repository containing the request file (#6764) — never the invoking directory — so one request yields one committed report from any cwd; a supplied path outside that repository (a mesh or `options.output_dir` in another checkout, even the invoking one) is `external`, and a request outside every repository makes every artifact `external`.
 
 `error` (no trustworthy result: bad request, engine failure/timeout, a report
 whose terminals or matrix do not match the request) is the standard error

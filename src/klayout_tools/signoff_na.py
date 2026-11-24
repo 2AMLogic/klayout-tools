@@ -173,3 +173,75 @@ def _na_spec_format(raw: dict[str, Any], ref: dict[str, Any]) -> str | None:
     elif column is not None:
         return "'id_column' applies only to format 'markdown-table'"
     return None
+
+
+# Sets of digital and analog IDs normalized from the manifest. The hash-bound
+# spec remains the authority on which IDs actually exist.
+NaScope = tuple[set[str], set[str]]
+
+
+def digital_na_scope(
+    declarations: dict[tuple[int, str | None], list[dict[str, Any]] | None],
+) -> NaScope | None:
+    digital = declarations.get((6, "digital"))
+    analog = declarations.get((6, "analog"), [])
+    if not digital or analog is None:
+        return None
+    if any(
+        row["gap"] or row["justified_gap"] or row["structural"] or not row["ratified"]
+        for row in digital
+    ):
+        return None
+    return {r["id"] for r in digital}, {r["id"] for r in analog}
+
+
+def partition_coverage_problem(
+    rows: list[dict[str, Any]], scope: NaScope
+) -> dict[str, Any] | None:
+    assigned = scope[0] | scope[1]
+    ids = {row["id"] for row in rows}
+    if assigned == ids:
+        return None
+    return {
+        "document": "spec",
+        "unassigned_row_ids": sorted(ids - assigned),
+        "unknown_row_ids": sorted(assigned - ids),
+    }
+
+
+def na_citation(
+    spec_ref: dict[str, Any],
+    statement_ref: dict[str, Any],
+    row_count: int,
+    statement_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Bind the original full spec and the statement covering the graded rows."""
+    spec_block: dict[str, Any] = {
+        "file": spec_ref["file"],
+        "content_hash": spec_ref["content_hash"],
+        "status": "ratified",
+        "row_count": row_count,
+    }
+    if "format" in spec_ref:
+        spec_block["format"] = spec_ref["format"]
+        spec_block["id_column"] = spec_ref["id_column"]
+    return {
+        "spec": spec_block,
+        "statement": {
+            "file": statement_ref["file"],
+            "content_hash": statement_ref["content_hash"],
+            "rows": [
+                {
+                    "id": r["id"],
+                    "class": r["class"],
+                    "reason": r["reason"],
+                    **(
+                        {"reviewed_not_statistical": True}
+                        if r.get("reviewed_not_statistical") is True
+                        else {}
+                    ),
+                }
+                for r in statement_rows
+            ],
+        },
+    }

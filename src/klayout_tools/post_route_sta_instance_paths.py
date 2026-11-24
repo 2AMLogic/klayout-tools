@@ -36,18 +36,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._sta_request_diag import extract_block as _extract_block
+from ._tcl import tcl_literal as _tcl_literal
+from .post_route_sta_errors import PostRouteStaError
 from .post_route_sta_path_groups import (
     _empty_path_record,
-    _extract_block,
     _worst_path_record,
 )
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
-
 
 #: Issue #5754: brackets the per-instance worst-path records
 #: (:func:`_instance_path_lines`) a ``constraints.report_instances`` request
@@ -58,17 +53,6 @@ def _error(message: str) -> Exception:
 #: failed.
 _INSTANCE_PATHS_BEGIN = "===KLT_STA_INSTANCE_PATHS_BEGIN==="
 _INSTANCE_PATHS_END = "===KLT_STA_INSTANCE_PATHS_END==="
-
-_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
-
-
-def _tcl_literal(text: str) -> str:
-    """Backslash-quote ``text`` into one literal Tcl word: no word
-    splitting, no ``$``/``[...]``/backslash substitution, no brace
-    matching. Byte-for-byte the helper ``post_route_sta`` and
-    ``lvs_netgen.py`` carry under the same name -- kept module-local per
-    this package's self-contained convention."""
-    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
 
 
 def _validate_report_instances(constraints: dict[str, Any]) -> list[str] | None:
@@ -86,18 +70,20 @@ def _validate_report_instances(constraints: dict[str, Any]) -> list[str] | None:
     if value is None:
         return None
     if not isinstance(value, list):
-        raise _error(f"{field} must be a list of instance names")
+        raise PostRouteStaError(f"{field} must be a list of instance names")
     seen: set[str] = set()
     for name in value:
         if not isinstance(name, str) or not name or name != name.strip():
-            raise _error(
+            raise PostRouteStaError(
                 f"{field} entries must be non-empty instance-name strings "
                 f"without leading/trailing whitespace (got {name!r})"
             )
         if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
-            raise _error(f"{field} entry {name!r} contains a control character")
+            raise PostRouteStaError(
+                f"{field} entry {name!r} contains a control character"
+            )
         if name in seen:
-            raise _error(f"{field} must not repeat an instance ({name!r})")
+            raise PostRouteStaError(f"{field} must not repeat an instance ({name!r})")
         seen.add(name)
     return list(value) or None
 

@@ -5,16 +5,124 @@ netlist description header, ``netlist.write`` (with scratch-dir cleanup on
 failure), narrow-width substitution notes, pin ties and the hash/finish step.
 Returns ``(reported_netlist_path, netlist_sha256, pin_ties)``.
 
-``warnings`` is mutated in place, exactly as the inline block did. The helpers
-it calls that still live in ``extract.py`` are imported inside the function
-body: ``extract.py`` imports this module at its top level, so a module-level
-``from .extract import ...`` would be a circular import.
+The writer appends its diagnostics to the supplied ``warnings`` list.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+from .extract_base import ExtractError, _parasitic_model_header_comment
+from .extract_netlist_target import _finish_netlist_write
+from .pdk_models import create_model_binding_delegate
+
+#: KLayout's stock ``NetlistSpiceWriter`` (``use_net_names`` on; reported on
+#: 0.30.12, reproduced on 0.30.10, issue #6732) throws from inside ``Netlist.write`` --
+#: before it calls any delegate hook, so no delegate can intercept it -- for a
+#: net whose name *starts with* lowercase ``nc_`` unless the rest is a number
+#: (``nc_a``, ``nc_ab``, ``nc_a,vss`` fail; ``nc_1``, ``NC_a``, ``nca``,
+#: ``a_nc`` and ``vss,nc_a`` write fine). Only net names are scanned: a pin or
+#: circuit named ``nc_a`` is accepted.
+_NC_NET_PREFIX = "nc_"
+_NC_WRITE_ERROR = "Unexpected text after numeric value"
+
+#: Stem of the placeholder that stands in for ``nc_`` while the writer runs.
+_NC_PLACEHOLDER_STEM = "klt_nc"
+
+
+def _nc_prefixed_nets(netlist: Any) -> list[Any]:
+    return [
+        net
+        for circuit in netlist.each_circuit()
+        for net in circuit.each_net()
+        if net.name.startswith(_NC_NET_PREFIX)
+    ]
+
+
+def _unused_placeholder_prefix(netlist: Any) -> str:
+    """A ``klt_nc<n>_`` prefix no existing name in ``netlist`` starts with.
+
+    The restore rewrites *every* token that starts with the prefix, so a net,
+    pin, circuit, device or device-class name that already did would be
+    corrupted along with the placeholders."""
+    names = [
+        name.casefold()
+        for name in (
+            *(cls.name for cls in netlist.each_device_class()),
+            *(
+                name
+                for circuit in netlist.each_circuit()
+                for name in (
+                    circuit.name,
+                    *(net.name for net in circuit.each_net()),
+                    *(pin.name() for pin in circuit.each_pin()),
+                    *(device.expanded_name() for device in circuit.each_device()),
+                )
+            ),
+        )
+        if name
+    ]
+    index = 0
+    while any(name.startswith(f"{_NC_PLACEHOLDER_STEM}{index}_") for name in names):
+        index += 1
+    return f"{_NC_PLACEHOLDER_STEM}{index}_"
+
+
+def _restore_nc_prefix(netlist_path: str, placeholder: str) -> None:
+    """Rewrite the placeholder back to ``nc_`` in the written SPICE.
+
+    Only the *prefix* was swapped, so the writer has already applied its own
+    escaping to the rest of the name (``nc_a-b`` is spelled ``nc_a\\x2db``
+    exactly as ``nc-a`` would be). A placeholder the pattern cannot reach (not
+    at the start of a token) is an error, never a silently corrupted deck."""
+    with open(netlist_path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    restored = re.sub(rf"(?<!\S){re.escape(placeholder)}", _NC_NET_PREFIX, text)
+    if placeholder in restored:
+        raise RuntimeError(
+            f"internal net-name placeholder '{placeholder}' remained in the "
+            "written netlist after restoring net names that start with "
+            f"'{_NC_NET_PREFIX}'"
+        )
+    with open(netlist_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(restored)
+
+
+def write_spice_netlist(
+    netlist: Any, netlist_path: str, writer: Any, description: str
+) -> None:
+    """``netlist.write(netlist_path, writer, description)``, tolerating the
+    stock writer's rejection of a net name starting with lowercase ``nc_``
+    (issue #6732).
+
+    The plain write is tried first, so every netlist that wrote before is
+    written exactly as before. Only that one confirmed error -- with a net
+    whose name starts with ``nc_`` present -- takes the fallback: those nets are
+    renamed to an unused placeholder prefix, written, and the placeholder is put
+    back in the written text. The real net names are restored in ``netlist``
+    whether or not the write succeeds, so the report and every later pass still
+    see the layout's own label. Any other write error propagates unchanged."""
+    try:
+        netlist.write(netlist_path, writer, description)
+        return
+    except Exception as exc:
+        nc_nets = _nc_prefixed_nets(netlist)
+        if _NC_WRITE_ERROR not in str(exc) or not nc_nets:
+            raise
+
+    placeholder = _unused_placeholder_prefix(netlist)
+    originals = [(net, net.name) for net in nc_nets]
+    for net, name in originals:
+        net.name = placeholder + name[len(_NC_NET_PREFIX) :]
+    try:
+        netlist.write(netlist_path, writer, description)
+    finally:
+        for net, name in originals:
+            net.name = name
+    _restore_nc_prefix(netlist_path, placeholder)
 
 
 def write_flat_netlist(
@@ -34,14 +142,6 @@ def write_flat_netlist(
     warnings: Any,
     pin_order: Any = (),
 ) -> tuple[Any, Any, Any]:
-    from .extract import (
-        ExtractError,
-        _apply_pin_ties_if_circuit,
-        _finish_netlist_write,
-        _model_delegate_factory,
-        _parasitic_model_header_comment,
-        _substitution_notes,
-    )
 
     # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
     # the PDK reference CDL's parameter set); every other deck keeps the
@@ -72,7 +172,7 @@ def write_flat_netlist(
         )
     try:
         with stage("netlist_write"):
-            netlist.write(netlist_path, writer, netlist_description)
+            write_spice_netlist(netlist, netlist_path, writer, netlist_description)
     except Exception as exc:
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -92,3 +192,80 @@ def write_flat_netlist(
             netlist_path, scratch_dir
         )
     return reported_netlist_path, netlist_sha256, pin_ties
+
+
+#: Resistance of the ties ``--tie-declared-pins`` writes (issue #4383): a
+#: micro-ohm rather than a literal ``0``, which ngspice warns about and clamps.
+PIN_TIE_RESISTANCE = "1u"
+
+
+def _apply_pin_ties_if_circuit(
+    netlist_path: str, circuit: Any, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: :func:`_apply_pin_ties_to_spice` on the extracted top
+    circuit; a device-free layout has none (and no ``.SUBCKT``), so skip."""
+    if circuit is not None:
+        _apply_pin_ties_to_spice(netlist_path, circuit.name, ties)
+
+
+def _apply_pin_ties_to_spice(
+    netlist_path: str, top_name: str, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: rewrite the written deck so ``top_name``'s ``.SUBCKT``
+    header also lists every tied declared pin (appended after the existing
+    ports, in tie order) and the body gains one ``Rtie_<pin> <pin> <canonical>
+    1u`` per tied pin, just before the matching ``.ENDS``."""
+    if not ties:
+        return
+    with open(netlist_path, encoding="utf-8") as handle:
+        lines = handle.read().split("\n")
+    header_re = re.compile(rf"^\.subckt\s+{re.escape(top_name)}(\s|$)", re.IGNORECASE)
+    start = next((i for i, line in enumerate(lines) if header_re.match(line)), None)
+    if start is None:
+        raise ExtractError(
+            f"--tie-declared-pins: no `.SUBCKT {top_name}` header in '{netlist_path}'"
+        )
+    last_header = start
+    while last_header + 1 < len(lines) and lines[last_header + 1].startswith("+"):
+        last_header += 1
+    end = next(
+        (
+            i
+            for i in range(last_header + 1, len(lines))
+            if lines[i].lower().startswith(".ends")
+        ),
+        None,
+    )
+    if end is None:
+        raise ExtractError(f"--tie-declared-pins: no `.ENDS` in '{netlist_path}'")
+    extra = [pin for tie in ties for pin in tie["tied_pins"]]
+    cards = [
+        f"Rtie_{pin} {pin} {tie['pin']} {PIN_TIE_RESISTANCE}"
+        for tie in ties
+        for pin in tie["tied_pins"]
+    ]
+    lines[last_header] += " " + " ".join(extra)
+    lines[end:end] = cards
+    with open(netlist_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
+def _model_delegate_factory(
+    model_bindings: Any, global_nets: Any, sink: list[Any]
+) -> Callable[[], Any]:
+    """Factory building the model-binding delegate and recording it in ``sink``."""
+
+    def make() -> Any:
+        delegate = create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=global_nets,
+        )
+        sink.append(delegate)
+        return delegate
+
+    return make
+
+
+def _substitution_notes(delegates: list[Any]) -> list[str]:
+    """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
+    return [n for d in delegates for n in getattr(d, "substitution_notes", ())]
