@@ -9083,9 +9083,8 @@ values), *and* reduced to a per-measurement statistical verdict under
     section opener would end the scan mid-section. Those refusals
     name the offending parameter or line and the file: leaving one sigma at
     nominal while its siblings are scaled would be a *partially* scaled run,
-    and
-    `mismatch_params` — which lists only what was written — would not show
-    the omission. Never a silently unscaled, or partially scaled, run.
+    and `mismatch_params` — which lists only what was written — would not
+    show the omission. Never a silently unscaled, or partially scaled, run.
 
     **Not yet measured on real models.** Unlike the switch families above,
     the effect of these cards on the sampled `stddev` of an ngspice run
