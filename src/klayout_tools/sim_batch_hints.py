@@ -94,6 +94,15 @@ _MODELNAME_RE = re.compile(r"could not find a valid modelname", re.IGNORECASE)
 _ATTRIBUTED_MARK = "ngspice card at expanded-deck line"
 
 
+def is_model_selection_abort(diagnostic: dict[str, Any]) -> bool:
+    """Identify a model-selection failure from the classified engine evidence."""
+    code = diagnostic.get("code")
+    return code == "model_bin_range" or (
+        code == "ngspice_fatal"
+        and bool(_MODELNAME_RE.search(str(diagnostic.get("message", ""))))
+    )
+
+
 def attribute_modelname(diagnostic: dict[str, Any], log_text: str) -> dict[str, Any]:
     """Name the instance/model behind a ``could not find a valid modelname``
     abort (issue #5138). The fleet outputs carry no expanded deck, but the

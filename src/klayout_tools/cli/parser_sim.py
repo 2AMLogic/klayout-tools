@@ -7,24 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import sim_check_cmd
-
-
-def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
-    """``--wait-for-capacity`` for ``klt sim`` and ``klt pex`` (issue #5280)."""
-    parser.add_argument(
-        "--wait-for-capacity",
-        dest="wait_for_capacity",
-        metavar="SECONDS",
-        type=float,
-        default=None,
-        help=(
-            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
-            "capacity when the launch is refused (batch_no_capacity / "
-            "batch_concurrency_cap), re-launching the same job with jittered "
-            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
-            "means one attempt. " + tail
-        ),
-    )
+from ._batch_parser_args import add_wait_for_capacity_arg
 
 
 def add_sim_parser(
@@ -129,6 +112,25 @@ def add_sim_parser(
             "(issue #5810). Submits and launches nothing. Unit counts "
             "are not published by the fleet and are not reported. See "
             "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--cancel",
+        dest="cancel",
+        metavar="JOB_ID",
+        default=None,
+        help=(
+            "cancel one batch job by id through 2am's "
+            "batch-fleet-provision.sh cancel --apply: its pending/running "
+            "fleet instances are terminated and the job's status.json "
+            "reports cancelled, while its S3 prefix and partial results "
+            "are left in place (issue #4351). The positional request, "
+            "when given, supplies the bucket/region/profile; without one "
+            "they resolve from the KLT_BATCH_* environment and the fleet "
+            "batch-fleet.env. The bucket and jobs prefix must match that "
+            "file. --dry-run conflicts with --cancel. A job with nothing "
+            "live to terminate fails with error.code "
+            "batch_cancel_nothing_to_cancel. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
