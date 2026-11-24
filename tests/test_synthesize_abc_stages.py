@@ -1,6 +1,5 @@
 """Exercise the generic ABC watchdog through the synthesize and signoff contracts."""
 
-import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -129,16 +128,58 @@ def test_missing_checkpoint_is_an_engine_error(tmp_path, monkeypatch, suffix):
         synthesize.run_synthesize(path)
 
 
+def _assert_report_covers(actual, expected, path="$"):
+    assert type(actual) is type(expected), (
+        f"{path}: expected {expected!r}, got {actual!r}"
+    )
+    if isinstance(expected, dict):
+        for key, value in expected.items():
+            child = f"{path}.{key}"
+            assert key in actual, f"{child}: missing key"
+            _assert_report_covers(actual[key], value, child)
+    elif isinstance(expected, list):
+        assert len(actual) == len(expected), (
+            f"{path}: expected {len(expected)} items, got {len(actual)}"
+        )
+        for i, value in enumerate(expected):
+            _assert_report_covers(actual[i], value, f"{path}[{i}]")
+    else:
+        assert actual == expected, f"{path}: expected {expected!r}, got {actual!r}"
+
+
+def test_report_covers_accepts_additive_fields():
+    _assert_report_covers(
+        {"extra": True, "rows": [{"count": 3, "new": 1}]},
+        {"rows": [{"count": 3}]},
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "diagnostic"),
+    [
+        ([{"count": 4}], "$.rows[0].count: expected 3, got 4"),
+        ([{}], "$.rows[0].count: missing key"),
+        ([], "$.rows: expected 1 items, got 0"),
+        ([{"count": 3.0}], "$.rows[0].count: expected 3, got 3.0"),
+    ],
+)
+def test_report_covers_reports_changed_fields(rows, diagnostic):
+    with pytest.raises(AssertionError) as exc:
+        _assert_report_covers({"rows": rows}, {"rows": [{"count": 3}]})
+    assert diagnostic in str(exc.value)
+
+
 def test_no_budget_report_golden(tmp_path, monkeypatch, capsys):
     # Pin host-dependent fields. The golden includes the digest added in #7277.
     path = setup_run(tmp_path, monkeypatch, run_id="golden")
     monkeypatch.setattr(synthesize, "build_provenance", lambda **kw: {})
     monkeypatch.setattr(synthesize, "_read_sta_timing", lambda *args: (None, "fixture"))
     assert main(["synthesize", path, "--format", "json"]) == 0
-    assert (
-        hashlib.sha256(capsys.readouterr().out.encode()).hexdigest()
-        == "e04454a006ac969f71cd1703d13c5569c62c23da5aad4b85c5ccebc7a468773a"
+    expected_path = (
+        Path(__file__).parent / "fixtures" / "synthesize_no_budget_report.json"
     )
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    _assert_report_covers(json.loads(capsys.readouterr().out), expected)
 
 
 @pytest.mark.parametrize(

@@ -39,6 +39,7 @@ from ..place_and_route import (
     rerun_place_and_route_report,
     run_place_and_route,
 )
+from ..place_and_route_merge_only import run_merge_from_def
 from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 from .sta_cmd import FMAX_CAVEAT
 
@@ -65,7 +66,15 @@ RERUN_HELP_EXTRA = (
 )
 
 
-def add_threads_argument(parser: argparse.ArgumentParser) -> None:
+def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ``klt place-and-route``'s non-positional run flags.
+
+    ``--threads`` (engine threads) and ``--from-def`` (issue #7721: run only
+    the DEF->GDS merge on a committed routed DEF) -- the flags this verb's
+    own module owns, registered in one place so ``parser.py``'s verb wiring
+    stays a single call.
+    """
+
     def argument(value: str) -> int | str:
         # Preserve invalid tokens so all modes emit the same JSON request error.
         try:
@@ -79,9 +88,30 @@ def add_threads_argument(parser: argparse.ArgumentParser) -> None:
         metavar="N|max",
         help="OpenROAD threads per process (overrides request.threads, default 1)",
     )
+    parser.add_argument(
+        "--from-def",
+        dest="from_def",
+        metavar="DEF",
+        default=None,
+        help=(
+            "run only the DEF->GDS merge on an existing routed DEF "
+            "(issue #7721): resolve the LEF/GDS views from the request, "
+            "run the merge-time repair passes (min-area, via-pad trim with "
+            "tip_check/router_fill_scan, power-stack) on that routing, and "
+            "write <top>_from_def.gds under the stage root -- no OpenROAD "
+            "stage, stage ODB or commit record needed, so a committed "
+            "routed stream can be re-graded on a later pin. Not combinable "
+            "with --check/--rerun/--resume/--backend. See "
+            "docs/cli/place-and-route.md, 'Merging a committed routed DEF "
+            "(--from-def)'"
+        ),
+    )
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.from_def is not None:
+        return _run_from_def(args)
+
     if args.check is not None:
         if args.resume:
             return emit_error(
@@ -110,11 +140,22 @@ def run(args: argparse.Namespace) -> int:
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_text)
+    return _emit_fresh_run_report(report, args.format)
+
+
+def _emit_fresh_run_report(report: dict, fmt: str) -> int:
+    """Emit a fresh run's report and derive its exit code: the response's own
+    `warnings` list goes to stderr in *both* formats (issue #2086 -- a run
+    that placed no tapcells, no PDN and no fillers completes, exits 0, and
+    its output looks exactly like data, so the complaint has to be visible
+    to an operator who never opens the JSON; stderr, not stdout, keeps
+    `--format json`'s stdout a single parseable document), and a
+    `pdk.rebuild_corners` report fails the command when any corner unit
+    failed while still emitting the aggregated report (issue #3507, each
+    unit's warnings corner-prefixed).
+    """
+    emit_success(report, fmt, _print_text)
     if "corner_runs" in report:
-        # Issue #3507: a `pdk.rebuild_corners` request emits its aggregated
-        # report either way; a unit that failed still fails the command.
-        # Each unit's own #2086 warnings go to stderr too, corner-prefixed.
         for run in report["corner_runs"]:
             for warning in run.get("warnings", ()):
                 print(
@@ -122,13 +163,6 @@ def run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         return 0 if report["status"] == "ok" else 1
-    # Issue #2086: the response's own `warnings` list also goes to stderr,
-    # in *both* formats. A run that placed no tapcells, no PDN and no
-    # fillers is the failure mode this exists for -- it completes, exits 0,
-    # and its output looks exactly like data -- so the complaint has to be
-    # visible to an operator who never opens the JSON. stderr, not stdout:
-    # `--format json`'s stdout stays a single parseable document (see
-    # `output.py`'s own envelope note), and the exit code is unchanged.
     for warning in report.get("warnings", ()):
         print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
@@ -141,6 +175,46 @@ def _emit_flow_error(exc: PlaceAndRouteError, fmt: str) -> int:
     return emit_error(
         "place-and-route", str(exc), fmt, code=exc.code, details=exc.details
     )
+
+
+def _run_from_def(args: argparse.Namespace) -> int:
+    """``--from-def <routed.def>`` (issue #7721): run only the DEF→GDS merge
+    on a committed routed DEF -- no OpenROAD stage, no ODB/commit record.
+
+    Mutually exclusive with the flow-verification (``--check``/``--rerun``),
+    resume (``--resume``) and dispatch (``--backend``) flags: each names work
+    only a stage-running invocation can do.
+    """
+    conflicts = [
+        flag
+        for flag, active in (
+            ("check", args.check is not None),
+            ("rerun", bool(args.rerun)),
+            ("resume", bool(args.resume)),
+            ("backend", args.backend is not None),
+        )
+        if active
+    ]
+    if conflicts:
+        return emit_error(
+            "place-and-route",
+            f"--from-def cannot be combined with --{conflicts[0]}",
+            args.format,
+        )
+    try:
+        report = run_merge_from_def(
+            args.request,
+            args.from_def,
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+        )
+    except PlaceAndRouteError as exc:
+        return _emit_flow_error(exc, args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
+
+    emit_success(report, args.format, _print_from_def_text)
+    return 0
 
 
 def _run_check(args: argparse.Namespace) -> int:
@@ -267,3 +341,51 @@ def _print_text(report: dict) -> None:
     print(f"def_path: {report['def_path']}")
     print(f"gds_path: {report['gds_path']}")
     print(f"verilog_path: {report['verilog_path']}")
+
+
+def _print_from_def_text(report: dict) -> None:
+    """`--format text` rendering of a `--from-def` merge-only report
+    (issue #7721): the merge's own inputs and repair results, nothing a
+    placement run produced (no stages, no timing, no ODB metrics)."""
+    print(f"hdl_toplevel: {report['hdl_toplevel']}")
+    print(f"status: {report['status']}")
+    print()
+    inputs = report["from_def"]
+    print(f"def_path: {inputs['def_path']}")
+    print(f"def_content_hash: {inputs['def_content_hash']}")
+    print(f"tech_lef: {inputs['tech_lef']}")
+    print(f"cell_lef: {inputs['cell_lef']}")
+    print(f"cell_gds: {inputs['cell_gds']}")
+    print()
+    print(f"gds_path: {report['gds_path']}")
+    print(f"gds_dbu_um: {report['gds_dbu_um']}")
+    layer_map = report["layer_map"]
+    print(f"layer_map: {layer_map['path']} ({layer_map['resolution']})")
+
+    def _pass(name: str, info: dict | None) -> None:
+        if info is None:
+            print(f"{name}: (not measured)")
+            return
+        line = f"{name}: {info.get('status')}"
+        if info.get("status") == "skipped":
+            line += f" ({info.get('reason')})"
+        print(line)
+
+    print()
+    _pass("min_area_repair", report["min_area_repair"])
+    _pass("power_stack_repair", report["power_stack_repair"])
+    trim = report["via_pad_trim"]
+    _pass("via_pad_trim", trim)
+    if trim is not None:
+        tip = trim.get("tip_check")
+        if tip is not None:
+            line = f"via_pad_trim.tip_check: {tip.get('status')}"
+            if tip.get("status") == "skipped":
+                line += f" ({tip.get('reason')})"
+            else:
+                line += (
+                    f", violations={tip.get('violations')}"
+                    f", via_pad_violations={tip.get('via_pad_violations')}"
+                    f", router_fill_violations={tip.get('router_fill_violations')}"
+                )
+            print(line)

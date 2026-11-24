@@ -122,7 +122,7 @@ M1 Y A VGND VGND some_other_model W=0.65U L=0.15U
 def test_unresolvable_deck_is_not_refused(tmp_path, deck):
     """Without `reference.deck` -- or for a name with no curated model
     table -- the guard returns early (best-effort, like
-    `_reject_bare_resistor_x_cards`); the reference read owns the
+    `_reject_bare_deck_x_cards`); the reference read owns the
     authoritative unknown-deck error."""
     reference = _read_spice(tmp_path, "ref.spice", _REFERENCE_SIM_MODELS)
     layout = _read_spice(tmp_path, "layout.spice", _LAYOUT_DECK_CLASSES)
