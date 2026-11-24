@@ -3966,10 +3966,11 @@ Whether a `Region` sees the properties depends on how it is built:
   `LoadLayoutOptions.properties_enabled = False` (or otherwise ignore the
   properties) before rebuilding a rule this way.
 - `kdb.Region(cell.begin_shapes_rec(layer_index))` ignores properties by
-  default. If the file was read with properties, calling `enable_properties()`
-  on the iterator before constructing the region includes them. On KLayout
-  0.30.12 this reproduced the tagged-wire result of one violation and two
-  merged M4 polygons. The curated engine uses the default construction.
+  default. If the reader retained the properties, call `enable_properties()`
+  on the iterator before constructing the region, or on the new region before
+  evaluating it. Both calls reproduced one violation and two merged M4 polygons
+  on KLayout 0.30.12, 0.30.13 and 0.30.14. The curated engine uses the default
+  construction.
 
 Do not drop the properties in a shared reader: `klt extract --def-net-names`
 needs them.

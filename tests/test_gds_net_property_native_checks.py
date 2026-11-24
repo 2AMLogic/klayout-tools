@@ -30,7 +30,7 @@ table is the Region construction**:
 * ``kdb.Region(cell.begin_shapes_rec(layer_index))`` -- the flattening idiom
   ``klt drc``'s native engine uses (``drc._cell_region_or_empty``) -- ignores
   the properties by default (merged M4 count 1, no violation). Enabling
-  properties on the iterator includes the tag when the reader retained it.
+  properties on the iterator or the new region includes a tag retained by the reader.
 
 Measured with the klayout module 0.30.13 (this venv) and 0.30.14 (the
 reporter's version); only the ``enclosing_check`` rebuild is exercised here
@@ -87,11 +87,12 @@ def _region(layout, cell, layer: tuple[int, int], construction: str):
     if construction == "shapes":
         return kdb.Region(cell.shapes(index))
     iterator = cell.begin_shapes_rec(index)
-    if construction == "recursive_with_properties":
+    if construction == "iterator_with_properties":
         iterator.enable_properties()
-    else:
-        assert construction == "recursive"
-    return kdb.Region(iterator)
+    region = kdb.Region(iterator)
+    if construction == "region_with_properties":
+        region.enable_properties()
+    return region
 
 
 def _native_two_side_enclosure(layout, cell, construction: str) -> tuple[int, int]:
@@ -165,16 +166,16 @@ def test_recursive_region_ignores_properties_by_default(
 
 
 @pytest.mark.parametrize(("tagged", "properties_enabled", "expected"), SHAPES_TABLE)
-def test_recursive_iterator_can_include_properties(
-    tmp_path, tagged, properties_enabled, expected
+@pytest.mark.parametrize(
+    "construction", ["iterator_with_properties", "region_with_properties"]
+)
+def test_recursive_region_can_include_properties(
+    tmp_path, tagged, properties_enabled, expected, construction
 ):
     path = _write_layout(tmp_path / "m4.gds", tagged_wire=tagged)
     layout, cell = _read(path, properties_enabled=properties_enabled)
 
-    assert (
-        _native_two_side_enclosure(layout, cell, "recursive_with_properties")
-        == expected
-    )
+    assert _native_two_side_enclosure(layout, cell, construction) == expected
 
 
 def test_klt_drc_native_engine_report_is_unchanged_by_the_wire_property(
