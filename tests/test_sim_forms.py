@@ -213,9 +213,10 @@ def test_an_entry_declaring_one_exclusive_form_needs_a_name(form):
         sim_validate._validate_measurement_forms([{form: _BODY[form]}])
 
 
-def test_normalize_selector_is_shared_by_transfer_and_snm():
-    from klayout_tools import sim_snm_meas, sim_transfer_meas
+def test_measurement_modules_share_the_voltage_selector_normalizer():
+    from klayout_tools import sim_slope_band_meas, sim_snm_meas, sim_transfer_meas
 
+    assert sim_slope_band_meas.normalize_selector is sim_forms.normalize_selector
     assert sim_transfer_meas.normalize_selector is sim_forms.normalize_selector
     assert sim_snm_meas.normalize_selector is sim_forms.normalize_selector
     assert sim_forms.normalize_selector("V(OUT_A)") == "v(out_a)"
