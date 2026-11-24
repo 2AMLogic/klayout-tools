@@ -53,7 +53,7 @@
           "klt_version": {
             "type": "string",
             "pattern": "^[0-9][A-Za-z0-9._+-]{0,79}$",
-            "description": "The `klt --version` build string (without the leading `klt `) that this image's baked klayout-tools reports, e.g. '0.7.0' or '0.7.1.dev3+gabc1234' (issue #2851). Published by scripts/aws/build-remote-sim-ami.sh from the version the pinned `klt_ref` installed. The `batch` backend compares it with the submitting client before any submit/launch (release-segment major.minor rule, issue #3184). Publication metadata, not proof of the bytes a job executes; the runner-side preflight still runs. Optional: absent on historical entries, which means unknown."
+            "description": "The `klt --version` build string (without the leading `klt `) that this image's baked klayout-tools reports, e.g. '0.7.0' or '0.7.1.dev3+gabc1234' (issue #2851). Published by scripts/aws/build-remote-sim-ami.sh from the version the pinned `klt_ref` installed. The `remote` backend's pre-launch mandatory-feature check (`assess_remote_runner_features`, issue #2924) compares it with the registry features the request uses and refuses before any instance launches when the image's release predates one; the `batch` backend does not read it (its runner identity comes from the published `eda-batch-image/1` pointer, issue #6430). Publication metadata, not proof of the bytes a job executes; the host-side preflight still runs. Optional: absent on historical entries, which means unknown (the check defers to the host preflight)."
           },
           "klt_ref": {
             "type": "string",

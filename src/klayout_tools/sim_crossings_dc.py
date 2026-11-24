@@ -175,7 +175,8 @@ def resolve_sampled_level(
 def resolve_level(
     name: Any,
     body: dict[str, Any],
-    points: list[list[float]],
+    scale: list[float],
+    values: list[float],
     supply_v: dict[str, Any] | None,
     sweep: bool,
 ) -> tuple[float | None, str | None]:
@@ -191,8 +192,8 @@ def resolve_level(
                 resolve_sampled_level(
                     name,
                     raw_level,
-                    [point[0] for point in points],
-                    [point[1] for point in points],
+                    scale,
+                    values,
                     sweep=sweep,
                 ),
                 None,

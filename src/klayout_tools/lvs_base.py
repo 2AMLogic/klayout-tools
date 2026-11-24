@@ -81,6 +81,7 @@ CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
 #: `device_parameter_coverage` block, which is built from the same
 #: determination.
 CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED = "device.geometry_not_compared"
+CATEGORY_DEVICE_IMPLAUSIBLE_DIMENSIONS = "device.implausible_dimensions"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #: Issue #4165: `options.compare_timeout_s` expired; `status` is

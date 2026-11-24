@@ -60,8 +60,10 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 - `--envelope-out PATH` — also write the JSON envelope to `PATH` whatever
   `--format` is: the success / `submitted` report, or the error envelope on
   failure (byte-identical to what `--format json` emits on stdout / stderr).
-  A path that cannot be written is an exit-`1` error. Additive
-  ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
+  A path that cannot be written is an exit-`1` error. The envelope is staged
+  as a sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Additive ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
   [`extract.md`](extract.md). **One run extracts one top**, and swaps one DUT
   `.include` for it, so a testbench instantiating two or more cells that are
@@ -218,6 +220,18 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   install the extraction read (`variant`, `root` as `{path, scope}`,
   `version`; `null` without `--pdk`), so a run with two installs of one
   variant shows which was used.
+- `--schematic-top NAME` selects the subcircuit called by the testbench when
+  its name differs from the layout cell. For example,
+  `--top LAYOUT_RES --schematic-top RES` keeps `RES` callable on the schematic
+  leg and retargets its instances to `LAYOUT_RES` in the extracted testbench
+  copy. The two interfaces still need matching positional pins. This works
+  with schematic flattening enabled or disabled. An unresolved binding
+  reports both names before either leg runs.
+  Use spaces between the pins of a schematic `.subckt` header for
+  portable simulation. The binding check recognizes comma-separated pins,
+  but the unflattened schematic leg passes the original file to ngspice.
+  The same `.subckt RES RA,RB` resistor deck gave different voltages in
+  ngspice 42 and 46, including when run directly.
 - `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
   before the schematic-side run (issue #2889) — the `klt pex` counterpart of
   `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical
@@ -1170,16 +1184,28 @@ simulate at the PDK subcircuit's own defaults, so a delta over them is not
 a delta over the drawn sizes — it is the only way measured parameters reach
 the cards (issue #5513).
 
+**Top ports on a merged leg.** Use `--pins RP,RN` to expose declared
+curated pin-layer labels on the runset's top subcircuit. Each requested
+label must identify a distinct curated net with a unique runset match.
+The header lists their final curated SPICE names in alphabetical order
+(`.SUBCKT RES RN RP` in this example). Use the same order in the schematic
+DUT. `--rename-declared-pins` also applies the curated extractor's
+single-alias rename before the join. The ordered
+`extraction.net_correspondence.declared_ports` rows record the declaration,
+the curated name and cluster, and the original runset node and cluster.
+A missing pin, a split net, an unresolved correspondence or a conflicting
+node name produces `merged_pin_unresolved` before simulation. Omitting
+`--pins` uses the top interface written by the runset.
+
 **Refused by name, never silently ignored.** Every option that only makes sense
 with a richer curated parasitic model is refused with the flag spelled out
 (`engine 'klayout-runset' cannot honour --critical-net, --distributed-rc …`),
 exit 1 — under the merged route too, which serves the curated deck's default
 lumped model only: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
 `--mom-rlc-*`, `--parasitic-variant`, `--substrate-tie-ohms`, `--deck-option`,
-`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--pdk`,
+`--tie-declared-pins`, `--pdk`,
 `--pdk-root` (the same table `klt extract` refuses them from), plus
-`--label-layer` *without* `--deck` (with `--deck` it routes to the curated
-leg, above),
+`--label-layer`, `--pins` and `--rename-declared-pins` *without* `--deck`,
 `--device-only-leg` (the runset leg *is* already the parasitic-free one) and
 `--tie-net` (it ties nets the curated deck reports as unbiased PMOS bodies,
 which this engine never computes). `--dry-run` is refused too: its preflight

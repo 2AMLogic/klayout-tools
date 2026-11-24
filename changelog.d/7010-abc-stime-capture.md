@@ -19,4 +19,5 @@
   designs on WASI engines (the dump's later records are percentages, not
   delays), a missing dump, or an engine whose help does not document the
   constrained script (the capture silently does not stage and today's
-  behaviour stands). Arithmetic `auto` trials recover the same way.
+  behaviour stands). Each eligible arithmetic `auto` trial can recover its own single-region timing
+  from its own statistics dump (#7504).

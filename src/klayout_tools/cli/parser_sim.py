@@ -363,6 +363,14 @@ def add_sim_parser(
         ),
     )
     sim_parser.add_argument(
+        "--portable-paths",
+        action="store_true",
+        help=(
+            "omit the client binary path from batch reports and make set member "
+            "report paths relative"
+        ),
+    )
+    sim_parser.add_argument(
         "--report-out",
         dest="report_out",
         default=None,

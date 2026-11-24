@@ -46,11 +46,12 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, run_sim
 from ..sim_batch_plan import print_dry_run_plan_line
+from ..sim_batch_worker_engine_build import portable_batch_report
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 from .sim_job_cancel import _run_job_cancel as _run_job_cancel
 from .sim_job_status import _run_job_status as _run_job_status
-from .sim_measurement_text import print_measurement_head
+from .sim_measurement_text import print_measurement_head, print_monte_carlo
 from .sim_op_lint_text import _print_op_lint_text as _print_op_lint_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -156,6 +157,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
     except (SimError, OutputLockError) as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
+    report = portable_batch_report(
+        report, enabled=getattr(args, "portable_paths", False), backend=args.backend
+    )
     if (
         write_failure := _write_report_out(report, args, implicit_outdir=True)
     ) is not None:
@@ -207,14 +211,8 @@ def _print_submitted_text(report: dict) -> None:
 
 
 def _run_batch_set(args: argparse.Namespace) -> int:
-    """``klt sim --batch-set``: submit a set of requests (issue #2869).
-
-    Exit codes: ``1`` only when the set could not start (validation); ``2``
-    for a usage conflict; otherwise the aggregate envelope is emitted and the
-    code is the worst per-request code -- ``0`` all passed, ``3`` a
-    measurement failed, ``4`` at least one request errored or was refused
-    (a partial set included).
-    """
+    """Submit a request set. Validation and usage failures return 1 and 2;
+    a completed or partial set returns its worst member exit code."""
     conflicts = [
         flag
         for flag, value in (
@@ -249,6 +247,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         report = run_sim_set(
             args.batch_set,
             outdir=args.outdir,
+            portable_paths=getattr(args, "portable_paths", False),
+            aggregate_path=getattr(args, "report_out", None),
             max_in_flight=limit,
             capacity_retries=args.capacity_retries or 0,
             max_workers=args.max_workers,
@@ -431,20 +431,7 @@ def _print_text(report: dict) -> None:
                 # Issue #1723: name the SVG next to the failing measurement
                 # so an agent (or a human) knows exactly what to open.
                 print(f"    plot: {plot}")
-            mc = m.get("monte_carlo")
-            if mc is not None:
-                stats = f"n={mc['n']} mean={mc['mean']!r} sigma={mc['stddev']!r}"
-                quantiles = "  ".join(
-                    f"{key}={value!r}" for key, value in mc["quantiles"].items()
-                )
-                print(f"    mc: {stats}  {quantiles}".rstrip())
-                window = mc["sigma_window"]
-                if window is not None:
-                    print(
-                        f"    mc: mean+/-{window['k']:g}sigma = "
-                        f"[{window['low']!r}, {window['high']!r}] "
-                        f"[{window['status']}] (margin={window['margin']!r})"
-                    )
+            print_monte_carlo(m.get("monte_carlo"))
 
     corners = report["corners"]
     if not corners:
