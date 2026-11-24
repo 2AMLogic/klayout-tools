@@ -1,7 +1,7 @@
 """Via-enclosure fixtures for the ASAP7 DRC deck (#3147).
 
-The via-enclosure rules judged on a 26 nm bar around an 18 x 18 nm via live
-here: the bar is 4 nm past the via on both sides across it (short of every
+The enclosure fixtures use an 18 nm long via (24 nm tall under M4 and
+18 nm tall otherwise). The bar extends 4 nm past both sides across it (short of every
 threshold) and runs ``e0`` / ``e1`` nm past the via's two ends, so the rule
 under test is decided by those two ends alone. The metal on the other side
 of the via keeps the long default bar of
@@ -31,17 +31,21 @@ from helpers.asap7_drc_fixtures import (
 END_CAP_RULES = {"V0": "V0.M1.EN.1", "V1": "V1.M2.EN.2", "V2": "V2.M3.EN.2"}
 
 
-def bar(e0: float, e1: float, vertical: bool) -> tuple[float, float, float, float]:
-    """A 26 nm bar that runs ``e0`` / ``e1`` nm past the via's two ends
+def bar(
+    e0: float, e1: float, vertical: bool, *, height: float = 18
+) -> tuple[float, float, float, float]:
+    """A bar that runs ``e0`` / ``e1`` nm past the via's two ends
     (top / bottom for a vertical bar, left / right for a horizontal one).
     Even at e = 5 nm it stays above the 504 nm^2 M2/M3 area minimum."""
-    return (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
+    return (-4, -e0, 22, height + e1) if vertical else (-e0, -4, 18 + e1, height + 4)
 
 
 def capped(via: str, which: str, e0: float, e1: float, vertical: bool) -> list[Shape]:
     """A via stack whose ``which`` ("lower" or "upper") metal is
     :func:`bar`."""
-    return _stack(via, **{which: bar(e0, e1, vertical)})
+    return _stack(
+        via, **{which: bar(e0, e1, vertical, height=24 if via == "V3" else 18)}
+    )
 
 
 def two_side_cases() -> list[Case]:
@@ -143,3 +147,33 @@ def end_cap_cases() -> list[Case]:
                 else _fail(rule, overhang, also=[f"{via}.AUX.1"])
             )
     return c
+
+
+def v3_m4_width_cases() -> list[Case]:
+    """V3 spans both horizontal M4 edges over the full length of the cut."""
+    rule = "V3.M4.AUX.2"
+    track = box("M4", -48, 0, 72, 24)
+
+    def stack(y0: float, y1: float, *metal: Shape) -> list[Shape]:
+        return [box("V3", 0, y0, 18, y1), box("M3", 0, -48, 18, 124), *metal]
+
+    notch = [
+        box("M4", -48, 0, 6, 24),
+        box("M4", 6, 0, 12, 24 - D),
+        box("M4", 12, 0, 72, 24),
+    ]
+    return [
+        _pass(rule, stack(0, 24, track)),
+        _pass(rule, stack(0, 72, box("M4", -48, 0, 72, 72))),
+        _fail(rule, stack(D, 24, track)),
+        _fail(rule, stack(0, 24 - D, track)),
+        _fail(rule, stack(D, 24 - D, track)),
+        _fail(rule, stack(D, 24 + D, track), also=["V3.AUX.1"]),
+        _pass(rule, stack(0, 24), also=["V3.AUX.1"]),
+        _pass(rule, stack(24, 48, track), also=["V3.AUX.1"]),
+        _fail(
+            rule,
+            stack(0, 24, *notch),
+            also=["M4.AUX.1", "M4.AUX.3", "M4.S.2", "M4.W.1", "V3.AUX.1"],
+        ),
+    ]
