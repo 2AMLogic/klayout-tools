@@ -961,6 +961,7 @@
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_grouped_citations",
+        "klayout_tools.signoff_joint_rows",
         "klayout_tools.signoff_justified_gap",
         "klayout_tools.signoff_malformed_coverage",
         "klayout_tools.signoff_multi_member",
