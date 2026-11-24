@@ -9963,9 +9963,12 @@ substitution is **reported rather than discarded**:
 
 - **PDK revision stamps** (issue #3070): `provenance.pdk.version` is
   `SOURCES` text for open_pdks installs, `fetched:<marker>` for a
-  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a git checkout, else
-  `null`. When the resolved model library lives in a *different* variant tree
-  (a cross-variant symlink), `provenance.pdk.linked_trees` lists
+  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a Git checkout,
+  or `store:<version>` for a stamped PDK bundle. Otherwise it is `null`.
+  Git adds `-dirty` for staged changes or edits to tracked files. Copying an
+  untracked model into the checkout leaves the stamp unchanged until it is
+  added to the index. When the resolved model library lives in a *different*
+  variant tree (a cross-variant symlink), `provenance.pdk.linked_trees` lists
   `[{name, version}]` for it; the key is absent otherwise. See
   [`docs/json-contract.md`](../json-contract.md).
 
