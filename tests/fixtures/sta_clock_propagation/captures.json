@@ -1,7 +1,7 @@
 {
  "engine_version": "26Q3-1510-g6cb3f2b704",
  "pdk": "sky130A (volare open_pdks c6d73a35)",
- "note": "stdout reduced to the parseable tail (from the first klt marker or report output on; engine banner/LEF lines carry host paths). Metrics files are the real -metrics dumps of the same sessions. Scripts are the module's own _sta_script_lines output with fixture paths.",
+ "note": "stdout reduced to the parseable tail (from the first klt marker or report output on; engine banner/LEF lines carry host paths). Metrics files are the real -metrics dumps of the same sessions. Scripts are the module's own _sta_script_lines output with fixture paths. Issue #7417 adds the sink-count query: `clock_sink_counts` holds the per-scenario counts (verified live on the same pinned build) and `tcl_fragments.clock_sink_count_lines` is the module's authored block, which the capture stdout/scripts predate -- the replay stub splices the synthesized count block into the captured stdout.",
  "netlists": {
   "buffered": "module top (clk, rst_n, d1, d2, q1, q2);\n  input clk, rst_n, d1, d2;\n  output q1, q2;\n  wire c1, c2, c3, c4;\n  sky130_fd_sc_hd__clkbuf_4 b1 (.A(clk), .X(c1));\n  sky130_fd_sc_hd__clkbuf_4 b2 (.A(c1), .X(c2));\n  sky130_fd_sc_hd__clkbuf_8 b3 (.A(c2), .X(c3));\n  sky130_fd_sc_hd__clkbuf_4 b4 (.A(c1), .X(c4));\n  sky130_fd_sc_hd__dfrtp_1 ff1 (.CLK(c3), .D(d1), .RESET_B(rst_n), .Q(q1));\n  sky130_fd_sc_hd__dfrtp_1 ff2 (.CLK(c4), .D(d2), .RESET_B(rst_n), .Q(q2));\nendmodule\n",
   "notree": "module top (clk, rst_n, d1, q1);\n  input clk, rst_n, d1;\n  output q1;\n  sky130_fd_sc_hd__dfrtp_1 ff (.CLK(rst_n), .D(d1), .RESET_B(1'b1), .Q(q1));\nendmodule\n"
@@ -24,6 +24,21 @@
    "puts \"===KLT_STA_CLOCK_LATENCY_BEGIN===\"",
    "catch {report_clock_latency -digits 6} klt_clock_latency_msg",
    "puts \"===KLT_STA_CLOCK_LATENCY_END===\""
+  ],
+  "clock_sink_count_lines": [
+   "puts \"===KLT_STA_CLOCK_SINK_COUNT_BEGIN===\"",
+   "if {[catch {",
+   "        set klt_sink_clks [get_clocks clk]",
+   "        if {[llength $klt_sink_clks] != 1} {",
+   "            error \"get_clocks did not name exactly one clock\"",
+   "        }",
+   "        llength [all_registers -clock $klt_sink_clks -clock_pins]",
+   "    } klt_sink_msg]} {",
+   "        puts \"KLT_STA_CLOCK_SINK_COUNT_ERROR [string map [list \\n { } \\t { }] $klt_sink_msg]\"",
+   "    } else {",
+   "        puts \"KLT_STA_CLOCK_SINK_COUNT $klt_sink_msg\"",
+   "    }",
+   "puts \"===KLT_STA_CLOCK_SINK_COUNT_END===\""
   ]
  },
  "scripts": {
@@ -326,5 +341,10 @@
     "flow__warnings__type_count": 1
    }
   }
+ },
+ "clock_sink_counts": {
+  "propagated_buffered": 2,
+  "propagated_spef_buffered": 2,
+  "propagated_notree": 0
  }
 }

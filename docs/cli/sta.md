@@ -306,6 +306,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
 | `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless a string `request.spef` was given (never given together with `request.verilog`); also `null` in map form, where each `corners[]` entry carries its own. |
+| `spef_content_hash` | string | SHA-256 of the input SPEF bytes, prefixed with `sha256:`. A scalar SPEF has one top-level digest, including when several Liberty corners share it. A map puts the corresponding digest in each `corners[]` entry. Runs without a SPEF omit the field. STA resolves SPEF symlinks before hashing and rejects a run if the bytes of a resolved file change during analysis (the digest is re-checked at engine exit); a metadata-only change that leaves the bytes identical, such as `touch`, `chmod` or a byte-identical rewrite, does not fail the run. |
 | `macros` | array\<object\> | **Always present** (issue #2635). Echo of `request.macros`, resolved to absolute paths (`cell`, `lef`, `lib` per corner, `gds`, `verilog_blackbox`) — the same shape `klt synthesize`'s own `macros` response field carries. `[]` when the request declared none. On a `pdk.corners` (list) response this is hoisted to the top level like every other field that cannot vary per corner — see "Multi-corner characterization" below. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
@@ -930,7 +931,7 @@ per interconnect corner. In `def` mode, give `spef` as an object:
   per liberty corner.
 - **Entry shape.** Each entry keeps its existing `corner` field (the liberty
   corner) and adds `interconnect_corner` (`"min"` \| `"nom"` \| `"max"`) and
-  its own `spef_path` (`{path, scope}` envelope), alongside the usual timing
+  its own `spef_path` (`{path, scope}` envelope) and `spef_content_hash`, alongside the usual timing
   fields and its own `spef_annotation` evidence block (so a SPEF that
   annotated nothing shows up on its own entry).
 - **Top level.** `spef_path` is `null` in map form — each entry carries its
@@ -1261,7 +1262,10 @@ There is no engine query for the propagated flag on the pinned build, and a
 propagation is requested, the response carries explicit machine-readable
 evidence instead of an assumption. The script dumps
 `report_clock_latency -digits 6` after any `read_spef` and before the
-timing metrics, and the parser turns that into:
+timing metrics, then runs a dedicated sink-count query (issue #7417:
+OpenSTA's own `all_registers -clock [get_clocks <clock_port>]
+-clock_pins` enumeration, live-verified on the pinned build to follow the
+clock through the CTS buffers), and the parser turns the two into:
 
 ```json
 "clock_propagation": {
@@ -1271,12 +1275,17 @@ timing metrics, and the parser turns that into:
 }
 ```
 
-- `clock_sinks` — distinct clock pins the clock network reaches
-  (deduplicated across OpenSTA's per-transition rise/fall tables).
+- `clock_sinks` — the number of clock sink pins the engine query
+  returned: the true count of register clock pins the clock network
+  drives. It is *not* derived from the latency dump —
+  `report_clock_latency`'s per-transition tables name only the **min- and
+  max-latency** sink of each table, so counting its pins under-reports
+  every real tree (issue #7417: a hundreds-of-flops design reported `5`).
 - `max_network_latency_ns` — the worst `network latency` the section
   reports, i.e. the insertion delay actually in this analysis. `null` when
   there are no sinks.
-- `clock_sinks_sample` — the sink names in report order, capped at 20 (a
+- `clock_sinks_sample` — the pin names the latency report names (the
+  per-transition min/max extremes), in report order, capped at 20 (a
   diagnostic sample, like `spef_annotation`'s missing-nets sample; a real
   CTS tree reaches thousands of clock pins and only the count is
   exhaustive).
@@ -1290,8 +1299,8 @@ session.
 A DEF whose clock reaches **no clock pin** (pre-CTS netlist with the clock
 unconnected, a malformed DEF, ...) does not fail the run: OpenSTA accepts
 `set_propagated_clock` regardless. What the response does instead is make
-the absence visible — the clock's `report_clock_latency` section prints
-with no rows, and the parsed evidence is:
+the absence visible. When the sink-count query succeeds and returns zero,
+the parsed evidence is:
 
 ```json
 "clock_propagation": {
@@ -1304,10 +1313,12 @@ with no rows, and the parsed evidence is:
 `clock_sinks: 0` is the machine-readable "propagation could not be
 established" signal: whatever slack numbers sit next to it carry **no**
 real insertion delay, and a consumer gating on propagation must treat the
-run as untimed-in-propagated-mode rather than trust them. `clock_sinks:
-null` (the section never appeared at all — e.g. an OpenSTA build whose
-`catch`-guarded latency report produced nothing) means unknown, never a
-fabricated count.
+run as untimed-in-propagated-mode rather than trust them. A failed,
+malformed or incomplete sink-count query produces `clock_sinks: null`
+(unknown), including when the latency report shows only a clock header.
+Older captures with neither sink-count marker retain their original
+behavior. A header for the requested clock with no latency rows yields
+zero. Other legacy captures yield an unknown count.
 
 Note the honest middle case: a **pre-CTS** DEF whose clock port connects
 straight to the flops through plain wires *does* propagate (sinks ≥ 1) —
@@ -1714,7 +1725,7 @@ per path group, worst slack first:
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `"ok"`: the rows parsed and each side agrees with its violation count. `"inconsistent"`: a side disagrees with its count — the lists are still reported, and `reason` names the side (mirroring the `worst_*_path` aggregate cross-check), never a silently short list. `"unavailable"`: the engine query failed or its output was missing or malformed — both lists empty, `reason` says why, rows are never partially reported. |
+| `status` | `"ok"`: the rows parsed and each side agrees with its violation count. For a truncated side, the count must cover every row the engine returned before trimming. For a complete side, the count must equal the list length. `"inconsistent"`: a side disagrees with its count — the lists are still reported, and `reason` names the side (mirroring the `worst_*_path` aggregate cross-check), never a silently short list. `"unavailable"`: the engine query failed or its output was missing or malformed — both lists empty, `reason` says why, rows are never partially reported. |
 | `reason` | A human-readable reason when `status` is not `"ok"`. Otherwise `null`. |
 | `setup` / `hold` | At most N violating endpoints on that side, worst slack first (engine order kept on ties), each row unique per endpoint per path group — only negative-slack rows appear, including async recovery/removal and clock-gating checks labelled by their own `check_type` (same `_CHECK_ROLE_TYPES` mapping and 5-decimal rounding as `worst_paths_by_group`). Entries carry the `path_group` the row was found in. |
 | `setup_truncated` / `hold_truncated` | `true` iff more violating endpoints exist on that side than were listed — "first N", not "all of them". Untruncated, the list length equals that side's violation count; that equality is what the `status` cross-check enforces. |

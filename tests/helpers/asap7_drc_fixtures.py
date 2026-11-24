@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 
 import klayout.db as kdb
 
-from .asap7_via_enclosures import V1_FAIL, V1_PASS, cap
-
 #: GDS layer numbers (asap7.lyp "<name> drawing - L/0").
 LAYERS = {
     "WELL": 1,
@@ -1661,6 +1659,8 @@ def _stack(
 
 
 def _via_cases() -> list[Case]:
+    from helpers import asap7_drc_enclosure_fixtures as enclosure
+
     c: list[Case] = []
     for via in _VIA_METALS:
         c += [
@@ -1669,35 +1669,22 @@ def _via_cases() -> list[Case]:
         ]
         # Partly off the upper metal: the via sticks out 1 nm across it. An
         # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
+        # Where it sticks out the metal does not enclose it, so the metal's
+        # "(5 & 5) | (5 & 0)" end-cap rule fires as well.
         off = (
             _stack(via, via_y0=-1)
             if via == "V3"
             else _stack(via, upper=(-50, 1, 68, 19))
         )
+        end_cap = () if via == "V3" else (enclosure.END_CAP_RULES[via],)
         c += [
             _fail(f"{via}.AUX.1", _stack(via, upper=None)),
             _fail(f"{via}.AUX.1", _stack(via, lower=None)),
-            _fail(f"{via}.AUX.1", off),
+            _fail(f"{via}.AUX.1", off, also=end_cap),
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
-    for via, rule, limits in (
-        ("V1", "V1.M1.EN.1", ((5, 2), (2, 5))),
-        ("V2", "V2.M2.EN.1", ((5, 5),)),
-        ("V3", "V3.M3.EN.1", ((5, 5),)),
-    ):
-        for vertical in (True, False):
-            for e0, e1 in limits:
-                c.append(_pass(rule, _stack(via, lower=cap(e0, e1, vertical))))
-                for x, y in ((e0 - D, e1), (e0, e1 - D), (e0 - D, e1 - D)):
-                    c.append(_fail(rule, _stack(via, lower=cap(x, y, vertical))))
-
-    for make_case, layouts in ((_pass, V1_PASS), (_fail, V1_FAIL)):
-        for boxes, also in layouts:
-            shapes = _stack("V1", lower=None)
-            shapes.extend(box("M1", *bounds) for bounds in boxes)
-            case = make_case("V1.M1.EN.1", shapes, also=also)
-            c.extend((case, _flip(case)))
+    c += enclosure.two_side_cases()
 
     # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
     # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
@@ -1714,7 +1701,7 @@ def _via_cases() -> list[Case]:
         _pass("V3.M4.EN.2", m4_capped(11, 15)),
         _pass("V3.M4.EN.2", m4_capped(15, 11)),
     ]
-    return c
+    return [*c, *enclosure.end_cap_cases()]
 
 
 def _transpose(shapes: Iterable[Shape]) -> list[Shape]:
