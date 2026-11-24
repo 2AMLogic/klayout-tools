@@ -13,8 +13,8 @@ from typing import Any
 
 from .. import pex
 from . import pex_cmd
+from ._batch_parser_args import add_wait_for_capacity_arg
 from .parser_pex_extract import add_pex_extraction_args
-from .parser_sim import add_wait_for_capacity_arg
 
 
 def add_pex_parser(
