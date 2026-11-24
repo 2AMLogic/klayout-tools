@@ -52,7 +52,7 @@ def _violates(distance_squared, a, b, nm):
     return distance_squared < (limit * nm) ** 2
 
 
-def _pair_layout(tmp_path, dx, dy, caps, rotation, junction=False):
+def _pair_layout(tmp_path, dx, dy, caps, rotation, junction=False, *, jog=False):
     # 0.05 nm/DBU admits exact 3:4:5 diagonals at all three thresholds.
     nm = 20
     layout = kdb.Layout()
@@ -68,6 +68,10 @@ def _pair_layout(tmp_path, dx, dy, caps, rotation, junction=False):
         cell.shapes(layout.layer(18, 0)).insert(via.transformed(trans))
         layer = cell.shapes(layout.layer(19, 0))
         layer.insert(m1.transformed(trans))
+        if jog and i == 0:
+            # Extend M1 5 nm along only half of the first cut's facing edge.
+            step = kdb.Box(via.right, y, via.right + 5 * nm, y + side // 2)
+            layer.insert(step.transformed(trans))
         if junction:
             layer.insert(
                 kdb.Box(x, y - 5 * nm, x + side, y + side + 5 * nm).transformed(trans)
@@ -114,6 +118,28 @@ def test_straight_wires_use_the_facing_ends_at_the_boundary(
     assert d2 == dx**2 + dy**2
     assert sum(endpoints) == sum(c == 5 for c in caps)
     assert _violates(d2, *endpoints, nm) == (delta < 0)
+
+
+@pytest.mark.parametrize("rotation", [0, 1])
+def test_partial_facing_cap_on_jogged_landing(tmp_path, rotation):
+    boxes, metal, nm = _pair_layout(
+        tmp_path, 20 * 20, 15 * 20, (0, 5), rotation, jog=True
+    )
+    [(a, b, d2)] = _diagonal_pairs(boxes, 30 * nm)
+    trans = kdb.Trans(rotation, False, 0, 0)
+    center = trans * kdb.Point(9 * nm, 9 * nm)
+    partial, full = (a, b) if a.contains(center) else (b, a)
+
+    strip = kdb.Box(18 * nm, 0, 23 * nm, 18 * nm).transformed(trans)
+    assert (kdb.Region(strip) & metal).area() == 5 * 9 * nm**2
+    ends = [
+        _facing(cut, other, _caps(cut, metal, 5 * nm))[rotation]
+        for cut, other in ((partial, full), (full, partial))
+    ]
+    assert ends == [False, True]
+    assert d2 == (25 * nm) ** 2
+    assert _violates(d2, *ends, nm)  # One complete cap requires 27 nm.
+    assert not _violates(d2, True, True, nm)  # Counting the jog would select 23 nm.
 
 
 @pytest.mark.parametrize("rotation", [0, 1])
