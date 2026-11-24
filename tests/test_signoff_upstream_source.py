@@ -105,6 +105,31 @@ def test_upstream_source_normalizes_the_commit_to_lowercase():
     }
 
 
+def test_upstream_source_accepts_a_sha256_commit_and_lowercases_it():
+    """A SHA-256 repository names objects with 64 hex digits, not 40; the
+    documented width is accepted and normalized the same way as the 40-digit
+    one. The input is mixed-case so the same assertion also covers the
+    normalization path on the wider commit."""
+    sha256_commit = "0123456789abcdef" * 4
+    mixed_case = sha256_commit[:32].upper() + sha256_commit[32:]
+    assert len(sha256_commit) == 64
+    assert mixed_case not in (sha256_commit, sha256_commit.upper())
+
+    result = build_tier_report(
+        _manifest(
+            upstream_source={
+                "repository": _UPSTREAM_REPOSITORY,
+                "commit": mixed_case,
+            }
+        )
+    )
+
+    assert result["upstream_source"] == {
+        "repository": _UPSTREAM_REPOSITORY,
+        "commit": sha256_commit,
+    }
+
+
 @pytest.mark.parametrize(
     "raw",
     [
