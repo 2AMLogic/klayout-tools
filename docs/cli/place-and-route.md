@@ -2803,7 +2803,7 @@ carries 186). Additive; no `schema_version` bump:
       "via_pads": 180,
       "router_fill": 0,
       "markers": [
-        { "box_um": [-0.209, 0.02, 0.209, 0.04], "via_pad": true, "router_fill": false }
+        { "box_um": [-0.009, 0.02, 0.009, 0.04], "via_pad": true, "router_fill": false }
       ],
       "markers_truncated": false
     }
