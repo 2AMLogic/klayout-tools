@@ -13,6 +13,8 @@ import copy
 from collections.abc import Mapping
 from typing import Any
 
+from .pex_errors import PexError
+
 # Only keys `klt sim` actually emits in its `environment` (see sim.py's
 # `run_sim`): which engine/build ran, and -- for an off-host backend that
 # fills it -- the `remote` block carrying the job identity.
@@ -146,8 +148,6 @@ def delta_labels(
 
 
 def _selected_probes(group: dict[str, Any], prefix: str, *, omit: bool) -> list[str]:
-    from .pex import PexError
-
     specs = group.get("measurements")
     if not isinstance(specs, list):
         return []  # sim validates the container itself

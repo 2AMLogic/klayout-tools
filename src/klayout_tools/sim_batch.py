@@ -106,6 +106,7 @@ from . import (
     _batch_common,
     _provenance,
     remote_transport,
+    sim_batch_image,
     sim_batch_observer,
     sim_batch_receipt,
     sim_staging,
@@ -113,10 +114,8 @@ from . import (
 from .pdk_families import family_subset, pdk_variant_family
 from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
-    RemoteLaunchError,
     _signal_handlers_install,
     _signal_handlers_restore,
-    published_runner_identities,
 )
 from .sim_batch_capacity_watch import _CapacityWatch
 from .sim_batch_features import (
@@ -142,7 +141,7 @@ from .sim_batch_reattach import (
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_echo_checks import check_ngspice_options_echo
+from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_pin_settle import _enforce_published_engine_version_pin
@@ -323,9 +322,28 @@ class BatchConfig:
     job_timeout_s: float | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
-    #: Pre-launch ``warn`` diagnostic for request features the manifest's
+    #: Pre-launch ``warn`` diagnostic for request features the published image's
     #: runner predates (issue #2901); reported as a top-level diagnostic.
     feature_diagnostic: dict[str, Any] | None = None
+    image_pointer_key: str = "images/eda-batch-runner/current.json"
+    runner_images: list[dict[str, Any]] | None = None
+
+    def runner_identities(self, pdk: str | None) -> list[dict[str, Any]]:
+        """Reuse the pointer snapshot across all gates and shards of this request."""
+        if self.runner_images is not None:
+            return self.runner_images
+        command = _aws_argv(
+            self,
+            "s3api",
+            "get-object",
+            "--bucket",
+            self.bucket,
+            "--key",
+            self.image_pointer_key,
+        )
+        return sim_batch_image.read_batch_runner_images(
+            pdk, self.region, command, _run_subprocess
+        )
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -582,25 +600,12 @@ def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
     )
 
 
-def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
-    """Refuse a ``models.pdk`` variant the fleet image does not ship,
-    **before** any S3 write (issue #3251).
-
-    :func:`_validate_batch_pdk` only reduces a variant to its family
-    (``gf180mcuC`` -> ``gf180mcu``), so a variant the image lacks used to
-    surface on the runner as one ``batch_job_failed`` per corner. When the
-    AMI manifest's entries publish ``pdk_variants``, the request is refused
-    only if **every** candidate image (see :func:`_assess_published_runner`
-    for the selection) publishes the field and none lists the variant.
-    Legacy entries, no manifest, no candidate or a request without a PDK
-    stay unchanged. Never raises anything but :class:`SimError`.
-    """
+def _validate_batch_pdk_variant(
+    request: dict[str, Any], images: list[dict[str, Any]]
+) -> None:
+    """Refuse a requested variant absent from every known inventory."""
     pdk = (request.get("models") or {}).get("pdk")
     if not pdk:
-        return
-    try:
-        images = published_runner_identities(str(pdk), region)
-    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
         return
     published = [image.get("pdk_variants") for image in images]
     listed: list[list[str]] = [v for v in published if v is not None]
@@ -611,7 +616,7 @@ def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> 
     carried = sorted({v for variants in listed for v in variants})
     raise SimError(
         f"backend 'batch': PDK variant {str(pdk)!r} is not shipped by the fleet "
-        f"image the AMI manifest publishes (it carries: {', '.join(carried)}) "
+        f"image the batch pointer publishes (it carries: {', '.join(carried)}) "
         "-- the request was not submitted and no instance was launched; use "
         "one of those variants as models.pdk"
     )
@@ -637,7 +642,7 @@ def _resolve_batch_config(
     path on this backend at all -- a property of the *request*, reported
     even when the provision script or bucket is also unresolvable.
 
-    Last, the runner ``klt`` the AMI manifest publishes is compared with
+    Last, the runner ``klt`` the batch image pointer publishes is compared with
     this client (:func:`_assess_published_runner`, issue #2851): under
     ``enforce`` a known mismatch raises ``batch_runner_version_mismatch``.
     A pin excluded by every published engine version also fails before any
@@ -675,6 +680,8 @@ def _resolve_batch_config(
     )
     config = BatchConfig(
         provision_script=provision_script,
+        image_pointer_key=f"{fleet.get('BATCH_IMAGES_PREFIX', 'images').strip('/')}/"
+        f"{fleet.get('BATCH_LAUNCH_TEMPLATE', 'eda-batch-runner')}/current.json",
         bucket=bucket,
         jobs_prefix=(
             batch_spec.get("jobs_prefix")
@@ -706,18 +713,19 @@ def _resolve_batch_config(
         job_timeout_s=job_timeout_s,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
-    # Issue #2851: compare the runner klt the AMI manifest publishes with
+    # Issue #2851: compare the runner klt the batch image pointer publishes with
     # this client, once per request (so once for every shard of a
     # `hosts > 1` run), before any S3 write or launch.
     if check_runner:
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
         diagnostic = _enforce_published_runner_features(request, assessment)
-        if diagnostic is not None:
-            config = replace(config, feature_diagnostic=diagnostic)
+        config = replace(
+            config, feature_diagnostic=diagnostic, runner_images=assessment["images"]
+        )
         _enforce_published_engine_version_pin(request, assessment)
         # Issue #3251: refuse a PDK variant the published image does not ship.
-        _validate_batch_pdk_variant(request, config.region)
+        _validate_batch_pdk_variant(request, assessment["images"])
     return config
 
 
@@ -775,26 +783,8 @@ def dry_run_runner_check(
 def _assess_published_runner(
     request: dict[str, Any], config: BatchConfig
 ) -> dict[str, Any]:
-    """Compare the ``klt`` build the AMI manifest says the fleet image runs
-    with this client's, **before** any submit or launch (issue #2851).
-
-    The source is :func:`remote_launcher.published_runner_identities`: the
-    most recently built manifest entry per ``(pdk, region)`` for the
-    request's ``models.pdk`` (every PDK when it names none) and the batch
-    ``region`` (every region when none is configured, because the fleet
-    picks its own Spot pool). Versions are compared with the runner gate's
-    own release-segment rule, :func:`_runner_gate_release` (issue #3184),
-    so the two checks cannot disagree.
-
-    Returns ``{"status", "check", "client_klt_version", "images",
-    "message"}``. ``status`` is ``"mismatch"`` only when *every* candidate
-    image publishes a ``klt_version`` and none of them matches the client:
-    then the job could not pass the runner-side gate on any image the fleet
-    might boot. Anything less certain -- no manifest, no candidate, a legacy
-    entry without ``klt_version``, a mix of matching and mismatching images,
-    an unparseable version -- is ``"unknown"`` (or ``"match"``) and the
-    request proceeds to the runner-side preflight unchanged. Never raises.
-    """
+    """Compare the published sim image's klt major.minor with the client.
+    Unavailable metadata leaves the runner-side preflight authoritative."""
     client = _provenance._klt_version()
     assessment: dict[str, Any] = {
         "status": "unknown",
@@ -804,10 +794,7 @@ def _assess_published_runner(
         "message": None,
     }
     pdk = (request.get("models") or {}).get("pdk")
-    try:
-        images = published_runner_identities(str(pdk) if pdk else None, config.region)
-    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
-        return assessment
+    images = config.runner_identities(str(pdk) if pdk else None)
     assessment["images"] = images
     client_release = _runner_gate_release(client)
     if not images or client_release is None:
@@ -829,7 +816,7 @@ def _assess_published_runner(
         for image in images
     )
     assessment["message"] = (
-        f"the AMI manifest publishes the fleet runner image as {published}, "
+        f"the batch image pointer publishes the fleet runner image as {published}, "
         f"but the submitting client is klt {client}; their major.minor "
         "releases differ, so the runner-side version gate would reject the job"
     )
@@ -3201,7 +3188,7 @@ def _poll_and_collect(
         collect_outputs(config, job_id, collected, runner=runner)
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
-        check_ngspice_options_echo(request, report)
+        check_runner_option_echoes(request, report)
         sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
         identity = _read_job_identity(collected, request, report=report)
         environment = {**environment, **identity}
@@ -3695,11 +3682,11 @@ class _BatchFleetRun:
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Retry capacity-refused shards in order with a fresh wait budget."""
-        refused = sorted(self.capacity_refused)
+        """Reset the wait budget and pending count for the capacity-refused shards."""
         self.started = time.monotonic()
         self.budget_spent.clear()
-        return refused
+        self.watch.start_retry_pass(self.capacity_refused)
+        return sorted(self.capacity_refused)
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         return self._guarded(shard_points, self._run_one_shard)

@@ -60,8 +60,10 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 - `--envelope-out PATH` — also write the JSON envelope to `PATH` whatever
   `--format` is: the success / `submitted` report, or the error envelope on
   failure (byte-identical to what `--format json` emits on stdout / stderr).
-  A path that cannot be written is an exit-`1` error. Additive
-  ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
+  A path that cannot be written is an exit-`1` error. The envelope is staged
+  as a sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Additive ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
   [`extract.md`](extract.md). **One run extracts one top**, and swaps one DUT
   `.include` for it, so a testbench instantiating two or more cells that are
@@ -218,6 +220,18 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   install the extraction read (`variant`, `root` as `{path, scope}`,
   `version`; `null` without `--pdk`), so a run with two installs of one
   variant shows which was used.
+- `--schematic-top NAME` selects the subcircuit called by the testbench when
+  its name differs from the layout cell. For example,
+  `--top LAYOUT_RES --schematic-top RES` keeps `RES` callable on the schematic
+  leg and retargets its instances to `LAYOUT_RES` in the extracted testbench
+  copy. The two interfaces still need matching positional pins. This works
+  with schematic flattening enabled or disabled. An unresolved binding
+  reports both names before either leg runs.
+  Use spaces between the pins of a schematic `.subckt` header for
+  portable simulation. The binding check recognizes comma-separated pins,
+  but the unflattened schematic leg passes the original file to ngspice.
+  The same `.subckt RES RA,RB` resistor deck gave different voltages in
+  ngspice 42 and 46, including when run directly.
 - `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
   before the schematic-side run (issue #2889) — the `klt pex` counterpart of
   `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical

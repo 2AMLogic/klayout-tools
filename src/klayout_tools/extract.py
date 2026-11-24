@@ -210,6 +210,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_abstract_poly import connect_terminal_poly, terminal_poly
 from .extract_assemble import _describe_device_models as _describe_device_models
 from .extract_assemble import _describe_label_layers as _describe_label_layers
 from .extract_assemble import _hierarchy_fields as _hierarchy_fields
@@ -400,10 +401,12 @@ from .extract_report_canonicalize import (
 from .extract_spef import (
     DefNetConnections,
     _renamed_def_name,
-    _unescape_spice_safe_net_name,
 )
 from .extract_spef import ExtractError as ExtractError
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
+from .extract_spef_block import (
+    _spef_missing_conn_warnings as _spef_missing_conn_warnings,
+)
 from .extract_spef_block import write_spef_block
 from .extract_validate import _attach_resistance_paths as _attach_resistance_paths
 from .extract_validate import _require_parasitics as _require_parasitics
@@ -2659,6 +2662,7 @@ def run_extract(
     )
 
     spef_path = write_spef_block(
+        circuit=circuit,
         spef_output=spef_output,
         parasitics_report=parasitics_report,
         def_net_connections=def_net_connections,
@@ -3745,6 +3749,7 @@ def extract_netlist_from_layout(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
     abstract_well_tie_cover: kdb.Region | None = None
+    terminal_poly_cover: kdb.Region | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3769,15 +3774,8 @@ def extract_netlist_from_layout(
                 )
                 for cell_index in matched_cell_indices
             }
-            # Also computed *before* erasure (issue #1911): the well /
-            # substrate-isolation cover the matched instances contribute
-            # (`_abstract_cell_body_identity_cover` -- reunioned into
-            # `_extract_netlist`'s whole-layout *classification* split so
-            # erasing a black box's well cannot silently reclassify a tie
-            # drawn outside it onto the deck's global substrate net), and
-            # the per-cell-type count of ports that only ever resolve
-            # through that global (`_abstract_cell_global_net_ports` --
-            # warned about instead of silently dropped).
+            # Capture terminal and body conductors before black-box erasure.
+            terminal_poly_cover = terminal_poly(layout, deck, abstract_instances)
             abstract_body_identity_cover = _abstract_cell_body_identity_cover(
                 layout, deck, abstract_instances
             )
@@ -3859,6 +3857,7 @@ def extract_netlist_from_layout(
         abstract_body_identity_cover=abstract_body_identity_cover,
         abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
         abstract_well_tie_cover=abstract_well_tie_cover,
+        terminal_poly_cover=terminal_poly_cover,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -4028,21 +4027,25 @@ def _reconcile_top_pins(
     below_top_labels: set[str],
     *,
     demote: bool,
+    unresolved: Sequence[kdb.Net] = (),
 ) -> list[str]:
-    """Reconcile the top circuit's pins against ``below_top_labels`` (issue
-    #291), the label strings that name a net only from below an instance
-    boundary.
+    """Reconcile top pins promoted by ``make_top_level_pins()`` (#291, #7663).
 
-    ``make_top_level_pins()`` has already promoted every named net. This finds
-    the promoted pins whose net name is a below-top label and, when
-    ``demote`` is set, removes those pins (the net keeps its name and stays an
-    internal node). Returns the sorted, de-duplicated net names affected --
-    the input to the caller's ``warnings`` entry, whether or not they were
-    actually demoted.
+    ``below_top_labels`` names nets labeled only below an instance boundary.
+    Demotion removes promoted pins and keeps their named internal nets.
+    Return sorted, unique affected names for warnings even without demotion.
+    Substrate nets named by ``connect_global`` have no such labels and keep their pins.
 
-    Global/substrate nets (named by ``connect_global``, not by any drawn text)
-    are never in ``below_top_labels``, so a substrate pin is left untouched.
+    ``unresolved`` holds ``<instance>__<pin>`` nets minted by ``_wire_abstract_cells``
+    where an abstract pin touches no conductor. When demoting, remove their
+    pins by net identity before the early return, sparing same-named user
+    nets. Omit these names from the result because ``_wire_abstract_cells``
+    already emits per-instance "left unconnected" warnings.
     """
+    if demote:
+        for net in unresolved:
+            for pin_id in [ref.pin().id() for ref in net.each_pin()]:
+                net.circuit().remove_pin(pin_id)
     circuit = netlist.circuit_by_name(top_name)
     if circuit is None or not below_top_labels:
         return []
@@ -5154,71 +5157,33 @@ def _remap_def_net_connections(
     after_by_before: dict[str, str] = {}
     for _circuit, before, after in renames:
         after_by_before.setdefault(before, after)
-    remapped: dict[str, Sequence[tuple[str, str]]] = {}
-    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
-    for key, pins in def_net_connections.items():
-        target = after_by_before.get(key)
-        if target is None:
-            remapped[key] = pins
-        else:
-            # Issue #3900: the key carries the DEF's own SPEF spelling, so
-            # the SPEF a linked design reads still names the net as the DEF
-            # does; only the SPICE/JSON spelling is the renamed one.
-            renamed_items[_renamed_def_name(target, key)] = pins
-    # The renamed net is what actually exists, so it wins any key clash.
-    remapped.update(renamed_items)
-    # Keep the DEF's renamed-port map (issue #3257 gap B), re-keyed the same way.
+    targets = set(after_by_before.values())
+
+    def remap_key(key: str) -> str:
+        return (
+            _renamed_def_name(after_by_before[key], key)
+            if key in after_by_before
+            else key
+        )
+
+    # Keep the observed net's DEF spelling, instance pins and port pins together.
+    # An absent DEF net with the same normalized spelling has no layout island.
+    remapped = {
+        remap_key(key): pins
+        for key, pins in def_net_connections.items()
+        if key in after_by_before or key not in targets
+    }
     port_pins = getattr(def_net_connections, "port_pins", None)
     if port_pins is None:
         return remapped
     return DefNetConnections(
         {net: tuple(pins) for net, pins in remapped.items()},
-        {after_by_before.get(net, net): pins for net, pins in port_pins.items()},
+        {
+            remap_key(key): pins
+            for key, pins in port_pins.items()
+            if key in after_by_before or key not in targets
+        },
     )
-
-
-def _spef_missing_conn_warnings(
-    parasitics_report: Mapping[str, Any],
-    original: Mapping[str, Sequence[tuple[str, str]]] | None,
-    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
-) -> list[str]:
-    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
-    correspond to a ``--def-net-connections`` net yet get no instance
-    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
-    those port-only), or a dotted DEF net whose rewritten spelling did not
-    reach the key lookup."""
-    if not remapped:
-        return []
-    names = [
-        _unescape_spice_safe_net_name(entry["net"])
-        for entry in parasitics_report["nets"]
-    ]
-    counts: dict[str, int] = {}
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-    stale = {
-        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
-        for key in (original or {})
-        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
-    }
-    missing = sorted(
-        name
-        for name in counts
-        if (remapped.get(name) and counts[name] > 1)
-        or (name in stale and not remapped.get(name))
-    )
-    if not missing:
-        return []
-    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
-    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
-    return [
-        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
-        f"net but were written without instance *CONN pins ({shown}"
-        + (f", +{more} more" if more > 0 else "")
-        + ") -- duplicated net names stay port-only, and a DEF net name the "
-        "extractor did not rename cannot be matched; downstream `klt sta` "
-        "will report these nets as partially unannotated"
-    ]
 
 
 def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
@@ -6113,6 +6078,7 @@ def _extract_netlist(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
     abstract_well_tie_cover: kdb.Region | None = None,
+    terminal_poly_cover: kdb.Region | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -7594,6 +7560,8 @@ def _extract_netlist(
         l2n.connect(tap_substrate_outside, contact)
         for isolated_slice in tap_substrate_isolated:
             l2n.connect(isolated_slice, contact)
+    # Connect terminal poly and retain its probe layers for abstract-pin wiring (#7663).
+    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     # Re-join an abstracted macro's own well to the contact/metal stack its
     # tie was contacted up through (issue #2398) -- the `tap`/`nwell`/
     # `contact` triangle above, restricted to the well-tie geometry erasure
@@ -7830,46 +7798,32 @@ def _extract_netlist(
     # stub from being purged as floating. See `_wire_abstract_cells`'s
     # docstring for the full contract.
     abstracted_cells: list[dict[str, Any]] = []
+    open_abstract_nets: list[kdb.Net] = []
     if abstract_instances:
         top_circuit = netlist.circuit_by_name(top_cell.name)
         assert top_circuit is not None, (
             "top circuit must exist immediately after l2n.extract_netlist()"
         )
-        # Metals bottom-up first, then poly/nwell/tap -- matches
-        # `_probe_abstract_pin_net`'s own documented fallback order (a
-        # standard cell's pins land on the lowest metal available). Getting
-        # this backwards is a confirmed correctness bug (PR #622 review): a
-        # parent-level well/tap shape (e.g. a guard ring) overlapping a
-        # LEF-fallback pin's footprint would silently win over the metal net
-        # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit. Well geometry includes the abstracted cells'
-        # preserved cover (#2082); it must still never outrank a LEF pin's
-        # drawn metal access. Poly/tap inside black boxes remain erased.
-        #
-        # This order is only the *fallback* for a candidate point with no
-        # role of its own. A LEF-resolved point whose `PORT LAYER` the
-        # active PDK's KLayout `.map` file translates into one of these
-        # `metal{i}` levels now carries that level as its role and is probed
-        # there first (issue #2658, `abstract_cell_lef_layer_roles`) --
-        # without which a parent power strap on a *low* metal under a hard
-        # macro's *upper*-metal port wins this bottom-up scan and collapses
-        # nearly every one of that macro's declared pins onto one net.
+        # Without a layer hint, probe lower metals before body layers.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
-        abstracted_cells, abstract_cell_warnings = _wire_abstract_cells(
-            layout,
-            deck,
-            l2n,
-            netlist,
-            top_circuit,
-            abstract_instances,
-            lef_macros or {},
-            probe_layers,
-            abstract_cell_local_candidates,
-            abstract_cell_global_net_ports,
-            abstract_cell_lef_layer_roles,
-            def_net_name_probes,
+        probe_layers.extend(poly_probes)
+        abstracted_cells, abstract_cell_warnings, open_abstract_nets = (
+            _wire_abstract_cells(
+                layout,
+                deck,
+                l2n,
+                netlist,
+                top_circuit,
+                abstract_instances,
+                lef_macros or {},
+                probe_layers,
+                abstract_cell_local_candidates,
+                abstract_cell_global_net_ports,
+                abstract_cell_lef_layer_roles,
+                def_net_name_probes,
+            )
         )
         warnings = warnings + abstract_cell_warnings
 
@@ -7918,7 +7872,11 @@ def _extract_netlist(
     netlist.make_top_level_pins()
     _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
-        netlist, top_cell.name, below_top_labels, demote=top_cell_pins_only
+        netlist,
+        top_cell.name,
+        below_top_labels,
+        demote=top_cell_pins_only,
+        unresolved=open_abstract_nets,
     )
     if demoted:
         joined = ", ".join(demoted)
