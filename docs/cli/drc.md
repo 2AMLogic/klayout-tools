@@ -920,6 +920,17 @@ An explicit stack such as `--deck-var metal_level=4LM` takes precedence over
 the variant preset.
 Other stacks and explicit `--deck-file` runs load the original script directly.
 
+The empty Metal4 layer is not inert in the deck. `metal4_drawn` has exactly
+one use site in `mslot.rb` — `mim_bottom_under_fusetop`, the only one of the
+four terms unioned into `dont_slot` that does not derive from `top_metal` —
+so on 3LM that term is always empty while the other three stay populated.
+Both rules that read `dont_slot` shift accordingly: `MSLOT<n>.1` subtracts
+less from `metal_large_slotted` and so checks a slightly larger region
+(possible over-report, never a missed slotting violation), and `MSLOT<n>.9`
+measures separation from `dont_slot` without the MIM-under-fusetop
+contribution — the check is not vacuous, but it cannot see a
+slot-to-MIM-bottom-under-fusetop separation.
+
 On KLayout 0.30.12 with the `f6eeac7dad08` PDK, a 40 µm square of unslotted
 Metal1 on 34/0 produced one `MSLOT1.1` violation (exit 3). The deck logged
 slot checks for Metal1 through Metal3 and declared 27 unique categories.
