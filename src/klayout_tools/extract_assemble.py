@@ -277,6 +277,15 @@ def assemble_extract_report(
         # indistinguishable, in its own record, from a deck with no
         # selectable options at all.
         resolve_deck_options=True,
+        # Issue #7824: the default in-process engine opts into the same
+        # engine-drift comparison `klt drc`/`klt lvs` carry (issue #1490) --
+        # an extracted netlist's measured device parameters and parasitic
+        # R/C are first-class engine outputs, so a caller regenerating
+        # committed evidence under a drifted engine sees it at run time,
+        # not by byte-diffing reports later. `--engine klayout-runset`
+        # builds its provenance separately (external standalone
+        # application; pinning that engine is out of scope).
+        include_klayout_version_mismatch=True,
     )
 
     # Additive, independently-optional field (issue #216 addendum): `null`

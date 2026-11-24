@@ -176,7 +176,8 @@ def run_merge_from_def(
     "--from-def"): the merge's own repair/scan report fields
     (``layer_map``, ``def_net_names``, ``min_area_repair``,
     ``via_pad_trim`` with its nested ``tip_check``/``router_fill_scan``,
-    ``power_stack_repair``, ``pin_conductor``), the artifact paths
+    ``power_stack_repair``, ``m4_grid_repair``, ``pin_conductor``), the
+    artifact paths
     (``def_path``/``gds_path``/``gds_dbu_um``), and an additive ``from_def``
     block reporting the actual merge inputs with the supplied DEF's content
     hash. Raises :class:`PlaceAndRouteError` for a missing DEF, an
@@ -271,6 +272,7 @@ def run_merge_from_def(
         "min_area_repair": merge_info["min_area_repair"],
         "via_pad_trim": merge_info["via_pad_trim"],
         "power_stack_repair": merge_info["power_stack_repair"],
+        "m4_grid_repair": merge_info["m4_grid_repair"],
         "pin_conductor": merge_info["pin_conductor"],
         "warnings": [],
     }
