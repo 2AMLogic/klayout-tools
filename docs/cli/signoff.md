@@ -279,8 +279,10 @@ two steps:
    at least one passing test and no failures (skips are allowed —
    [`functional-verification.md`](functional-verification.md)), `klt sta` on
    its *reported timing* rather than a `status` field (that verb's `status`
-   is always `"ok"`: every corner it reports must be `timing_status:
-   "constrained"` with non-negative setup and hold slack — see "Digital-flow
+   is always `"ok"`, and a present non-`"ok"` one fails: every corner it
+   reports must be `timing_status: "constrained"` with non-negative setup and
+   hold slack; `geometry_source` is disclosed but not graded unless the entry
+   opts in with `require_routed_geometry` — see "Digital-flow
    evidence: `klt sta` and `klt functional-verification`" below), and a
    **generic**
    evidence envelope on its own `status: "pass"` (see "Generic evidence
@@ -4646,7 +4648,8 @@ newer `klt`"* versus *"this citation points at the wrong artifact"*.
 Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
 its own** — `status` is always `"ok"` (the verb reports timing, it does not
 judge it). So `klt signoff` derives a verdict from the reported timing
-instead. Every corner the run reported must satisfy both of:
+instead (a `status` other than `"ok"` still fails, see below). Every corner
+the run reported must satisfy both of:
 
 1. `timing_status == "constrained"`. OpenSTA's unconstrained-design sentinel
    is `1e+39` — a *positive* number, so a naive `worst_slack_ns >= 0` rule
@@ -4659,6 +4662,50 @@ instead. Every corner the run reported must satisfy both of:
 
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
+
+**The envelope's own `status` is graded (issue #7711).** `klt sta` always
+emits `status: "ok"` and a failed run never emits the envelope
+([`sta.md`](sta.md)). In manifest mode, a present top-level `status` with
+any other value grades `unmet` with reason `check_failed`. The value appears in
+`detail.sta_status`, including JSON `null`. An absent `status` still gives
+`unrecognized_envelope`. In envelope-aggregation mode, a non-ok string fails
+the check and a missing or non-string status fails envelope validation.
+Per-corner entries carry no `status`.
+
+**`geometry_source` is *not* part of the default predicate (issue #7711).** It
+is a caller-supplied label — `"routed"`, `"placement_estimate"` or
+`"netlist_estimate"` ([`sta.md`](sta.md)) — and item 5 is the pre-layout
+corner-timing item (item 7 is the post-layout one and does not accept `sta`),
+so a pre-route estimate with closed timing is deliberately still `met`. It is
+surfaced on every `sta` citation as `detail.geometry_source`, so a reader can
+see what a `met` rested on; require routed geometry with the opt-in below.
+
+**Opt-in: `require_routed_geometry` (issue #7711).** An evidence entry citing
+a `klt sta` envelope may add `"require_routed_geometry": true` (same
+entry-level shape as `require_annotation_complete`). Then the envelope's
+top-level `geometry_source` must be the literal string `"routed"`; otherwise
+the item is `unmet` with reason `check_failed` and
+`detail.sta_geometry_not_routed` is `{geometry_source: <value>}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `"placement_estimate"`, `"netlist_estimate"` and any other string → unmet.
+  The check is an exact string match, with no case folding.
+- An otherwise valid STA timing citation with a missing, `null` or non-string
+  `geometry_source` gives `check_failed` under this option. The diagnostic
+  carries the original JSON value, or `null` for an absent key. The default
+  still reports `unrecognized_envelope` for these shapes.
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- It composes with the two opt-ins below on one entry; when several fail,
+  the first of annotation, constraints, geometry is the one reported.
+
+It does not re-derive routedness from the DEF: the label is the caller's
+claim (see [`sta.md`](sta.md)), and the option only requires that the claim
+be `"routed"`.
+
+The key, `detail.sta_status`, `detail.sta_geometry_not_routed` and the
+citation's `detail.geometry_source` are additive: no existing field changes
+meaning, so `schema_version` is unchanged. The `status` guard changes the
+verdict only for an envelope `klt sta` cannot have produced.
 
 **Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
 say whether a SPEF was actually applied to the timing. An evidence entry
@@ -4939,8 +4986,9 @@ new. Outcomes:
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
   when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
-  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
-  **passing** measurements grade (issue #6027): those rows leave
+  failing `klt sim` citation still credits the rows its tagged, **passing**
+  measurements carrying a recognised, non-null `min`/`max` bound grade (issue
+  #6027): those rows leave
   `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
   bench with one known-failing row can claim the rows its envelope genuinely
   carries. A row whose tagged measurement fails — or that the failing
@@ -5115,7 +5163,8 @@ spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
 its envelope has at least one `spec_row`-tagged measurement, a named row counts
 as covered only if the envelope has a *passing* measurement tagged with it that
-declares `limits`; a named row with no such measurement is uncovered
+carries a recognised, non-null `min`/`max` bound; a named row with no such
+measurement is uncovered
 (`partial_coverage`, listed in `detail.uncovered_rows`). A tag for a row the
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
@@ -5247,10 +5296,11 @@ partition-qualified `"5.analog"` key works too):
   named member graded `met` and its envelope's `corners[]` contains every
   required grid point with every corner at that point `pass` (a point swept
   twice — a `params` axis — must pass at *every* corner), **and** it carries
-  at least one condition probe: a passing, `limits`-bearing `measurements[]`
-  entry tagged `spec_row: "<row id>"` (the #3778 tag; `klt sim`'s rolled-up
+  at least one condition probe. A probe is a passing `measurements[]` entry
+  tagged `spec_row: "<row id>"` (the #3778 tag) with a recognised, non-null
+  `min` or `max` bound in `limits`. Zero counts as a bound. The rolled-up
   `status` is `pass` only when the measurement passed at every corner that
-  reported it).
+  reported it.
 - Otherwise the row is uncovered — `unmet` / `partial_coverage`, listed in
   `detail.uncovered_rows` like any uncovered row — and `detail.joint_rows`
   names, per member with a shortfall, its `missing_points` (labels in the
@@ -5298,9 +5348,10 @@ there is no `schema_version` bump; note that a digital manifest citing only
 metric measured in that same sweep". A digital item 5 whose passing citations
 are all `klt sim` grades `met` only when the manifest declares at least one
 `spec_rows` row with `"timing_margin": true` (boolean, default `false`) **and**
-each such row is evidenced by a cited `klt sim` envelope: a passing,
-`limits`-bearing `measurements[]` entry tagged `spec_row: "<row>"`, whose name
-has a passing measurement in **every** `corners[]` entry. A manifest-asserted
+each such row is evidenced by a cited `klt sim` envelope: a passing
+`measurements[]` entry with a recognised, non-null `min`/`max` bound, tagged
+`spec_row: "<row>"`, whose name has a passing measurement in **every**
+`corners[]` entry. A manifest-asserted
 `rows` list is not enough; the tag must be in the envelope. Otherwise the item is
 `unmet` / `timing_margin_missing`, with
 `detail.missing_timing_margin: [{"row": "<id>", "corners": [...]}]` (`row` is
@@ -5573,8 +5624,9 @@ and `partial_coverage` is an existing reason.
 **Derived coverage on a `klt yield` envelope, and `reported` measurements
 (issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
 written: when a citation carries `rows` **and** its envelope has at least one
-`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
-measurement grades are covered. One case is added on top of it, for `klt
+`spec_row`-tagged measurement, only the rows a tagged measurement with a
+recognised, non-null `min`/`max` bound grades are covered. One case is added on
+top of it, for `klt
 yield` envelopes only:
 
 - a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
@@ -5675,8 +5727,9 @@ every other item grades it `wrong_kind`. It reuses `klt sim`'s
 - `kind`, `status` (`"pass"` is the passing token), `method` and
   `measurements[]` are required. `method` is a disclosure echoed on the
   citation (`citation.method`); it is never graded.
-- A row is covered only by a passing, `limits`-bearing measurement tagged
-  `spec_row: <row>`, and the citation passes only if `status` is `pass` and
+- A row is covered only by a passing measurement with a recognised, non-null
+  `min`/`max` bound, tagged `spec_row: <row>`, and the citation passes only
+  if `status` is `pass` and
   every `corners[]` point entry (the per-point list, optional) passes.
   Otherwise `partial_coverage` with `detail.uncovered_rows`, or
   `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
