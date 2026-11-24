@@ -1,6 +1,10 @@
 """Unit tests for the shared `klayout_tools.cli.output` envelope helper."""
 
+import io
 import json
+import sys
+
+import pytest
 
 from klayout_tools.cli.output import (
     ERROR_EXIT_CODE,
@@ -38,6 +42,74 @@ def test_emit_success_text_delegates_to_renderer(capsys):
     assert out == "rendered!\n"
     # Text format never emits raw JSON.
     assert "{" not in out
+
+
+#: Text no Windows-1252 stdout can encode (issue #5573: a claimant's free text).
+_UNENCODABLE = "レビュー待ち"
+_ESCAPED = "\\u30ec\\u30d3\\u30e5\\u30fc\\u5f85\\u3061"
+
+
+def _legacy_stdout(monkeypatch, errors="strict"):
+    """Swap in a cp1252 stdout with the given handler; return ``(bytes, stream)``."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors=errors, write_through=True)
+    monkeypatch.setattr(sys, "stdout", stream)
+    return raw, stream
+
+
+def test_emit_success_text_escapes_what_a_strict_stdout_cannot_encode(monkeypatch):
+    """The render survives, in full, with the unencodable characters as
+    ``\\uXXXX`` escapes and the encodable ones (``ü``) untouched; the
+    stream's own handler is restored afterwards."""
+    raw, stream = _legacy_stdout(monkeypatch)
+
+    def renderer(p):
+        print("before")
+        print(f"{p['note']} ü")
+        print("after")
+
+    emit_success({"note": _UNENCODABLE}, "text", text_renderer=renderer)
+
+    assert raw.getvalue().decode("cp1252") == f"before\n{_ESCAPED} ü\nafter\n"
+    assert stream.errors == "strict"
+
+
+def test_emit_success_text_restores_the_handler_when_the_renderer_raises(monkeypatch):
+    _, stream = _legacy_stdout(monkeypatch)
+
+    def renderer(p):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        emit_success({}, "text", text_renderer=renderer)
+
+    assert stream.errors == "strict"
+
+
+def test_emit_success_text_keeps_a_handler_the_caller_chose(monkeypatch):
+    """``PYTHONIOENCODING=cp1252:replace`` is the caller's explicit choice:
+    it is honoured (``?``), not overridden by the escape fallback."""
+    raw, stream = _legacy_stdout(monkeypatch, errors="replace")
+
+    emit_success(
+        {"note": _UNENCODABLE},
+        "text",
+        text_renderer=lambda p: print(p["note"]),
+    )
+
+    assert raw.getvalue() == b"??????\n"
+    assert stream.errors == "replace"
+
+
+def test_emit_success_json_keeps_the_original_string_on_a_legacy_stdout(monkeypatch):
+    """The JSON is the contract: ASCII-escaped on the wire, so a strict legacy
+    stdout carries it without loss and without any fallback."""
+    raw, _ = _legacy_stdout(monkeypatch)
+    payload = {"schema_version": 1, "note": _UNENCODABLE}
+
+    emit_success(payload, "json", text_renderer=lambda p: None)
+
+    assert json.loads(raw.getvalue().decode("cp1252")) == payload
 
 
 def test_emit_error_json_shape_and_exit_code(capsys):

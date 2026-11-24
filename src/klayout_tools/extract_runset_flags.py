@@ -13,11 +13,13 @@ device-only netlist as a parasitic-annotated one.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ._digest import content_hash
 from ._report_verify import get_path, hash_check
+from .extract_resistance_graph_caps import RESISTANCE_GRAPH_CAP_FLAGS
 from .extract_spef import ExtractError
 
 #: ``engine`` value selecting the PDK-runset engine (the ``klt lvs`` spelling).
@@ -57,12 +59,77 @@ def parse_deck_vars(raw_vars: Any) -> dict[str, str]:
     return deck_vars
 
 
+#: A SPICE parameter name as ``--device-param`` accepts it on the right of ``=``.
+_PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: A SPICE scale-factor suffix (``u``, ``p``, ``meg``, ...): letters only, so a
+#: declaration can never put whitespace or an operator into a written card.
+_PARAM_SUFFIX = re.compile(r"[A-Za-z]*")
+
+
+def parse_device_params(
+    raw: Sequence[str] | None,
+) -> dict[str, dict[str, tuple[str, str]]] | None:
+    """Parse repeatable ``--device-param CLASS:PARAM=NAME[:SUFFIX]`` entries
+    (issue #5513) into ``{class: {KLayout PARAM: (SPICE NAME, SUFFIX)}}``, or
+    ``None`` when none were given -- so "no declaration" stays distinguishable
+    from every declaration shape, and a default run is untouched.
+
+    ``PARAM`` is the extractor's own parameter name (``W``, ``L``, ``AS``, ...
+    -- the names ``warnings[]`` already lists); ``NAME`` is what the PDK
+    subcircuit calls it; ``SUFFIX`` is appended verbatim to the measured value
+    (empty when omitted). Nothing here knows a PDK's units: the caller states
+    the mapping, ``klt`` does not guess one.
+
+    A later entry for the same ``CLASS:PARAM`` wins (as ``--device-model``'s
+    does), but two *different* parameters of one class may not target the same
+    ``NAME`` -- that would write one ``name=`` twice onto the card. Whether
+    ``CLASS``/``PARAM`` exist is checked against the runset's own netlist, where
+    the real class and parameter names can be quoted.
+    """
+    if not raw:
+        return None
+    declared: dict[str, dict[str, tuple[str, str]]] = {}
+    for entry in raw:
+        target, sep, source = entry.partition("=")
+        device_class, colon, param = target.rpartition(":")
+        name, _, suffix = source.partition(":")
+        device_class, param = device_class.strip(), param.strip()
+        if (
+            not sep
+            or not colon
+            or not device_class
+            or not param
+            or _PARAM_NAME.fullmatch(name) is None
+            or _PARAM_SUFFIX.fullmatch(suffix) is None
+        ):
+            raise ExtractError(
+                f"--device-param entry {entry!r} is not CLASS:PARAM=NAME[:SUFFIX] "
+                "(NAME a SPICE identifier, SUFFIX letters only) -- e.g. "
+                "--device-param sg13_hv_nmos:W=w:u"
+            )
+        declared.setdefault(device_class, {})[param] = (name, suffix)
+    for device_class, params in declared.items():
+        seen: dict[str, str] = {}
+        for param, (name, _) in sorted(params.items()):
+            other = seen.setdefault(name.lower(), param)
+            if other != param:
+                raise ExtractError(
+                    f"--device-param maps both '{other}' and '{param}' of class "
+                    f"'{device_class}' onto '{name}': one card cannot carry "
+                    "the same parameter name twice"
+                )
+    return declared
+
+
 #: ``run_extract`` keyword -> the CLI flag a caller would have typed, for every
 #: parameter the curated engine honours and this engine cannot. Checked against
 #: each parameter's own default, so a flag that was never given is never
 #: refused. Kept explicit rather than derived: a new ``run_extract`` parameter
 #: should force a deliberate decision here, not silently become "accepted".
-REFUSED_FLAG_BY_PARAM: dict[str, str] = {
+#: A parameter that bundles several flags maps to ``{cap: flag}`` instead, and
+#: only the flags actually given are refused.
+REFUSED_FLAG_BY_PARAM: dict[str, str | dict[str, str]] = {
     "deck_name": "--deck",
     "pdk_variant": "--pdk",
     "pdk_root": "--pdk-root",
@@ -89,6 +156,7 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "parasitics_top_cell_only": "--parasitics-top-cell-only",
     "resistance_graph": "--resistance-graph",
     "resistance_graph_r_cut_ohm": "--resistance-graph-r-cut",
+    "resistance_graph_caps": RESISTANCE_GRAPH_CAP_FLAGS,
     "emit_selected_resistance": "--emit-selected-resistance",
     "distributed_rc": "--distributed-rc",
     "resistance_paths": "--resistance-path",
@@ -128,6 +196,15 @@ def _is_unset(value: Any) -> bool:
     return value is None or any(value == unset for unset in _UNSET_VALUES)
 
 
+def _flag_spellings(flags: str | Mapping[str, str], value: Any) -> list[str]:
+    """The flag spellings a given value names: ``flags`` itself, or -- for the
+    one parameter that bundles several flags (``resistance_graph_caps``) --
+    the spelling of each cap the mapping sets."""
+    if isinstance(flags, Mapping):
+        return [spelling for key, spelling in flags.items() if key in value]
+    return [flags]
+
+
 def refused_flags(given: Mapping[str, Any]) -> list[str]:
     """Flag spellings in ``given`` this engine cannot honour, in a stable
     order. ``given`` maps ``run_extract`` keyword names to the caller's values;
@@ -145,14 +222,14 @@ def refused_flags(given: Mapping[str, Any]) -> list[str]:
         value = given[param]
         if param == "apply_resistor_fixed_offset":
             if value is False:
-                refused.append(flag)
+                refused.extend(_flag_spellings(flag, value))
             continue
         if param == "report_parasitics":
             if value != "full":
-                refused.append(flag)
+                refused.extend(_flag_spellings(flag, value))
             continue
         if not _is_unset(value):
-            refused.append(flag)
+            refused.extend(_flag_spellings(flag, value))
     return refused
 
 
@@ -176,13 +253,13 @@ def refuse_unsupported(given: Mapping[str, Any]) -> None:
 
 def provenance_hash_check(
     committed: Mapping[str, Any],
-    deck_source_path: Callable[[str], str | None],
+    deck_content_hash: Callable[[str], str | None],
 ) -> dict[str, Any]:
     """The engine-aware provenance entry ``check_extract_report`` appends
     for a committed report.
 
-    The curated engine hashes its deck module through
-    ``deck_source_path(provenance.deck.name)``. A runset-engine report names
+    The curated engine hashes its named rule sources through
+    ``deck_content_hash(provenance.deck.name)``. A runset-engine report names
     no curated deck -- its ``provenance.deck.name`` is the runset's own
     filename, which no curated deck module resolves, so hashing it would
     grade every pristine runset report ``"drifted"``. It hashes the runset
@@ -190,7 +267,7 @@ def provenance_hash_check(
     ``check_lvs_report`` has carried since issue #2849: a changed runset
     changes the extraction exactly as a changed deck does.
 
-    ``deck_source_path`` is injected so this module, whose engine never
+    ``deck_content_hash`` is injected so this module, whose engine never
     resolves a curated deck, stays free of the ``decks`` import."""
     if committed.get("engine") == RUNSET_ENGINE:
         return hash_check(
@@ -202,7 +279,7 @@ def provenance_hash_check(
     return hash_check(
         "provenance.deck.content_hash",
         get_path(committed, ("provenance", "deck", "content_hash")),
-        content_hash(deck_source_path(deck_name) if deck_name else None),
+        deck_content_hash(deck_name) if deck_name else None,
     )
 
 
@@ -236,3 +313,24 @@ def require_runset_engine_for_deck_vars(
             f"--deck-var is only used by engine '{RUNSET_ENGINE}' "
             f"(this run uses '{engine}')"
         )
+
+
+def refuse_batch_for_runset_engine(engine: str) -> None:
+    """``--backend batch`` cannot run the runset engine (issue #5481): it
+    needs the standalone ``klayout`` application and the PDK install on the
+    *executing* host, and the batch runner's request can ship neither -- so
+    refuse rather than submit a job that cannot honour the engine that was
+    asked for.
+
+    The CLI calls it with the argv ``--engine`` and again with a request
+    document's own ``engine`` -- a document carrying
+    ``"engine": "klayout-runset"`` never reaches the argv form, and must be
+    refused with this same message rather than failing later on a missing
+    ``deck`` or en route to a submit."""
+    if engine != RUNSET_ENGINE:
+        return
+    raise ExtractError(
+        f"--backend batch cannot run engine '{RUNSET_ENGINE}' -- the runset "
+        "needs the standalone klayout application and the PDK install on the "
+        "executing host. Run it locally (--backend local)"
+    )

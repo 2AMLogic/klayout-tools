@@ -31,7 +31,9 @@ import os
 import shlex
 import sys
 
-from .. import pex_async
+from .. import pex_async, pex_runset
+from ..extract import ExtractError
+from ..extract_runset import parse_device_params
 from ..output_lock import OutputDirLockedError, OutputLockError
 from ..pex import PexError, run_pex
 from ..pex_dry_run import run_pex_dry_run
@@ -40,6 +42,7 @@ from ._parsing import (
     parse_declared_pins,
     parse_device_models,
     parse_label_layers,
+    parse_resistance_graph_caps,
     parse_tie_nets,
 )
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
@@ -74,13 +77,22 @@ _REQUEST_EXCLUDED = frozenset(
 )
 #: Request fields holding filesystem paths, stored absolute so a bare
 #: ``--attach`` from another working directory resolves them identically.
-_REQUEST_PATH_FIELDS = ("layout", "output", "outdir", "pdk_root", "reference_netlist")
+_REQUEST_PATH_FIELDS = (
+    "layout",
+    "output",
+    "outdir",
+    "pdk_root",
+    "reference_netlist",
+    "deck_file",
+)
 
 
 def _submit_request(args: argparse.Namespace) -> dict:
     """The invocation's request, as recorded in a ``--submit-only`` manifest
     (issue #4692): every flag that shapes the run, paths made absolute."""
     request = {k: v for k, v in vars(args).items() if k not in _REQUEST_EXCLUDED}
+    if request.get("timeout_s") is None:
+        request.pop("timeout_s", None)
     for key in _REQUEST_PATH_FIELDS:
         if request.get(key):
             request[key] = os.path.abspath(request[key])
@@ -164,10 +176,25 @@ def run(args: argparse.Namespace) -> int:
             and not args.testbenches
         ):
             _rehydrate_bare_attach(args)
+        # Issue #6559: `--engine klayout-runset` -- usage errors (exit 2) use
+        # `klt extract`'s own validation and text. `--deck` is not required
+        # here; given, it selects the curated deck whose parasitics are
+        # joined onto the runset devices by geometric net correspondence
+        # (issue #6606) -- never forwarded to the runset extraction itself.
+        try:
+            runset = pex_runset.runset_from_args(
+                args.engine,
+                args.deck_file,
+                parse_deck_options(args.deck_var, ExtractError, flag="--deck-var"),
+                parse_device_params(args.device_params),
+                args.runset_timeout,
+            )
+        except ExtractError as exc:
+            return _fail(args, str(exc), exit_code=EXIT_USAGE_ERROR)
         missing = [
             flag
             for flag, value in (("layout", args.layout), ("--deck", args.deck))
-            if value is None
+            if value is None and not (flag == "--deck" and runset is not None)
         ]
         if missing:
             return _fail(
@@ -198,6 +225,13 @@ def run(args: argparse.Namespace) -> int:
         # rather than by whatever `/bin/sh` the host happens to have.
         measure_command = _parse_measure_command(args.measure_command)
         if getattr(args, "dry_run", False):
+            if runset is not None:
+                raise PexError(
+                    "--dry-run does not model --engine klayout-runset: its "
+                    "preflight checks the curated deck and parasitics, which "
+                    "this engine does not use. Run `klt pex --extract-only` "
+                    "to exercise the extraction without a measurement leg"
+                )
             # Issue #5464: a separate entry point, not a `dry_run=` parameter
             # threaded through `run_pex`/`run_extract` -- a dry run performs a
             # strict, engine-free subset of the real run's checks and shares
@@ -217,6 +251,7 @@ def run(args: argparse.Namespace) -> int:
                 hosts=args.hosts,
                 resume=args.resume,
                 capacity_wait_s=args.wait_for_capacity,
+                timeout_s=args.timeout_s,
                 deck_options=deck_options,
                 declared_pins=declared_pins,
                 rename_declared_pins=args.rename_declared_pins,
@@ -231,6 +266,7 @@ def run(args: argparse.Namespace) -> int:
                 distributed_rc=args.distributed_rc,
                 resistance_graph=args.resistance_graph,
                 resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+                resistance_graph_caps=parse_resistance_graph_caps(args),
                 parasitic_variants=args.parasitic_variants,
                 substrate_tie_ohms=args.substrate_tie_ohms,
                 mom_rlc_net=args.mom_rlc_net,
@@ -263,6 +299,7 @@ def run(args: argparse.Namespace) -> int:
             hosts=args.hosts,
             resume=args.resume,
             capacity_wait_s=args.wait_for_capacity,
+            timeout_s=args.timeout_s,
             # `--deck-option` (issue #1558): selects a flavour of a shared-geometry
             # device family (e.g. gf180mcu's `poly_res`/`mim_cap`), passed to
             # `klt extract --deck-option`; `None` when the flag was never given.
@@ -311,6 +348,9 @@ def run(args: argparse.Namespace) -> int:
             # never given, unchanged from every call site that predates them.
             resistance_graph=args.resistance_graph,
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            # `--resistance-graph-max-*` (issue #6964): the explicit caps as
+            # `{builder keyword: value}`; `None` when never given.
+            resistance_graph_caps=parse_resistance_graph_caps(args),
             # `--substrate-tie-ohms` (issue #3089): `None` when never given.
             substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/
@@ -350,6 +390,9 @@ def run(args: argparse.Namespace) -> int:
             submit_only=args.submit_only,
             attach=args.attach_manifest,
             submit_request=_submit_request(args) if args.submit_only else None,
+            # `--engine klayout-runset` (issue #6559): `None` for the curated
+            # engine, which leaves this call exactly as it was.
+            runset=runset,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)

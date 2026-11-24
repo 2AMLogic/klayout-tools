@@ -191,6 +191,12 @@ The spec file is a JSON object:
     name), echoed back on every edge's `em_verdict` entry. See "Worked
     example" below, which cites a real sky130 `.tlef` `DCCURRENTDENSITY`
     line this way.
+  - `sheet_resistance_source` (string, optional) — the same citation
+    convention for `sheet_resistance_ohm_per_sq`: a free-text note of which
+    techfile line, foundry doc or corner variant the number came from,
+    echoed on every metal edge this role contributes as
+    `islands[].edges[].resistance_ohm_source` (issue #5791), `null` on the
+    edges of a role that declared none.
 - `vias` (optional array, default `[]`) — each entry bridges two `stackup`
   roles:
   - `name` (string, optional, defaults to `"via<index>"`) — echoed in every
@@ -222,6 +228,19 @@ The spec file is a JSON object:
     one resistor" model.
   - `current_limit_source` (string, optional) — same citation convention as
     a `stackup` entry's, above.
+  - `resistance_ohm_source` (string, optional) — the citation convention for
+    `resistance_ohm` (issue #5791), echoed on every via edge this role
+    contributes as `islands[].edges[].resistance_ohm_source`, `null` when
+    the role declared none. Only meaningful alongside an explicit
+    `resistance_ohm`: giving the citation **without** the number is an
+    error — under `--deck` the number would come from the deck and the
+    report's own `resistance_source` would say `deck:<name>:<corner>`, so
+    the spec citation would assert false provenance. An explicit
+    `resistance_ohm` (including under `--deck`) always wins over the deck,
+    so an accepted citation is always truthful. Note the deliberate name:
+    the report's `vias[].resistance_source` (deck-only, below) is a
+    different field with a different meaning — `"spec"` or
+    `"deck:<name>:<corner>"` — not this free-text citation.
 - `devices` (optional array, default `[]`, issue #2260) — where a drawn
   **device body** sits on an already-declared role, so it stops being read
   as wire. Identical in shape and semantics to `klt erc`'s own `devices[]`
@@ -896,6 +915,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
               "area_um2": null,
               "current_limit_a": 0.0028,
               "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um",
+              "resistance_ohm_source": null,
               "n_cuts": null,
               "n_cuts_source": null
             }
@@ -965,7 +985,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
               {"id": "n0", "voltage_v": 1.8, "droop_mv": 0.0, "injected_current_a": 0.0, "pad_voltage_v": 1.8},
               {"id": "n1", "voltage_v": 1.799, "droop_mv": 1.0, "injected_current_a": -0.001, "pad_voltage_v": null}
             ],
-            "edges": [{"id": "e0", "current_a": 0.001, "current_density_a_per_um": 0.001}]
+            "edges": [{"id": "e0", "current_a": 0.001, "current_density_a_per_um": 0.001, "cross_section_density_a_per_um": null}]
           }
         ]
       }
@@ -1033,7 +1053,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].node_count`/`edge_count` | integer | This island's own totals (both `0` when `unsolved_reason` is set).                                 |
 | `islands[].unsolved_reason` | string \| null | `null` on a modelled island. A non-null string means this island's geometry could not be modelled exactly (not axis-aligned, or over the decomposition cap) and **no** resistor network was emitted for it — see "Non-rectangular segments" above. Never accompanied by an approximate network. |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source", "n_cuts", "n_cuts_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. `n_cuts` / `n_cuts_source` (issue #3401) are a **via** edge's cut count and its provenance: `"spec"` when the via's `cut_size_um`/`cut_space_um` derived it, `"assumed"` (count 1) when they are absent; both `null` on a metal edge. A via edge's `resistance_ohm` is already divided by `n_cuts`. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source", "resistance_ohm_source", "n_cuts", "n_cuts_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. `resistance_ohm_source` (issue #5791) is the contributing role's free-text citation of where its resistance came from — `stackup[].sheet_resistance_source` on a metal edge, `vias[].resistance_ohm_source` on a via edge — `null` when that role declared none. `n_cuts` / `n_cuts_source` (issue #3401) are a **via** edge's cut count and its provenance: `"spec"` when the via's `cut_size_um`/`cut_space_um` derived it, `"assumed"` (count 1) when they are absent; both `null` on a metal edge. A via edge's `resistance_ohm` is already divided by `n_cuts`. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
@@ -1071,7 +1091,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].worst_case_droop_mv`/`worst_case_node_id` | number \| null / string \| null | This island's worst droop magnitude and where.                       |
 | `islands[].iterations`/`residual` | integer / number | Conjugate-gradient iterations and the achieved relative residual (worst over the island's components). |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "voltage_v", "droop_mv", "injected_current_a", "pad_voltage_v"}` — `id` matches the sibling `networks[]` node; `voltage_v`/`droop_mv` are `null` on an unsolved island; `injected_current_a` is signed (negative = drawn off this net) and `pad_voltage_v` is `null` unless a pad landed here. |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a", "current_density_a_per_um"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. `current_density_a_per_um` (issue #2345) is `abs(current_a)` divided by the same-named `networks[]` edge's own `cross_um`, `null` for a via edge or an edge with no solved current — a derived number with **no** verdict attached, so a role the PDK publishes no limit for is still reported as a density a human can price against a datasheet. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a", "current_density_a_per_um", "cross_section_density_a_per_um"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. `current_density_a_per_um` (issue #2345) is `abs(current_a)` divided by the same-named `networks[]` edge's own `cross_um`, `null` for a via edge or an edge with no solved current — a derived number with **no** verdict attached, so a role the PDK publishes no limit for is still reported as a density a human can price against a datasheet. It is a **per-mesh-row solver diagnostic**: where a non-rectangular polygon's mesh cuts an arm lengthwise into parallel rows and a pad/load snaps to one node, it can overstate the drawn-section density (2× on the stair-step example in `tests/test_power_em_sections.py`; that is an example, not a bound). `cross_section_density_a_per_um` (issue #6525) is the drawn-section density: for the **highest-density** eligible cut that pools two or more branches and contains the edge, `abs(Σ signed branch currents) / Σ row widths` in A/µm. Eligibility is the EM verdict's cross-section rule (see "A split arm is judged on its cross-section, not row by row" above) **except** that no declared limit is required, so a role the PDK publishes no limit for still gets the number. It is `null` for an edge in no such section — a single-row edge, a via edge, a gap/overlap/unmapped-metal cut, a member with no solved current, or an unsolved island — and `0.0` (not `null`) for an eligible multi-row section carrying zero net current. It is a diagnostic beside the per-row field, which is unchanged: it adds no verdict, threshold or flag, and `em_verdict`, `coverage` and exit codes never read it. Additive, so no `schema_version` bump. |
 
 ### `em_verdict` (Phase 1c)
 

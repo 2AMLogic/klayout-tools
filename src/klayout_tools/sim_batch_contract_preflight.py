@@ -30,6 +30,7 @@ from .sim_batch_contract_spec import (
     _request_features,
     _runner_gate_release,
 )
+from .sim_errors import SimError
 
 if TYPE_CHECKING:
     pass
@@ -86,8 +87,6 @@ def _runner_preflight_script(
     )
     # Only a validated N.N is ever embedded in the shell below.
     if client_release is None or not re.fullmatch(r"\d+\.\d+", client_release):
-        from .sim import SimError
-
         raise SimError(
             f"the submitting client's klt version {client_version!r} cannot be "
             "pinned against the fleet runner (expected only [A-Za-z0-9._+-] "
@@ -213,8 +212,6 @@ def assess_remote_runner_features(
     manifest, a legacy entry without ``klt_version``) proceeds to
     :func:`remote_feature_preflight` on the host. Never relaxed by a warn
     policy: ``remote`` has none, and a silently dropped metric is worse."""
-    from .sim import SimError
-
     features = [
         name
         for name in _request_features(request)
@@ -243,6 +240,52 @@ def assess_remote_runner_features(
     )
 
 
+# Development builds can share a release segment while accepting different request
+# fields. Have the worker's own CLI validate a self-contained deck before launch.
+_CROSSINGS_VALUE_FROM_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/deck.spice" "$probe/probe.json"; rmdir "$probe"' EXIT
+    echo 'V1 out 0 1' > "$probe/deck.spice" || exit 1
+    cat > "$probe/probe.json" <<'KLT_CROSSINGS_PROBE' || exit 1
+{"netlist":"deck.spice","analysis":{"kind":"tran","args":"1n 4n"},
+ "measurements":[{"name":"period","crossings":{"signal":"v(out)","level":0.5,
+ "value_from":"period.mean"}}]}
+KLT_CROSSINGS_PROBE
+    klt sim "$probe/probe.json" --backend local --dry-run --format json
+)"""
+
+# The first supported release segment also identifies development images built
+# before phase selection and stepped eyes. Exercise the installed worker CLI.
+_EYE_STEP_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/eye.sp" "$probe/request.json"; rmdir "$probe"' EXIT
+    echo 'V1 rx 0 1' > "$probe/eye.sp" || exit 1
+    cat > "$probe/request.json" <<'KLT_EYE_PROBE' || exit 1
+{"netlist":"eye.sp","analysis_steps":[{"name":"one","analysis":{"kind":"tran",
+"args":"10p 4n"},"measurements":[{"name":"e","eye":{"signal":"v(rx)","ui":"1n",
+"uis":2,"phase":"500p"}}]}]}
+KLT_EYE_PROBE
+    klt sim "$probe/request.json" --backend local --dry-run --format json
+)"""
+
+
+# A post-0.9.2 worker can share the release segment while predating the
+# object form. Validate one local request with the worker's installed CLI.
+_OSDI_PDK_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$probe"' EXIT
+    cd "$probe" || exit 1
+    mkdir -p sample/libs.tech/ngspice || exit 1
+    touch sample/libs.tech/ngspice/model.osdi || exit 1
+    echo 'V1 test 0 1' > body.sp || exit 1
+    cat > request.json <<'KLT_OSDI_PROBE' || exit 1
+{"netlist":"body.sp","analysis":{"kind":"op"},"models":{"pdk":"sample","pdk_root":"."},
+"options":{"osdi_preload":[{"pdk_relative":"libs.tech/ngspice/model.osdi"}]}}
+KLT_OSDI_PROBE
+    klt sim request.json --backend local --dry-run --format json
+)"""
+
+
 def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
     """Shell setting ``$mmiss`` to the ``features`` the runner is not known
     to support, from ``$rv`` (the runner's ``klt --version`` string). It
@@ -253,6 +296,25 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
+    if "_regrade" in features:
+        # A pre-feature dev build can report the same release segment as a
+        # capable worker. Check the worker command before starting the grid.
+        checks += (
+            f' if [ "$mk" -ge {_feature_release_key("_regrade")} ] && '
+            '! klt sim --help 2>/dev/null | grep -F -- "--regrade" >/dev/null; '
+            'then mmiss="${mmiss}${mmiss:+, }_regrade"; fi;'
+        )
+    for name, probe in (
+        ("crossings_value_from", _CROSSINGS_VALUE_FROM_PROBE),
+        ("eye_step_or_phase", _EYE_STEP_PROBE),
+        ("osdi_pdk_relative", _OSDI_PDK_PROBE),
+    ):
+        if name in features:
+            floor = _feature_release_key(name)
+            checks += (
+                f' if [ "$mk" -ge {floor} ] && ! {probe} >/dev/null 2>&1; then '
+                f'mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
+            )
     names = ", ".join(features)
     return (
         "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "

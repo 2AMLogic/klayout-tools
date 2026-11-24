@@ -20,6 +20,19 @@ PIN_STALE = "stale"
 PIN_UNVERIFIABLE = "unverifiable"
 
 
+def common_input_hash(value: Any) -> str | None:
+    """The digest shared by every shard of a merged sim report.
+
+    Only a *list* reduces to ``None`` (empty or non-uniform). A scalar comes
+    back untouched, ``""`` included: a declared empty-string ``content_hash``
+    is echoed verbatim (#6403)."""
+    if isinstance(value, list):
+        if not value or not all(member == value[0] for member in value):
+            return None
+        return value[0]
+    return value
+
+
 def content_hash_pin_state(
     expected_hash: str | None, live_hash: str | None
 ) -> str | None:
@@ -38,19 +51,49 @@ def content_hash_pin_state(
 
 
 def unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str:
-    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893)."""
+    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893,
+    #5550)."""
+    if check_kind == "sim":
+        provenance = (resolution.get("envelope") or {}).get("provenance") or {}
+        if isinstance((provenance.get("input") or {}).get("content_hash"), list):
+            return (
+                "The merged sim report has mixed or missing per-shard input hashes. "
+                "A single netlist digest is required to compare this pin."
+            )
     if check_kind == "functional-verification":
+        provenance = (resolution.get("envelope") or {}).get("provenance") or {}
+        if provenance.get("input") is not None:
+            # A report from the klt that added the block (issue #5550): the
+            # pin *has* a field to compare against, but this run's digest is
+            # null -- a source could not be hashed.
+            return (
+                "functional-verification provenance.input.content_hash is "
+                "null (a source could not be hashed); the pin cannot be "
+                "compared"
+            )
+        # No digest to compare, for one of two reasons: a report from a klt
+        # predating the block (no ``provenance`` key), or an
+        # ``options.from_synthesize`` run from this klt (a block whose
+        # ``input`` is null by design -- its design input is the netlist).
+        subject = (
+            "this options.from_synthesize functional-verification envelope "
+            "(its design input is the synthesized netlist, pinned by "
+            "from_synthesize.netlist_sha256, so provenance.input is null)"
+            if provenance
+            else "this legacy functional-verification envelope (from a klt "
+            "predating the provenance block)"
+        )
         if resolution.get("command") is not None:
             return (
-                "functional-verification envelopes carry no "
-                "provenance.input.content_hash, and a command-backed citation's "
-                "stdout is not a stable file the grader can re-hash; cite the "
-                "envelope as a file to pin its bytes"
+                f"{subject} carries no provenance.input.content_hash, and a "
+                "command-backed citation's stdout is not a stable file the "
+                "grader can re-hash; cite the envelope as a file to pin its "
+                "bytes"
             )
         return (
-            "functional-verification envelopes carry no "
-            "provenance.input.content_hash, and the cited evidence file could "
-            "not be re-hashed; the pin cannot be compared"
+            f"{subject} carries no provenance.input.content_hash, and the "
+            "cited evidence file could not be re-hashed; the pin cannot be "
+            "compared"
         )
     return (
         f"{check_kind} envelopes carry no "
@@ -72,6 +115,14 @@ def pin_disclosure(
     :func:`content_hash_pin_state`, plus, when ``check_kind`` is given and
     the pin is uncomparable, the :func:`unverifiable_pin_note` saying why.
 
+    Issue #5963: a pinned entry whose resolution also carries
+    ``content_hash_unresolved`` (a `klt yield` samples document that could
+    not be hashed from disk *and* whose declared store pin could not resolve
+    it) has that disclosure folded in beside the pin state, so an unmet
+    item's ``detail`` names why -- the same field the ``met`` citation
+    carries -- instead of only the generic note. An entry that pins nothing
+    is untouched, exactly as before.
+
     The single implementation behind every site that surfaces a pin without
     letting it move the verdict, so those sites cannot drift.
     """
@@ -83,6 +134,9 @@ def pin_disclosure(
     detail: dict[str, Any] = {"content_hash_pin": pin_state}
     if pin_state == PIN_UNVERIFIABLE and check_kind is not None:
         detail["content_hash_pin_note"] = unverifiable_pin_note(check_kind, resolution)
+    unresolved = resolution.get("content_hash_unresolved")
+    if unresolved is not None:
+        detail["content_hash_unresolved"] = unresolved
     return detail
 
 
@@ -165,14 +219,26 @@ def rehash_evidence_file(
     file_label: str | None,
     actual_hash: str | None,
     input_verified: bool | None,
+    provenance: Mapping[str, Any],
 ) -> tuple[str | None, str | None, bool | None]:
     """Issue #4893: a ``functional-verification`` envelope records no input
     hash, so a file-backed citation that the manifest pins is re-hashed and the
     pin binds the evidence file's own bytes. Hashed only when pinned, so an
     unpinned entry's output is unchanged. Returns ``(actual_hash, basis,
-    input_verified)``."""
+    input_verified)``.
+
+    Since issue #5550 an envelope whose ``provenance.input`` is present pins
+    its *RTL* digest instead (``provenance.input.content_hash``), so the
+    re-hash applies only where the envelope has no ``input`` to compare: a
+    report committed by an older ``klt`` (no block, ``{}`` here) and an
+    ``options.from_synthesize`` report (a block whose ``input`` is ``null`` by
+    design -- its design input is the netlist). A present ``input`` -- even a
+    null-digest one (a source that could not be hashed) -- suppresses it,
+    keeping the pin's meaning from silently flipping back to the report's own
+    bytes."""
     if (
         actual_hash is None
+        and provenance.get("input") is None
         and check_kind == "functional-verification"
         and file_label is not None
         and spec.get("content_hash") is not None

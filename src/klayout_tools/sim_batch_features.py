@@ -9,10 +9,51 @@ non-empty ``missing`` list.
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
+from . import _warn
+from ._digest import normalize_sha256
+from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
+from .sim_batch_corner_libs import (
+    _compare_corner_section_libs,
+    _lib_pairs,
+    runner_corner_section_libs,
+)
+from .sim_batch_worker_engine_build import (
+    apply_worker_engine_build as apply_worker_engine_build,
+)
+from .sim_batch_worker_engine_build import (
+    worker_ngspice_binary as worker_ngspice_binary,
+)
 from .sim_exit_reason import exit_reason_env
+
+#: The worker-observed simulator cluster (issues #3110, #5566) moved to
+#: :mod:`klayout_tools.sim_batch_worker_engine_build` (size ratchet) and is
+#: re-exported above -- self-aliased -- so ``sim.apply_engine_host``'s
+#: existing imports keep working.
+
+
+def warn_unverified_features(
+    features: list[str], client: str | None
+) -> dict[str, Any] | None:
+    """Report mandatory features the client could not check against an image."""
+    if not features:
+        return None
+    message = (
+        f"the client could not verify support for {', '.join(features)} before "
+        "launch because the published batch runner image identity is unknown. "
+        "The worker will check these mandatory features when it starts."
+    )
+    _warn.warn(f"klt sim: warning: {message}")
+    return {
+        "code": BATCH_RUNNER_FEATURE_UNVERIFIED_CODE,
+        "severity": "warning",
+        "message": message,
+        "features": features,
+        "runner_klt_version": None,
+        "client_klt_version": client,
+        "source": "manifest",
+    }
 
 
 def missing_features(identity: dict[str, Any]) -> list[str]:
@@ -116,16 +157,13 @@ def annotate_unrecovered_failure(corners: list[dict[str, Any]], exit_code: int) 
                 diagnostic["message"] = f"{diagnostic['message']} [{note}]"
 
 
-# --- runner models_lib hash comparison (issue #5321) ---
-
-
-def _sha256_or_none(value: Any) -> str | None:
-    """``value`` lower-cased when it is a 64-hex digest, else ``None`` -- one
-    rule for every digest lifted out of a runner's report, so a malformed
-    value can never reach a report as if it were a hash."""
-    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        return value.lower()
-    return None
+# --- runner model-identity comparison (issues #5321, #5457) ---
+#
+# `models_lib_sha256` pins "which models ran" only for a request that has a
+# `models.lib`. A request whose every selected section names its own library
+# (issue #2522) has none, so #5321's hash pair is null on both sides by
+# construction and `corner_section_libs` carries the identity instead --
+# hence the second, list-shaped pair below (issue #5457).
 
 
 def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
@@ -134,7 +172,7 @@ def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
     i.e. the card the worker actually resolved. ``None`` when absent or not a
     64-hex string (older runner, error envelope, malformed report)."""
     env = report.get("environment") if isinstance(report, dict) else None
-    return _sha256_or_none(
+    return normalize_sha256(
         env.get("models_lib_sha256") if isinstance(env, dict) else None
     )
 
@@ -146,7 +184,7 @@ def _lifted_osdi_entry(entry: Any) -> dict[str, Any]:
     sha256 = entry.get("sha256") if isinstance(entry, dict) else None
     return {
         "name": name if isinstance(name, str) and name else None,
-        "sha256": _sha256_or_none(sha256),
+        "sha256": normalize_sha256(sha256),
     }
 
 
@@ -158,7 +196,7 @@ def runner_osdi_preload(report: dict[str, Any] | None) -> list[dict[str, Any]] |
     The runner is not a reduced klt -- it runs a full
     ``--backend local-parallel`` sweep, whose on-host settling expands and
     existence-checks every entry and hashes the bytes it opened
-    (``sim._model_file_entries``). So the digest a runner-resolved,
+    (``sim_environment_report.ModelInputDigests``). So the digest a runner-resolved,
     image-baked ``.osdi`` otherwise has nowhere to come from already exists
     one level down; this only lifts it.
 
@@ -183,22 +221,41 @@ def runner_osdi_preload(report: dict[str, Any] | None) -> list[dict[str, Any]] |
 
 def collected_report_env(status: Any, report: dict[str, Any]) -> dict[str, Any]:
     """Environment keys derived from the collected inner report: the exit
-    reason plus ``runner_models_lib_sha256`` (#5321) and
-    ``runner_osdi_preload`` (#5562) -- each ``None`` when unreported, so
-    "unknown" is visible."""
+    reason plus ``runner_models_lib_sha256`` (#5321),
+    ``runner_corner_section_libs`` (#5457) and ``runner_osdi_preload``
+    (#5562) -- each ``None`` when unreported, so "unknown" is visible."""
     return {
         **exit_reason_env(status, report),
         "runner_models_lib_sha256": runner_models_lib_sha256(report),
+        "runner_corner_section_libs": runner_corner_section_libs(report),
         "runner_osdi_preload": runner_osdi_preload(report),
     }
 
 
 def _compare_models_lib(
-    runner_sha: Any, client_sha: Any, *, staged: bool = False
+    runner_sha: Any,
+    client_sha: Any,
+    *,
+    staged: bool = False,
+    client_absent: bool = False,
 ) -> dict[str, Any]:
     """``models_lib_comparison`` (issue #5321): the runner's executed
     model-card hash against the client's. Missing data is ``not_comparable``,
-    never a proven mismatch."""
+    never a proven mismatch.
+
+    ``client_absent`` says the request declared no ``models.lib`` at all --
+    every selected section names its own library (issue #2522), so
+    ``environment.models_lib`` is ``{"path": null, "scope": "absent"}`` and
+    both hashes are ``null`` **by construction**. That reports
+    ``no_models_lib``, checked before the runner hash, because it is what
+    explains the runner's null: ``runner_hash_unavailable`` reads as a runner
+    or image problem the caller could fix by updating the image, and no image
+    update would ever produce a hash here (issue #5457). The per-section
+    libraries carry the identity instead -- see
+    :func:`_compare_corner_section_libs`.
+    """
+    if client_absent:
+        return {"status": "not_comparable", "reason": "no_models_lib"}
     if not isinstance(runner_sha, str) or not runner_sha:
         return {"status": "not_comparable", "reason": "runner_hash_unavailable"}
     if not isinstance(client_sha, str) or not client_sha:
@@ -218,13 +275,28 @@ def _compare_models_lib(
 
 
 def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> None:
-    """Add ``models_lib_comparison`` to ``environment.remote`` (single job) or
-    each ``fleet[]`` member, in place (issue #5321); batch backend only."""
+    """Add ``models_lib_comparison`` -- and, when either side lists
+    per-section corner libraries, ``corner_section_libs_comparison`` -- to
+    ``environment.remote`` (single job) or each ``fleet[]`` member, in place
+    (issues #5321, #5457); batch backend only.
+
+    ``corner_section_libs_comparison`` is emitted only when the client or the
+    runner actually reported per-section libraries, so an ordinary request
+    gains nothing but ``runner_corner_section_libs: null``. Unlike
+    ``models_lib_sha256``, the client's ``corner_section_libs`` hashes carry
+    no ``*_scope`` sibling to gate on: they are always the submitting host's
+    resolution (the orchestrator existence-checks every ref locally for the
+    preflight), which is exactly what the runner's list is being compared
+    against.
+    """
     remote_environment = environment.get("remote")
     if backend != "batch" or not isinstance(remote_environment, dict):
         return
     client_sha = environment.get("models_lib_sha256")
     client_scope = environment.get("models_lib_sha256_scope")
+    client_libs = environment.get("corner_section_libs")
+    models_lib = environment.get("models_lib")
+    client_absent = isinstance(models_lib, dict) and models_lib.get("scope") == "absent"
     entries = [remote_environment]
     fleet = remote_environment.get("fleet")
     if isinstance(fleet, list):
@@ -236,8 +308,16 @@ def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> N
         pdk = worker_env.get("pdk") if isinstance(worker_env, dict) else None
         staged = isinstance(pdk, dict) and pdk.get("models_staged") is True
         entry["models_lib_comparison"] = _compare_models_lib(
-            entry.get("runner_models_lib_sha256"), client_sha, staged=staged
+            entry.get("runner_models_lib_sha256"),
+            client_sha,
+            staged=staged,
+            client_absent=client_absent,
         )
+        runner_libs = entry.get("runner_corner_section_libs")
+        if _lib_pairs(runner_libs) or _lib_pairs(client_libs):
+            entry["corner_section_libs_comparison"] = _compare_corner_section_libs(
+                runner_libs, client_libs, staged=staged
+            )
 
 
 # --- runner OSDI digests joined onto the declared entries (issue #5562) ---
@@ -289,13 +369,15 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
         return None
     name = reported.get("name")
     declared = entry.get("entry")
-    if (
-        isinstance(name, str)
-        and isinstance(declared, str)
-        and os.path.basename(declared) != name
-    ):
-        return None
-    return _sha256_or_none(reported.get("sha256"))
+    if isinstance(declared, dict):
+        declared = declared.get("pdk_relative")
+        if not isinstance(declared, str) or not isinstance(name, str):
+            return None
+    # Normalize as the resolver does: ``device.osdi/.`` names ``device.osdi``.
+    if isinstance(name, str) and isinstance(declared, str):
+        if os.path.basename(os.path.normpath(declared)) != name:
+            return None
+    return normalize_sha256(reported.get("sha256"))
 
 
 def attach_runner_osdi_digests(environment: dict[str, Any], backend: str) -> None:
@@ -407,94 +489,3 @@ def finalize_batch_remote(environment: dict[str, Any], backend: str) -> None:
     attach_models_lib_comparison(environment, backend)
     attach_fleet_rollups(environment, backend)
     attach_runner_osdi_digests(environment, backend)
-
-
-# --- worker-observed simulator out of `environment.remote` (issues #3110,
-# #5566): `sim.apply_engine_host`'s two readers, kept together ---
-
-
-def _worker_simulators(remote: Any) -> list[dict[str, Any] | None]:
-    """One entry per member of ``environment.remote``: its
-    ``worker_environment.simulator`` block when ``capture`` is ``"ok"``, else
-    ``None`` (one per member; ``[None]`` for a pre-#2834 runner or SSH)."""
-    if not isinstance(remote, dict):
-        return [None]
-    members = remote.get("fleet")
-    blocks = members if isinstance(members, list) and members else [remote]
-    simulators: list[dict[str, Any] | None] = []
-    for block in blocks:
-        worker = block.get("worker_environment") if isinstance(block, dict) else None
-        simulator = worker.get("simulator") if isinstance(worker, dict) else None
-        ok = isinstance(worker, dict) and worker.get("capture") == "ok"
-        simulators.append(simulator if ok and isinstance(simulator, dict) else None)
-    return simulators
-
-
-def worker_ngspice_binary(remote: Any) -> str | None:
-    """The worker-observed ngspice path out of ``environment.remote`` (issue #3110):
-    ``worker_environment.simulator.selected_path`` when its capture is ``"ok"``.
-    A sharded run reports a value only when every member captured the same
-    path; ``None`` for a pre-#2834 runner, SSH ``remote``, or disagreement."""
-    paths: set[str | None] = set()
-    for simulator in _worker_simulators(remote):
-        path = simulator.get("selected_path") if simulator else None
-        paths.add(path if isinstance(path, str) and path else None)
-    return next(iter(paths)) if len(paths) == 1 else None
-
-
-def _worker_banner(remote: Any) -> tuple[str | None, list[str]]:
-    """``(agreed_banner, explaining_probe_codes)``: the ``version_banner``
-    every member reported (same agreement rule as
-    :func:`worker_ngspice_binary`), plus probe codes when it is missing."""
-    banners: set[str | None] = set()
-    probes: set[str] = set()
-    for simulator in _worker_simulators(remote):
-        raw = simulator.get("version_banner") if simulator else None
-        banner = raw.strip() if isinstance(raw, str) and raw.strip() else None
-        banners.add(banner)
-        probe = simulator.get("version_probe") if simulator else None
-        if banner is None and isinstance(probe, str) and probe:
-            probes.add(probe)
-    if len(banners) != 1:
-        return None, ["disagreement"]
-    return next(iter(banners)), sorted(probes)
-
-
-def _no_worker_banner(codes: list[str]) -> tuple[str, str]:
-    """The ``(probe, reason)`` pair explaining a missing worker banner."""
-    if codes == ["disagreement"]:
-        return "disagreement", "the sharded members did not report the same banner"
-    if codes == ["ok"]:
-        # A clean probe with no banner is what the client-side probe reports as "error".
-        return "error", "the worker's --version probe reported 'ok' but no banner"
-    if len(codes) == 1:
-        return codes[0], f"the worker's --version probe reported {codes[0]!r}"
-    return "absent", "the worker reported no --version banner"
-
-
-def apply_worker_engine_build(environment: dict[str, Any]) -> None:
-    """Issue #5566: make ``environment.engine_build`` describe the *worker* on
-    an off-host report, in place, keeping the submitter's probe verbatim under
-    ``client_engine_build`` -- the same relocation #3110 made for
-    ``ngspice_binary``, which left this field behind.
-
-    The banner is the one every member reported (:func:`_worker_banner`);
-    ``binary_sha256`` is always ``None`` (the worker capture records no digest
-    and the client's would describe the wrong machine). With no usable worker
-    banner it is ``None`` and ``probe``/``reason`` say why. Keyed on
-    ``engine_build``'s presence (a deck-list report gains nothing) and value
-    (``engine: "xyce"`` keeps a null build)."""
-    if "engine_build" not in environment:
-        return
-    client_build = environment["engine_build"]
-    environment["client_engine_build"] = client_build
-    if client_build is None:
-        return
-    banner, codes = _worker_banner(environment.get("remote"))
-    probe, reason = ("ok", None) if banner else _no_worker_banner(codes)
-    environment["engine_build"] = {
-        "version_banner": banner,
-        "binary_sha256": None,
-        "probe": probe,
-        "reason": reason,
-    }

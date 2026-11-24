@@ -6,32 +6,36 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import (
+    sim_crossings,
+    sim_cycle_mean,
+    sim_energy,
+    sim_eye,
+    sim_search,
+    sim_settled,
+    sim_slope_band_meas,
+    sim_snm_meas,
+    sim_step_resolution,
+    sim_stress,
+    sim_transfer_meas,
+)
 from .sim_errors import SimError
+from .sim_validate import _expr_measurements
 
 
 def refuse_control_block_measurements(
-    *,
-    expr_declared: bool,
-    crossings_declared: bool,
-    cycle_mean_declared: bool,
-    energy_declared: bool,
-    stress_declared: bool = False,
-    transfer_declared: bool = False,
-    snm_declared: bool = False,
-    slope_band_declared: bool = False,
-    search_declared: bool = False,
-    eye_declared: bool = False,
-    step_resolution_declared: bool = False,
-    settled_declared: bool = False,
+    measurements_spec: list[dict[str, Any]],
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
     issue #2533; ``crossings``, issue #2868; ``energy``, issue #3033). Split out of
     :func:`klayout_tools.sim._enforce_xyce_support_boundary` to keep that gate under the
-    complexity limit."""
-    for declared, message in (
+    complexity limit. The table's own fixed form order picks the first
+    applicable diagnostic, so a request declaring several unsupported forms
+    is refused identically whatever order it declared them in."""
+    for find, message in (
         (
-            expr_declared,
+            _expr_measurements,
             # Issue #2533: an `expr` measurement is emitted as ngspice
             # `let`/`print` commands inside the generated `.control` block, and
             # the Xyce deck has no control block to carry them (see
@@ -46,7 +50,7 @@ def refuse_control_block_measurements(
             "quantity as a `.meas` card in measurements[].spice",
         ),
         (
-            crossings_declared,
+            sim_crossings.crossings_measurements,
             # Issue #2868: the series is dumped by ngspice `let`/`write`
             # commands in the generated `.control` block -- same boundary as
             # `expr`, refused by name for the same reason.
@@ -56,7 +60,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
         (
-            cycle_mean_declared,
+            sim_cycle_mean.cycle_mean_measurements,
             # Issue #2947: same `.control` let/write boundary as `crossings`.
             "measurements[].cycle_mean is not supported for engine 'xyce': "
             "the signals are dumped by ngspice `let`/`write` commands inside "
@@ -64,7 +68,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
         (
-            energy_declared,
+            sim_energy.energy_measurements,
             # Issue #3033: the source current/voltage are dumped by ngspice
             # `let`/`write` commands in the generated `.control` block -- same
             # boundary as `crossings`.
@@ -74,7 +78,7 @@ def refuse_control_block_measurements(
             "use engine 'ngspice'",
         ),
         (
-            stress_declared,
+            sim_stress.stress_measurements,
             # Issue #4592: the node-pair voltage is dumped by ngspice
             # `let`/`write` commands in the generated `.control` block -- same
             # boundary as `energy`.
@@ -84,7 +88,7 @@ def refuse_control_block_measurements(
             "engine 'ngspice'",
         ),
         (
-            transfer_declared,
+            sim_transfer_meas.transfer_measurements,
             # Issue #2923: same `.control` let/write boundary as `cycle_mean`.
             "measurements[].transfer is not supported for engine 'xyce': the "
             "AC vectors are dumped by ngspice `let`/`write` commands inside a "
@@ -92,7 +96,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
         (
-            snm_declared,
+            sim_snm_meas.snm_measurements,
             # Issue #3895: same `.control` let/write boundary as `transfer`.
             "measurements[].snm is not supported for engine 'xyce': the sweep "
             "vectors are dumped by ngspice `let`/`write` commands inside a "
@@ -100,7 +104,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
         (
-            slope_band_declared,
+            sim_slope_band_meas.slope_band_measurements,
             # Issue #5518: same `.control` let/write boundary as `snm`.
             "measurements[].slope_band is not supported for engine 'xyce': "
             "the sweep vectors are dumped by ngspice `let`/`write` commands "
@@ -108,14 +112,14 @@ def refuse_control_block_measurements(
             "engine 'ngspice'",
         ),
         (
-            search_declared,
+            sim_search.search_measurements,
             # Issue #4121: the bisection is an ngspice `.control` `while` loop.
             "measurements[].search is not supported for engine 'xyce': the "
             "bisection runs as an ngspice `.control` `while` loop, and the "
             "Xyce deck has no control block; use engine 'ngspice'",
         ),
         (
-            eye_declared,
+            sim_eye.eye_measurements,
             # Issue #4292: same `.control` let/write boundary as `crossings`.
             "measurements[].eye is not supported for engine 'xyce': the "
             "signal is dumped by ngspice `let`/`write` commands inside a "
@@ -123,7 +127,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
         (
-            step_resolution_declared,
+            sim_step_resolution.step_resolution_measurements,
             # Issue #4773: same `.control` let/write boundary as `crossings`.
             "measurements[].step_resolution is not supported for engine "
             "'xyce': the signal is dumped by ngspice `let`/`write` commands "
@@ -131,7 +135,7 @@ def refuse_control_block_measurements(
             "engine 'ngspice'",
         ),
         (
-            settled_declared,
+            sim_settled.settled_measurements,
             # Issue #4780: same `.control` let/write boundary as `crossings`.
             "measurements[].settled is not supported for engine 'xyce': the "
             "signals are dumped by ngspice `let`/`write` commands inside a "
@@ -139,7 +143,7 @@ def refuse_control_block_measurements(
             "'ngspice'",
         ),
     ):
-        if declared:
+        if find(measurements_spec):
             raise SimError(message)
 
 

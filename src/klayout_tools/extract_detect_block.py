@@ -15,16 +15,13 @@ report is assembled.
 block did. ``DetectionFindings`` is a :class:`typing.NamedTuple` so the call
 site can keep unpacking the results into the same local names it used before.
 
-``_fixed_value_capacitor_note``/``_fixed_value_capacitor_classes`` still live
-in ``extract.py`` and are imported inside the function body: ``extract.py``
-imports this module at its top level, so a module-level ``from .extract
-import ...`` would be a circular import. Everything else comes from
-``extract_report.py``/``extract_warnings.py``, neither of which reaches back
-into ``extract.py``.
+This stage owns the fixed-value capacitor findings and reads the remaining
+findings from the report and warning helpers.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 from .extract_report import (
@@ -36,7 +33,9 @@ from .extract_report import (
     _detect_split_net_labels,
     _detect_unbiased_pmos_body_nets,
     _split_net_label_warnings,
+    detect_case_colliding_net_names,
 )
+from .extract_spef import ExtractError
 from .extract_warnings import (
     ignored_layer_warnings,
     merged_net_label_warnings,
@@ -73,7 +72,6 @@ def build_detection_findings(
     model_bindings: Any,
     warnings: Any,
 ) -> DetectionFindings:
-    from .extract import _fixed_value_capacitor_classes, _fixed_value_capacitor_note
 
     # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
     # `Net.expanded_name()` joins every distinct label found on one
@@ -222,3 +220,67 @@ def build_detection_findings(
         ignored_layers=ignored_layers,
         device_recognition_only_layers=device_recognition_only_layers,
     )
+
+
+def refuse_case_fold_nets(nets: list[dict[str, Any]], spice_output: bool) -> None:
+    """Refuse a persistent flat ``--parasitics`` SPICE write whose distinct
+    nets differ only by case (issue #7091).
+
+    ngspice and ``klt lvs`` read SPICE case-insensitively, so two distinct
+    nets ``N1``/``n1`` fold to one node (a silent short) and their
+    net-derived parasitic cards (``RN1_t0``/``Rn1_t0``) collide as duplicate
+    devices -- whether or not the RC selection covers them. ``nets`` is the
+    pre-injection ``nets[]`` (one row per distinct net, so labels repeated
+    on one net are already a single name such as ``A|a``). ``spice_output``
+    is ``parasitics and not no_netlist``: the device-only and report-only
+    paths keep the #4200 warning instead. Raises :class:`ExtractError`
+    before anything is injected or written.
+    """
+    groups = detect_case_colliding_net_names(n["name"] for n in nets)
+    if not spice_output or not groups:
+        return
+    named = "; ".join(", ".join(repr(name) for name in group) for group in groups)
+    raise ExtractError(
+        f"--parasitics: distinct nets differ only by case ({named}) -- a "
+        "case-insensitive SPICE reader (ngspice, `klt lvs`) would join them "
+        "into one node and reject their net-derived parasitic card names as "
+        "duplicates, so no netlist was written; relabel one net of each group "
+        "or use --no-netlist for the report only"
+    )
+
+
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]

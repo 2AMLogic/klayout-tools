@@ -310,18 +310,26 @@ written to every block.
    same `--check` re-hash guarantees as a curated-deck report (layout hash,
    reference netlist hash, plus the runset hash); (3) the report names its
    engine, and `klt signoff` carries `engine` and the runset hash distinctly in
-   the check detail and the `met` citation; (4) every device is recognised — a
-   non-empty `coverage.declared_not_recognized`, or a `device_census` whose
-   per-class layout and reference counts differ, is a failure
+   the check detail and the `met` citation; (4) every device is recognised —
+   a `device_census` whose per-class layout and reference counts differ
+   (compared case-insensitively; issue #6902), a report without the
+   reference-source device evidence (`device_census.reference_source`,
+   emitted by `klt lvs` since #6902 — a pre-#6902 report fails closed), or a
+   source class with too few converted devices after accounting for
+   documented runset renames on the affected cards, is a failure
    (`runset_unrecognised_device`), never a warning, even when `status` reads
-   `match`. A report from a runset that is not in the allowlist is refused
+   `match`. Classes the runset declares with zero instances anywhere are not
+   graded — `coverage.declared_not_recognized` is disclosure only (issue
+   #6902: no real block instantiates every class a PDK runset declares; the
+   2026-10-08 ruling itself — every device recognised, nothing dropped — is
+   unchanged). A report from a runset that is not in the allowlist is refused
    `runset_not_pinned`; one whose runset file changed since the run,
    `runset_hash_mismatch`. **This does not change** the default: curated decks
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
    allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
    `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
-   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
+   SG13CMOS5L, gf180mcu and sky130 `*.lvs` runsets as of 2026-11-21.
    **Adding an entry** is a reviewed trust decision, never a copy of a hash
    from a report: fetch the PDK's runset file from its upstream repo at a
    named commit, `sha256` it (the same digest `_provenance.sha256_file`
@@ -416,6 +424,11 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   For a mixed-signal block sharing one ratified spec, `spec_rows."6.digital"`
+   scopes this statement and scan to the digital rows. Every spec row must be
+   assigned under `6.digital` or `6.analog`. A statistical row assigned to the
+   digital partition still prevents this outcome. Analog rows are graded
+   independently against their yield evidence.
    **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
    restriction is intentional. Analog performance is inherently statistical
    (offset, mismatch, bias spread), so an analog spec with no statistical row
@@ -480,7 +493,16 @@ written to every block.
      proof" section) — every `delta[]` row is explainable directly from the
      extracted netlist's own added R/C, not merely reported, including the
      (measured, not assumed) no-degradation rows that canary's current
-     topology produces.
+     topology produces. For a block whose core device family only the PDK's
+     own LVS runset recognises (the case `klt pex --engine
+     klayout-runset` exists for, #6559), the citation must carry parasitics:
+     `klt signoff` refuses a `parasitics_carried: false` leg with
+     `no_parasitics` (#6606) — the merged route (`klt pex --engine
+     klayout-runset --deck <curated>`, which attaches the curated deck's
+     parasitics to the runset devices through the measured geometric net
+     correspondence of
+     `docs/design/runset-pex-net-correspondence.md`) is the runset-engine
+     shape that grades.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation. The machine-checkable evidence is a
@@ -665,9 +687,11 @@ written to every block.
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
       reason `degenerate_tap_declaration`, issue #2199,
       `degenerate_well_assertion`, issue #2255,
-      `degenerate_well_selection`, issue #2339, or `empty_well_region`,
+      `degenerate_well_selection`, issue #2339, `empty_well_region`,
       issue #2377 — a drawn `well_layer` with no geometry at all in the
-      stream) returns zero for a
+      stream — or `degenerate_connect_target`, issue #7419 — a
+      through-less tie whose `connect_to` role touches none of its tap
+      sites, so it cannot pass by construction) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with
