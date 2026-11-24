@@ -1,0 +1,5 @@
+* klayout-tools issue #6903 negative control 1: inductor genuinely wired
+* the other way round (reference terminal order reversed).
+.SUBCKT IND2 LA LB
+L1 LB LA sub inductor w=2u s=2.1u d=25.35u nr_r=1
+.ENDS
