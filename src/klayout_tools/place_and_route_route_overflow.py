@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .place_and_route_base import PlaceAndRouteError
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_reports import (
     build_congestion,
@@ -19,7 +20,6 @@ from .place_and_route_reports import (
     parse_global_route_congestion,
     rank_overflow_regions,
 )
-from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_script import _macro_footprint
 
 #: Issue #6949: the region frame `overflow_by_region` always carries -- a
