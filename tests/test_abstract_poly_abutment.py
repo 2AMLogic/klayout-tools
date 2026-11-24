@@ -119,3 +119,27 @@ def test_gds_to_lvs_with_abstract_leaf_stubs(
     assert report["status"] == expected_status
     assert report["counts"]["pins"]["layout"] == 1
     assert report["counts"]["nets"]["layout"] == layout_nets
+
+
+def test_retained_poly_counts_as_a_declared_layer_landing():
+    from klayout_tools.extract_abstract import _probe_single_abstract_pin_point
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly_layer = layout.layer(1, 0)
+    terminal_layer = layout.layer(2, 0)
+    top.shapes(poly_layer).insert(kdb.Box(200, 200, 300, 300))
+    top.shapes(terminal_layer).insert(kdb.Box(0, 0, 100, 100))
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top, []))
+    poly = l2n.make_layer(poly_layer, "poly")
+    terminal = l2n.make_layer(terminal_layer, "abstract_terminal_poly")
+    l2n.connect(poly)
+    l2n.connect(terminal)
+    l2n.extract_netlist()
+
+    point = kdb.Point(50, 50)
+    net, declared = _probe_single_abstract_pin_point(
+        l2n, point, "poly", [("poly", poly), ("poly", terminal)]
+    )
+    assert net is not None and declared
+    assert net.cluster_id == l2n.probe_net(terminal, point).cluster_id
