@@ -241,7 +241,7 @@
     {
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
-      "complexity": 20
+      "complexity": 21
     },
     {
       "file": "src/klayout_tools/extract_parasitics_block.py",

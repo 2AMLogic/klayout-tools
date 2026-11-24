@@ -1011,6 +1011,7 @@ def run_extract(
     resistance_graph_r_cut_ohm: float | None = None,
     resistance_graph_caps: Mapping[str, int] | None = None,
     emit_selected_resistance: bool = False,
+    emit_resistance_network: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1479,36 +1480,29 @@ def run_extract(
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
 
-    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
-    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
-    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
-    of the net's geometry-derived resistor graph, with coverage counts and
-    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
-    other field are unchanged, and ``False`` (the default) adds no key.
-    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+    ``resistance_graph`` (``--resistance-graph``, #2982) requires parasitics.
+    It adds the geometry-derived terminal-pair resistance matrix, coverage and
+    diagnostics to each net. The existing scalar and ladder stay unchanged.
+    See :func:`_compute_parasitics`.
 
-    ``emit_selected_resistance`` (internal, issue #4037; set only by
-    ``klt pex``, never exposed on ``klt extract``) writes each net's
-    ``selected_resistance_ohm`` as its lumped R in the emitted netlist where
-    ``resistance_source == "graph"``; requires ``resistance_graph=True``.
-    ``False`` keeps the legacy-scalar netlist.
+    PEX can use the graph to write two alternative netlists. With
+    ``emit_selected_resistance`` (#4037), each graph-sourced net uses its
+    ``selected_resistance_ohm`` as its lumped R. With ``emit_resistance_network``
+    (``klt pex --resistance-network``, #6899), solved nets with at least three
+    terminals use a Kron-reduced network in place of the star. Both require
+    ``resistance_graph=True``. The latter is incompatible with ``spef_output``.
+    Both default to false and preserve the legacy netlist when disabled.
 
-    ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    overrides every landing's per-cut resistance (``0`` = ideal via).
-    ``None`` (the default) resolves each landing from the deck's nominal
-    per-cut tables (``ParasiticsDeck.cuts``/``.poly_contact``, issue #6917)
-    and keeps an uncurated landing ``unsupported`` on the legacy scalar.
+    ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, #2983)
+    overrides per-cut resistance at every landing (zero models an ideal via).
+    The default uses the deck's cut or poly-contact tables (#6917) and keeps
+    unsupported landings on the legacy scalar.
 
-    ``resistance_graph_caps`` (``--resistance-graph-max-terminals`` /
-    ``--resistance-graph-max-cells`` / ``--resistance-graph-max-nodes`` /
-    ``--resistance-graph-max-edges``, issue #6964) raises the builder's own
-    per-net size caps, as ``{builder keyword: positive integer}`` holding
-    only the caps that were given (``None``/empty: none). A cap the builder
-    would exceed is reported ``graph_too_large`` naming the value applied,
-    so a net stays on the legacy scalar until its cap is raised. Defaults
-    come from :mod:`~klayout_tools.extract_resistance_graph`'s constants
-    (64 terminals, 4096 mesh cells, 5000 nodes, 20000 edges); needs
-    ``resistance_graph=True``.
+    ``resistance_graph_caps`` (#6964) accepts positive per-net limits keyed by
+    builder argument. The ``--resistance-graph-max-*`` options override the
+    defaults of 64 terminals, 4096 mesh cells, 5000 nodes and 20000 edges.
+    An exceeded cap reports ``graph_too_large`` and its value, retaining the
+    legacy scalar. Omitted caps use the builder defaults. Requires a graph.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2423,6 +2417,7 @@ def run_extract(
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         critical_net_patterns=critical_net_patterns,
         critical_net_all=critical_net_all,
         critical_net_excludes=critical_net_excludes,
@@ -2639,6 +2634,7 @@ def run_extract(
         deck_name=deck_name,
         distributed_rc=distributed_rc,
         emit_selected_resistance=emit_selected_resistance,
+        emit_resistance_network=emit_resistance_network,
         mom_crosscheck=mom_crosscheck,
         mom_net=mom_net,
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -2767,6 +2763,7 @@ def run_extract(
         netlist_sha256=netlist_sha256,
         nets=nets,
         parasitics_report=parasitics_report,
+        emit_resistance_network=emit_resistance_network,
         path=path,
         pdk_info=pdk_info,
         report_parasitics_shape=report_parasitics,

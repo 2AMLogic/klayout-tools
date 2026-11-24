@@ -336,6 +336,8 @@
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_resistance_graph_caps",
+        "klayout_tools.extract_resistance_network",
+        "klayout_tools.extract_terminal_topology",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
         "klayout_tools.extract_spef_rc",

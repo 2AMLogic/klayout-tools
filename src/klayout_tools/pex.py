@@ -263,6 +263,7 @@ from .pex_netlist_text import (
 )
 from .pex_resistance_graph import (
     _reject_resistance_graph_with_distributed_rc,
+    _reject_resistance_network_without_graph,
     _resistance_graph_echo,
 )
 from .sim import SimError, load_request, run_sim
@@ -2551,6 +2552,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
     resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
@@ -2622,23 +2624,16 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm``/``resistance_graph_caps``
-    (``klt pex --resistance-graph [--resistance-graph-r-cut OHM]
-    [--resistance-graph-max-* N]``, issues #4037, #6964) forward to ``klt
-    extract``'s terminal-aware resistance graph and make the extracted netlist
-    use each ``resistance_source == "graph"`` net's ``selected_resistance_ohm``
-    as its lumped R (``legacy`` nets keep the legacy scalar). The caps raise
-    the graph builder's per-net size limits. ``extraction.resistance_graph``
-    echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
-    values -- only when a cap was given) and one ``{net, net_id,
-    resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
-    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
-    the graph flag, the report and netlist are byte-identical. Combining it with
-    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    before this feature existed.
 
-    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    ``resistance_graph`` selects the extracted graph resistance or legacy
+    fallback per net. Its report echoes terminals, pair resistances, fallback
+    reasons and the optional per-cut resistance. Explicit caps are echoed
+    with all four effective limits. ``resistance_network`` requires the graph
+    and writes a Kron-reduced network for each solved net with three or more
+    terminals. The graph is incompatible with the distributed RC ladder.
+
+    ``critical_net_patterns``/``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
     issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
     straight through; ``extraction.critical_nets`` then echoes the resolved
@@ -2859,8 +2854,12 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    _reject_resistance_network_without_graph(resistance_network, resistance_graph)
     pex_runset.refuse_unsupported(
-        runset, device_only_leg=device_only_leg, tie_nets=tie_nets
+        runset,
+        device_only_leg=device_only_leg,
+        tie_nets=tie_nets,
+        resistance_network=resistance_network,
     )
 
     # Issue #1261: every input-path field this run's own JSON response
@@ -2902,6 +2901,7 @@ def run_pex(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_network=resistance_network,
             resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
