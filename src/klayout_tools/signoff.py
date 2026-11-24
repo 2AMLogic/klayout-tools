@@ -275,6 +275,15 @@ from .signoff_justified_gap import (
     justified_gap_report_fields,
 )
 
+# The per-citation `requires` assertion (issue #7807): `_build_tier_item`,
+# `_parse_multi_members`, `_post_member_outcome`.
+from .signoff_member_requires import (
+    has_requires,
+    pre_grading_refusal,
+    read_requires,
+    requires_outcome,
+)
+
 # Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
 # for its size-ratchet ceiling.
 from .signoff_multi_member import (
@@ -361,6 +370,18 @@ from .signoff_store_pin import (
 )
 from .signoff_store_pin import store_pin_samples_entry
 
+# The timing-margin rule (issue #4314), moved verbatim for this file's
+# size-ratchet ceiling (issue #7807); the `X as X` form marks a re-export.
+from .signoff_timing_margin import (
+    _grade_timing_margin,
+)
+from .signoff_timing_margin import (
+    _missing_timing_margin as _missing_timing_margin,
+)
+from .signoff_timing_margin import (
+    _row_margin_lacking_corners as _row_margin_lacking_corners,
+)
+
 # The 22 shared `_REASON_*` unmet-reason strings moved verbatim to the
 # stdlib-only `signoff_unmet_reasons` leaf in the same split as
 # `signoff_base` above (issue #7371), re-imported here *by name* so
@@ -381,9 +402,7 @@ from .signoff_unmet_reasons import (
     _REASON_STALE_ARTIFACT,
     _REASON_STALE_EVIDENCE,
     _REASON_TIER_NOT_SUPPORTED,
-    _REASON_TIMING_MARGIN_MISSING,
     _REASON_UNANCHORED_EVIDENCE,
-    _REASON_UNGRADEABLE_BY_BUILD,
     _REASON_UNREADABLE_EVIDENCE,
     _REASON_UNRECOGNIZED_ENVELOPE,
     _REASON_UNVERIFIABLE_PROVENANCE,
@@ -392,6 +411,9 @@ from .signoff_unmet_reasons import (
 )
 from .signoff_unmet_reasons import (
     _REASON_EVIDENCE_NOT_KLT_NATIVE as _REASON_EVIDENCE_NOT_KLT_NATIVE,
+)
+from .signoff_unmet_reasons import (
+    _REASON_UNGRADEABLE_BY_BUILD as _REASON_UNGRADEABLE_BY_BUILD,
 )
 from .signoff_unmet_reasons import (
     _REASON_WRONG_ITEM as _REASON_WRONG_ITEM,
@@ -6007,8 +6029,11 @@ def _build_tier_item(
     report_list = corner_box is not None or (
         item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     )
-    if raw_entry is not None and not graded_by_build:
-        reason = _REASON_UNGRADEABLE_BY_BUILD
+    # Decided before the evidence is resolved at all: an item this build has no
+    # rules for, and (issue #7807) a `requires` on any item but 5.
+    refusal = pre_grading_refusal(item_id, raw_entry, graded_by_build)
+    if refusal is not None:
+        reason, failure_detail = refusal
     elif (
         item_id == _STATISTICAL_CLAIMS_ITEM_ID
         and isinstance(raw_entry, dict)
@@ -6036,6 +6061,7 @@ def _build_tier_item(
             # A declared row set also grades an empty citation set (#4190).
             or isinstance(raw_entry, list)
             or has_covers(raw_entry)
+            or has_requires(raw_entry)  # issue #7807: a lone citation too
             or (raw_entry is not None and required_kind_pair is not None)
         )
     ):
@@ -6366,6 +6392,8 @@ def _post_member_outcome(
     problem = joint.problem if joint is not None else None
     if problem is not None:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
+    if (unmet := requires_outcome(graded, met_envelopes, row_info, extra)) is not None:
+        return unmet  # issue #7807: a citation's `requires` run-scope assertion
     for check in (_check_justified_gap_rationales, _check_structural_artifacts):
         declared_unmet = _declared_artifact_outcome(check(spec_rows), row_info, extra)
         if declared_unmet is not None:
@@ -6373,106 +6401,6 @@ def _post_member_outcome(
     return _grade_timing_margin(
         required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
     )
-
-
-def _grade_timing_margin(
-    required_kind_pair: tuple[str, ...] | None,
-    graded: list[tuple[Any, Any, Any]],
-    spec_rows: list[dict[str, Any]] | None,
-    met_envelopes: dict[int, dict[str, Any]] | None,
-    row_info: dict[str, Any],
-    extra: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet``/``timing_margin_missing`` outcome for the full-custom
-    digital sub-case (``sim`` evidence only, issue #4314); ``None`` when it
-    does not apply or the timing margin is satisfied."""
-    if required_kind_pair is None or not graded:
-        return None
-    kinds = {g[2]["kind"] for _, _, g in graded if g[2] is not None}
-    # Issue #4859: a `model-run` is sim-like here -- it alone neither
-    # satisfies the STA+functional pair nor escapes the timing-margin rule.
-    if not kinds or not kinds <= {"sim", "model-run"}:
-        return None
-    missing_margin = _missing_timing_margin(
-        spec_rows,
-        [(met_envelopes or {}).get(id(spec)) for spec, _, _ in graded],
-    )
-    if not missing_margin:
-        return None
-    return (
-        "unmet",
-        _REASON_TIMING_MARGIN_MISSING,
-        None,
-        {**row_info, "missing_timing_margin": missing_margin},
-        extra,
-    )
-
-
-def _missing_timing_margin(
-    spec_rows: list[dict[str, Any]] | None,
-    envelopes: list[dict[str, Any] | None],
-) -> list[dict[str, Any]]:
-    """``[{"row": id, "corners": [...]}]`` for the timing-margin evidence a
-    ``sim``-only digital item 5 lacks (issue #4314); empty when satisfied.
-
-    A ``timing_margin: true`` row is satisfied by a cited ``klt sim``
-    envelope whose rollup ``measurements[]`` has a passing, ``limits``-bearing
-    entry tagged ``spec_row: <row>`` and whose every ``corners[]`` entry has a
-    passing measurement of that name. No such row declared -> one entry with
-    ``row: None``. ``corners`` names the corners lacking the measurement
-    (``[]`` when no corner list exists or no tagged measurement was found).
-    """
-    rows = [r["id"] for r in spec_rows or [] if r.get("timing_margin")]
-    if not rows:
-        return [{"row": None, "corners": []}]
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        best: list[str] | None = None
-        for envelope in envelopes:
-            lacking = _row_margin_lacking_corners(envelope, row)
-            if best is None or len(lacking) < len(best):
-                best = lacking
-        if best is None or best:
-            out.append({"row": row, "corners": best or []})
-    return out
-
-
-def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> list[str]:
-    """Corner ids lacking a passing measurement for ``row`` in ``envelope``;
-    ``["*"]`` when the envelope has no passing, limited, ``row``-tagged
-    measurement at all."""
-    if envelope is None:
-        return ["*"]
-    raw = envelope.get("measurements")
-    names = [
-        m.get("name")
-        for m in (raw if isinstance(raw, list) else [])
-        if isinstance(m, dict)
-        and m.get("spec_row") == row
-        and m.get("status") == "pass"
-        and _recognised_bound(m)
-    ]
-    if not names:
-        return ["*"]
-    corners = envelope.get("corners")
-    corners = (
-        [c for c in corners if isinstance(c, dict)] if isinstance(corners, list) else []
-    )
-    best: list[str] | None = None
-    for name in names:
-        lacking = [
-            str(c.get("corner_id"))
-            for c in corners
-            if not any(
-                isinstance(m, dict)
-                and m.get("name") == name
-                and m.get("status") == "pass"
-                for m in c.get("measurements") or []
-            )
-        ]
-        if best is None or len(lacking) < len(best):
-            best = lacking
-    return best or []
 
 
 def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:
@@ -6506,6 +6434,10 @@ def _parse_multi_members(
                 return None, f"{where} 'rows' is not a non-empty list of strings"
         if has_covers(raw):
             spec["covers"] = raw["covers"]
+        if has_requires(raw):  # issue #7807: validated here, graded post-member
+            spec["requires"], requires_problem = read_requires(raw["requires"])
+            if requires_problem is not None:
+                return None, f"{where} {requires_problem}"
         members.append((spec, rows))
     return members, None
 

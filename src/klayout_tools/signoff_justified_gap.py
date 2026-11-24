@@ -46,7 +46,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._digest import sha256_file
-from ._jsonnum import is_number
+from .signoff_grid_axes import grid_axes_problem
 from .signoff_na import _na_spec_format
 from .signoff_row_extent import label_list
 
@@ -122,42 +122,13 @@ def read_joint_grid(raw: Any) -> dict[str, Any] | None:
         or len(set(members)) != len(members)
     ):
         return None
-    process = raw.get("process")
-    if process is not None and (
-        not isinstance(process, list)
-        or not process
-        or not all(isinstance(p, str) and p for p in process)
-    ):
-        return None
-    supply = raw.get("supply_v")
-    if supply is not None:
-        if not isinstance(supply, dict) or not supply:
-            return None
-        lengths: set[int] = set()
-        for rail, values in supply.items():
-            if (
-                not isinstance(rail, str)
-                or not rail
-                or not isinstance(values, list)
-                or not values
-                or not all(is_number(v) for v in values)
-            ):
-                return None
-            lengths.add(len(values))
-        if len(lengths) != 1:  # rails sweep zipped, as in a sim request
-            return None
-    temperature = raw.get("temperature_c")
-    if temperature is not None and (
-        not isinstance(temperature, list)
-        or not temperature
-        or not all(is_number(t) for t in temperature)
-    ):
+    if grid_axes_problem(raw) is not None:  # shared with `requires.grid` (#7807)
         return None
     return {
         "members": list(members),
-        "process": process,
-        "supply_v": supply,
-        "temperature_c": temperature,
+        "process": raw.get("process"),
+        "supply_v": raw.get("supply_v"),
+        "temperature_c": raw.get("temperature_c"),
     }
 
 
