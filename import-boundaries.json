@@ -758,6 +758,7 @@
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layer_map",
         "klayout_tools.place_and_route_library_limits",
+        "klayout_tools.place_and_route_multicycle",
         "klayout_tools.place_and_route_layers",
         "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
