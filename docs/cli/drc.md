@@ -3588,7 +3588,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `ACTIVE.AUX.3` | Table 3.5.2 | no distance bound, but a topological condition (a slot cut into a vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' nor its size, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
-| `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
+| `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | At T-shaped M1 landings a 25 nm corner gap can face two flush ends on one axis and two 5 nm caps on the other. The 30 and 23 nm bounds give different results. | #3147 |
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
 | `V0.LIG.EN.4` | Table 3.11.2 | V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT and SLVT library has 1,413 selected V0 wholly inside LIG. Figure 3.11.2(a) shows V0 protruding beyond LIG. Of the 6,312 selected cuts per library, 4,899 protrude by exactly 1 nm on both sides. The 1,413 fully covered cuts occupy 208 of 212 cell masters and have no LISD overlap. They include 18 nm square V0 centered in 22 nm square LIG. The rule needs clarification for V0 wholly inside LIG. | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | V0 edges parallel to the LIG length must clear LIG. In each pinned library, 4,899 selected cuts touch horizontal LIG only on their vertical V0 edges. A square LIG has no unique length axis. Rotating the square-LIG fixture by 90° preserves the 360 nm² overlap and exchanges which pair of V0 edges touches LIG. | #3147 |
@@ -3620,6 +3620,34 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+
+### V0 corner spacing at M1 ends
+
+Table 3.11.1 and Figure 3.11.1(b,c) use the M1 end that faces the other
+V0. Two facing 5 nm caps require 23 nm of corner spacing, one requires
+27 nm and two flush ends require 30 nm. For example, two 18 nm square cuts
+separated diagonally by 15 nm on x and 20 nm on y have 25 nm of corner
+spacing. With two straight M1 landings the pair passes only when both
+facing ends have caps, even if each far end has 5 nm of metal.
+
+At a T junction, both arms can enclose a cut. The junction control has corner
+offsets of 20 nm on x and 15 nm on y. Each 18 nm wide
+horizontal arm ends flush toward the other cut, and each 18 nm wide vertical
+arm extends 5 nm in that direction. A common LISD landing supplies both cuts.
+Both orientations pass all 272 enabled categories, including `V0.M1.EN.1`. Section 1.2.1 defines an end-cap by the upper
+metal enclosure. Figure 3.11.1 illustrates straight landings. Neither
+identifies which arm supplies the facing end in this junction. Classifying
+an entire via by the presence of any cap also loses the flush facing ends
+from Figure 3.11.1(c).
+
+Each pinned RVT, LVT and SLVT library contains 8,576 unique V0 sites in
+212 masters. Per library, 29 pairs have strictly disjoint x and y projections
+and diagonal spacing below 30 nm. Measuring a full 5 nm strip on all four
+sides gives exactly one candidate axis per cut in these pairs. Using each
+cut's own axis, all 29 clear their applicable bound. Assuming horizontal
+for every cut instead flags one pair. Assuming vertical flags 28. The
+shipped examples establish the result when each cut supplies one candidate
+axis. The two-axis junction remains unresolved.
 
 ### Topology gaps: `GATE.AUX.2` and `ACTIVE.AUX.3`
 

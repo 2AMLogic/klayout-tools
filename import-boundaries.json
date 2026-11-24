@@ -665,6 +665,7 @@
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
+        "klayout_tools.decks.asap7_v0_gaps",
         "klayout_tools.decks.extraction",
         "klayout_tools.decks.extraction_inductor",
         "klayout_tools.decks.finfet",
