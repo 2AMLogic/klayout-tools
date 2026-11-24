@@ -295,6 +295,7 @@
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_abstract_pin_join",
+        "klayout_tools.extract_abstract_poly",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_report_canonicalize",
         "klayout_tools.extract_validate",
@@ -404,6 +405,9 @@
         "klayout_tools.gen_pdk_cell",
         "klayout_tools.gen_cap_stack",
         "klayout_tools.gen_describe",
+        "klayout_tools.gen_diff_pair_describe",
+        "klayout_tools.gen_diff_pair",
+        "klayout_tools.gen_diff_pair_strap",
         "klayout_tools.gen_diode",
         "klayout_tools.gen_hbt",
         "klayout_tools.gen_layer_params",
@@ -455,10 +459,12 @@
         "klayout_tools.gen_compose_landing_pads",
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_pad_conflicts",
+        "klayout_tools.gen_compose_pad_ports",
         "klayout_tools.gen_compose_plane_change",
         "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
+        "klayout_tools.gen_compose_port_search",
         "klayout_tools.gen_compose_routing",
         "klayout_tools.gen_compose_top_metal_floors",
         "klayout_tools.gen_compose_via_cuts"
@@ -531,6 +537,7 @@
         "klayout_tools.layout_plan",
         "klayout_tools.layout_plan_check",
         "klayout_tools.layout_plan_body_nets",
+        "klayout_tools.layout_plan_diff_pair",
         "klayout_tools.layout_plan_execute",
         "klayout_tools.layout_plan_fields",
         "klayout_tools.layout_plan_flavors",
@@ -930,6 +937,7 @@
         "klayout_tools.signoff_attest_command",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
+        "klayout_tools.signoff_attest_gaprows",
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
@@ -957,6 +965,7 @@
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_grouped_citations",
+        "klayout_tools.signoff_joint_rows",
         "klayout_tools.signoff_justified_gap",
         "klayout_tools.signoff_malformed_coverage",
         "klayout_tools.signoff_multi_member",
@@ -968,6 +977,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_corner_box",
         "klayout_tools.signoff_report_diff",
         "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_require_build",
@@ -1034,6 +1044,7 @@
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
+        "klayout_tools.sim_batch_image",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_knobs",
         "klayout_tools.sim_batch_plan",
@@ -1080,6 +1091,7 @@
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_mismatch_scale",
+        "klayout_tools.sim_mismatch_scan",
         "klayout_tools.sim_measurement_grading",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
@@ -1101,6 +1113,7 @@
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_population_limits",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_post_commands",
         "klayout_tools.sim_report_check",
@@ -1143,6 +1156,7 @@
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
         "klayout_tools.sim_window",
+        "klayout_tools.sim_windowed",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
@@ -1194,6 +1208,7 @@
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
         "klayout_tools._sta_sdc_multicycle",
+        "klayout_tools._sta_spef_inputs",
         "klayout_tools._sta_timing_derate",
         "klayout_tools._sta_wire_load",
         "klayout_tools.post_route_sta",
@@ -1202,7 +1217,8 @@
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
         "klayout_tools.post_route_sta_stages",
-        "klayout_tools.post_route_sta_verify"
+        "klayout_tools.post_route_sta_verify",
+        "klayout_tools.post_route_sta_violating_endpoints"
       ]
     },
     "stats": {
@@ -1450,11 +1466,6 @@
     {
       "consumer": "drc",
       "exporter": "cli-infra",
-      "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
-    },
-    {
-      "consumer": "drc",
-      "exporter": "layers",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {

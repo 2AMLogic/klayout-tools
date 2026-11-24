@@ -210,6 +210,7 @@ from .extract_abstract import (
     lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
+from .extract_abstract_poly import connect_terminal_poly, terminal_poly
 from .extract_assemble import _describe_device_models as _describe_device_models
 from .extract_assemble import _describe_label_layers as _describe_label_layers
 from .extract_assemble import _hierarchy_fields as _hierarchy_fields
@@ -3469,6 +3470,7 @@ def extract_netlist_from_layout(
     unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
     layout_coverage: dict[str, Any] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3662,24 +3664,9 @@ def extract_netlist_from_layout(
     skips the lateral pass entirely, byte-identical to before this feature
     existed.
 
-    ``mom_net``/``mom_background_permittivity`` (``klt extract --mom-net
-    <net>``, issue #798) forward straight to :func:`_extract_netlist`, which
-    computes ``mom_crosscheck`` alongside ``parasitic_nets`` for the same
-    "``l2n`` must still be alive" reason -- see its docstring. ``None`` (the
-    default) skips the cross-check entirely, ``mom_crosscheck`` is then
-    always ``None`` too, byte-identical to before this feature existed.
-
-    Shared by :func:`run_extract` (this module, which additionally writes the
-    netlist to disk and builds the ``devices``/``nets`` convenience view) and
-    ``klt lvs``'s inline-extraction path (``lvs.py``'s ``layout.file`` +
-    ``layout.deck`` request shape, per
-    ``docs/design/lvs-extraction-spike.md`` section 2b), which composes this
-    with ``NetlistComparer`` instead of ``NetlistSpiceWriter`` -- no need to
-    round-trip through a written SPICE file just to compare it.
-
-    Raises :class:`ExtractError` for a bad file, unknown deck, invalid
-    ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
-    identical error semantics to ``run_extract``.
+    The optional MOM cross-check runs while the extractor still owns its geometry.
+    LVS can request implicit joins between identically labelled top-level nets.
+    This shared entry point raises the same errors as `run_extract`.
     """
     # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
@@ -3759,6 +3746,7 @@ def extract_netlist_from_layout(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
     abstract_well_tie_cover: kdb.Region | None = None
+    terminal_poly_cover: kdb.Region | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3783,15 +3771,8 @@ def extract_netlist_from_layout(
                 )
                 for cell_index in matched_cell_indices
             }
-            # Also computed *before* erasure (issue #1911): the well /
-            # substrate-isolation cover the matched instances contribute
-            # (`_abstract_cell_body_identity_cover` -- reunioned into
-            # `_extract_netlist`'s whole-layout *classification* split so
-            # erasing a black box's well cannot silently reclassify a tie
-            # drawn outside it onto the deck's global substrate net), and
-            # the per-cell-type count of ports that only ever resolve
-            # through that global (`_abstract_cell_global_net_ports` --
-            # warned about instead of silently dropped).
+            # Capture terminal and body conductors before black-box erasure.
+            terminal_poly_cover = terminal_poly(layout, deck, abstract_instances)
             abstract_body_identity_cover = _abstract_cell_body_identity_cover(
                 layout, deck, abstract_instances
             )
@@ -3860,6 +3841,7 @@ def extract_netlist_from_layout(
         top_cell,
         deck,
         parasitics_deck,
+        join_same_named_nets=join_same_named_nets,
         top_cell_pins_only=top_cell_pins_only,
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
@@ -3872,6 +3854,7 @@ def extract_netlist_from_layout(
         abstract_body_identity_cover=abstract_body_identity_cover,
         abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
         abstract_well_tie_cover=abstract_well_tie_cover,
+        terminal_poly_cover=terminal_poly_cover,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -4041,6 +4024,7 @@ def _reconcile_top_pins(
     below_top_labels: set[str],
     *,
     demote: bool,
+    unresolved: Sequence[kdb.Net] = (),
 ) -> list[str]:
     """Reconcile the top circuit's pins against ``below_top_labels`` (issue
     #291), the label strings that name a net only from below an instance
@@ -4056,6 +4040,10 @@ def _reconcile_top_pins(
     Global/substrate nets (named by ``connect_global``, not by any drawn text)
     are never in ``below_top_labels``, so a substrate pin is left untouched.
     """
+    if demote:
+        for net in unresolved:
+            for pin_id in [ref.pin().id() for ref in net.each_pin()]:
+                net.circuit().remove_pin(pin_id)
     circuit = netlist.circuit_by_name(top_name)
     if circuit is None or not below_top_labels:
         return []
@@ -6098,6 +6086,15 @@ def _flavour_mos_regions(
     return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
 
 
+def _extract_connected_netlist(
+    l2n: kdb.LayoutToNetlist, join_same_named_nets: bool
+) -> None:
+    """Apply any requested implicit top-level connections before extracting the nets."""
+    if join_same_named_nets:
+        l2n.join_net_names("*")
+    l2n.extract_netlist()
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6117,6 +6114,7 @@ def _extract_netlist(
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
     abstract_well_tie_cover: kdb.Region | None = None,
+    terminal_poly_cover: kdb.Region | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -6135,6 +6133,7 @@ def _extract_netlist(
     tie_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
+    join_same_named_nets: bool = False,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -7605,6 +7604,7 @@ def _extract_netlist(
     # every other region registered above. Deliberately outside the
     # `tap_declared` gate: it is empty whenever the deck has no tap mechanism
     # at all, so the gate would be redundant.
+    poly_probes = connect_terminal_poly(l2n, terminal_poly_cover, poly, contact)
     _abstract_well_tie = _connect_abstract_well_tie(
         l2n, nwell, nwell_body_cover, contact, abstract_well_tie_cover
     )
@@ -7723,7 +7723,7 @@ def _extract_netlist(
                 l2n.connect(terminal_region, contact)
 
     try:
-        l2n.extract_netlist()
+        _extract_connected_netlist(l2n, join_same_named_nets)
     except RuntimeError as exc:
         # KLayout's own `LayoutToNetlist.extract_netlist()` raises a bare
         # `RuntimeError` (not one of *this* module's own exception types) for
@@ -7833,46 +7833,32 @@ def _extract_netlist(
     # stub from being purged as floating. See `_wire_abstract_cells`'s
     # docstring for the full contract.
     abstracted_cells: list[dict[str, Any]] = []
+    open_abstract_nets: list[kdb.Net] = []
     if abstract_instances:
         top_circuit = netlist.circuit_by_name(top_cell.name)
         assert top_circuit is not None, (
             "top circuit must exist immediately after l2n.extract_netlist()"
         )
-        # Metals bottom-up first, then poly/nwell/tap -- matches
-        # `_probe_abstract_pin_net`'s own documented fallback order (a
-        # standard cell's pins land on the lowest metal available). Getting
-        # this backwards is a confirmed correctness bug (PR #622 review): a
-        # parent-level well/tap shape (e.g. a guard ring) overlapping a
-        # LEF-fallback pin's footprint would silently win over the metal net
-        # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit. Well geometry includes the abstracted cells'
-        # preserved cover (#2082); it must still never outrank a LEF pin's
-        # drawn metal access. Poly/tap inside black boxes remain erased.
-        #
-        # This order is only the *fallback* for a candidate point with no
-        # role of its own. A LEF-resolved point whose `PORT LAYER` the
-        # active PDK's KLayout `.map` file translates into one of these
-        # `metal{i}` levels now carries that level as its role and is probed
-        # there first (issue #2658, `abstract_cell_lef_layer_roles`) --
-        # without which a parent power strap on a *low* metal under a hard
-        # macro's *upper*-metal port wins this bottom-up scan and collapses
-        # nearly every one of that macro's declared pins onto one net.
+        # Without a layer hint, probe lower metals before body layers.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
-        abstracted_cells, abstract_cell_warnings = _wire_abstract_cells(
-            layout,
-            deck,
-            l2n,
-            netlist,
-            top_circuit,
-            abstract_instances,
-            lef_macros or {},
-            probe_layers,
-            abstract_cell_local_candidates,
-            abstract_cell_global_net_ports,
-            abstract_cell_lef_layer_roles,
-            def_net_name_probes,
+        probe_layers.extend(poly_probes)
+        abstracted_cells, abstract_cell_warnings, open_abstract_nets = (
+            _wire_abstract_cells(
+                layout,
+                deck,
+                l2n,
+                netlist,
+                top_circuit,
+                abstract_instances,
+                lef_macros or {},
+                probe_layers,
+                abstract_cell_local_candidates,
+                abstract_cell_global_net_ports,
+                abstract_cell_lef_layer_roles,
+                def_net_name_probes,
+            )
         )
         warnings = warnings + abstract_cell_warnings
 
@@ -7921,7 +7907,11 @@ def _extract_netlist(
     netlist.make_top_level_pins()
     _promote_orphan_named_nets(netlist)
     demoted = _reconcile_top_pins(
-        netlist, top_cell.name, below_top_labels, demote=top_cell_pins_only
+        netlist,
+        top_cell.name,
+        below_top_labels,
+        demote=top_cell_pins_only,
+        unresolved=open_abstract_nets,
     )
     if demoted:
         joined = ", ".join(demoted)

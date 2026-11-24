@@ -50,14 +50,12 @@ from __future__ import annotations
 
 import bisect
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
-from .sim_raw import parse_ascii_rawfile
 
 #: Reason tokens a failed ``step_resolution`` entry's diagnostic leads with.
 ERROR_CODES = (
@@ -312,31 +310,23 @@ def extract_corner_step_resolutions(
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StepResolutionOutcome:
     body = spec["step_resolution"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) did "
-                "not resolve against this transient's saved vectors (no "
-                "rawfile was written) -- check the node/branch name"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=f"measurement '{name}': could not read its rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return StepResolutionOutcome(
-            code="step_resolution_vector_missing",
-            error=f"measurement '{name}': its signal yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) did "
+            "not resolve against this transient's saved vectors (no "
+            "rawfile was written) -- check the node/branch name"
+        ),
+        empty_error=(f"measurement '{name}': its signal yielded no samples"),
+    )
+    if columns is None:
+        return StepResolutionOutcome(code="step_resolution_vector_missing", error=error)
+    scale, values = columns
     outcome = compute_step_resolution(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        scale,
+        values,
         float(body["level"]),
         float(_seconds(name, body, "window") or 0.0),
         edge=body.get("edge", "either"),

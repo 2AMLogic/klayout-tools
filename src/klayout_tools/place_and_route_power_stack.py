@@ -110,17 +110,18 @@ _S6_NM = 20.0
 _TIP_MIN_NM = 24.0
 
 _LEF_LAYERS = ("M3", "M4", "M5", "V3", "V4")
+_REPAIR_FAMILIES = ("v4_m4_enclosure", "v4_m5_enclosure", "m3_stub_spacing")
 
 
 def _report(status: str, reason: str | None = None) -> dict[str, Any]:
-    return {
-        "status": status,
-        "reason": reason,
-        "patches": 0,
-        "v4_m4_enclosure": {"targets": 0, "repaired": 0, "left": 0},
-        "v4_m5_enclosure": {"targets": 0, "repaired": 0, "left": 0},
-        "m3_stub_spacing": {"targets": 0, "repaired": 0, "left": 0},
-    }
+    counts = {key: {"targets": 0, "repaired": 0, "left": 0} for key in _REPAIR_FAMILIES}
+    return {"status": status, "reason": reason, "patches": 0, **counts}
+
+
+def _repair_status(report: dict[str, Any]) -> str:
+    if any(report[family]["left"] for family in _REPAIR_FAMILIES):
+        return "violations"
+    return "repaired" if report["patches"] else "clean"
 
 
 def _nm_to_dbu(nm: float, dbu_um: float) -> int:
@@ -427,10 +428,9 @@ def repair_power_stack(
     spacing violations on the merged ASAP7 layout (issue #6909), and report
     what was drawn.
 
-    Returns ``status`` (``"repaired"``: at least one patch drawn;
-    ``"clean"``: ran, nothing to repair; ``"skipped"``: did not run,
-    ``reason`` says why -- every non-ASAP7 PDK reports ``"skipped"`` and its
-    GDS is untouched), ``patches`` (total rectangles drawn), and one count
+    Returns ``status`` (``"violations"`` for any targets left, ``"repaired"`` for
+    all targets repaired, ``"clean"`` for no targets, or ``"skipped"`` with a
+    reason for a no-op), ``patches`` (total rectangles drawn), and one count
     triple per family: ``targets`` (geometry the deck's rule would flag),
     ``repaired`` (patched), ``left`` (not safely repairable, reported rather
     than forced). Never raises for absent input.
@@ -494,6 +494,5 @@ def repair_power_stack(
             dbu_um=layout.dbu,
             report=report,
         )
-    if report["patches"]:
-        report["status"] = "repaired"
+    report["status"] = _repair_status(report)
     return report
