@@ -83,8 +83,8 @@ def test_upper_ladder_layer_notch_is_rejected(tmp_path):
 def _channel_macro(tmp_path):
     """One net shaped as a U: a 0.13 um-wide channel (narrower than met1's
     0.14 space rule) between two legs joined at the left edge. The channel
-    notch pre-exists in the merged polygon, so every pad candidate breaks
-    the notch test and the search fails naming the category."""
+    notch *pre-exists* every pad: a clean deck would flag it with no route
+    drawn at all (#6314)."""
     return _make_macro(
         tmp_path,
         [
@@ -96,10 +96,63 @@ def _channel_macro(tmp_path):
     )
 
 
+def _h_macro(tmp_path, post_gap_um=0.6):
+    """Net A as an H set off the 50 um grid used below: two 0.3 um posts
+    joined by a 0.34 um crossbar. The macro is clean -- the open slots above
+    and below the crossbar are ``post_gap_um`` wide -- and the polygon's
+    centre sits on the crossbar, which is the *only* candidate a 50 um grid
+    leaves. The 0.42 um pad landed there protrudes 0.04 um above and below
+    the crossbar, and at the default gap its edge is then 0.09 um from each
+    post's inner wall: a notch the pad itself creates (#6314)."""
+    right = 3.3 + post_gap_um
+    centre_x = (3.0 + right + 0.3) / 2
+    return _make_macro(
+        tmp_path,
+        [
+            (MET1, (3.0, 3.0, 3.3, 4.0)),  # left post
+            (MET1, (right, 3.0, right + 0.3, 4.0)),  # right post
+            (MET1, (3.0, 3.33, right + 0.3, 3.67)),  # crossbar
+        ],
+        [(MET1_PIN, "A", centre_x, 3.5)],
+    )
+
+
+#: One candidate only: no multiple of 50 um falls inside either H macro.
+COARSE = {**ACCESS, "grid_um": 50.0}
+
+
 def test_no_legal_landing_lists_self_notch(tmp_path):
+    # Every candidate (here: the only one) breaks the notch test because the
+    # pad itself wedges 0.09 um from a post wall, so the per-category error
+    # still names ``self_notch`` -- and now it is true that the pad did it.
+    gds = _h_macro(tmp_path)
+    with pytest.raises(GenComposeError, match=r"no legal landing.*self_notch: 1"):
+        _blocks(gds, _spec(["A"], COARSE))
+
+
+def test_self_notch_control_wide_posts_land_at_the_same_candidate(tmp_path):
+    # Same H, posts 1.5 um apart: the lone candidate is legal. Guards the
+    # rejection above against passing for a reason other than the notch.
+    gds = _h_macro(tmp_path, post_gap_um=1.5)
+    landing = _blocks(gds, _spec(["A"], COARSE))["m"]["derived_ports"][0]["landing"]
+    assert (landing["x_um"], landing["y_um"]) == pytest.approx((4.05, 3.5))
+
+
+def test_pre_existing_notch_does_not_reject_every_candidate(tmp_path):
+    # #6314: a notch the macro already carries (a 0.13 um channel between the
+    # two legs) used to fail *every* candidate with ``self_notch``, however far
+    # from the channel -- the error blamed a pad that did nothing. The search
+    # now succeeds, and it must still not accept a pad that makes the channel
+    # narrower: the landing's pad top may not poke into it past y=0.34.
     gds = _channel_macro(tmp_path)
-    with pytest.raises(GenComposeError, match=r"no legal landing.*self_notch: [1-9]"):
-        _blocks(gds, _spec(["A"], ACCESS))
+    landing = _blocks(gds, _spec(["A"], ACCESS))["m"]["derived_ports"][0]["landing"]
+    pad_half_um = 0.21  # 0.42 um met1 pad
+    assert landing["y_um"] + pad_half_um <= 0.34 + 1e-9
+    # The default grid is a quarter pad side (0.105 um). The nearest candidate
+    # to the label (5.0, 0.17) is (5.04, 0.21), but its pad top (0.42) would
+    # narrow the channel to 0.05 um, so it is rejected; (5.04, 0.105) keeps the
+    # pad top at 0.315, inside the leg, and is the nearest legal point.
+    assert (landing["x_um"], landing["y_um"]) == pytest.approx((5.04, 0.105))
 
 
 def test_landing_reports_per_layer_pad_sides(tmp_path):
