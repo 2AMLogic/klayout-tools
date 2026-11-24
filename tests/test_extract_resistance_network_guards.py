@@ -153,6 +153,32 @@ def test_reduction_refuses_terminals_split_into_two_groups():
     assert reduce_terminal_network(pairs) == (None, "pair_resistance_unavailable")
 
 
+def test_reduction_refuses_inaccurate_connected_network():
+    # A four-resistor loop. Effective resistance between any two terminals is
+    # the parallel combination of the two paths around the loop.
+    segments = [1.0, 1e9 / 9, 1.0, 1e9 / 11]
+    total = sum(segments)
+    pairs = [[0.0] * 4 for _ in segments]
+    for i in range(4):
+        for j in range(i + 1, 4):
+            path = sum(segments[i:j])
+            alternate = sum(segments[j:]) + sum(segments[:i])
+            pairs[i][j] = pairs[j][i] = path * alternate / total
+    assert pairs[0][3] == pytest.approx(50_000_000.405)
+    entry = _plan_entry()
+    positions = [(float(i), 0.0) for i in range(4)]
+    graph = entry["resistance_graph"]
+    graph["terminals"] = [f"cuts@{x},{y}" for x, y in positions]
+    graph["pair_resistance_ohm"] = pairs
+    network, _ = _plan(entry, positions)
+    assert network is None
+    assert graph["network"] == {
+        "written": "legacy",
+        "resistor_count": None,
+        "fallback_reason": "singular_system",
+    }
+
+
 def test_reduction_keeps_a_wide_but_connected_spread():
     """Control: a six-decade spread that the drop leaves connected (0-1 at
     1 ohm, 1-2 at 1e6 ohm) must still emit, so the refusals above are not

@@ -3101,10 +3101,10 @@ additive fields, all absent without the flag (byte-identical output):
   net share that device's single position), `mom_rlc_override` (a
   `--mom-rlc-resistance-ohm` substitution won) and `parasitic_variant` (a
   `--parasitic-variant` drop kept the star), which it cannot express. A
-  written reduced network reproduces every `pair_resistance_ohm` entry by
-  construction; a reduction whose numerically-zero-conductance drop would
-  disconnect the terminals is refused (`pair_resistance_unavailable`, the
-  net keeps its legacy network). The net's ground
+  written reduced network reproduces every `pair_resistance_ohm` entry within
+  1e-6 relative tolerance. A disconnected filtered network reports
+  `pair_resistance_unavailable`, and an inaccurate connected reduction reports
+  `singular_system`. Both keep the existing fallback model. The net's ground
   capacitance splits equally across its terminal nodes (the documented
   first-increment rule; per-node capacitance from the graph itself is the
   roadmap's open question).

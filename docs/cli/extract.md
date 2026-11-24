@@ -8390,9 +8390,10 @@ flag) writes the terminal-equivalent network instead:
 `extract_resistance_network.reduce_terminal_network` Kron-reduces the solved
 `pair_resistance_ohm` matrix onto the net's device terminals (one resistor
 per surviving terminal pair, at most `T(T-1)/2` = 2016 at the 64-terminal
-cap), reproducing every pair value by construction (a numerically-zero
-drop that would disconnect the terminals reports `pair_resistance_unavailable`
-and keeps the star instead). The emission matches
+cap). A grounded DC solve checks every emitted pair against the input matrix
+to 1e-6 relative tolerance. A disconnected network reports
+`pair_resistance_unavailable`. An inaccurate connected reduction reports
+`singular_system`. Both retain the existing fallback model. The emission matches
 each device terminal (position proxy `Device.trans`, the same coarseness
 the star/ladder split uses) to its nearest geometry-derived graph terminal
 one-to-one; a count mismatch, an assignment outside the terminals' own

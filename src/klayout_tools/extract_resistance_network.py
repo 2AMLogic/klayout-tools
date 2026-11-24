@@ -18,10 +18,9 @@ Schur complement of a Laplacian it is itself a Laplacian, so every
 it. A full reduction is dense -- ``T`` terminals give at most
 ``T (T-1) / 2`` resistors (2016 at the graph build's ``MAX_GRAPH_TERMINALS``
 = 64 cap) -- and only numerically-zero conductances (``g < 1e-9 * max g``)
-are dropped. A drop that would leave the terminals disconnected (a net
-whose conductances span more than nine decades) is refused as
-``pair_resistance_unavailable`` rather than emitted, so the "every pair
-reproduces the matrix" guarantee holds for every network that is emitted.
+are dropped. The emitted resistors must reproduce the input pair matrix to
+1e-6 relative tolerance in a grounded DC solve. A disconnected network keeps
+its legacy model, as does an inaccurate reduction of an ill-conditioned matrix.
 
 :func:`map_device_terminals` grounds the emission on real nets: a graph
 terminal is a geometry-derived ``"<kind>@<x_um>,<y_um>"`` name (a cut box
@@ -317,40 +316,42 @@ def reduce_terminal_network(
     largest = max(g for _i, _j, g in conductances)
     if largest <= 0.0:
         return None, "singular_system"
-    return _resistors_from_conductances(conductances, largest, n)
+    return _resistors_from_conductances(conductances, largest, finite)
 
 
-def _terminals_connected(terminal_count: int, resistors: list[NetworkResistor]) -> bool:
-    """Whether ``resistors`` join all ``terminal_count`` terminals into one
-    DC component (union-find over the terminal indices)."""
-    parent = list(range(terminal_count))
-
-    def root(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
+def _verify_pair_resistances(
+    resistors: Sequence[NetworkResistor], expected: Sequence[Sequence[float]]
+) -> str | None:
+    """Check the as-written network against each input pair by a grounded DC solve."""
+    n = len(expected)
+    laplacian = [[0.0] * n for _ in range(n)]
     for resistor in resistors:
-        parent[root(resistor.terminal_a)] = root(resistor.terminal_b)
-    return len({root(index) for index in range(terminal_count)}) == 1
+        a, b = resistor.terminal_a, resistor.terminal_b
+        g = 1.0 / resistor.resistance_ohm
+        laplacian[a][a] += g
+        laplacian[b][b] += g
+        laplacian[a][b] -= g
+        laplacian[b][a] -= g
+    grounded = _invert_spd([row[1:] for row in laplacian[1:]])
+    if grounded is None:
+        return "pair_resistance_unavailable"
+    impedance = [[0.0] * n, *[[0.0, *row] for row in grounded]]
+    for i in range(n):
+        for j in range(i):
+            resistance = math.fsum(
+                (impedance[i][i], impedance[j][j], -impedance[i][j], -impedance[j][i])
+            )
+            if not math.isclose(resistance, expected[i][j], rel_tol=1e-6):
+                return "singular_system"
+    return None
 
 
 def _resistors_from_conductances(
-    conductances: list[tuple[int, int, float]], largest: float, terminal_count: int
+    conductances: list[tuple[int, int, float]],
+    largest: float,
+    expected: Sequence[Sequence[float]],
 ) -> tuple[ReducedNetwork | None, str | None]:
-    """The emit decision for one conductance list: one ``1 / g`` resistor
-    per conductance above the numerical-zero threshold, ``singular_system``
-    for a conductance negative enough to demand a negative resistor.
-
-    The ``1e-9`` relative threshold is not "numerically zero" once a net's
-    conductances span more than nine decades: dropping can leave a terminal
-    (or a group of them) with no resistor path to the rest, a DC-floating
-    node in the written netlist and pairs the network cannot reproduce. The
-    surviving resistors must therefore still connect every terminal;
-    otherwise the terminals are effectively in more than one component and
-    the net reports ``pair_resistance_unavailable`` and keeps its legacy
-    network."""
+    """Drop numerically zero conductances, then verify the surviving network."""
     resistors: list[NetworkResistor] = []
     dropped = 0
     for i, j, g in conductances:
@@ -362,8 +363,9 @@ def _resistors_from_conductances(
         resistors.append(NetworkResistor(i, j, 1.0 / g))
     if not resistors:
         return None, "singular_system"
-    if not _terminals_connected(terminal_count, resistors):
-        return None, "pair_resistance_unavailable"
+    refusal = _verify_pair_resistances(resistors, expected)
+    if refusal:
+        return None, refusal
     return ReducedNetwork(tuple(resistors), dropped), None
 
 
