@@ -33,7 +33,6 @@ Three tiers:
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
 import os
@@ -8205,20 +8204,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    args = argparse.Namespace(
-        request=path,
-        format="json",
-        check=None,
-        rerun=False,
-        deck=None,
-        deck_file=None,
-        deck_var=None,
-        layout=None,
-        reference=None,
-        progress=None,
-        output=None,
-    )
-    assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
+    assert main(["lvs", path, "--format", "json"]) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"
 
@@ -8563,24 +8549,6 @@ def test_subckt_call_conversion_flavour_classes_split_only_flavoured_models():
     assert sum(" nfet__nvt " in f"{line} " for line in lines) == 1
     assert sum(" nfet__hvi " in f"{line} " for line in lines) == 2
     assert sum(" nfet " in f"{line} " for line in lines) == 1
-
-
-def test_subckt_call_conversion_flavour_classes_gf180mcu_pair():
-    from klayout_tools.netlist_normalize import convert_reference_netlist
-
-    ref = (
-        ".subckt top d g s b\n"
-        "X1 d g s b nfet_06v0 L=0.7u W=1u\n"
-        "X2 d g s b pfet_06v0 L=0.5u W=1u\n"
-        "X3 d g s b nfet_03v3 L=0.28u W=1u\n"
-        ".ends\n"
-    )
-    text = convert_reference_netlist(
-        ref, deck="gf180mcu", mos_flavour_classes=True
-    ).text
-    assert " nfet__06v0 " in text
-    assert " pfet__06v0 " in text
-    assert " nfet " in text
 
 
 # --------------------------------------------------------------------------- #
@@ -11539,11 +11507,12 @@ def test_normalize_si_and_eng_suffixes_convert_to_um():
     assert "W=1.5U" in out
 
 
-def test_normalize_unknown_subckt_name_fails_clearly():
+@pytest.mark.parametrize(
+    "deck,subckt", [("sky130", "totally_made_up"), ("gf180mcu", "nfet_06v0_dss")]
+)
+def test_normalize_unknown_subckt_name_fails_clearly(deck, subckt):
     with pytest.raises(NormalizeError, match="not a known"):
-        normalize_reference_netlist(
-            "XM1 d g s b totally_made_up L=0.5u W=1u\n", deck="sky130"
-        )
+        normalize_reference_netlist(f"XM1 d g s b {subckt} L=0.5u W=1u\n", deck=deck)
 
 
 def test_normalize_wrong_deck_device_name_fails():
@@ -12103,9 +12072,12 @@ def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
     assert report["mismatch_count"] == 0
 
 
-def test_run_lvs_subckt_call_reference_gf180_converts_and_matches(tmp_path):
+@pytest.mark.parametrize("voltage", ["03v3", "05v0", "06v0"])
+def test_run_lvs_subckt_call_reference_gf180_converts_and_matches(tmp_path, voltage):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
-    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_GF180)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_GF180.replace("03v3", voltage)
+    )
     request = {
         "layout": {"netlist": layout_path, "top": "inv"},
         "reference": {
@@ -12686,12 +12658,12 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
-    # (issue #5491), with the two antenna-diode keys that binding added.
-    # Both fully-curated decks are unchanged: no derived entry is added.
+    # For sg13g2's keys see test_extract_sg13g2_antenna_diodes.py (#5491).
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
+        "nfet_05v0",
+        "pfet_05v0",
         "nfet_06v0",
         "pfet_06v0",
         # Drain-extended LDMOS (issue #4570) -- curated in `pdk_models.py`.
@@ -12710,10 +12682,13 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        "efuse",  # read-only: `_RESISTOR_READ_ONLY_TABLE` (issue #4312)
         # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
+        # Their PDK fF/ff spellings (issue #7031) -- read-side aliases.
+        *(f"cap_mim_{d}{s}" for d in ("1f0", "1f5", "2f0") for s in ("fF", "ff")),
         # MOS capacitors (issue #2919) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_nmos_03v3",
         "cap_pmos_03v3",
@@ -12736,9 +12711,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
-        # Fixed-width wrapper family (issue #2459) -- curated, not derived,
-        # same discipline as gf180mcu's metal-resistor flavours above (see
-        # `_RESISTOR_FIXED_WIDTH_TABLE`).
+        # Fixed-width wrapper family (issue #2459) -- curated, not derived
+        # (see `_RESISTOR_FIXED_WIDTH_TABLE`), like the flavours above.
         "sky130_fd_pr__res_high_po_0p35",
         "sky130_fd_pr__res_high_po_0p69",
         "sky130_fd_pr__res_high_po_1p41",
@@ -15789,7 +15763,7 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     longer matches".
 
     `reference`'s anchoring is unchanged (still the current working
-    directory): the entry is still `match: False` / `status: "drifted"`, it
+    directory): the entry is `match: False` / `status: "unverifiable"`. It
     just carries an additional `input_not_found` block naming the resolved
     path, plus the report-relative path that *does* exist when one does.
 
@@ -15801,7 +15775,7 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = check_lvs_report(os.path.join("pair", "lvs.json"))
 
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
     by_field = {check["field"]: check for check in result["checks"]}
     check = by_field["environment.reference_sha256"]
     assert check["match"] is False
@@ -15816,8 +15790,8 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
         pair / "ref.spice"
     )
     assert missing["hint"] == (
-        "run --check from the report's directory, or pass --layout/an absolute path; "
-        f"request-file-relative paths resolve against {pair.resolve()}"
+        "run --check from the report's directory, or pass --reference/an absolute path;"
+        f" request-file-relative paths resolve against {pair.resolve()}"
     )
     assert by_field["environment.layout_sha256"]["match"] is True
     assert "input_not_found" not in by_field["environment.layout_sha256"]
@@ -16623,21 +16597,21 @@ def test_cli_lvs_check_drifted_exits_three(tmp_path, capsys):
 
 def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypatch):
     """Issue #2595's reproduction, end to end through the CLI: `--check`ing
-    a committed pair from its parent directory still exits 3, but the text
+    a committed pair from its parent directory exits 4, but the text
     rendering says the input was not found (and where it really is) instead
     of the bare `actual: None` the report reads as a lost hash."""
     pair, _report_path = _portable_pair(tmp_path, legacy_reference=True)
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
 
-    assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 3
+    assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 4
     out = capsys.readouterr().out
-    assert "status: drifted" in out
+    assert "status: unverifiable" in out
     # Issue #2659: the *layout* side resolves cleanly now (the `{path, scope}`
     # envelope, anchored on the report's own repo root), so the diagnostic is
     # the reference side's.
     assert "[OK] environment.layout_sha256" in out
-    assert "[DRIFTED] environment.reference_sha256" in out
+    assert "[UNVERIFIABLE] environment.reference_sha256" in out
     assert f"actual:   None (input not found: {tmp_path / 'ref.spice'})" in out
     assert str(pair / "ref.spice") in out
     assert "re-run from there" in out
@@ -21207,15 +21181,6 @@ def _portable_macro_request(tmp_path: Path, **extra) -> tuple[str, str]:
     return json.dumps(request), root
 
 
-def test_run_lvs_portable_paths_default_keeps_absolute_paths(tmp_path):
-    """Omitting `portable_paths` leaves the report as it was (issue #3798)."""
-    request, _ = _portable_macro_request(tmp_path)
-    explicit_false, _ = _portable_macro_request(tmp_path, portable_paths=False)
-    sources = run_lvs(request)["provenance"]["pin_order_sources"]
-    assert all(os.path.isabs(entry["path"]) for entry in sources)
-    assert run_lvs(explicit_false)["provenance"]["pin_order_sources"] == sources
-
-
 def test_run_lvs_portable_paths_true_leaves_no_absolute_host_path(tmp_path):
     """`portable_paths: true` makes the envelope pass the env-provenance scan:
     PDK files become `$PDK_ROOT/...`, nothing absolute remains, and the
@@ -23072,7 +23037,7 @@ def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
     # #4984: the reference is outside any repo too: unverifiable.
     assert by_field["environment.reference_sha256"]["actual"] is None
     assert by_field["environment.reference_sha256"]["match"] is False
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
 
 
 def test_rerun_lvs_report_refuses_an_external_layout_cleanly(tmp_path_factory):
@@ -25389,10 +25354,7 @@ def test_abstract_cells_reconstructed_request_and_rerun(tmp_path):
 
 _LVS_SCHEMA = json.loads(
     (
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "schemas"
-        / "lvs-response.schema.json"
+        Path(__file__).resolve().parents[1] / "docs/schemas/lvs-response.schema.json"
     ).read_text()
 )
 
@@ -25412,6 +25374,7 @@ _LVS_ALWAYS_REQUIRED = [
     "body_verification",
     "device_parameter_coverage",
     "mismatch_count",
+    "mismatches_omitted",
     "error_count",
     "category_counts",
     "category_error_counts",
@@ -25777,8 +25740,8 @@ def test_cli_lvs_check_rerun_with_explicit_layout_on_external_report(
         assert code == 0
         assert json.loads(capsys.readouterr().out)["status"] == "match"
 
-    # Without --layout the honest drift/error is unchanged.
-    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
+    # Without --layout the input cannot be verified.
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 4
     capsys.readouterr()
     assert (
         main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 1

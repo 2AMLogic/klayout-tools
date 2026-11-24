@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from .env_provenance import find_repo_root, repo_relative_path
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import path_envelope as _log_path
 
 
 def _captured_text(value: str | bytes | None) -> str:
@@ -20,72 +22,25 @@ def _captured_text(value: str | bytes | None) -> str:
     return value or ""
 
 
-def _log_path(path: Path | None) -> dict[str, Any]:
-    root = find_repo_root()
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
-
-
-#: The stderr line the generated wrapper (``scripts/install-openroad-docker.sh``)
-#: emits as soon as the container runtime records the invocation's container
-#: id (issue #5726). The wrapper's background poller prints
-#: ``klt-openroad-cid <64-hex>`` exactly once; scanning for it is how the
-#: engine attributes a container -- including one that outlives this process
-#: after an uncatchable SIGKILL -- to this invocation. A non-Docker
-#: ``openroad`` never produces the line, and the id stays ``null``.
-_CONTAINER_ID_RE = re.compile(r"^klt-openroad-cid ([0-9a-fA-F]{64})$", re.MULTILINE)
-
-#: How long :func:`_poll_container_id` waits for the wrapper's marker line
-#: before giving up for the launch-time record. The wrapper prints it as
-#: soon as the container is created -- sub-second on a warm image, which is
-#: the steady state (the image is pulled once per host). Cold pulls exceed
-#: any sane bound; :meth:`_LiveLogs.finish` re-scans the completed stderr
-#: for them. A bare (non-wrapper) ``openroad`` never prints the marker, so
-#: this whole wait is wasted on such hosts -- bounded here, and skipped
-#: entirely once the process has already exited.
+# A cold image pull may delay creation of Docker's cidfile beyond this window.
 _CONTAINER_ID_WAIT_S = 2.0
-
-#: Seconds between polls of the growing stderr log.
 _CONTAINER_ID_POLL_INTERVAL_S = 0.05
-
-
-def _scan_container_id(stderr_text: str) -> str | None:
-    """The container id a wrapper recorded on stderr, or ``None``."""
-    match = _CONTAINER_ID_RE.search(stderr_text)
-    return match.group(1).lower() if match else None
 
 
 def _poll_container_id(
     logs: _LiveLogs, proc: subprocess.Popen, wait_s: float
 ) -> str | None:
-    """Best-effort container id from the stderr log *while the stage runs*.
-
-    Reads whatever the wrapper has flushed to the retained ``stderr.log``
-    so far, in a bounded loop: the marker line appears once the runtime
-    creates the container (after image resolution, so a cold pull delays
-    it past this bound -- :meth:`_LiveLogs.finish` re-scans the full
-    stderr then). Gives up early when the process has already exited,
-    so fast failures (an unreachable runtime, ``openroad -version``) pay
-    nothing like the full bound. Returns ``None`` when the stderr stream
-    is pipe-backed (nothing retained to read while running) or the
-    directory itself could not be created.
-    """
-    if logs.directory is None or logs.handles.get("stderr") is None:
+    if logs.directory is None:
         return None
-    path = logs.directory / "stderr.log"
     deadline = time.monotonic() + wait_s
     while True:
-        try:
-            container_id = _scan_container_id(
-                path.read_bytes().decode("utf-8", errors="replace")
-            )
-        except OSError:
-            return None
-        if container_id is not None:
+        container_id = logs.read_container_id()
+        if (
+            container_id is not None
+            or proc.poll() is not None
+            or time.monotonic() >= deadline
+        ):
             return container_id
-        if proc.poll() is not None or time.monotonic() >= deadline:
-            return None
         time.sleep(_CONTAINER_ID_POLL_INTERVAL_S)
 
 
@@ -99,7 +54,7 @@ def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> Non
 
 def _write_log_artifact(
     directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
-) -> dict[str, Any]:
+) -> Path | None:
     """Create a retained artifact exclusively (never overwrite)."""
     path = directory / name
     data = content.encode("utf-8") if isinstance(content, str) else content or b""
@@ -108,13 +63,13 @@ def _write_log_artifact(
             handle.write(data)
     except OSError as exc:
         _retention_error(record, name, exc)
-        return _log_path(None)
-    return _log_path(path)
+        return None
+    return path
 
 
 def _replace_log_artifact(
     directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
-) -> dict[str, Any]:
+) -> Path | None:
     """Atomically (re)write a retained artifact (issue #5726).
 
     ``finish()`` overwrites the launch-time snapshot of ``invocation.json``;
@@ -134,8 +89,8 @@ def _replace_log_artifact(
             tmp.unlink()
         except OSError:
             pass
-        return _log_path(None)
-    return _log_path(path)
+        return None
+    return path
 
 
 class _LiveLogs:
@@ -154,34 +109,36 @@ class _LiveLogs:
         *,
         invocation_id: str,
         script_hash: str | None,
+        repo_root: RepoRoot = ANCHOR_CWD,
     ) -> None:
+        self.repo_root = repo_root
         self.directory = (
             Path(script_path).absolute().parent / "openroad-logs" / invocation_id
         )
         self.record: dict[str, Any] = {
             "invocation_id": invocation_id,
             "script_name": Path(script_path).name,
-            "script_path": _log_path(Path(script_path)),
+            "script_path": _log_path(Path(script_path), repo_root=self.repo_root),
             "script_sha256": script_hash,
-            "metrics_path": _log_path(Path(metrics_path)),
+            "metrics_path": _log_path(Path(metrics_path), repo_root=self.repo_root),
             "outcome": None,
             "returncode": None,
             "container_id": None,
-            "directory": _log_path(None),
-            "stdout_path": _log_path(None),
-            "stderr_path": _log_path(None),
-            "metadata_path": _log_path(None),
+            "directory": _log_path(None, repo_root=self.repo_root),
+            "stdout_path": _log_path(None, repo_root=self.repo_root),
+            "stderr_path": _log_path(None, repo_root=self.repo_root),
+            "metadata_path": _log_path(None, repo_root=self.repo_root),
             "retention_errors": [],
         }
         self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
         self._snapshot_written = False
         try:
-            self.directory.mkdir(parents=True, exist_ok=False)
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=False)
         except OSError as exc:
             _retention_error(self.record, "directory", exc)
             self.directory = None  # type: ignore[assignment]
             return
-        self.record["directory"] = _log_path(self.directory)
+        self.record["directory"] = _log_path(self.directory, repo_root=self.repo_root)
         for stream in self._STREAMS:
             try:
                 # Unbuffered: the child writes through the shared descriptor.
@@ -190,6 +147,34 @@ class _LiveLogs:
                 )
             except OSError as exc:
                 _retention_error(self.record, f"{stream}.log", exc)
+
+    def wrapper_environment(self) -> dict[str, str]:
+        env = dict(os.environ, KLT_OPENROAD_INVOCATION_ID=self.record["invocation_id"])
+        env.pop("KLT_OPENROAD_CIDFILE", None)
+        if self.directory is not None:
+            env["KLT_OPENROAD_CIDFILE"] = str(self.directory / "container.cid")
+        return env
+
+    def read_container_id(self) -> str | None:
+        """Read the runtime's full ID from this invocation's dedicated file."""
+        if self.directory is None:
+            return None
+        try:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            fd = os.open(self.directory / "container.cid", flags)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                data = stream.read(66)
+        except OSError:
+            return None
+        if re.fullmatch(rb"[0-9a-f]{64}\n?", data):
+            return data.rstrip(b"\n").decode("ascii")
+        return None
 
     def popen_streams(self) -> dict[str, Any]:
         return {
@@ -215,17 +200,20 @@ class _LiveLogs:
         if self.directory is None:
             return
         self.record["outcome"] = "running"
-        self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
+        self.record["metadata_path"] = _log_path(
+            self.directory / "invocation.json", repo_root=self.repo_root
+        )
         writer = (
             _replace_log_artifact if self._snapshot_written else _write_log_artifact
         )
         self._snapshot_written = True
-        self.record["metadata_path"] = writer(
+        written = writer(
             self.directory,
             "invocation.json",
             json.dumps(self.record, indent=2) + "\n",
             self.record,
         )
+        self.record["metadata_path"] = _log_path(written, repo_root=self.repo_root)
 
     def finish(
         self,
@@ -256,7 +244,7 @@ class _LiveLogs:
             finally:
                 handle.close()
             path = self.directory / f"{stream}.log"
-            self.record[f"{stream}_path"] = _log_path(path)
+            self.record[f"{stream}_path"] = _log_path(path, repo_root=self.repo_root)
             try:
                 data[stream] = path.read_bytes()
             except OSError as exc:
@@ -265,18 +253,16 @@ class _LiveLogs:
         self.record["outcome"] = outcome
         self.record["returncode"] = returncode
         if not self.record.get("container_id"):
-            # Re-scan the completed stderr: a cold image pull delays the
-            # wrapper's marker past the launch-time poll bound, but the
-            # marker lands in the retained log whenever it appears.
-            self.record["container_id"] = _scan_container_id(
-                _captured_text(data.get("stderr"))
-            )
+            self.record["container_id"] = self.read_container_id()
         if self.directory is not None:
-            self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
-            self.record["metadata_path"] = _replace_log_artifact(
+            self.record["metadata_path"] = _log_path(
+                self.directory / "invocation.json", repo_root=self.repo_root
+            )
+            written = _replace_log_artifact(
                 self.directory,
                 "invocation.json",
                 json.dumps(self.record, indent=2) + "\n",
                 self.record,
             )
+            self.record["metadata_path"] = _log_path(written, repo_root=self.repo_root)
         return data, self.record

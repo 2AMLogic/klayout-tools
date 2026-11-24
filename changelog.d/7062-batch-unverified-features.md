@@ -1,0 +1,1 @@
+- Batch dry-runs and submissions warn before launch when the AMI manifest has no candidate image for checking mandatory runner features (#7062).

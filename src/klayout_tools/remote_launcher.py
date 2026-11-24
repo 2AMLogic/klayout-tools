@@ -104,19 +104,14 @@ USER_MANIFEST_PATH: Path = Path(
     "~/.config/klt/remote-sim-ami-manifest.json"
 ).expanduser()
 
-#: Step 4 (final fallback) of :func:`load_ami_manifest`'s resolution order:
-#: <repo root>/data/remote-sim-ami-manifest.json. Mirrors kb.py's
-#: DEFAULT_KB_ROOT convention -- walk up from this module's own location so
-#: the module works the same from an installed wheel's source checkout or a
-#: repo clone; every function also accepts an explicit path override for
-#: tests. A tool-installed ``klt`` (uv tool / pipx / pip) resolves this
-#: inside the installed package's own data dir -- the historically sole
-#: location, now behind :data:`USER_MANIFEST_PATH`/:data:`AMI_MANIFEST_ENV_VAR`.
-DEFAULT_MANIFEST_PATH: Path = (
-    Path(__file__).resolve().parent.parent.parent
-    / "data"
-    / "remote-sim-ami-manifest.json"
-)
+# The wheel bundles the published manifest inside the package. In a source
+# checkout the canonical file lives at the repository root under data/.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_MANIFEST_FILE = Path("data") / "remote-sim-ami-manifest.json"
+DEFAULT_MANIFEST_PATH: Path = _PACKAGE_DIR / _MANIFEST_FILE
+if _PACKAGE_DIR.parent.name == "src" and not DEFAULT_MANIFEST_PATH.is_file():
+    DEFAULT_MANIFEST_PATH = _PACKAGE_DIR.parent.parent / _MANIFEST_FILE
+
 
 #: PDK combinations the AMI build pipeline maintains (per #264's acceptance
 #: criteria, extended to SG13G2 by #2573). Not every historical PDK klt
@@ -716,20 +711,19 @@ def published_runner_identities(
     region: str | None,
     manifest_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """The runner identity of every image the manifest currently publishes
-    for ``pdk``/``region`` -- the most recently built entry per
-    ``(pdk key, region)`` pair, exactly the entry :func:`resolve_ami` would
-    pick for that pair (issue #2851).
+    """The runner identity of every image the manifest publishes for
+    ``pdk``/``region`` -- the newest entry per ``(pdk key, region)`` pair,
+    exactly what :func:`resolve_ami` picks (issue #2851).
 
     ``None`` for ``pdk`` or ``region`` widens the selection to every PDK key
     or every region (the batch fleet chooses its own Spot pool, so a client
     that does not pin a region cannot know which region's image it gets).
     Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
-    "pdk_variants", "open_pdks_commit"}``; the last four are ``None`` for a
-    legacy entry (``pdk_variants``: the PDK variant directories the image
-    ships, issue #3251; ``open_pdks_commit``: the pinned open_pdks build,
-    issue #6156). Raises :class:`RemoteLaunchError` when the manifest cannot
-    be loaded or ``pdk`` has no AMI family, like :func:`resolve_ami`.
+    "pdk_variants", "open_pdks_commit", "ngspice_version", "pdk_snapshot"}``.
+    Legacy entries report missing fields as ``None``. The PDK fields identify
+    installed variants and the open_pdks build. The simulator version feeds
+    the pre-submit engine pin check. Raises :class:`RemoteLaunchError` when
+    the manifest cannot be loaded or ``pdk`` has no AMI family.
     """
     key = ami_pdk_key(pdk) if pdk else None
     manifest = load_ami_manifest(manifest_path)
@@ -741,9 +735,8 @@ def published_runner_identities(
             continue
         if region is not None and image.get("region") != region:
             continue
-        groups.setdefault((str(image.get("pdk")), str(image.get("region"))), []).append(
-            image
-        )
+        pair = (str(image.get("pdk")), str(image.get("region")))
+        groups.setdefault(pair, []).append(image)
     identities = []
     for (image_pdk, image_region), candidates in sorted(groups.items()):
         latest = _latest_image(candidates)
@@ -756,6 +749,8 @@ def published_runner_identities(
                 "klt_ref": _manifest_runner_field(latest, "klt_ref"),
                 "pdk_variants": _manifest_pdk_variants(latest),
                 "open_pdks_commit": _manifest_runner_field(latest, "open_pdks_commit"),
+                "ngspice_version": _manifest_runner_field(latest, "ngspice_version"),
+                "pdk_snapshot": _manifest_runner_field(latest, "pdk_snapshot"),
             }
         )
     return identities

@@ -36,6 +36,8 @@ def _print_coverage_gaps(coverage: dict) -> None:
         for record in skipped_requested:
             print(f"  {record['id']}: {record['reason']}")
 
+    for warning in coverage.get("implant_warnings", []):
+        print(f"warning: {warning['cell']}: {warning['description']}")
     unchecked_layers = coverage["layers_in_stream_without_rules"]
     if unchecked_layers:
         print(f"unchecked layers in stream: {len(unchecked_layers)}")
@@ -167,6 +169,9 @@ def _print_crosscheck_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"status: {report['status']}")
     print(f"comparison: {comparison['state']}")
+    # Issue #5720: which not_comparable cause applies; absent on other states.
+    if comparison.get("reason"):
+        print(f"  reason: {comparison['reason']}")
     error = comparison.get("error")
     if error:
         print(f"  native run did not complete: {error['message']}")

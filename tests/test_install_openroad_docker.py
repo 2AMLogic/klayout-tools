@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,39 +23,17 @@ SCRIPT = (
 )
 
 #: The container id the stub writes into the `--cidfile` (simulating the
-#: runtime) -- 64 hex, the shape the engine's marker scan expects.
+#: runtime) -- 64 hex, the full ID Docker writes.
 STUB_CID = "a1c" + "0" * 58 + "fe1"
 assert len(STUB_CID) == 64
 
-STUB = """#!/usr/bin/env bash
-printf '%s\\n' "$@" >>"$DOCKER_ARGV_LOG"
-prev=""
-for a in "$@"; do
-    if [[ "$prev" == "--cidfile" ]]; then
-        printf '%s' "STUB_CID_STRING" >"$a"
-    fi
-    prev="$a"
-done
-# Drain the client's stdin into a sink when asked: the wrapper must forward it.
-if [[ "$1" == "run" && -n "${DOCKER_STDIN_SINK:-}" ]]; then
-    cat >>"$DOCKER_STDIN_SINK"
-fi
-# Hold only on `run`: the "container" is what runs long; a kill must
-# complete immediately like the real runtime's.
-if [[ "$1" == "run" && -n "${DOCKER_HOLD_S:-}" ]]; then
-    if [[ -n "${STUB_RUNNING:-}" ]]; then
-        echo "$PPID" >"$STUB_RUNNING.tmp"
-        mv "$STUB_RUNNING.tmp" "$STUB_RUNNING"
-    fi
-    sleep "$DOCKER_HOLD_S"
-elif [[ "$1" == "kill" && "$2" == "STUB_CID_STRING" && -n "${STUB_RUNNING:-}" ]]; then
-    rm -f "$STUB_RUNNING"
-fi
-exit "${DOCKER_EXIT_CODE:-0}"
-""".replace("STUB_CID_STRING", STUB_CID)
+STUB = (Path(__file__).parent / "fixtures/openroad_wrapper/docker_stub.sh").read_text()
+STUB = STUB.replace("STUB_CID_STRING", STUB_CID)
 
 
-def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
+def _install(
+    tmp_path: Path, extra_env: dict[str, str | None], *, klt_stub: str | None = None
+) -> list[str]:
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir(exist_ok=True)
     docker = stub_dir / "docker"
@@ -62,7 +41,9 @@ def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     # Keep host PDK discovery out of the recorded mounts, even with HOME unset.
     klt = stub_dir / "klt"
-    klt.write_text("#!/bin/sh\nexit 1\n")
+    if klt_stub is None:
+        klt_stub = "exit 1"
+    klt.write_text(f"#!/bin/sh\n{klt_stub}\n")
     klt.chmod(klt.stat().st_mode | stat.S_IXUSR)
     dest = tmp_path / "dest"
     log = tmp_path / "argv.log"
@@ -215,7 +196,7 @@ def test_wrapper_group_sigterm_kills_recorded_container(tmp_path: Path) -> None:
                 break  # stub has logged the invocation and written the cid
             assert time.monotonic() < deadline, "wrapper never started the client"
             time.sleep(0.05)
-        time.sleep(0.2)  # let the wrapper reach its `wait` and the poller spin up
+        time.sleep(0.2)  # let the wrapper reach its `wait`
         os.killpg(proc.pid, signal.SIGTERM)
         assert proc.wait(timeout=30) == 143
         lines = run_log.read_text().splitlines()
@@ -270,7 +251,7 @@ def test_driver_group_signal_reaps_wrapper_container(
                     STUB_CID in p.read_text()
                     for p in tmp_path.glob(
                         "openroad-logs/*/"
-                        + ("invocation.json" if poll_s else "stderr.log")
+                        + ("invocation.json" if poll_s else "container.cid")
                     )
                 ):
                     break
@@ -295,31 +276,53 @@ def test_driver_group_signal_reaps_wrapper_container(
         driver.wait(timeout=5)
 
 
-def test_wrapper_marker_line_carries_the_container_id(tmp_path: Path) -> None:
-    """The poller emits `klt-openroad-cid <id>` on the wrapper's stderr once
-    the runtime records the cid file -- the line the engine scans for."""
-    _install(tmp_path, {"TMPDIR": str(tmp_path)})
-    wrapper = tmp_path / "dest" / "openroad"
-    (tmp_path / "run-argv.log").unlink(missing_ok=True)
-    env = _wrapper_env(
+def test_wrapper_uses_the_invocations_cidfile_and_label(tmp_path: Path) -> None:
+    cidfile = tmp_path / "container.cid"
+    argv = _install(
         tmp_path,
-        # Hold the client briefly so the poller's tick lands while the
-        # client still lives (real containers live for the whole stage).
-        {"DOCKER_HOLD_S": "1"},
+        {
+            "TMPDIR": str(tmp_path),
+            "KLT_OPENROAD_CIDFILE": str(cidfile),
+            "KLT_OPENROAD_INVOCATION_ID": "this-invocation",
+        },
     )
-    completed = subprocess.run(
-        [str(wrapper), "-version"],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=60,
+    assert argv[argv.index("--cidfile") + 1] == str(cidfile)
+    assert (
+        argv[argv.index("--label") + 1]
+        == "org.klayout-tools.openroad-invocation=this-invocation"
     )
-    assert completed.returncode == 0
-    assert f"klt-openroad-cid {STUB_CID}" in completed.stderr.splitlines()
+    assert cidfile.read_text() == STUB_CID
 
 
 def _mounts(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="PDK discovery requires jq"
+)
+
+
+@requires_jq
+def test_wrapper_mounts_pdk_find_root_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "pdkstore"
+    (tmp_path / "pdk-find.json").write_text(json.dumps({"root": str(root)}))
+    argv = _install(
+        tmp_path,
+        {},
+        klt_stub='[ "$*" = "pdk find --format json" ] && cat "$HOME/pdk-find.json"',
+    )
+    assert f"{root}:{root}:ro" in _mounts(argv)
+
+
+@requires_jq
+def test_wrapper_skips_pdk_mount_when_pdk_find_omits_root(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {}, klt_stub="echo '{}'")
+    cwd = tmp_path / "cwd"
+    cache = tmp_path / ".cache" / "klt"
+    assert sorted(_mounts(argv)) == sorted(
+        [f"{cwd}:{cwd}", "/tmp:/tmp", f"{cache}:{cache}:ro"]
+    )
 
 
 def test_wrapper_mounts_default_klt_cache_root(tmp_path: Path) -> None:

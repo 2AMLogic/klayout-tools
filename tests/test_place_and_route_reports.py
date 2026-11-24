@@ -129,9 +129,9 @@ def test_final_route_artifacts_and_metrics_are_authoritative(
 
     def append_style_run(cmd, **kwargs):
         completed = base_run(cmd, **kwargs)
-        if len(cmd) > 5 and cmd[5].endswith("_route.tcl"):
+        if len(cmd) > 5 and cmd[-1].endswith("_route.tcl"):
             route_calls[:] = _append_route_outputs(
-                _script_lines(cmd[5]), cmd[4], final_records
+                _script_lines(cmd[-1]), cmd[-2], final_records
             )
         return completed
 
@@ -182,10 +182,10 @@ def test_missing_final_report_does_not_fall_back_to_engine_or_earlier_pass(
 
     def missing_report_run(cmd, **kwargs):
         completed = base_run(cmd, **kwargs)
-        if len(cmd) > 5 and cmd[5].endswith("_route.tcl"):
+        if len(cmd) > 5 and cmd[-1].endswith("_route.tcl"):
             calls = [
                 shlex.split(line)
-                for line in _script_lines(cmd[5])
+                for line in _script_lines(cmd[-1])
                 if line.startswith("detailed_route ")
             ]
             Path(calls[0][2]).write_text(_REPORTED_RECORD)

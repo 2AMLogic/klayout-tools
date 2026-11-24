@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+from ._jsonnum import is_int
 from ._vendor import mutation_variants as _mutation_variants
 
 #: `<proposals>` top-level required fields (spike §3b). `schema` is not
@@ -146,7 +147,7 @@ def _entry_errors(position: int, entry: dict[str, Any]) -> list[str]:
     for field in ("index", "line"):
         if field in entry:
             value = entry[field]
-            if not isinstance(value, int) or isinstance(value, bool):
+            if not is_int(value):
                 errors.append(f"{prefix}.{field} must be an integer")
     for field in ("category", "file"):
         if field in entry:
@@ -220,7 +221,7 @@ def parse_mutation_proposals(
                 )
                 continue
             index = entry.get("index")
-            if isinstance(index, int) and not isinstance(index, bool):
+            if is_int(index):
                 indices.append(index)
             entry_errors = _entry_errors(position, entry)
             errors.extend(entry_errors)
@@ -265,15 +266,15 @@ def load_mutation_proposals(path: str) -> tuple[list[str], list[_ProposalRecord]
 def _index_errors(indices: list[int]) -> list[str]:
     """One message per duplicate or non-positive ``index`` (spike §3b)."""
     seen: set[int] = set()
-    errors: list[str] = []
+    invalid: dict[int, None] = {}
     for index in indices:
         if index <= 0 or index in seen:
-            errors.append(
-                "mutation proposals[].index must be unique and positive "
-                f"(got {index!r})"
-            )
+            invalid[index] = None
         seen.add(index)
-    return errors
+    return [
+        f"mutation proposals[].index must be unique and positive (got {index!r})"
+        for index in invalid
+    ]
 
 
 def _validate_proposal_indices(proposals: list[_ProposalRecord]) -> None:
@@ -290,7 +291,7 @@ def _scope_errors(scope: list[str], request_sources: list[str]) -> list[str]:
     """The scope-subset failure, naming both the unmatched entries and the
     ``request.sources`` strings actually available (matching stays an exact
     string compare -- issue #5679 only improves the diagnostic)."""
-    missing = [entry for entry in scope if entry not in request_sources]
+    missing = dict.fromkeys(entry for entry in scope if entry not in request_sources)
     if not missing:
         return []
     available = ", ".join(request_sources) if request_sources else "(none)"

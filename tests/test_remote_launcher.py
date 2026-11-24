@@ -274,11 +274,9 @@ def test_resolve_ami_accepts_sg13g2_variant(tmp_path):
 def test_resolve_ami_sg13g2_names_region_when_no_published_ami(tmp_path):
     """Acceptance criterion 5 (#2573): once SG13G2 is registered in
     `SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES`, a region with no published SG13G2
-    manifest entry already gets the region-aware "no published AMI for
-    pdk=... region=..." message with no new error-handling code -- this is a
-    regression test for that claim, not new behavior. Mirrors
-    `test_resolve_ami_missing_entry_names_both_variant_and_key`'s gf180mcu
-    case."""
+    entry already gets the region-aware "no published AMI for pdk=...
+    region=..." message -- a regression test for that claim, not new
+    behavior. Mirrors `test_resolve_ami_missing_entry_names_both_variant_and_key`."""
     manifest = _write_manifest(
         tmp_path,
         [
@@ -1770,7 +1768,7 @@ def test_resolve_ami_unusable_klt_version_reads_as_unknown(tmp_path, value):
 def test_manifest_schema_accepts_legacy_and_new_entries():
     _validate_manifest([_entry()])
     _validate_manifest([_entry(klt_version="0.7.0", klt_ref="v0.7.0")])
-    # The checked-in manifest (all legacy entries) stays valid.
+    # The checked-in manifest stays valid against the schema.
     shipped = json.loads(
         (_REPO_ROOT / "data" / "remote-sim-ami-manifest.json").read_text()
     )
@@ -1819,6 +1817,8 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "klt_ref": "v0.7.0",
             "pdk_variants": None,
             "open_pdks_commit": None,
+            "ngspice_version": "46",
+            "pdk_snapshot": "sky130A-2026.10.01",
         }
     ]
     any_region = rl.published_runner_identities("sky130A", None, manifest)

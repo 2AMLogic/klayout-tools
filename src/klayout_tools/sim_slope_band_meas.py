@@ -33,15 +33,15 @@ token from :data:`ERROR_CODES` -- never a silent pass or a substituted value.
 
 from __future__ import annotations
 
-import math
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_slope_band
+from . import sim_measurement_kind, sim_slope_band
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``slope_band`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -75,7 +75,7 @@ _FORMS = other_forms("slope_band")
 
 def is_slope_band(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``slope_band``."""
-    return spec.get("slope_band") is not None
+    return sim_measurement_kind.declares(spec, "slope_band")
 
 
 def slope_band_measurements(
@@ -90,15 +90,6 @@ def normalize_selector(selector: Any) -> str | None:
         return None
     match = _SELECTOR_RE.match(selector)
     return None if match is None else f"v({match.group(1).lower()})"
-
-
-def _is_number(value: Any) -> bool:
-    """A finite real number. ``bool`` is excluded: ``True`` is not a slope."""
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
 
 
 def _pair(spec: dict[str, Any]) -> tuple[str, str]:
@@ -185,7 +176,7 @@ def validate_slope_band_spec(name: Any, body: Any) -> None:
                 f"whitespace, comma or parenthesis); got {body.get(key)!r}"
             )
     for key in _NUMBER_KEYS:
-        if not _is_number(body.get(key)):
+        if not is_finite_number(body.get(key)):
             raise SimError(
                 f"measurement '{name}': slope_band.{key} must be a finite "
                 f"number; got {body.get(key)!r}"
@@ -212,22 +203,16 @@ def validate_slope_band_context(
     declared = slope_band_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'slope_band', which "
-            f"reduces a swept transfer curve and so requires analysis.kind "
-            f'"dc" (got {analysis.get("kind")!r})'
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a slope_band entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="slope_band",
+        required="dc",
+        explanation="reduces a swept transfer curve",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a slope_band entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +221,7 @@ def validate_slope_band_context(
 
 
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"slope_band_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, "slope_band", index)
 
 
 def control_lines(
@@ -284,26 +269,17 @@ class SlopeBandOutcome:
 def _read_pair(raw_path: str) -> _Pair | SlopeBandOutcome:
     """One pair's ``(xs, ys)`` from its rawfile, or a pair-level failure
     outcome (the caller prefixes the measurement name)."""
-    if not os.path.isfile(raw_path):
-        return SlopeBandOutcome(
-            code="slope_band_vector_missing",
-            error=(
-                "its x or y vector did not resolve against this DC analysis's "
-                "saved vectors (no rawfile was written) -- check the node "
-                "names, and that options.save_mode does not omit them"
-            ),
-        )
-    try:
-        raw = sim_raw.read_complex_ascii_rawfile(raw_path)
-    except sim_raw.RawFileError as exc:
-        return SlopeBandOutcome(
-            code="slope_band_raw_invalid", error=f"could not read its rawfile: {exc}"
-        )
-    if len(raw.names) != 3 or not raw.points:
-        return SlopeBandOutcome(
-            code="slope_band_raw_invalid",
-            error="its rawfile must hold a sweep axis, x and y with samples",
-        )
+    raw, error = sim_measurement_kind.read_complex_rawfile(
+        raw_path,
+        form="slope_band",
+        columns=3,
+        vector_desc="x or y",
+        analysis_label="DC",
+        expected_columns="a sweep axis, x and y",
+    )
+    if error is not None:
+        return SlopeBandOutcome(code=error[0], error=error[1])
+    assert raw is not None
     return [z.real for z in raw.column(1)], [z.real for z in raw.column(2)]
 
 
@@ -381,43 +357,6 @@ def slope_band_measurement_result(
     failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from :data:`ERROR_CODES`."""
-    from . import sim as _sim
-
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no slope_band value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "slope_band_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "slope_band_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        diagnostic = {
-            "severity": "error",
-            "code": "measurement",
-            "message": f"[{reason}] {message}",
-        }
-        return result, [diagnostic]
-    m_status, margin, grading = _sim._grade_measurement_value(spec, outcome.value)
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "slope_band": outcome.report(spec),
-    }
-    return result, grading
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="slope_band", report_with_spec=True
+    )

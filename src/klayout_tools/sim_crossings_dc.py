@@ -82,6 +82,12 @@ def validate_dc_context(
                 f"measurement '{name}': crossings.reduce is a time-series "
                 "reduction and is not supported on a dc sweep -- drop it"
             )
+        if body.get("value_from") is not None:
+            raise SimError(
+                f"measurement '{name}': crossings.value_from grades a "
+                "time-series reduction and is not supported on a dc sweep "
+                "-- drop it (the first crossing abscissa is the value)"
+            )
         level = body.get("level")
         if bounds is None or not isinstance(level, dict) or "sample_at" not in level:
             continue
@@ -169,7 +175,8 @@ def resolve_sampled_level(
 def resolve_level(
     name: Any,
     body: dict[str, Any],
-    points: list[list[float]],
+    scale: list[float],
+    values: list[float],
     supply_v: dict[str, Any] | None,
     sweep: bool,
 ) -> tuple[float | None, str | None]:
@@ -185,8 +192,8 @@ def resolve_level(
                 resolve_sampled_level(
                     name,
                     raw_level,
-                    [point[0] for point in points],
-                    [point[1] for point in points],
+                    scale,
+                    values,
                     sweep=sweep,
                 ),
                 None,

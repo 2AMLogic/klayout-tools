@@ -12,6 +12,28 @@ Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
 #1966: their frozen-timeline protection now lives in the pinned
 `scripts/claim-staleness.sh`. This page does not cover them.
 
+## Pin audit 2026-11-23 (#7601)
+
+Keep the four groups of pins at the recorded install, `v0.19.1306`
+(`e7af83ea2`). The configured resync checkout also predates the three merged
+fixes. To test the next version, we substituted its files into an isolated
+copy of klayout-tools at `85b21713e` on macOS. All three fixes are in
+[the upstream v0.20.25 tag](https://github.com/2AMLogic/loom/tree/5a5eae1d86f5ef068b8da000fc54f6d8d82a246d).
+
+| Pinned files | What the upstream change covers | Result and retirement condition |
+|---|---|---|
+| `sweep-lease-fence.sh` and its test | A sweep ID distinguishes concurrent sweeps on the same host. | Local suite passed 113/113 on the pin and 108/113 on the candidate. A fresh lease from another sweep on this host returns 4 (`SUPERSEDED`) upstream. The local contract expects 0 (fail open). Four diagnostic assertions also differed. Reconcile that exit contract before unpinning. [Upstream fence change](https://github.com/2AMLogic/loom/pull/15057) |
+| Both `builder-pr.md` copies (commands and roles) | The guidance covers quoted closing keywords in final and partial PR bodies, including inline and fenced examples. | The same files supply the fence call. Upstream passes `LOOM_SWEEP_ID`, while the pins use `RUN_ID` or `LOOM_SWEEP_RUN_ID` to match the publisher. Verify the published ID reaches the fence before retiring both copies. The separate quoted-reference helper passed 10/16 on both baseline and candidate, with the same six missed references. [Upstream quoting change](https://github.com/2AMLogic/loom/pull/15053) |
+| `pr-worktree.sh` | The post-worktree hook runs on successful creation and refresh for attached and detached checkouts. | Local hook suite passed 14/14 on the pin and 13/14 on the candidate. The sole failure greps for a call with an explicit path argument. Upstream reads that path inside its helper. The live `uv` invocation passed, as did all 38 local isolation checks. Recheck the behavioral hook tests when the configured install source includes this fix. [Upstream hook change](https://github.com/2AMLogic/loom/pull/15062) |
+| `claim-staleness.sh` and its test | The frozen-timeline change is still open upstream. | All 115 local staleness checks passed on the pin. Retest the frozen-timeline cases when the change lands in the install source. [Upstream report](https://github.com/2AMLogic/loom/issues/15044) and [proposed fix](https://github.com/2AMLogic/loom/pull/15049) |
+
+The upstream isolation suite passed 62/64 with its original macOS fixture.
+Git reported a path under `/private/tmp`, while the fixture requested the
+same checkout under `/tmp`. Two attached refresh checks exited early. Changing
+only the fixture's temporary-directory prefix to `/private/tmp` yielded 64/64
+with the same upstream script. The local lease-publisher control passed 83/83.
+The earlier lease-host reconciliation remains tracked separately in [#6236](https://github.com/2AMLogic/klayout-tools/issues/6236).
+
 ## Pin audit 2026-11-17 (#6236)
 
 All five pins made by the 2026-10-14 re-port (`d532f8e94`, 2am#4345) were
@@ -20,18 +42,16 @@ re-audited against upstream tag `v0.19.1306` (`e7af83ea2`, the version
 upstream drift were separated by diffing the pinned files against both the
 re-port base and `v0.19.1306`, porting every upstream hunk that does not touch
 the protected delta. Every file below was **re-ported** (pin kept); none was
-unpinned, because each still carries its protected delta. Upstream issues for
-the four retained deltas do not exist yet and cannot be filed from this repo
-(the `rjwalters` owner gh token is invalid; `create-issue.sh` write-scope
-refuses cross-repo filing) — the filings are tracked in #6306.
+unpinned, because each still carries its protected delta. The upstream
+reports filed for #6306 are linked with their corresponding pins below.
 
 | Pinned file | Protected delta | Upstream drift found (v0.19.1306) | Disposition |
 |---|---|---|---|
-| `scripts/pr-worktree.sh` | #2020 post-worktree hook call | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
-| `scripts/claim-staleness.sh` (+ test) | #1966 frozen-timeline guard | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
-| `.claude/commands/loom/builder-pr.md` | #1674 quoted-keyword section; #2237 `--sweep-id` call site | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
-| `.loom/roles/builder-pr.md` | same as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
-| `scripts/sweep-lease-fence.sh` (+ test) | #2237 `--sweep-id` | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
+| `scripts/pr-worktree.sh` | #2020 [post-worktree hook call](https://github.com/2AMLogic/loom/issues/15045) | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
+| `scripts/claim-staleness.sh` (+ test) | #1966 [frozen-timeline guard](https://github.com/2AMLogic/loom/issues/15044) | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
+| `.claude/commands/loom/builder-pr.md` | #1674 [quoted-keyword guidance](https://github.com/2AMLogic/loom/issues/15046) and #2237 [`--sweep-id` call](https://github.com/2AMLogic/loom/issues/15043) | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
+| `.loom/roles/builder-pr.md` | same [quoting guidance](https://github.com/2AMLogic/loom/issues/15046) and [sweep identity](https://github.com/2AMLogic/loom/issues/15043) as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
+| `scripts/sweep-lease-fence.sh` (+ test) | #2237 [`--sweep-id`](https://github.com/2AMLogic/loom/issues/15043) | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
 
 Notable findings:
 
@@ -52,8 +72,8 @@ After #6222 merged, `test-sweep-lease-fence.sh` passed 110/110 on the updated
 audit branch. This completes the #6236 fence drift check with the
 `LOOM_LEASE_HOST_ID` fix from #6108.
 
-Per-pin retirement conditions are unchanged and now also require the matching
-upstream issue from #6306 to exist and be resolved.
+Retire a pin only after upstream resolves its linked reports with equivalent
+behavior and the pin's local verification conditions pass.
 
 
 ## `commands/loom/champion-epic.md`
@@ -253,8 +273,7 @@ requires a test PATH without a real `uv` binary.
 
 Drop the pin when upstream `pr-worktree.sh` invokes an equivalent
 post-worktree hook on both the fresh and reuse paths, and the local post-hook
-suite passes against the upstream file. Upstreaming that generic hook call
-would permit retirement; it is separate work in `rjwalters/loom`.
+suite passes against the upstream file. [Upstream hook issue](https://github.com/2AMLogic/loom/issues/15045)
 
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 

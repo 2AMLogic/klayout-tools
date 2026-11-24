@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -17,8 +18,7 @@ from klayout_tools import _openroad_engine as engine
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
-#: A 64-hex container id the stub wrappers in these tests emit through the
-#: engine's marker scan.
+#: A complete container ID written by the stub runtime.
 STUB_CID = "b7e" + "0" * 58 + "9ad"
 assert len(STUB_CID) == 64
 
@@ -80,7 +80,7 @@ def test_launch_snapshot_exists_with_running_outcome_before_completion(
 
 
 def test_launch_snapshot_records_wrapper_container_id(tmp_path, monkeypatch):
-    """The wrapper's stderr marker names the container in the launch-time
+    """Docker's invocation-specific cidfile names the container in the launch-time
     record -- the attribution that makes a post-SIGKILL orphan reapable."""
     script = tmp_path / "run.tcl"
     script.write_text("# invoked script\n", encoding="utf-8")
@@ -89,9 +89,7 @@ def test_launch_snapshot_records_wrapper_container_id(tmp_path, monkeypatch):
     class _MarkedProc(subprocess.Popen):
         def __init__(self, argv, **kwargs):
             super().__init__(argv, **kwargs)
-            # Simulate the wrapper's poller: write through the engine's own
-            # retained handle so the bytes share its file offset.
-            kwargs["stderr"].write(f"klt-openroad-cid {STUB_CID}\n".encode())
+            Path(kwargs["env"]["KLT_OPENROAD_CIDFILE"]).write_text(STUB_CID)
 
         def communicate(self, timeout=None):
             record = json.loads(
@@ -123,13 +121,30 @@ def test_launch_snapshot_records_wrapper_container_id(tmp_path, monkeypatch):
     assert during["container_id"] == STUB_CID
     assert result.engine_log["container_id"] == STUB_CID
     directory = tmp_path / "openroad-logs" / result.engine_log["invocation_id"]
-    # The raw marker line stays in the retained transcript.
-    assert f"klt-openroad-cid {STUB_CID}" in (directory / "stderr.log").read_text()
+    assert (directory / "container.cid").read_text() == STUB_CID
+    assert "full stderr β" in (directory / "stderr.log").read_text()
 
 
-def test_finish_rescans_stderr_for_a_late_container_id(tmp_path, monkeypatch):
-    """A cold image pull delays the marker past the launch poll; the final
-    record still carries the id once the completed stderr holds it."""
+def test_only_the_dedicated_cidfile_supplies_container_identity(tmp_path):
+    from klayout_tools._openroad_logs import _LiveLogs
+
+    logs = _LiveLogs(
+        str(tmp_path / "stage.tcl"),
+        str(tmp_path / "metrics.json"),
+        invocation_id="local-test",
+        script_hash=None,
+    )
+    logs.handles["stderr"].write(f"klt-openroad-cid {STUB_CID}\n".encode())
+    assert logs.read_container_id() is None
+    cidfile = Path(logs.wrapper_environment()["KLT_OPENROAD_CIDFILE"])
+    cidfile.write_text("incomplete")
+    assert logs.read_container_id() is None
+    _, record = logs.finish("exited", 0, {})
+    assert record["container_id"] is None
+
+
+def test_finish_reads_a_late_container_id(tmp_path, monkeypatch):
+    """A delayed cidfile is still reflected in the final record."""
     script = tmp_path / "run.tcl"
     script.write_text("# invoked script\n", encoding="utf-8")
     late: dict[str, str | None] = {}
@@ -137,7 +152,7 @@ def test_finish_rescans_stderr_for_a_late_container_id(tmp_path, monkeypatch):
     class _LateMarkerProc:
         def __init__(self, argv, **kwargs):
             assert kwargs.get("start_new_session") is True
-            self._stderr = kwargs["stderr"]
+            self.cidfile = Path(kwargs["env"]["KLT_OPENROAD_CIDFILE"])
             self.pid = 4711
             self.returncode = None
 
@@ -152,7 +167,7 @@ def test_finish_rescans_stderr_for_a_late_container_id(tmp_path, monkeypatch):
             late["container_id"] = json.loads(
                 next(tmp_path.glob("openroad-logs/*/invocation.json")).read_text()
             )["container_id"]
-            self._stderr.write(f"klt-openroad-cid {STUB_CID}\n".encode())
+            self.cidfile.write_text(STUB_CID)
             return None, None
 
     monkeypatch.setattr(engine, "Popen", _LateMarkerProc)
@@ -167,7 +182,7 @@ def test_finish_rescans_stderr_for_a_late_container_id(tmp_path, monkeypatch):
     assert result.engine_log["outcome"] == "exited"
 
 
-def _record_kill_paths(monkeypatch, *, recorded_container: bool):
+def _record_kill_paths(monkeypatch, tmp_path, *, recorded_container: bool):
     """Record ``os.killpg`` calls and (when a container is expected) the
     ``docker kill`` argv, without signaling anything real."""
     killpg_calls: list[tuple[int, signal.Signals]] = []
@@ -180,6 +195,10 @@ def _record_kill_paths(monkeypatch, *, recorded_container: bool):
     real_run = subprocess.run
 
     def fake_run(argv, **kwargs):
+        if argv[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=(tmp_path / "docker-owner").read_bytes()
+            )
         if argv[:2] == ["docker", "kill"]:
             docker_kills.append(argv)
             return subprocess.CompletedProcess(argv, 0)
@@ -194,7 +213,10 @@ def _marked_popen_factory(tmp_path, raise_in_communicate):
     class _MarkedFailingProc:
         def __init__(self, argv, **kwargs):
             assert kwargs.get("start_new_session") is True
-            kwargs["stderr"].write(f"klt-openroad-cid {STUB_CID}\n".encode())
+            Path(kwargs["env"]["KLT_OPENROAD_CIDFILE"]).write_text(STUB_CID)
+            (tmp_path / "docker-owner").write_text(
+                kwargs["env"]["KLT_OPENROAD_INVOCATION_ID"]
+            )
             self.pid = 424242
             self.returncode = None
 
@@ -226,7 +248,7 @@ def test_timeout_kill_hits_group_and_recorded_container(tmp_path, monkeypatch):
         ),
     )
     killpg_calls, docker_kills = _record_kill_paths(
-        monkeypatch, recorded_container=True
+        monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(RuntimeError, match="timed out") as exc:
         engine._run_openroad(
@@ -243,11 +265,7 @@ def test_timeout_kill_hits_group_and_recorded_container(tmp_path, monkeypatch):
     assert record["container_id"] == STUB_CID
     assert record["invocation_id"] in str(exc.value)
     assert record_path.with_name("stdout.log").read_bytes() == b"partial out\n"
-    # The stderr file already holds the wrapper's marker, so the runner's
-    # partial capture is not appended into a non-empty log; the marker
-    # (the container attribution) is what must survive there.
-    stderr_retained = record_path.with_name("stderr.log").read_bytes()
-    assert stderr_retained.startswith(f"klt-openroad-cid {STUB_CID}\n".encode())
+    assert record_path.with_name("stderr.log").read_bytes() == b"partial err\n"
 
 
 def test_interrupt_kill_hits_group_and_recorded_container(tmp_path, monkeypatch):
@@ -259,7 +277,7 @@ def test_interrupt_kill_hits_group_and_recorded_container(tmp_path, monkeypatch)
         _marked_popen_factory(tmp_path, KeyboardInterrupt()),
     )
     killpg_calls, docker_kills = _record_kill_paths(
-        monkeypatch, recorded_container=True
+        monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(KeyboardInterrupt, match="openroad interrupted") as exc:
         engine._run_openroad(
@@ -290,7 +308,7 @@ def test_termination_unwind_kills_and_retains_but_propagates_unchanged(
     unwind = SystemExit(128 + signal.SIGTERM)
     monkeypatch.setattr(engine, "Popen", _marked_popen_factory(tmp_path, unwind))
     killpg_calls, docker_kills = _record_kill_paths(
-        monkeypatch, recorded_container=True
+        monkeypatch, tmp_path, recorded_container=True
     )
     with pytest.raises(SystemExit) as exc:
         engine._run_openroad(

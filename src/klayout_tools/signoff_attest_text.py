@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .signoff_attest import failed_output_tail
+from .signoff_attest_command import failed_output_tail
 
 
 def check_label(check: Mapping[str, Any]) -> str:
@@ -51,22 +51,36 @@ def documented_suffix(check: Mapping[str, Any]) -> str:
     return f" (validates only; documented: {' '.join(argv)})"
 
 
+_SKEW_REMEDY = (
+    "version skew -- written by an older klt than this one recognises; "
+    "re-run the cited check under the current klt"
+)
+
+
 def _what_envelope(c: dict) -> str:
     what = f"{c['role']} {c['path']} envelope"
-    return (
-        f"{what} ({c['kind']})" if c["passed"] else f"{what}: not a recognised envelope"
-    )
+    if c["passed"]:
+        return f"{what} ({c['kind']})"
+    if c.get("reason") == "envelope_version_skew":  # issue #5986
+        return f"{what}: {_SKEW_REMEDY}"
+    return f"{what}: not a recognised envelope"
 
 
 def _what_command(c: dict) -> str:
     label = check_label(c)
     status = c.get("error") or f"exit {c['exit_status']}"
     argv = " ".join(c["argv"])
-    return f"{c['role']} {label}: {argv} ({status}){documented_suffix(c)}"
+    duration = c.get("duration_s")
+    ran = f" in {duration:.1f}s" if duration is not None else ""
+    return f"{c['role']} {label}: {argv} ({status}){ran}{documented_suffix(c)}"
 
 
 def _what_unbenched(c: dict) -> str:
     return f"row {c['row']} has no testbench (issue #{c['issue']})"
+
+
+def _what_uncited(c: dict) -> str:
+    return f"row {c['row']} has no citation yet (issue #{c['issue']})"
 
 
 def _what_dependency_binding(c: dict) -> str:
@@ -94,7 +108,18 @@ def _what_metric(c: dict) -> str:
     )
 
 
+def _what_unmeasured_metric(c: dict) -> str:
+    return f"{c['role']} {c['corner']} {c['metric']}: unmeasured ({c['reason']})"
+
+
 def _what_pin(c: dict) -> str:
+    if c["role"] == "tool_version":
+        what = f"pin {c['tool']} {c['value']}"
+        if c.get("unverifiable"):
+            return f"{what} (running version unverifiable)"
+        if not c["passed"]:
+            return f"{what} (running {c['running']})"
+        return what
     shown = c["value"] if c["passed"] else c.get("reason", "missing")
     return f"pin {c['role']}: {shown}"
 
@@ -106,11 +131,13 @@ _WHAT_RENDERERS = {
     "dbu_on_grid": _what_dbu,
     "command": _what_command,
     "unbenched_row": _what_unbenched,
+    "uncited_row": _what_uncited,
     "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
     "envelope": _what_envelope,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,
+    "unmeasured_metric": _what_unmeasured_metric,
     "pin": _what_pin,
 }
 

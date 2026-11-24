@@ -62,11 +62,9 @@ or image selection) raises before any upload, SSH push, or fleet launch --
 the same "refuse before anything billable" discipline the corner backends
 apply.
 
-Dependency surface mirrors ``sim_remote.py``/``sim_batch.py``: ``sim.py``
-imports this module's entry point, while this module's need for
-``sim.SimError`` (and the couple of other ``sim`` helpers it reuses) is
-imported *inside* the functions that use them, so there is no load-time
-cycle. Tests patch ``RemoteLauncher`` and the ``remote_transport``/
+``sim.py`` imports this module's entry point. The shared ``SimError`` comes
+from ``sim_errors``. Functions import the remaining ``sim`` helpers when called.
+Tests patch ``RemoteLauncher`` and the ``remote_transport``/
 ``sim_batch`` call sites by this module's namespace, the same way
 ``tests/test_sim.py`` patches ``sim.RemoteLauncher``.
 """
@@ -95,8 +93,9 @@ from . import (
     sim_remote,
     sim_staging,
 )
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
+from .sim_errors import SimError, request_options
 
 #: Top-level request field that marks a deck-list request.
 DECKS_FIELD = "decks"
@@ -212,8 +211,6 @@ def _validated_timeout(value: Any, where: str) -> float:
 
 
 def _deck_error(message: str):
-    from .sim import SimError
-
     return SimError(message)
 
 
@@ -266,9 +263,7 @@ def plan_deck_units(
             "-- one off-host job runs the whole deck list across its own "
             "worker pool (options.max_workers)"
         )
-    options = request.get("options") or {}
-    if not isinstance(options, dict):
-        raise _deck_error("request.options must be a JSON object")
+    options = request_options(request)  # issue #7720
     default_timeout = DEFAULT_TIMEOUT_S
     if options.get("timeout_s") is not None:
         default_timeout = _validated_timeout(
@@ -592,8 +587,6 @@ def _scan_deck_closure(
     ngspice will on the worker. Bounded by ``sim_staging``'s per-closure
     file/byte caps.
     """
-    from .sim import SimError
-
     includes: list[dict[str, Any]] = []
     host_resolved: list[str] = []
     seen: set[tuple[str, str]] = set()
@@ -655,8 +648,6 @@ def _scan_deck_closure(
 
 
 def _read_closure_file(path: str, *, where: str) -> bytes:
-    from .sim import SimError
-
     try:
         with open(path, "rb") as handle:
             return handle.read()
@@ -680,8 +671,6 @@ def _classify_include_target(
     PDK-rooted). Anything that would need the deck rewritten -- an absolute
     local path, a ``..``-climbing relative, a file that resolves nowhere --
     raises ``SimError`` naming the directive site."""
-    from .sim import SimError
-
     if not target or "$" in target:
         return None, target
     expanded = os.path.expanduser(target)
@@ -1369,8 +1358,6 @@ def _require_remote_config(request: dict[str, Any]) -> tuple[Any, str]:
     (``models.pdk`` selects the baked AMI; ``remote.ssh_key_path`` pairs
     with ``remote.key_name``) -- same messages, so a deck request missing
     them fails exactly like a corner request would."""
-    from .sim import SimError
-
     remote_spec = request.get("remote") or {}
     pdk = (request.get("models") or {}).get("pdk")
     if not pdk:
@@ -1446,7 +1433,6 @@ def _run_decks_remote(
     ``RemoteLauncher``'s context-manager contract, exactly as for corners.
     """
     from .remote_launcher import RemoteLaunchError
-    from .sim import SimError
 
     remote_spec = request.get("remote") or {}
     pdk, ssh_key_path = _require_remote_config(request)
@@ -1890,8 +1876,7 @@ def _collect_decks_batch(
             message=str(exc),
             outdir=outdir,
             environment={
-                "provider": "aws-batch-fleet",
-                "job_id": job_id,
+                **sim_batch._batch_job_environment(config, job_id),
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -1939,8 +1924,6 @@ def _run_decks_batch(
     its report -- the batch analog of :func:`_run_decks_remote`, reusing
     the batch transport primitives (submit/launch/poll/collect and the
     runner-identity preflight) exactly as the corner backend does."""
-    from .sim import SimError
-
     config, spec = _prepare_decks_batch(request, files, worker_request)
     job_id = sim_batch.new_job_id()
     try:
@@ -1961,8 +1944,6 @@ def _submit_decks_batch_only(
     """``--submit-only`` for a deck list (issue #3958): upload and launch the
     one deck job and return its identity without polling or collecting.
     ``job_ceiling`` is ``None`` -- the deck path does not assess one."""
-    from .sim import SimError
-
     try:
         config, spec = _prepare_decks_batch(request, files, worker_request)
     except sim_batch.BatchError as exc:
@@ -2002,7 +1983,7 @@ def _deck_dry_run_report(
     a report of the planned units. Nothing is spawned, submitted or
     written. ``plan_deck_units`` (already run by the caller) covers deck,
     input and include existence on every backend."""
-    from .sim import SCHEMA_VERSION, SimError
+    from .sim import SCHEMA_VERSION
 
     staged: list[sim_staging.StagedFile] = []
     if backend in ("remote", "batch"):
@@ -2092,15 +2073,13 @@ def _run_decks_offhost(
     """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
     from .sim import apply_engine_host
 
-    # Validate the whole staged closure before anything billable: an
-    # unstageable include or missing file is a submit-time SimError,
-    # never a launched job that cannot run.
-    files, worker_request = stage_deck_job(request, request_dir=request_dir)
     if backend == "remote":
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
         report = _run_decks_remote(request, files, worker_request, outdir=outdir)
     elif submit_only:
         from . import sim_decks_split
 
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
         sim_decks_split.refuse_submit_only(request, units)
         return _submit_decks_batch_only(
             request, files, worker_request, artifacts_dir=artifacts_dir
@@ -2108,6 +2087,7 @@ def _run_decks_offhost(
     elif attach_job_id is not None:
         from . import sim_decks_split
 
+        _, worker_request = stage_deck_job(request, request_dir=request_dir)
         report = sim_decks_split.attach(
             request,
             worker_request,
@@ -2176,12 +2156,12 @@ def run_deck_request(
     """
     from . import sim_decks_resume
     from .sim import (
-        SimError,
         _resolve_max_workers,
         _resolve_ngspice_binary,
         _validate_ngspice_init,
         apply_engine_host,
     )
+    from .sim_spiceinit import add_deck_init_hints
 
     if resume and (submit_only or attach_job_id is not None):
         raise SimError(
@@ -2189,11 +2169,7 @@ def run_deck_request(
             "--attach for a deck-list request -- the submitted job is one "
             "unit of work that is collected whole"
         )
-    if max_workers is not None and (
-        not isinstance(max_workers, int)
-        or isinstance(max_workers, bool)
-        or max_workers < 1
-    ):
+    if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
         request,
@@ -2227,7 +2203,7 @@ def run_deck_request(
     pending = [unit for index, unit in enumerate(units) if index not in resumed]
 
     if backend == "remote" or backend == "batch":
-        return _run_decks_offhost(
+        report = _run_decks_offhost(
             request,
             units,
             pending,
@@ -2243,10 +2219,9 @@ def run_deck_request(
             collect_partial=collect_partial,
         )
 
-    if backend == "local":
-        workers = 1
-    else:
-        workers = _resolve_max_workers(max_workers)
+        return add_deck_init_hints(report, ngspice_init_lines)
+
+    workers = 1 if backend == "local" else _resolve_max_workers(max_workers)
     report = _run_decks_local(
         pending,
         staging_root=request_dir,
@@ -2261,4 +2236,4 @@ def run_deck_request(
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )
-    return report
+    return add_deck_init_hints(report, ngspice_init_lines)

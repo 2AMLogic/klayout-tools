@@ -369,7 +369,74 @@ survives the two-step flow; add `rng`, `corner_matrix` etc. by hand.
 added outside the native response, whose `schema_version` check is
 unchanged; grading is untouched.
 
+### Ingesting a caller-driven transient-noise campaign
+
+A waveform reducer can supply one value per draw to `klt yield` through a
+sample-set document. For example, suppose a campaign writes `draws.csv` with
+columns `metric,draw,value`. Each row contains the same metric, the integer
+seed used for that draw, and its measured mean absolute voltage. This example
+uses one valid row per seed and grades an upper limit of 0.1 V.
+
+Capture the simulator identity and input digest when the harness runs. Here
+the harness used ngspice 46, started its seed sequence at 42, and supplied
+the same `noise.cir` to each draw. Use the identity your harness recorded.
+
+```python
+import hashlib
+import json
+from pathlib import Path
+
+netlist = Path("noise.cir")
+run = {
+    "seed": 42,
+    "engine": {"name": "ngspice", "version": "46"},
+    "netlist_sha256": hashlib.sha256(netlist.read_bytes()).hexdigest(),
+}
+Path("campaign.json").write_text(json.dumps(run))
+```
+
+Import the waveform reducer's values. The resulting document records the
+digest of `draws.csv` in `derivation.csv.content_hash`.
+
+```sh
+klt yield-csv draws.csv --group-by metric --value value --draw-col draw \
+    --unit V --max 0.1 --format json > samples.json
+```
+
+Attach the campaign record and the spec row to that document. The draw seeds
+below follow the order of the rows in this single-metric CSV.
+
+```python
+import csv
+import json
+from pathlib import Path
+
+samples = json.loads(Path("samples.json").read_text())
+run = json.loads(Path("campaign.json").read_text())
+with Path("draws.csv").open(newline="") as stream:
+    run["draw_seeds"] = [int(row["draw"]) for row in csv.DictReader(stream)]
+samples["provenance"] = run
+samples["measurements"][0]["spec_row"] = "transient_noise_mean_abs"
+Path("campaign-samples.json").write_text(json.dumps(samples))
+```
+
+```sh
+klt yield campaign-samples.json --format json > yield.json
+```
+
+In `yield.json`, check `measurements[0].n` against the number of draws and
+`measurements[0].spec_row` against the declared row. The estimator echoes
+the recorded engine, seed sequence and netlist digest in `source.provenance`.
+These fields describe the caller's simulation. The `klt yield-csv` digest
+identifies the CSV bytes used to derive the sample set.
+
 ### Deriving a sample set from a per-draw CSV (`klt yield-csv`)
+
+Supply `--negative-control control.csv` to attach known-bad draws using the same
+columns and nominal group names. Add `--description` to identify the injected
+fault. The optional `--seed`, `--rng` and `--draws-per-population` flags carry
+run settings into `source.provenance`. [Command example](yield-csv.md#paired-controls-and-run-provenance)
+
 
 A Monte Carlo harness that is not a `klt sim` request (a shell-driven ngspice
 campaign, say) usually persists one CSV row per draw. `klt yield-csv` turns
@@ -395,9 +462,14 @@ klt yield samples.json --format json > yield.json
 | `--draw-col COL` | Optional. A repeated (group, draw) pair is rejected. Without it duplicates are accepted as separate draws. |
 | `--unit U`, `--min`, `--max`, `--target-yield` | Optional, applied to every measurement (`--limits` on `klt yield` still wins). |
 
-Rules: the file is read once and the same bytes are hashed and parsed (UTF-8,
-BOM and CRLF accepted). A passing row whose value is empty, non-numeric or
-non-finite (`nan`, `inf`) counts `errored` — never dropped, never a sample.
+Before the CSV header, lines starting with `#` are harness metadata. The
+source hash covers the complete file, including this preamble, a UTF-8 BOM
+and the original line endings. After the header, an unquoted record starting
+with `#` is an error. Quote a first field that begins with `#`, including a
+header name. A `#` inside a quoted multiline field is ordinary field data.
+
+A passing row whose value is empty, non-numeric or non-finite (`nan`, `inf`)
+counts `errored` — never dropped, never a sample.
 Samples keep file order; the counts `klt yield` grades do not depend on it. A
 missing column, empty file, header-only file or a group with no usable draw is
 exit `1` with the JSON error envelope on stderr and stdout empty.

@@ -1,0 +1,1 @@
+- On ASAP7, `klt place-and-route` repairs eligible M1 enclosures at individual placed V1s and reports repaired and remaining enclosure counts in `via_pad_trim` (#7798).

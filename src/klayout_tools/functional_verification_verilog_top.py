@@ -15,7 +15,9 @@ from typing import Any
 
 from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._verilog_top import plusargs, require_module_declared
+from .functional_verification_initial_state import resolve_module_plusargs
 
 VERILOG_TOP_FIELDS = (
     "verilog_top",
@@ -93,7 +95,7 @@ def _reject_verilog_top_options(engine: str, options: Any) -> None:
 
 
 def _resolve_verilog_top(
-    testbench: Any, sources: list[str], engine: str, options: Any
+    testbench: Any, sources: list[str] | None, engine: str, options: Any
 ) -> dict[str, Any] | None:
     """Validate the Verilog-bench form of ``request.testbench`` (issue #4083).
 
@@ -110,19 +112,25 @@ def _resolve_verilog_top(
     _reject_verilog_top_options(engine, options)
     top = resolved["verilog_top"]
     assert top is not None
-    require_module_declared(top, sources, _fv.FunctionalVerificationError)
+    if sources is not None:  # During a run, also check the module declaration.
+        require_module_declared(top, sources, _fv.FunctionalVerificationError)
     return resolved
 
 
 def _resolve_testbench_target(
     verilog_tb: dict[str, Any] | None, testbench: Any, request_dir: str
-) -> tuple[str, str, str | list[str] | None]:
-    """``(module, module_dir, testcase)`` for either testbench form."""
+) -> tuple[str, list[str], str | list[str] | None, list[str]]:
+    """``(module, module_dirs, testcase, plusargs)`` for either testbench
+    form. On the cocotb path the plusargs are the user's validated
+    ``testbench.plusargs`` (issue #6906); on a Verilog bench they are the
+    form's own already-validated entries."""
     if verilog_tb is None:
-        return _fv._resolve_testbench(testbench, request_dir)
+        module, module_dirs, testcase = _fv._resolve_testbench(testbench, request_dir)
+        plusargs = resolve_module_plusargs(testbench, _fv.FunctionalVerificationError)
+        return module, module_dirs, testcase, plusargs
     top = verilog_tb["verilog_top"]
     assert top is not None
-    return top, request_dir, None
+    return top, [request_dir], None, verilog_tb["plusargs"]
 
 
 def _sdf_annotate_scope(
@@ -357,7 +365,8 @@ def _run_verilog_top(
                 "test_log": _hashed_path_envelope(test_log, repo_root=repo_root),
                 "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": None,
-                "source_defines": source_defines,
+                # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
+                "source_defines": _source_defines_envelope(source_defines, repo_root),
                 "parameters": {},  # issue #5697; always `{}` -- rejected upstream
                 "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
@@ -365,7 +374,8 @@ def _run_verilog_top(
                     None
                     if sdf is None
                     else {
-                        "file": sdf["file"],
+                        # Retyped to the hashed envelope (issue #5784).
+                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
                         "corner": sdf["corner"],
                         "entries": sdf["entries"],
                         **({"scope": sdf["scope"]} if "scope" in sdf else {}),
@@ -384,6 +394,8 @@ def _run_verilog_top(
         "results_xml": None,
         "test_log": test_log,
         "build_log": build_log,
+        "sdf": None if sdf is None else sdf["file"],
+        "initial_state_netlist": None,
     }
     return report
 

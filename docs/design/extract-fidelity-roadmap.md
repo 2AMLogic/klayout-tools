@@ -24,7 +24,12 @@ naming the issue that landed each increment and the flag that enables it:
   lumped totals along a terminal-position proxy, not the geometry-decomposed
   segment graph this stage describes. Its §3.D terminal-aware resistance-graph
   design is separately **shipped** behind `--resistance-graph` /
-  `--resistance-graph-r-cut` (#2982, #2983), consumed by `klt pex` (#4037).
+  `--resistance-graph-r-cut` (#2982, #2983), consumed by `klt pex` (#4037), and
+  the Stage 3 netlist step is **shipped for the multi-terminal case** as
+  `klt pex --resistance-network` (#6899): the Kron-reduced terminal network
+  written in place of the star per solved 3+-terminal net (see §3.D3's
+  "Stage 3 netlist step" note). A graph-aware ladder and per-node capacitance
+  from the graph remain open.
 - **Stage 4** — quasi-static field solve: **partial** — `klt mom` ships the
   quasi-static capacitance solve (#718) with closed-form and
   convergence-under-refinement validation (#719) plus PEEC partial
@@ -678,7 +683,9 @@ flag), and increment 4's cross-level scalar substitution landed as #2983
 consumed by `klt pex` in #4037. Increment 4's remaining items — graph-aware
 ladder segments, per-node capacitance, and the magic `extresist` measurement —
 were not traced for this status pass. The text below is the original design
-record, unchanged.
+record, unchanged. A later update: the multi-terminal netlist step landed as
+`klt pex --resistance-network` (#6899, §3.D3's "Stage 3 netlist step" note);
+graph-aware ladder segments and per-node capacitance are still open.
 
 **Status at filing: design and fixture specification only (2026-10-06).** No solver is
 implemented by this section and no extraction number changes. Verified against
@@ -931,6 +938,9 @@ test-only). The solve is `solve_ir_drop`'s pure-Python sparse CG over
 adjacency lists, and its default iteration cap is `max(500, 10*n)`.
 Exceeding a bound yields diagnostic `graph_too_large` (with the counts) and
 the legacy scalar stands; the builder never truncates silently.
+Since #6964 a caller raises any of these four bounds for one run with `klt
+extract` / `klt pex --resistance-graph-max-{terminals,cells,nodes,edges}`;
+the defaults above are unchanged and the diagnostic names the value applied.
 
 **Failure behaviour.** Geometry or coefficient problems never raise and never
 change the legacy output. Each produces a diagnostic with a stable code and
@@ -1000,6 +1010,31 @@ scalar is the series sum, the ladder inherits the bias. If a graph-derived
 scalar is later substituted, the ladder consumes it unchanged and its
 conservation tests stay valid; a graph-aware ladder (segments taken from graph
 edges) is the later Stage 3 netlist step, not part of the DC increments.
+
+**Stage 3 netlist step — status: landed for the multi-terminal case
+(#6899).** `klt pex --resistance-network` (requires `--resistance-graph`)
+writes the **Kron-reduced terminal network** of the solved graph in place
+of the star for every net whose graph solved `ok` with three or more
+terminals and whose device terminals map one-to-one onto its graph
+terminals (`extract_resistance_network.reduce_terminal_network`: with `R`
+the pair matrix and `J = I - 11^T/T`, the reduced Laplacian is
+`pinv(-0.5 J R J)`, one resistor per surviving terminal pair — dense, at
+most `T(T-1)/2` = 2016 at the 64-terminal cap, only numerically-zero
+conductances dropped and a drop that would disconnect the terminals refused
+as `pair_resistance_unavailable`, so every written network reproduces every
+pair value; terminals of one device share its position and fall back as
+`terminal_mismatch`).
+This is deliberately *not* a graph-aware ladder: it replaces the star, not
+the `--distributed-rc` chain (the `--resistance-graph` +
+`--distributed-rc` refusal still stands; per-segment ladders taken from
+graph edges remain open). Two-terminal graph nets keep #4037's
+`selected_resistance_ohm` scalar; every other net keeps its established
+model with a per-net reason in `resistance_graph.network` (the #5747
+vocabulary plus `terminal_mismatch` / `mom_rlc_override` /
+`parasitic_variant`). Ground capacitance splits equally across the
+terminal nodes (first increment; per-node capacitance from the graph is
+still the open question below). Per-node capacitance and a graph-aware
+ladder remain the residual gaps of this step.
 
 ##### 3.D4 Fixture matrix
 

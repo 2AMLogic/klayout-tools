@@ -14,13 +14,6 @@ from typing import Any
 from ._provenance import sha256_file
 from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
-from .signoff import (
-    _HASH_KIND_BYTES,
-    _HASH_KIND_GEOMETRY,
-    _REGENERATED_HASH_RE,
-    SCHEMA_VERSION,
-    input_set_digest,
-)
 from .signoff_attest import (
     _ITEM_TITLES,
     HASH_ALGORITHM,
@@ -35,6 +28,7 @@ from .signoff_attest import (
     _skipped_check,
     _validate_header,
 )
+from .signoff_attest_command import reset_command_side_channels
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_input import attestation_block, normalized_description
@@ -43,6 +37,13 @@ from .signoff_attest_item2_inputs import (
     input_checks,
     validated_checks,
     validated_inputs,
+)
+from .signoff_base import (
+    _HASH_KIND_BYTES,
+    _HASH_KIND_GEOMETRY,
+    _REGENERATED_HASH_RE,
+    SCHEMA_VERSION,
+    input_set_digest,
 )
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
@@ -223,7 +224,7 @@ def _inventory_checks(
     checks are the hash-pinned ``role: "input"`` pins of ``inputs`` (issue
     #5724); empty when the inventory declares none. ``description`` is the
     inventory's normalized ``description`` (issue #5573), or ``None``."""
-
+    reset_command_side_channels()
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))

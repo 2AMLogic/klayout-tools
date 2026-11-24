@@ -10,6 +10,16 @@ import fnmatch
 from typing import Any
 
 
+def root_selected_circuit(netlist: Any, top: str | None) -> None:
+    """Keep the selected interior circuit and its descendants before flattening."""
+    from .lvs import _prune_extra_top_circuits
+
+    if top is not None:
+        selected = netlist.circuit_by_name(top)
+        if selected is not None and any(selected.each_ref()):
+            _prune_extra_top_circuits(netlist, selected)
+
+
 def flatten_keeping(netlist: Any, keep: list[str] | None) -> tuple[int, int, str]:
     """Flatten ``netlist`` in place, optionally sparing circuits named by ``keep``.
 

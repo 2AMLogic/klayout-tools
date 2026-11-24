@@ -42,11 +42,9 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any
 
-from . import env_provenance
+from . import _warn, env_provenance
 from . import erc_antenna_gf180mcu as _gf180
 from ._devices import (
     _conductor_role_layers,
@@ -54,6 +52,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
+from ._layout import ActiveIndex as _ActiveIndex
 from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -64,12 +63,12 @@ from ._paths import (
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_hash_check
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .coverage_work import coverage_work_count
 from .decks import (
@@ -79,6 +78,7 @@ from .decks import (
     deck_source_path,
 )
 from .decks import get_extraction_deck as _get_extraction_deck
+from .erc_antenna_names import match_antenna_layers
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
     _disclosed_undeclared_classes,
@@ -88,6 +88,7 @@ from .erc_disclosure import (
     floating_gate_work,
     validate_floating_gate_allowed,
 )
+from .erc_keepouts import KeepoutOutcome, evaluate_keepouts, parse_keepouts
 from .erc_spec import (
     _SPEC_KEYS,
     ErcError,
@@ -107,7 +108,9 @@ from .erc_substrate import (
 )
 from .erc_ties import (
     _degenerate_tie_reasons,
+    _register_tie_join,
     _tie_findings,
+    _tie_skip_record,
 )
 from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported for tests
     _boxes_region,
@@ -116,6 +119,7 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
     _tie_well_region,
     _well_assertion_coverage_entry,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     _capacitor_plate_regions,
     _capacitor_top_via_overlap_region,
@@ -568,6 +572,7 @@ def _connectivity_coverage(
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
     substrate: SubstrateOutcome | None = None,
+    keepouts: KeepoutOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -607,8 +612,9 @@ def _connectivity_coverage(
       performed, so it is recorded as **skipped** (the reason
       ``degenerate_ties`` carries for it:
       :data:`REASON_DEGENERATE_TAP_DECLARATION`, issue #2255's
-      :data:`REASON_DEGENERATE_WELL_ASSERTION`, or issue #2339's
-      :data:`REASON_DEGENERATE_WELL_SELECTION`) and the whole
+      :data:`REASON_DEGENERATE_WELL_ASSERTION`, issue #2339's
+      :data:`REASON_DEGENERATE_WELL_SELECTION`, or issue #7419's
+      :data:`REASON_DEGENERATE_CONNECT_TARGET`) and the whole
       connectivity scope reads ``clean_partial`` rather than ``clean``.
       Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
       requires to be zero can be satisfied by a declaration that never
@@ -710,7 +716,9 @@ def _connectivity_coverage(
     well_asserted = well_asserted_ties or set()
     # (issues #2965, #4820) Excused gates are disclosed (`inapplicable`), not checked.
     checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
-    skipped: list[dict[str, str]] = []
+    if keepouts is not None:
+        checked.extend(keepouts.checked)
+    skipped: list[dict[str, Any]] = list(keepouts.skipped) if keepouts else []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
@@ -731,7 +739,7 @@ def _connectivity_coverage(
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
         if tie["name"] in degenerate:
-            skipped.append({"id": identity, "reason": degenerate[tie["name"]]})
+            skipped.append(_tie_skip_record(identity, degenerate[tie["name"]], tie))
         else:
             checked.append(identity)
             if tie["name"] in asserted:
@@ -897,15 +905,13 @@ def _merge_antenna_limits(
     pdk_limits: dict[str, tuple[float, str]] | None,
     pdk: str | None,
     spec_limits: list[dict[str, Any]],
+    stackup_names: list[str],
 ) -> dict[str, tuple[float, str]] | None:
-    """Layer name -> ``(limit, antenna_ratio_source)`` for every graded level
-    (issue #4090): the ``--pdk`` table's entries, each overridden by the
-    spec's caller-supplied ``antenna_limits`` entry for the same layer.
-    ``None`` when neither supplies a limit, so a spec-less run is unchanged.
-    """
+    """Resolve PDK limits by stackup name, then apply the spec's overrides."""
     merged: dict[str, tuple[float, str]] = {}
     if pdk_limits is not None and pdk is not None:
-        for layer, (value, rule_id) in pdk_limits.items():
+        rules = match_antenna_layers(pdk_limits, stackup_names[1:], pdk)
+        for layer, (value, rule_id) in rules.items():
             merged[layer] = (
                 value,
                 f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
@@ -2228,13 +2234,12 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     file still sees it (JSON goes to stdout only -- ``docs/json-contract.md``).
     ``verb`` is the calling command (``"klt erc"``), so the line names the
     tool the caller actually ran."""
-    print(
+    _warn.warn(
         f"{verb}: warning: stackup entry {name!r} declares label_layer "
         f"{label_layer}, but that layer carries no text anywhere in the "
         "analysed top cell -- nets matched through it resolve zero islands "
         "(erc.unconnected_net) and its gates[].net reads null. Check the "
-        "label layer/datatype.",
-        file=sys.stderr,
+        "label layer/datatype."
     )
 
 
@@ -2285,37 +2290,6 @@ def _register_label_layer(
     l2n.connect(conductor_region, label_texts)
 
 
-class _ActiveIndex:
-    """Bbox-indexed copy of the whole-layout active region (issue #2751).
-
-    ``(net_poly & whole_active).merged()`` visits every active polygon in the
-    chip once per candidate net -- candidates x active polygons, quadratic in
-    design size. Here the active polygons are loaded once into a scratch
-    cell, and :meth:`intersect` pulls only those whose bounding box touches
-    the net's own poly bbox through the shape tree's spatial query before
-    intersecting. Active polygons outside that window cannot intersect the
-    net's poly, so the result is geometrically identical to the whole-layout
-    boolean (same merged polygons, same area, same ``gates[]``).
-    """
-
-    def __init__(self, active_region: Any) -> None:
-        import klayout.db as kdb
-
-        self._kdb = kdb
-        self._layout = kdb.Layout()
-        self._cell = self._layout.create_cell("ACTIVE")
-        self._layer = self._layout.layer(0, 0)
-        self._cell.shapes(self._layer).insert(active_region)
-
-    def intersect(self, poly_region: Any) -> Any:
-        if poly_region.is_empty():
-            return poly_region
-        local = self._kdb.Region(
-            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
-        )
-        return (poly_region & local).merged()
-
-
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -2325,6 +2299,7 @@ def _extract_connectivity(
     device_cuts: dict[str, Any],
     verb: str | None,
     label_layers: list[dict[str, Any]] | None = None,
+    allow_empty: bool = False,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -2353,28 +2328,10 @@ def _extract_connectivity(
     with ``devices[]`` omitted, ``device_cuts`` is empty and every region
     below is the raw drawn layer, exactly as before.
 
-    **A declared well is never a conductor here (issue #2169).** The
-    previous model registered the whole ``well_layer`` region, self-
-    connected it (``l2n.connect(well_region)``) and connected it to the tap
-    layer, which made a blanket well -- one plan-view polygon spanning
-    whole standard-cell rows -- conduct to *every* shape that merely
-    overlapped it, not only to the shapes actually tied to it. On a routed
-    design that collapsed the entire layout into one or two electrical
-    islands: a false ``erc.supply_short`` between VDD and VSS, and a
-    ``gates[]`` list collapsed to a single entry (which silently invalidated
-    every antenna ratio in the same report).
-
-    Instead, a tie contributes exactly one conductor: its **tap sites** --
-    ``tap_layer`` intersected with every ``tap_requires`` layer (the
-    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as), further
-    intersected with the union of ``tap_boxes`` when the spec asserts them
-    (issue #2234), and then clipped to the well itself, since a tap is by
-    definition inside the well it taps. Those sites are wired up to
-    ``connect_to``'s ``stackup`` region exactly as before, so a tap still
-    reaches (or fails to reach) the declared supply net through real
-    routing. The well contributes only *where the taps are*, never across
-    its own extent, and taps in the same well are not shorted to each other
-    through it.
+    Each tie registers the full derived tap conductor (tap diffusion narrowed
+    by its markers and boxes, clipped to its well). The well itself supplies
+    only a boundary. A contact-qualified tie reaches its stackup role at cuts
+    overlapping both conductors. A tie with no named via connects by overlap.
 
     **A well need not be drawn at all (issue #2255).** A tie declaring
     ``well_layer: null`` + ``well_boxes`` -- a native-substrate block, whose
@@ -2423,6 +2380,7 @@ def _extract_connectivity(
         via_region = _cut_device_bodies(
             _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
         )
+        regions[via["name"]] = via_region
         l2n.register(via_region, via["name"])
         l2n.connect(via_region)
         role_a, role_b = via["between"]
@@ -2479,9 +2437,10 @@ def _extract_connectivity(
         if tie["tap_boxes"]:
             tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
-        tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
-        l2n.connect(tap_sites)
-        l2n.connect(tap_sites, regions[tie["connect_to"]])
+        # Measure disjointness on the same regions used for connectivity.
+        tap_index, connect_target_disjoint = _register_tie_join(
+            l2n, regions, tie, tap_sites
+        )
         tie_layers.append(
             {
                 **tie,
@@ -2497,6 +2456,12 @@ def _extract_connectivity(
                 "tap_narrowed": not (
                     (drawn_tap & well_region).merged() - tap_sites
                 ).is_empty(),
+                # Issue #7419: whether the `connect_to` role's conductor
+                # region interacts with any tap site of this tie -- measured
+                # above, where both regions exist; always `False` for a
+                # `through` tie, whose join is contact-qualified and out of
+                # scope. Read by `_degenerate_tie_reasons`.
+                "connect_target_disjoint": connect_target_disjoint,
                 # Whether this tie's tap region was derived (at least in
                 # part) from a caller assertion rather than pure PDK-marker
                 # narrowing -- read by `_connectivity_coverage` to grade a
@@ -2548,7 +2513,7 @@ def _extract_connectivity(
         raise ErcError(f"connectivity extraction failed: {exc}") from exc
 
     circuit = l2n.netlist().circuit_by_name(top_cell.name)
-    if circuit is None:
+    if circuit is None and not allow_empty:
         raise ErcError(
             f"no circuit named '{top_cell.name}' in the extracted connectivity graph"
         )
@@ -2561,7 +2526,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     the two entry points cannot drift.
 
     Returns ``(spec, stackup, stackup_names, vias, nets_decl, ties,
-    ties_disclosure, devices, spec_antenna_limits)``; raises :class:`ErcError`
+    ties_disclosure, devices, spec_antenna_limits, keepouts)``; raises :class:`ErcError`
     on any defect.
     """
     spec = _load_spec_json(spec_path, ErcError)
@@ -2572,7 +2537,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path, stackup_names)
-    ties = _validate_ties(spec, spec_path, stackup_names)
+    ties = _validate_ties(spec, spec_path, stackup_names, vias)
     # `ties` first, deliberately: #2541's `undeclared_classes` is validated
     # against the declared tie names, so a spec that declares and discloses
     # the same class is rejected as the self-contradiction it is.
@@ -2601,6 +2566,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ties_disclosure,
         devices,
         spec_antenna_limits,
+        parse_keepouts(spec, spec_path, stackup_names),
     )
 
 
@@ -2614,7 +2580,9 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
     :class:`ErcError` (with the same field-path message ``run_erc`` gives)
     for a missing/unreadable file or any malformed declaration.
     """
-    _, stackup, _, vias, nets_decl, ties, _, devices, _ = _parse_erc_spec(spec_path)
+    _, stackup, _, vias, nets_decl, ties, _, devices, _, keepouts = _parse_erc_spec(
+        spec_path
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "validate_spec",
@@ -2626,6 +2594,7 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
             "nets": len(nets_decl),
             "ties": len(ties),
             "devices": len(devices),
+            **({"keepouts": len(keepouts)} if keepouts is not None else {}),
         },
     }
 
@@ -2839,7 +2808,7 @@ def run_erc(
             "pass --findings-only for the erc_findings-only read, or --pdk "
             "for the antenna verdict, but not both"
         )
-    antenna_limits = _resolve_antenna_limits(pdk)
+    pdk_limits = _resolve_antenna_limits(pdk)
     deck_obj = _resolve_deck(deck)
 
     (
@@ -2851,10 +2820,11 @@ def run_erc(
         ties,
         ties_disclosure,
         devices,
-        spec_antenna_limits,
+        spec_limits,
+        keepouts,
     ) = _parse_erc_spec(spec_path)
     fg_allowed = validate_floating_gate_allowed(spec, spec_path)
-    antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
+    antenna_limits = _merge_antenna_limits(pdk_limits, pdk, spec_limits, stackup_names)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
@@ -2866,24 +2836,8 @@ def run_erc(
     top_cell = top_cells[0]
     dbu = layout.dbu
 
-    # Two graphs, deliberately (issue #2169). The *primary* graph carries
-    # only what the caller declared as real routing -- `stackup` + `vias` --
-    # and is the sole source of `gates[]`, the antenna-ratio model, and the
-    # `nets[]`-driven findings. The `ties[]` declarations are extracted
-    # separately below, so a mis-declared well/tap layer can no longer
-    # silently collapse `gates[]` (and with it every antenna ratio in the
-    # same report) or invent an `erc.supply_short` between two rails that
-    # are not actually shorted: with `ties` omitted or declared, these
-    # outputs are identical by construction, not merely by convention.
-    # `devices[]` (issue #2183): the declared device bodies, resolved once
-    # and subtracted from their own role in *both* graphs below -- a drawn
-    # resistor body is not a wire in the tie graph either. Empty (and so a
-    # no-op) whenever the spec declares no `devices`.
-    # `role_layers` (role name -> its declared `(layer, datatype)`) is what
-    # lets `_device_body_cuts` report the area each declaration *actually*
-    # subtracted -- `marker ∩ that role's own drawn region` -- rather than
-    # the marker layer's own area (issue #2226). `--deck` reuses the same
-    # map below for its exact-layer-equality matching rule.
+    # The antenna/net graph and the separate tie graph both subtract device
+    # bodies from their own role. Geometry keepouts inspect the raw role layers.
     role_layers = _conductor_role_layers(stackup, vias)
     device_cuts, devices_applied = _device_body_cuts(
         layout, top_cell, devices, role_layers, verb="klt erc"
@@ -2927,6 +2881,7 @@ def run_erc(
         device_cuts,
         verb="klt erc",
         label_layers=label_layers,
+        allow_empty=keepouts is not None and not nets_decl and not ties,
     )
 
     gate_role = stackup[0]["name"]
@@ -2959,8 +2914,9 @@ def run_erc(
     # `power_nets`, no name match is needed to find "a gate": any net whose
     # geometry touches the declared gate role qualifies. Sorted by
     # `cluster_id` for deterministic, reproducible output.
+    nets = circuit.each_net() if circuit is not None else ()
     candidates = sorted(
-        (net for net in circuit.each_net() if net.cluster_id != 0),
+        (net for net in nets if net.cluster_id != 0),
         key=lambda net: net.cluster_id,
     )
 
@@ -2976,6 +2932,7 @@ def run_erc(
     # directly off the connectivity graph on the `findings_only` one (issue
     # #2219). Same answer either way; see `_gate_is_floating`.
     gate_floating: list[bool] = []
+    gf180_violations: list[tuple[dict[str, Any], Any]] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -2985,10 +2942,11 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if active_index is not None:
-            gate_area_region = active_index.intersect(gate_poly_region)
-        else:
-            gate_area_region = gate_poly_region
+        gate_area_region = (
+            active_index.intersect(gate_poly_region)
+            if active_index
+            else gate_poly_region
+        )
         gate_area_um2 = gate_area_region.area() * dbu2_um2
         if gate_area_um2 <= 0:
             continue
@@ -3027,12 +2985,18 @@ def run_erc(
         )
         gate_regions.append(gate_poly_region)
         gate_floating.append(is_floating)
+        if pdk == "gf180mcu" and gates[-1]["antenna_verdict"] == "violate":
+            gf180_violations.append((gates[-1], net))
+
+    _gf180.annotate_contacted_diffusion(
+        gf180_violations, layout, top_cell, stackup, vias, active_region, l2n
+    )
 
     # (issue #2896) A passive-only cell (poly resistors, MoM/MiM caps, no
     # transistor) has no gates by construction, but its declared supplies and
     # ties are still worth checking. Zero gates is an error only when the
     # spec asks for nothing but antenna work.
-    if not gates and not nets_decl and not ties:
+    if not gates and not nets_decl and not ties and keepouts is None:
         raise ErcError(
             f"no net in '{file}' has any geometry on the declared gate role "
             f"{gate_role!r} (stackup[0], layer {stackup[0]['layer'][0]}/"
@@ -3045,7 +3009,8 @@ def run_erc(
 
     # ERC finding checks (issue #861, Phase 1c) -- see this module's
     # docstring, "ERC finding checks", for what each rule detects.
-    erc_findings: list[dict[str, Any]] = []
+    keepout_outcome = evaluate_keepouts(layout, top_cell, role_layers, keepouts)
+    erc_findings = list(keepout_outcome.findings)
     floating = list(zip(gates, gate_regions, gate_floating, strict=True))
     excused, fg_echo = excuse_floating_gates(floating, fg_allowed, dbu, _bbox_dict)
     erc_findings.extend(_floating_gate_findings(floating, gate_role, excused))
@@ -3060,10 +3025,9 @@ def run_erc(
     )
     erc_findings.extend(connectivity_findings)
 
-    # The tie graph (issue #2169): a second extraction (only when `ties[]` is
-    # declared) adding each tie's tap conductor to the same stackup/vias. Kept
-    # separate so no `ties[]` declaration can reach `gates[]`, the antenna
-    # ratios, or the `nets[]` findings already computed.
+    # Extract the tap conductors in a separate graph (#2169) so ties cannot
+    # affect gates, antenna ratios or the net findings already computed.
+    tie_layers: list[dict[str, Any]] = []
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3077,6 +3041,7 @@ def run_erc(
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
         substrate_outcome = run_substrate_pass(
             layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            common_native_substrate=spec.get("common_native_substrate", False),
             tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,
@@ -3202,7 +3167,7 @@ def run_erc(
     erc_coverage = _connectivity_coverage(
         gates,
         nets_decl,
-        ties,
+        tie_layers,
         degenerate_ties,
         asserted_ties,
         ties_disclosure,
@@ -3217,6 +3182,7 @@ def run_erc(
         compact,
         excused,
         substrate_outcome,
+        keepout_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3340,6 +3306,7 @@ def run_erc(
         "file": env_provenance.repo_relative_path(
             file, repo_root=env_provenance.repo_root_for(file)
         ),
+        "top": top_cell.name,
         "spec": spec_path,
         "pdk": pdk,
         # (issue #2219) Whether the per-gate antenna accumulation was
@@ -3393,36 +3360,6 @@ def run_erc(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str, expected: str | None, echoed: Any, report_path: str
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
-    path the committed report echoes back (``file``/``spec``).
-
-    Hashes via :func:`~klayout_tools._provenance.content_hash` because the
-    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
-    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
-    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
-    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
-    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
-    """
-    path = echoed if isinstance(echoed, str) and echoed else None
-    check = hash_check(field, expected, content_hash(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-    }
-    return check
-
-
 def check_erc_report(report_path: str) -> dict[str, Any]:
     """``klt erc --check`` (cheap mode, issue #3060): verify a previously
     committed ``klt erc --format json`` report at ``report_path`` still
@@ -3436,8 +3373,14 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     missing recorded hash fails the check.
 
     Relative echoed paths are re-hashed relative to the current working
-    directory -- the same convention (and the same ``input_not_found``
-    diagnostic) ``klt lvs --check`` uses.
+    directory -- the same convention ``klt lvs --check`` uses -- and an
+    echoed path that names no existing file carries the additive
+    ``input_not_found`` block ``klt drc``/``klt lvs`` attach (issue #6655):
+    the five keys ``path``/``resolved``/``found_relative_to_report``/
+    ``resolved_against``/``hint`` (``klt lvs`` adds a sixth,
+    ``resolved_repo_root``, which ERC does not emit), with the hint naming
+    only the report's directory, because ``--check`` is mutually exclusive
+    with the positional inputs and so offers no override flag to name.
 
     The result additionally carries the informational ``advisories`` list
     (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
@@ -3450,17 +3393,27 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
     committed = _load_committed_report(report_path, ErcError)
     checks = [
-        _input_hash_check(
+        # Issue #6655: the shared input_hash_check, so an echoed `file`/`spec`
+        # naming no existing file carries the five-key `input_not_found`
+        # block `klt drc` attaches (`klt lvs`'s adds `resolved_repo_root`,
+        # via `include_repo_root`, which ERC leaves off). `override_hint=None`:
+        # `--check` is mutually exclusive with the positional inputs, so
+        # there is no override flag for the hint to name.
+        input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            resolve_committed_path(committed.get("file"), report_path=report_path),
+            committed.get("file"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
-        _input_hash_check(
+        input_hash_check(
             "provenance.spec.content_hash",
             get_path(committed, ("provenance", "spec", "content_hash")),
             committed.get("spec"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
@@ -3475,23 +3428,11 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
 
 def rerun_erc_report(report_path: str) -> dict[str, Any]:
-    """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
-    previously committed ``klt erc --format json`` report by re-running ERC
-    from the ``file``/``spec``/``pdk``/``findings_only``/``antenna_tables_omitted``
-    it echoes (and the
-    ``--deck`` named by ``provenance.deck``, when there is one) and diffing
-    the fresh report against the committed one.
+    """Rerun the saved file, spec, PDK, top, deck and report options (#3060).
 
-    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
-    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`.
-
-    **Known limitation**: ``--top`` is not echoed in the report, so ``--rerun``
-    always runs with ``top=None``; a report from a multi-top-cell stream then
-    fails with the ordinary ambiguous-top-cell :class:`ErcError`. Use
-    ``--check`` (cheap mode) in that case.
-
-    Raises :class:`ErcError` for a missing/unparseable committed report, one
-    missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
+    Reports written before #7022 use automatic top selection. They can
+    replay a single-top stream and omit the new top field from their diff.
+    Missing inputs and cell lookup failures raise :class:`ErcError`.
     """
     committed = _load_committed_report(report_path, ErcError)
     file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
@@ -3499,15 +3440,23 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         raise ErcError(f"committed report has no 'file' field to rerun: {report_path}")
     if not committed.get("spec"):
         raise ErcError(f"committed report has no 'spec' field to rerun: {report_path}")
+    if "top" in committed and not isinstance(committed["top"], str):
+        raise ErcError("committed report field 'top' must name a cell")
     deck = get_path(committed, ("provenance", "deck"))
     fresh = run_erc(
         file_path,
         committed["spec"],
-        top=None,
+        top=committed.get("top"),
         pdk=committed.get("pdk"),
         deck=deck.get("name") if isinstance(deck, dict) else None,
         findings_only=bool(committed.get("findings_only")),
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for(
+        "erc",
+        report_path,
+        committed=committed,
+        fresh=fresh,
+        extra_exclude=() if "top" in committed else (("top",),),
+    )

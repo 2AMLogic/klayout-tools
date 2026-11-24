@@ -324,8 +324,8 @@ def _fake_openroad_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:2] == ["openroad", "-version"]:
         return fake_completed(stdout="26Q3-771-gdeadbeef \n")
     assert cmd[0] == "openroad"
-    metrics_path = cmd[4]
-    script_path = cmd[5]
+    metrics_path = cmd[cmd.index("-metrics") + 1]
+    script_path = cmd[-1]
     if script_path.endswith("_route_corners.tcl"):
         # The post-route corner-sweep invocation (issue #949,
         # `place_and_route._corner_sweep_script_lines`) -- a second,

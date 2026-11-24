@@ -21,9 +21,10 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from . import _json_pointer
 from . import evidence_lint as el
 from . import evidence_record as er
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 
 F_CITE_MISSING = "cited_record_missing"
 F_TWIN_MISSING = "cited_twin_missing"
@@ -111,13 +112,9 @@ def _check_claim_row(row: Any) -> None:
             raise EvidenceClaimsError(f"claims row needs a string {key!r}: {row!r}")
     if row.get("agg") not in (None, "min", "max"):
         raise EvidenceClaimsError("claims 'agg' must be 'min' or 'max'")
-    if "decimals" in row and (
-        not isinstance(row["decimals"], int) or isinstance(row["decimals"], bool)
-    ):
+    if "decimals" in row and not is_int(row["decimals"]):
         raise EvidenceClaimsError("claims 'decimals' must be an integer")
-    if "scale" in row and (
-        not isinstance(row["scale"], (int, float)) or isinstance(row["scale"], bool)
-    ):
+    if "scale" in row and not is_number(row["scale"]):
         raise EvidenceClaimsError("claims 'scale' must be a number")
 
 
@@ -267,19 +264,15 @@ def _citations(text: str, mapped_paths: list[str]) -> list[tuple[int, str]]:
 
 
 def _pointer(value: Any, pointer: str) -> Any:
-    if pointer in ("", "/"):
-        return value
-    if not pointer.startswith("/"):
+    """Resolve ``pointer`` (RFC 6901) into the record ``value`` via the
+    shared walk (:mod:`._json_pointer`, issue #6860), raising ``KeyError``
+    when it names nothing -- the caller renders that as the
+    ``claim_unresolved`` finding. A resolved JSON ``null`` is a value and
+    comes back as ``None``; only a pointer that names nothing raises."""
+    resolved, ok = _json_pointer.resolve_json_pointer(value, pointer)
+    if not ok:
         raise KeyError(pointer)
-    for token in pointer[1:].split("/"):
-        token = token.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, list):
-            value = value[int(token)]
-        elif isinstance(value, dict):
-            value = value[token]
-        else:
-            raise KeyError(token)
-    return value
+    return resolved
 
 
 def _row_value(row: Mapping[str, Any], record: Any) -> str:

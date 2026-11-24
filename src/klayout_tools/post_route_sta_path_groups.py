@@ -3,7 +3,8 @@
 ``worst_hold_path`` records reduced from it (issue #2740), the unreduced
 ``worst_paths_by_group`` list (issue #5424), and the per-port ``port_paths``
 block and records a ``constraints.report_ports`` request emits (issue
-#3042).
+#3042). The bounded ``violating_endpoints`` list (issue #7418) lives in
+its own :mod:`klayout_tools.post_route_sta_violating_endpoints`.
 
 Split out of :mod:`klayout_tools.post_route_sta` to keep that module under its
 file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`
@@ -17,17 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when either
-    marker is absent (same contract as ``post_route_sta._extract_block``)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
-
+from ._sta_request_diag import extract_block as _extract_block
 
 #: Issue #2740: brackets the per-path-group worst setup/hold path records
 #: (:func:`_worst_path_lines`), one

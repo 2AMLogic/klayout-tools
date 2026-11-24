@@ -23,7 +23,13 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import sim, sim_batch, sim_slope_band, sim_slope_band_meas
+from klayout_tools import (
+    sim,
+    sim_batch,
+    sim_measurement_kind,
+    sim_slope_band,
+    sim_slope_band_meas,
+)
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -79,15 +85,15 @@ def test_malformed_slope_band_is_rejected(body, message):
 
 
 @pytest.mark.parametrize("other", sim_slope_band_meas._FORMS)
-def test_conflicting_forms_are_rejected(other):
+def test_slope_band_validator_names_conflicting_forms(other):
     spec = {"name": "s", "slope_band": _BODY, other: {"x": 1}}
     with pytest.raises(sim.SimError, match=f"'slope_band' together with '{other}'"):
-        sim._validate_measurement_forms([spec])
+        sim_slope_band_meas.validate_form_exclusive(spec)
 
 
 def test_every_other_form_also_refuses_slope_band_beside_it():
     """Exclusivity must not depend on which validator happens to run first."""
-    for other in ("snm", "eye", "settled", "step_resolution", "search", "transfer"):
+    for other in sim_slope_band_meas._FORMS:
         spec = {"name": "s", other: {"x": 1}, "slope_band": _BODY}
         with pytest.raises(sim.SimError, match="declare exactly one"):
             sim._validate_measurement_forms([spec])
@@ -126,12 +132,19 @@ def _request(tmp_path: Path, measurements: list[dict], **extra) -> Path:
     "kind,args", [("tran", "1n 1u"), ("ac", "dec 10 1 1e6"), ("op", "")]
 )
 def test_non_dc_analysis_is_rejected(tmp_path, kind, args):
-    request = _request(tmp_path, [_DECL])
-    doc = json.loads(request.read_text())
-    doc["analysis"] = {"kind": kind, "args": args}
-    request.write_text(json.dumps(doc))
-    with pytest.raises(sim.SimError, match='requires analysis.kind "dc"'):
+    analysis = {"kind": kind, "args": args}
+    request = _request(tmp_path, [_DECL], analysis=analysis)
+    with pytest.raises(sim.SimError) as expected:
+        sim_measurement_kind.require_analysis_kind(
+            [_DECL],
+            analysis,
+            form="slope_band",
+            required="dc",
+            explanation="reduces a swept transfer curve",
+        )
+    with pytest.raises(sim.SimError) as actual:
         sim.run_sim(str(request))
+    assert str(actual.value) == str(expected.value)
 
 
 def test_analysis_steps_is_rejected_by_name(tmp_path):
@@ -158,9 +171,15 @@ def test_analysis_steps_is_rejected_by_name(tmp_path):
 
 def test_duplicate_names_are_rejected(tmp_path):
     other = {"name": "USABLE_RANGE", "slope_band": {**_BODY, "report": "x_span"}}
-    request = _request(tmp_path, [_DECL, other])
-    with pytest.raises(sim.SimError, match="duplicate measurement name"):
+    measurements = [_DECL, other]
+    request = _request(tmp_path, measurements)
+    with pytest.raises(sim.SimError) as expected:
+        sim_measurement_kind.require_unique_measurement_names(
+            measurements, form="a slope_band entry"
+        )
+    with pytest.raises(sim.SimError) as actual:
         sim.run_sim(str(request))
+    assert str(actual.value) == str(expected.value)
 
 
 def test_refused_for_xyce(tmp_path):

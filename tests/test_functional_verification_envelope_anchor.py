@@ -1,11 +1,8 @@
-"""``{path, scope}`` envelopes are anchored on the request, not the cwd (#6762).
+"""Functional-verification path envelopes use the request base (#6762, #6779).
 
-``klt functional-verification`` used to resolve the ``"repo"`` scope of
-``environment.sources``, ``environment.{results_xml,test_log,build_log}``,
-per-seed ``results_xml`` and mutation ``log_path`` from the *process cwd*, so
-one committed report differed by the directory ``klt`` was invoked from. Every
-test here runs the same request from several working directories and demands a
-byte-identical result.
+A request file uses its parent directory by default. Stdin and inline JSON
+default to the invoking directory. A fixed absolute ``--base-dir`` pins the
+base for any request form.
 
 Split out of ``tests/test_functional_verification.py`` for the per-file size
 ratchet (that module is baselined far over the hard limit); shared fixtures
@@ -158,6 +155,96 @@ def test_base_dir_anchors_the_inline_request_form(tmp_path, monkeypatch):
     assert runs[0]["results_xml"]["path"].startswith(_OUT)
     assert runs[1] == runs[0]
     assert runs[2] == runs[0]
+
+
+def test_inline_request_without_base_dir_follows_the_cwd(tmp_path, monkeypatch):
+    """The two layouts give the same inline source different repo-relative
+    paths. Outside a checkout, the same source is external (#6779)."""
+    flat = _checkout(tmp_path / "checkout-a")
+    _setup_inputs(flat)
+    nested = _checkout(tmp_path / "checkout-b") / "proj"
+    nested.mkdir()
+    _setup_inputs(nested)
+    inline = json.dumps(_base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    runs = {}
+    for label, cwd in {"flat checkout": flat, "nested checkout": nested}.items():
+        monkeypatch.chdir(cwd)
+        runs[label] = _envelopes(run_functional_verification(inline))
+
+    assert runs["flat checkout"]["sources"][0] == {
+        "path": "gcd.v",
+        "scope": "repo",
+        "sha256": runs["flat checkout"]["sources"][0]["sha256"],
+    }
+    assert runs["nested checkout"]["sources"][0]["path"] == "proj/gcd.v"
+    assert runs["nested checkout"]["sources"][0]["scope"] == "repo"
+    assert runs["flat checkout"]["results_xml"]["path"].startswith(
+        ".klt/functional-verification/"
+    )
+    assert runs["nested checkout"]["results_xml"]["path"].startswith(_OUT)
+    assert json.dumps(runs["flat checkout"], sort_keys=True) != json.dumps(
+        runs["nested checkout"], sort_keys=True
+    )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _setup_inputs(outside)
+    monkeypatch.chdir(outside)
+    got = _envelopes(run_functional_verification(inline))
+    assert got["sources"][0]["path"] is None
+    assert got["sources"][0]["scope"] == "external"
+    for key in _ARTIFACTS:
+        assert (got[key]["path"], got[key]["scope"]) == (None, "external"), key
+
+
+@pytest.mark.parametrize(
+    ("scope", "envelope_path", "message"),
+    [
+        ("repo", "proj/gcd.v", "see proj/gcd.v:17"),
+        ("external", None, "see gcd.v:17"),
+    ],
+    ids=["in-a-repo", "outside-every-checkout"],
+)
+def test_source_envelope_and_failure_message_agree_in_one_report(
+    tmp_path, monkeypatch, scope, envelope_path, message
+):
+    """#6769, the #6762 criterion PR #6766 left open: within a *single*
+    report, the envelope's ``sources[0].{path,scope}`` and the failure
+    message the #6760/#6761 normalizer renders tell the same story. In a
+    repo the diagnostic quotes the envelope path verbatim (``message`` is
+    ``see {envelope_path}:17``); outside every repo the envelope says
+    ``external``/``null`` (#6762 criterion 2) while the diagnostic falls
+    back to a request-dir-relative path -- a deliberate divergence to pin,
+    not collapse."""
+    if envelope_path is not None:
+        proj, request = _staged_project(tmp_path)
+        source = proj / "gcd.v"
+    else:
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        _setup_inputs(loose)
+        request = _write_request(loose / "request.json", _base_request())
+        source = loose / "gcd.v"
+    xml = (
+        f'<testsuite><testcase name="test_gcd">'
+        f'<failure message="see {source}:17"/></testcase></testsuite>'
+    )
+    _stub_runner(monkeypatch, _FakeRunner(xml))
+    monkeypatch.chdir(_checkout(tmp_path / "checkout-b"))
+
+    report = run_functional_verification(request)
+
+    assert report["status"] == "fail"
+    assert (report["test_count"], report["failed_count"]) == (1, 1)
+    rendered = report["environment"]["sources"][0]
+    assert (rendered["path"], rendered["scope"]) == (envelope_path, scope)
+    (test,) = report["tests"]
+    # Exact equality: an absolute prefix or a basename-only rendering of the
+    # in-repo case both fail here.
+    assert test["error_message"] == message
+    assert str(tmp_path) not in test["error_message"]
 
 
 def test_mutation_log_paths_do_not_depend_on_the_invoking_directory(

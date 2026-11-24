@@ -9,6 +9,7 @@ CI), not part of the `klt` CLI.
 scripts/
   README.md                    # this file
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
+  assemble-asap7-pdk-root.py     # generate an audited ASAP7 descriptor root
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
   fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
@@ -17,6 +18,7 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-xschem.sh              # install the fleet-pinned xschem from the 2AMLogic/xschem fork's public release asset, sha256-verified before unpack; self-contained for chip-CI copy (#6219)
   install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
@@ -30,6 +32,7 @@ scripts/
   release_notes.py               # build the GitHub Release notes from a CHANGELOG section for publish.yml (#5861)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
+  check_changelog_fragments.py   # CI gate: every changelog.d/ fragment is a `- ` bullet carrying a `#<issue>` reference (#7619)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
@@ -82,6 +85,14 @@ what lands where.
 ```
 scripts/fetch-pdks.sh
 ```
+
+## `assemble-asap7-pdk-root.py`
+
+Builds an ASAP7 root from an initialized upstream checkout. It stages the
+physical views, checks and merges the selected Liberty files, and records
+source commits and file hashes. Run
+`uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"`.
+[Selection and output details](../docs/cli/pdk.md#assembling-an-asap7-root)
 
 ## `fetch-cell-netlists.sh`
 
@@ -145,6 +156,22 @@ upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
 ```
 scripts/install-sv2v.sh
 uv run pytest tests/test_synthesize_netlist_normalize.py -rs
+```
+
+## `install-xschem.sh`
+
+Credential-free install of the fleet's pinned xschem (issue #6219, fleet rule
+2am#7275): downloads the public release asset of the `2AMLogic/xschem` fork
+(`tools.xschem.release_repo` / `release_tag` / `asset` in
+`docker/eda-sim/pdk-versions.json`), checks it against `tools.xschem.sha256`
+**before** unpacking, and unpacks it as shipped at `/opt/eda/xschem` (via
+`sudo -n` when that is not writable): the build is not relocatable, so there is
+no other supported prefix. Self-contained so chip CI can copy the single file.
+See `docker/eda-sim/README.md` for the full route.
+
+```
+scripts/install-xschem.sh [--force]
+uv run pytest tests/test_xschem_release_asset.py
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`
@@ -520,11 +547,17 @@ python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HE
 ```
 
 To explicitly regenerate the proposed baseline, use `--update-baseline`.
-It records exact candidate sizes and carries forward vendor pins whose
-bytes still match. Run check mode afterward to validate the result.
+It carries forward vendor pins whose bytes still match, keeps a recorded
+entry whose ceiling still covers the measured file (so a shrinking PR
+leaves the ledger byte-identical and cannot conflict with main, #7414),
+and records exact sizes only for new or grown paths. Do not edit a
+ledger entry just because a file shrank. On a ledger conflict in a
+long-lived PR, take main's version of the line, then validate:
 
 ```
 python scripts/check_file_size_baseline.py --update-baseline
+python scripts/check_file_size_baseline.py \
+  --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
 CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the
@@ -583,3 +616,29 @@ followed; a name bound more than once in a scope is not resolved for
 `alias._x` access; internal `from x import *` is rejected outright.
 `import-linter` 2.15 was evaluated and rejected: it models module-to-module
 edges only and cannot allow `_a` but forbid `_b` from the same module.
+
+## `check_changelog_fragments.py`
+
+CI gate (issue #7619) for the format `changelog.d/README.md` documents.
+`release_prep.py prepare` copies each pending fragment into `CHANGELOG.md`
+verbatim, so a bare paragraph or a bullet with no issue number would be
+released untraceable; this checks the shape at PR time instead. Pure stdlib,
+reads only `changelog.d/`, and runs as a non-`continue-on-error` step of the
+`lint` job ("Changelog fragment shape").
+
+```
+python scripts/check_changelog_fragments.py            # check changelog.d/
+python scripts/check_changelog_fragments.py --dir DIR  # check another directory
+```
+
+A fragment passes when its first non-blank line starts with `- ` **and** its
+text contains a `#<digits>` reference (`(#1234)`, `(issue #1234)`,
+`org/repo#1234`). A date is not required -- only 6 of the 1465 released
+bullets carry one, and the release heading already dates the section. It does
+not check that the number equals the filename's, or the shape of later
+bullets. Files in scope mirror `release_prep`: `*.md`, minus `README.md`,
+non-files and empty / whitespace-only files.
+
+Exit `0` clean, `1` offending fragments (each named on stderr with the
+reason), `2` the directory is missing. Fix a failure by editing the named
+fragment; the message suggests the `(#N)` taken from its filename.

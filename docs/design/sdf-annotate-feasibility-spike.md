@@ -771,6 +771,98 @@ stable.
   integration coverage, not by a sky130 CI fixture (PDK-scale gate-level
   runs stay out of CI for the same cost reasons §1 recorded).
 
+#### GF180 bit-counter capture at 10 ns
+
+Issue #6991 used a routed `antifuse_digital_top` with a 10 ns cocotb clock.
+Its STA request constrained the clock to **50 ns**. The full SDF fails 18 of
+21 tests at 10 ns and passes all 21 at 100 ns. The first missed capture is
+bit 0 of the SPI bit counter. [Pinned netlist, bench and STA inputs](https://github.com/2AMLogic/gf180-antifuse/tree/2948da287ed478d9f5cc0412b0b1dcdb271ee3fc)
+
+The comparison used Icarus/vvp 13.0, cocotb 2.0.1, KLayout 0.30.12,
+OpenSTA 3.2.0, and the gf180mcuD `gf180mcu_fd_sc_mcu7t5v0` timing models
+from Ciel revision `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`. The
+TT 25 °C / 1.8 V DEF+SPEF run generated the SDF once. Each row used the
+same 21 tests, reset, seed 1, 1 ns / 1 ps timescale, and
+`-gspecify -ginterconnect -T <corner>`. The first six rows also used
+identical clock and stimulus scheduling. The Q column is the settled value
+of `u_regs/_720_` at the end of the first divergent cycle, expected **0**.
+
+| Annotation | Period (ns) | Local rising CLK (ns) | D at CLK | Q at observation (ns) | Passing tests | Dropped entries |
+|---|---:|---:|---:|---|---:|---|
+| Specify only, min | 10 | 412.000 | 0 | 0 at 419.999 | 21/21 | None |
+| Specify only, typ | 10 | 412.000 | 0 | 0 at 419.999 | 21/21 | None |
+| Full, min | 10 | 412.591 | 1 | 1 at 419.999 | 3/21 | A |
+| Full, typ | 10 | 412.591 | 1 | 1 at 419.999 | 3/21 | A |
+| IOPATH only, typ | 10 | 412.591 | 1 | 1 at 419.999 | 3/21 | A |
+| `entries: "interconnect"`, typ | 10 | 412.000 | 0 | 0 at 419.999 | 21/21 | B |
+| Full, typ | 100 | 4102.591 | 0 | 0 at 4199.999 | 21/21 | A |
+| Full, typ, +10 ns SPI drive/sample phase | 100 | 4202.591 | 0 | 0 at 4299.999 | 21/21 | A |
+
+A comprises 1,070 `iopath_cond_expression`, 144 `iopath_ifnone_edge_modpath`
+and 95 exempt `timingcheck` diagnostics (the issue reported 96). B comprises
+2,584 `iopath_interconnect_only` and 95 `timingcheck`. The last row moves
+the start of the first SPI frame and each subsequent SPI drive/sample
+10 ns after a top-level rising edge. The corresponding count is one cycle later.
+
+Sampling all 96 Q pins 1 ps before each rising top edge first distinguishes
+the two low bits of the counter at 419.999 ns. In the unannotated timing
+control, both D pins settle at 408 ns, and Q[1:0] becomes `10` at 413 ns.
+With full typ SDF, bit 0's local clock rises at 412.591 ns while D and Q
+are both 1. Its AND3 driver `u_regs/_500_` sees A1 fall at 413.340 ns with
+A2 and A3 high. The surviving A1→Z falling IOPATH of 1.445 ns puts D=0
+at **414.785 ns**, 2.194 ns late. D returns to 1 at 421.281 ns, before
+the next capture at 422.591 ns. Bit 1 also misses its D=1 pulse and
+Q[1:0] stays `01`. At 100 ns bit 0 captures D=0 and its Q falls 2.909 ns
+later, matching the surviving CLK→Q falling delay.
+
+With the reporter's ideal clock and SPEF, OpenSTA's worst setup/hold slack
+to `u_regs/_720_/D` is **−3.01201 / +5.90948 ns** at a 10 ns period and
+**+36.98798 / +5.90948 ns** at 50 ns. Design-wide setup/hold slack is
+−12.19663 / +2.27619 ns at 10 ns. These are STA worst paths to the endpoint
+and across the design. The 2.194 ns above is the observed lateness for this
+specific vector. Direct `iverilog`/`vvp`, given KLT's two normalized SDFs,
+the same annotation roots and original cocotb suite, also passed 3/21 and
+produced a byte-identical capture trace. Deliberately changing only the
+AND3 A1→Z entry to A1→Q produces `Unable to match ModPath A1 -> Q`
+and KLT exit 1. The observed failure is explained by the short clock and
+surviving delays. A partial-annotation count alone cannot predict a capture.
+
+To replay, use a fresh checkout of the linked revision, a Ciel root containing
+`gf180mcuD`, and a Python environment with KLT and cocotb 2.0.1. OpenROAD
+and Icarus must be on PATH. From the klayout-tools root, run:
+
+```sh
+git clone https://github.com/2AMLogic/gf180-antifuse.git /tmp/gf180-antifuse-6991
+design=/tmp/gf180-antifuse-6991
+git -C "$design" fetch origin 2948da287ed478d9f5cc0412b0b1dcdb271ee3fc
+git -C "$design" checkout --detach 2948da287ed478d9f5cc0412b0b1dcdb271ee3fc
+export PDK_ROOT="$HOME/.ciel"
+(cd "$design" && klt sta rtl/sta/antifuse_digital_top.sdf.json --pdk gf180mcuD --format json)
+out=$(mktemp -d)
+probe=examples/functional-verification/gf180-sdf-capture/reproduce.py
+(set -e
+ for mode in specify-min specify-typ full-min full-typ iopath interconnect slow margin raw; do
+     python "$probe" "$design" "$out" "$mode"
+ done)
+diff <(grep '^S ' "$out/specify-typ/out/capture.tsv") <(grep '^S ' "$out/full-typ/out/capture.tsv")
+pytest -q tests/test_functional_verification_sdf_cond_expression.py tests/test_functional_verification_sdf_ifnone_edge.py
+```
+
+The comparison command uses Bash or Zsh process substitution. Each KLT case
+writes its request, instrumented netlist, report and pin trace. `raw` reuses
+the completed `full-typ` artifacts and compares traces and per-test outcomes. To inspect
+endpoint slack, source the generated `sta_antifuse_digital_top__tt_025C_1v80.tcl`
+in OpenROAD and run the following in the same design session:
+
+```tcl
+foreach period {10 50 100} {
+  create_clock -name clk -period $period [get_ports clk]
+  report_checks -to [get_pins -hier *720*/D] -path_delay min_max -digits 5
+  report_worst_slack -max -digits 5
+  report_worst_slack -min -digits 5
+}
+```
+
 ### 3.9 `ifnone` edge-sensitive modpaths do not exist in Icarus (2026-10-14, issue #2885)
 
 The gf180mcu standard-cell models declare every non-unate arc (XOR/XNOR

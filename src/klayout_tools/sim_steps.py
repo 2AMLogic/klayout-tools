@@ -43,9 +43,9 @@ to hand-rolled decks -- a plausible but mis-paired number):
    measurements then find no vectors and come back empty, instead of
    silently reading the *previous* step's solve.
 2. ``echo`` markers around the analysis record the plot name before and
-   after; :func:`step_outcomes` reads them back from the log, so a step that
-   produced no plot is reported as failed (``code: "step_failed"``) rather
-   than inferred from its measurements.
+   after; :func:`sim_step_evidence.step_outcomes` reads them back from the
+   log, so a step that produced no plot is reported as failed (``code:
+   "step_failed"``) rather than inferred from its measurements.
 3. The step's plot name is captured into ``klt_plot_<index>``; a
    step-qualified reference ``lo.vout`` is rewritten to
    ``{$klt_plot_<index>}.vout`` -- ngspice's own plot-qualified vector syntax
@@ -79,7 +79,10 @@ Failure propagation is decided in Python, not inferred from ngspice output: a
 measurement whose step failed, or any of whose inputs produced no value, is
 reported ``status: "error"`` with a ``derived_input_unavailable`` (or the
 step's ``step_failed``) diagnostic -- never graded -- while every independent
-result in the same corner stays inspectable.
+result in the same corner stays inspectable. The one opt-in exception
+(#7072): a step ``.meas`` card with ``on_unreached: "null"`` whose target
+its *completed* step never reached grades ``not_reached`` (info diagnostic
+``measurement_not_reached``) on that step's own log region.
 """
 
 from __future__ import annotations
@@ -87,9 +90,17 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import sim_derive, sim_eye, sim_step_evidence
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
+from .sim_step_evidence import step_outcomes as step_outcomes
+from .sim_step_grading import (
+    grade_step_measurements as grade_step_measurements,
+)
+from .sim_step_grading import (
+    measurement_provenance as measurement_provenance,
+)
 from .sim_step_shadow import validate_step_measurement_name
 
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
@@ -156,20 +167,13 @@ _BARE_NAME_RE = re.compile(r"(?<![\w.$}@])([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*[.(])"
 #: scalar the analysis line then reads with ``$&``.
 _ARG_REF_RE = re.compile(r"\$\{([^{}]*)\}")
 
-#: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
-#: unknown1`` / ``klt_step_end 0 op1``.
-_STEP_MARKER_RE = re.compile(
-    r"^\s*klt_step_(begin|end)\s+(\d+)\s+(\S+)\s*$", re.MULTILINE
-)
-
-
 #: Measurement keys the ``analysis_steps`` path refuses by name rather than
 #: silently ignoring: (key, tail of the "use the scalar analysis ..." hint,
 #: ``strict_true``). ``strict_true`` refuses only a literal ``True`` (the
 #: ``optional`` flag); otherwise any non-``None`` value is refused. Order is the
 #: order refusals are checked in, so it is part of the error contract.
 #: - crossings (#2868), energy (#3033), stress (#4592), cycle_mean (#2947),
-#:   eye (#4292), step_resolution (#4773), settled (#4780): each reads one
+#:   step_resolution (#4773), settled (#4780): each reads one
 #:   transient plot's rawfile; no per-step equivalent.
 #: - search (#4121): bisection loop is scalar-deck only.
 #: - optional (#2925): scalar analysis only; a step's no-value paths also carry
@@ -182,7 +186,6 @@ _UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("search", "for a bisection/threshold-search measurement", False),
     ("optional", "for a measurement that may legitimately be absent", True),
     ("cycle_mean", '(kind "tran") for a cycle-aligned mean', False),
-    ("eye", '(kind "tran") for an eye measurement', False),
     ("step_resolution", '(kind "tran") for a step-resolution report', False),
     ("settled", '(kind "tran") for a settled-window verdict', False),
     ("noise", '(kind "noise") for a noise-spectrum measurement', False),
@@ -205,23 +208,6 @@ def _refuse_unsupported(spec: dict[str, Any]) -> None:
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
     """Whether a resolved ``analysis`` object is a step sequence."""
     return analysis.get("kind") == STEPS_KIND and "steps" in analysis
-
-
-def measurement_provenance(spec: dict[str, Any]) -> dict[str, Any]:
-    """The additive provenance fields a measurement result/rollup entry
-    carries: ``step`` for a step-scoped measurement, ``derived_from`` for one
-    computed from other results, ``case`` for one expanded from a ``{case}``
-    template (issue #5731). Empty for every plain scalar-``analysis``
-    measurement, so those report entries keep their exact shape."""
-    fields: dict[str, Any] = {k: spec[k] for k in ("step", "case") if k in spec}
-    if "derived_from" in spec:
-        fields["derived_from"] = list(spec["derived_from"])
-    return fields
-
-
-# --------------------------------------------------------------------------- #
-# Request resolution and validation
-# --------------------------------------------------------------------------- #
 
 
 def resolve_analysis_steps(
@@ -478,11 +464,7 @@ def _resolve_step_measurements(
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
-    from .sim_validate import _validate_measurement_form
-
-    specs = raw.get("measurements")
-    if specs is None:
-        return []
+    specs = raw.get("measurements", [])  # an explicit null is refused too (#6412)
     if not isinstance(specs, list) or not all(isinstance(s, dict) for s in specs):
         raise SimError(
             f"step {step['name']!r}: measurements must be an array of objects"
@@ -493,13 +475,14 @@ def _resolve_step_measurements(
     # new name can cause against them (illegal, duplicate, shadowing #5446).
     local_names: dict[str, str] = {}
     for spec in specs:
-        _validate_measurement_form(spec)
+        sim_derive.validate_step_form(spec, step["name"])
         _refuse_unsupported(spec)
         _check_intermediate(spec, f"step {step['name']!r}")
         local = spec["name"]
         validate_step_measurement_name(spec, local, local_names, step)
         local_names[local.lower()] = local
         resolved.append(_flatten_step_measurement(spec, step, known))
+    sim_eye.validate_eye_context(resolved, step)
     return resolved
 
 
@@ -557,9 +540,13 @@ def _flatten_step_measurement(
             "log_key": log_key,
         }
     )
+    if sim_eye.is_eye(spec):
+        flat["deck_lines"] = []
+        return flat
     if spec.get("spice") is not None:
         flat["meas_card"] = spec["spice"]
         first = _meas_command(spec["spice"], local, step)
+        deck_lines = [*sim_step_evidence.find_vector_lines(spec), first]
         derived_from: list[str] = []
         spectrum_steps: list[str] = []
     else:
@@ -568,12 +555,10 @@ def _flatten_step_measurement(
         deck_expr, derived_from, spectrum_steps = _substitute_refs(
             expr, known, owner=f"{step['name']}.{local}"
         )
-        first = f"let {local} = {deck_expr}"
-    if spec.get("intermediate"):
-        flat["intermediate"] = True
-        flat["deck_lines"] = [first]
-    else:
-        flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
+        deck_lines = [f"let {local} = {deck_expr}"]
+    if not spec.get("intermediate"):
+        deck_lines.extend([f"let {log_key} = {local}", f"print {log_key}"])
+    flat["deck_lines"] = deck_lines
     if derived_from:
         flat["derived_from"] = derived_from
     if spectrum_steps:
@@ -682,6 +667,11 @@ def _substitute_refs(
                 f"measurement {owner!r} references {step_ref}.{meas_ref}, but "
                 f"step {target['name']!r} declares no measurement {meas_ref!r}"
             )
+        if sim_eye.is_eye(meas):
+            raise SimError(
+                f"measurement {owner!r} references postprocessed eye {meas['name']!r}; "
+                "its value is available after ngspice finishes"
+            )
         if meas.get("intermediate"):
             _note_intermediate_use(
                 meas,
@@ -746,15 +736,22 @@ def _resolve_derived_measurements(
     entries evaluated after every step, in declared order."""
     from .sim_validate import _validate_measurement_forms
 
-    specs = request.get("measurements") or []
+    # Only an absent key defaults (#6412); `or []` read null/{}/""/false/0 as absent.
+    specs = request.get("measurements", [])
     _validate_measurement_forms(specs)
+    derive, specs = sim_derive.top_level_split(specs)
     derived_names = [str(spec["name"]) for spec in specs]
-    resolved: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = [dict(spec) for spec in derive]
     intermediates: dict[str, list[str]] = {}
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_unsupported(spec)
         _check_intermediate(spec, "derived")
+        if sim_eye.is_eye(spec):
+            raise SimError(
+                f"measurement {name!r}: declare an eye in a transient step; "
+                "a top-level measurement here requires a derived expression"
+            )
         if spec.get("spice") is not None:
             raise SimError(
                 f"measurement {name!r}: with analysis_steps, a top-level "
@@ -841,7 +838,7 @@ def _check_log_keys_unique(specs: list[dict[str, Any]]) -> None:
     measurement, the name of each derived one -- must be unique, or two
     results would be read back from the same printed line."""
     seen: dict[str, str] = {}
-    for spec in specs:
+    for spec in sim_derive.per_corner_measurements(specs):
         key = spec["log_key"]
         if key in seen:
             raise SimError(
@@ -908,7 +905,13 @@ def validate_alter_targets(
         }
     )
     params = _param_only_targets(netlist_path, step_targets) if step_targets else {}
-    _check_ac_alter_targets_exist(analysis, netlist_path)
+    ac_targets = [
+        (target[: -len(_AC_SUFFIX)], f"step {step['name']!r}: alter target {target!r}")
+        for step in analysis["steps"]
+        for target, _value in step["alter"]
+        if is_ac_alter_target(target)
+    ]
+    check_ac_alter_targets_exist(netlist_path, ac_targets)
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             if target in params:
@@ -921,18 +924,12 @@ def validate_alter_targets(
                 )
 
 
-def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -> None:
-    """Refuse an ``"<SRC>.ac"`` key naming no element of the netlist: ngspice
-    would log ``no such device`` and the step would solve at the nominal
-    excitation. Same conclusiveness rule as ``_param_only_targets`` -- an
-    unreadable file or unresolvable ``.include``/``.lib`` reports nothing."""
-    pairs = [
-        (step["name"], target)
-        for step in analysis["steps"]
-        for target, _value in step["alter"]
-        if is_ac_alter_target(target)
-    ]
-    if not pairs:
+def check_ac_alter_targets_exist(
+    netlist_path: str, targets: list[tuple[str, str]]
+) -> None:
+    """Reject a missing AC source only when the whole include tree was readable.
+    Each pair gives the source name and its request location for diagnostics."""
+    if not targets:
         return
     from .sim import _included_elements, _netlist_declarations
 
@@ -947,10 +944,10 @@ def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -
         if included is None:
             return
         known |= included
-    for step, target in pairs:
-        if target[: -len(_AC_SUFFIX)].strip().lower() not in known:
+    for source, location in targets:
+        if source.strip().lower() not in known:
             raise SimError(
-                f"step {step!r}: alter target {target!r} names no element in "
+                f"{location} names no element in "
                 "the netlist -- ngspice would ignore it and solve at the "
                 "nominal AC magnitude"
             )
@@ -1050,6 +1047,7 @@ def control_lines(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
     reset_prefix: list[str] | None = None,
+    corner_dir: str = ".",
 ) -> list[str]:
     """The step-sequence body of the generated ``.control`` block -- placed
     after the corner's own ``alter`` cards and before ``quit``. See this
@@ -1059,6 +1057,7 @@ def control_lines(
     ``supply_v`` ``alter`` cards) re-emitted after ``reset`` for a step with
     ``reset: true``, since ``reset`` reverts both."""
     lines: list[str] = []
+    captures = sim_eye.step_captures(measurements_spec, corner_dir)
     spectrum_needed = {
         name for spec in measurements_spec for name in spec.get("spectrum_steps", [])
     }
@@ -1074,6 +1073,7 @@ def control_lines(
         lines.append(f"{step['kind']} {step.get('deck_args', step['args'])}".rstrip())
         lines.append(f"echo klt_step_end {index} $curplot")
         lines.append(f"set klt_plot_{index} = $curplot")
+        lines.extend(captures.get(step["name"], []))
         if step["name"] in spectrum_needed:
             lines.extend(_spectrum_plot_lines(index))
         if "lines" in step:
@@ -1084,219 +1084,3 @@ def control_lines(
                 lines.extend(spec["deck_lines"])
     lines.extend(_derived_lines(analysis, measurements_spec))
     return lines
-
-
-# --------------------------------------------------------------------------- #
-# Harvesting and grading
-# --------------------------------------------------------------------------- #
-
-
-def step_outcomes(analysis: dict[str, Any], log_text: str) -> dict[str, bool]:
-    """``{step name: completed}`` from the ``echo`` markers in the log. A
-    step completed iff both markers are present and the analysis made a new
-    plot current; a missing end marker (killed, aborted script) or an
-    unchanged plot (the analysis produced none) is a failed step."""
-    begin: dict[int, str] = {}
-    end: dict[int, str] = {}
-    for match in _STEP_MARKER_RE.finditer(log_text):
-        target = begin if match.group(1) == "begin" else end
-        target[int(match.group(2))] = match.group(3)
-    return {
-        step["name"]: index in begin and index in end and begin[index] != end[index]
-        for index, step in enumerate(analysis["steps"])
-    }
-
-
-def grade_step_measurements(
-    measurement_values: dict[str, float],
-    measurements_spec: list[dict[str, Any]],
-    *,
-    analysis: dict[str, Any],
-    log_text: str,
-    save_mode: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, Any]]:
-    """One corner's step-sequence results: ``(measurement_results,
-    diagnostics, extra_corner_fields)``.
-
-    ``extra_corner_fields`` is the additive ``{"steps": [...]}`` per-step
-    outcome list. Results are graded in flattened order (steps, then derived
-    measurements), so every input a result depends on is decided first."""
-    outcomes = step_outcomes(analysis, log_text)
-    unmet = _apply_arg_dependencies(
-        analysis, measurements_spec, measurement_values, outcomes
-    )
-    diagnostics: list[dict[str, str]] = []
-    for step in analysis["steps"]:
-        if step["name"] in unmet:
-            diagnostics.append(_input_unavailable_diagnostic(step, unmet[step["name"]]))
-        elif not outcomes[step["name"]]:
-            diagnostics.append(_step_failed_diagnostic(step, measurements_spec))
-    results: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
-    for spec in measurements_spec:
-        result, spec_diagnostics = _grade_one(
-            spec, measurement_values, outcomes, by_name, save_mode=save_mode
-        )
-        by_name[spec["name"]] = result
-        results.append(result)
-        diagnostics.extend(spec_diagnostics)
-    steps_field = [
-        {
-            "name": step["name"],
-            "kind": step["kind"],
-            "status": "ok" if outcomes[step["name"]] else "error",
-        }
-        for step in analysis["steps"]
-    ]
-    return results, diagnostics, {"steps": steps_field}
-
-
-def _apply_arg_dependencies(
-    analysis: dict[str, Any],
-    measurements_spec: list[dict[str, Any]],
-    measurement_values: dict[str, float],
-    outcomes: dict[str, bool],
-) -> dict[str, list[str]]:
-    """Issue #3055: a step whose sweep window reads an earlier result that
-    produced no value is marked failed (in place in ``outcomes``) whatever
-    ngspice made of the unresolved window, so it never reports a solve over
-    a stale or garbage range. Returns ``{step: [unavailable inputs]}``."""
-    specs = {spec["name"]: spec for spec in measurements_spec}
-    unmet: dict[str, list[str]] = {}
-    for step in analysis["steps"]:
-        missing = [
-            name
-            for name in step.get("arg_inputs", [])
-            if not outcomes.get(specs[name]["step"], False)
-            or measurement_values.get(specs[name]["log_key"]) is None
-        ]
-        if missing:
-            outcomes[step["name"]] = False
-            unmet[step["name"]] = missing
-    return unmet
-
-
-def _input_unavailable_diagnostic(
-    step: dict[str, Any], missing: list[str]
-) -> dict[str, str]:
-    return {
-        "severity": "error",
-        "code": "derived_input_unavailable",
-        "message": (
-            f"analysis step {step['name']!r} was not run against a derived "
-            f"sweep window ({step['args']!r}): its input(s) "
-            f"{', '.join(missing)} produced no value in this corner"
-        ),
-    }
-
-
-def _step_failed_diagnostic(
-    step: dict[str, Any], measurements_spec: list[dict[str, Any]]
-) -> dict[str, str]:
-    owned = [s["name"] for s in measurements_spec if s.get("step") == step["name"]]
-    suffix = (
-        f"; its measurements ({', '.join(owned)}) are reported without a value"
-        if owned
-        else ""
-    )
-    return {
-        "severity": "error",
-        "code": "step_failed",
-        "message": (
-            f"analysis step {step['name']!r} ({step['kind']} {step['args']}".rstrip()
-            + ") produced no analysis plot -- the solve failed or never ran "
-            "(see this corner's log)" + suffix
-        ),
-    }
-
-
-def _grade_one(
-    spec: dict[str, Any],
-    measurement_values: dict[str, float],
-    outcomes: dict[str, bool],
-    by_name: dict[str, dict[str, Any]],
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    from .sim import _grade_measurement_value
-
-    base = {"name": spec["name"], "value": None, "unit": spec.get("unit")}
-    errored = {
-        **base,
-        "status": "error",
-        "margin": None,
-        **measurement_provenance(spec),
-    }
-    step = spec.get("step")
-    if step is not None and not outcomes[step]:
-        # Reported by the step's own `step_failed` diagnostic; never read a
-        # value from a step that produced no plot of its own.
-        return errored, []
-    missing = [
-        name
-        for name in spec.get("derived_from", [])
-        if by_name.get(name, {}).get("value") is None
-    ]
-    missing += [
-        f"{name}.spectrum"
-        for name in spec.get("spectrum_steps", [])
-        if not outcomes[name]
-    ]
-    if missing:
-        return errored, [
-            {
-                "severity": "error",
-                "code": "derived_input_unavailable",
-                "message": (
-                    f"measurement {spec['name']!r} was not graded: its "
-                    f"input(s) {', '.join(missing)} produced no value in this "
-                    "corner"
-                ),
-            }
-        ]
-    value = measurement_values.get(spec["log_key"])
-    if value is None:
-        return errored, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": _no_value_message(spec, save_mode),
-            }
-        ]
-    status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
-    result = {
-        **base,
-        "value": value,
-        "status": status,
-        "margin": margin,
-        **measurement_provenance(spec),
-    }
-    return result, grading_diagnostics
-
-
-def _no_value_message(spec: dict[str, Any], save_mode: str) -> str:
-    from .sim import SAVE_MODE_NETLIST_NO_VALUE_HINT
-
-    if "step" in spec:
-        form = (
-            f"its .meas card ({spec['meas_card']!r})"
-            if "meas_card" in spec
-            else f"its 'expr' ({spec['expr']!r})"
-        )
-        message = (
-            f"measurement {spec['name']!r} produced no value: step "
-            f"{spec['step']!r} completed, but {form} printed no "
-            f"'{spec['log_key']} = <value>' line -- check that it resolves "
-            "against that step's saved vectors and reduces to a single real "
-            "scalar"
-        )
-    else:
-        message = (
-            f"derived measurement {spec['name']!r} produced no value: every "
-            f"input ({', '.join(spec['derived_from'])}) was available, but its "
-            f"expression ({spec['expr']!r}) did not evaluate to a single real "
-            "scalar -- check the expression itself"
-        )
-    if save_mode == "netlist" and "step" in spec:
-        message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-    return message

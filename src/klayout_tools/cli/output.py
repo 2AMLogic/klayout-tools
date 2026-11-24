@@ -16,7 +16,12 @@ Design notes (additive envelope, not a wrapping one):
 - ``--format json`` output on success goes to **stdout only**; on error, the
   JSON error object goes to **stderr**, and stdout is left empty. This means
   a caller never has to inspect stdout content to distinguish success from
-  failure under ``--format json`` — check the exit code.
+  failure under ``--format json`` — check the exit code. That error stderr
+  carries the envelope *alone*: under ``--format json`` klt's human-readable
+  warnings are deferred for the invocation and dropped ahead of an
+  application error, so parsing the whole stream yields exactly one JSON
+  document, while report-producing runs still deliver them to stderr
+  (issue #6935, :mod:`klayout_tools._warn`).
 - ``--format text`` is a courtesy rendering, not the contract: success calls
   a command-supplied ``text_renderer`` callback, and errors print a plain
   ``klt <command>: <message>`` line to stderr, matching pre-existing
@@ -37,9 +42,14 @@ import contextlib
 import gzip
 import io
 import json
+import os
+import stat
 import sys
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, BinaryIO
+from uuid import uuid4
+
+from .. import _warn
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -87,12 +97,61 @@ def emit_success(
     character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
     aborting the render (:func:`_printable_stdout`).
     """
+    # Issue #6935: this invocation produced a report, so any warning deferred
+    # for it is delivered now -- to stderr, ahead of the payload, leaving
+    # both streams exactly as documented (advisory visible, no envelope).
+    _warn.flush()
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
     else:
         with _printable_stdout():
             text_renderer(payload)
+
+
+@contextlib.contextmanager
+def _report_destination(path: str) -> Iterator[BinaryIO]:
+    """Stage regular files next to their target. Keep symlinks and streams usable.
+
+    A failed write re-raises :class:`OSError` carrying the errno text but not
+    the ``.klt-<uuid>.tmp`` staging name, which never existed for the caller:
+    every verb's error message already names the destination (issue #7658).
+    """
+    try:
+        yield from _stage_report(path)
+    except OSError as exc:
+        if exc.filename is None:
+            raise
+        raise OSError(exc.errno, exc.strerror) from exc
+
+
+def _stage_report(path: str) -> Iterator[BinaryIO]:
+    target = os.path.realpath(path) if os.path.islink(path) else path
+    try:
+        mode = os.stat(target).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        with open(target, "wb") as handle:
+            yield handle
+        return
+
+    if mode is not None:
+        # Directory write access alone must not grant write access to this file.
+        os.close(os.open(target, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)))
+    temporary = os.path.join(os.path.dirname(target), f".klt-{uuid4().hex}.tmp")
+    # New files inherit the caller's umask. Preserve access to an existing report.
+    permissions = 0o666 if mode is None else mode & 0o777
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, permissions)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            yield handle
+        if mode is not None:
+            os.chmod(temporary, permissions)
+        os.replace(temporary, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def write_json_file(payload: dict, path: str) -> None:
@@ -104,16 +163,15 @@ def write_json_file(payload: dict, path: str) -> None:
     ``json.dump`` rather than building a second in-memory copy. Raises
     :class:`OSError` if ``path`` cannot be written.
     """
-    if path.endswith(".gz"):
-        with open(path, "wb") as raw:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
-                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
-                    json.dump(payload, text, indent=2)
-                    text.write("\n")
-    else:
-        with open(path, "w", encoding="utf-8", newline="") as handle:
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
+    with _report_destination(path) as raw:
+        stream = (
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0)
+            if path.endswith(".gz")
+            else raw
+        )
+        with io.TextIOWrapper(stream, encoding="utf-8", newline="") as text:
+            json.dump(payload, text, indent=2)
+            text.write("\n")
 
 
 def render_table(
@@ -163,12 +221,14 @@ def _drift_check_label(entry: dict) -> str:
 
     ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
     that points at one ``attestation.checks[<i>]`` entry with an additive
-    ``check`` object holding that check's identity -- its ``role`` plus
-    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
     ``corner``/``metric`` the check kind carries (see
     ``signoff_attest_drift.check_identity``, which owns both the key set and
-    the order). Rendering it is a plain join of those values in that order, so
-    this module -- a leaf that every ``klt`` verb and two library modules
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
     import -- stays free of a dependency on the signoff stack, and the
     producer stays the single place that decides what identifies a check.
 
@@ -269,6 +329,12 @@ def _print_build_skew(skew: dict | None) -> None:
         print(f"build_skew: {what} -- excluded from the verdict")
 
 
+def _hash_check_label(check: dict) -> str:
+    if check.get("status") == "unverifiable":
+        return "UNVERIFIABLE"
+    return "OK" if check["match"] else "DRIFTED"
+
+
 def render_check_text(result: dict) -> None:
     """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
 
@@ -279,7 +345,7 @@ def render_check_text(result: dict) -> None:
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
     for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
+        mark = _hash_check_label(check)
         print(f"  [{mark}] {check['field']}")
         if not check["match"]:
             print(f"      expected: {check['expected']}")
@@ -364,6 +430,9 @@ def emit_error(
     ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
+        # Issue #6935: stderr belongs to this one document -- warnings
+        # deferred for the invocation are dropped, never prefixed to it.
+        _warn.discard()
         error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
@@ -373,6 +442,9 @@ def emit_error(
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)
     else:
+        # Text is not the contract, but the advisory stays visible ahead of
+        # the plain-text error line (issue #6935).
+        _warn.flush()
         print(f"klt {command}: {message}", file=sys.stderr)
     return exit_code
 

@@ -233,7 +233,7 @@ def test_env_batch_with_one_element_list_runs_locally(tmp_path, monkeypatch):
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert "environment" not in report
+    assert report["corner_runs"][0]["environment"]["threads"] == 1
 
 
 def test_flag_local_beats_env_batch(fake, monkeypatch):
@@ -436,7 +436,7 @@ def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
     fake, monkeypatch
 ):
     monkeypatch.setattr(
-        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000")],
     )
 
@@ -452,7 +452,7 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
     fake, monkeypatch, version
 ):
     monkeypatch.setattr(
-        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
         lambda *a, **k: [_image(version)],
     )
 
@@ -464,7 +464,7 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
 
 def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
     monkeypatch.setattr(
-        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
+        "klayout_tools.sim_batch.BatchConfig.runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
     )
 

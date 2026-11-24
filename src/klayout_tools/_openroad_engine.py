@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from subprocess import Popen
 from typing import Any
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._openroad_logs import (
     _CONTAINER_ID_WAIT_S,
     _captured_text,
@@ -64,9 +65,7 @@ def _is_unconstrained_slack(value: float | None) -> bool:
     :data:`_UNCONSTRAINED_SLACK_NS`. ``None`` (a metric the run never
     populated at all) is **not** the sentinel: absence is a different thing
     from "reported, but not a measurement"."""
-    if value is None:
-        return False
-    return abs(value) >= _UNCONSTRAINED_SLACK_NS
+    return value is not None and abs(value) >= _UNCONSTRAINED_SLACK_NS
 
 
 def _timing_status(values: Iterable[float | None]) -> str | None:
@@ -109,7 +108,9 @@ class _OpenRoadResult:
         try:
             yield
         except error_cls as exc:
-            raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
+            wrapped = error_cls(_log_error_context(str(exc), self.engine_log))
+            wrapped.__dict__.update(exc.__dict__)  # keep fields (#6952)
+            raise wrapped from exc
 
 
 #: The version-independent shape of "the Docker daemon is not reachable"
@@ -150,10 +151,8 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     argv, which -- per this repo's own documented, CI-used install path
     (``scripts/install-openroad-docker.sh``) -- is very often actually a
     wrapper script around ``docker run --rm -i ... $IMAGE ...``. The wrapper
-    adds almost nothing to the streams: it emits at most its own
-    ``klt-openroad-cid`` marker line (issue #5726) and otherwise forwards
-    the client's stdout/stderr and exit status unchanged, so whatever
-    ``docker`` itself prints when it cannot reach its daemon becomes the
+    forwards the client's stdout, stderr and exit status, so whatever
+    Docker prints when it cannot reach its daemon becomes the
     captured ``stderr`` of the run essentially *unchanged*: there is no
     wrapper-added text to strip, and no distinct exit code to key off
     (``docker`` exits ``1``, the same as a genuine OpenROAD/Tcl failure).
@@ -174,8 +173,8 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
       invoking user lacks access to the daemon socket. Checked first, as the
       narrower of the two signatures.
 
-    Like ``place_and_route.py``'s :func:`~klayout_tools.place_and_route.
-    _mount_namespace_hint` (issue #1868), this is safe to *append* to an
+    Like :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`
+    (issue #1868), this is safe to *append* to an
     existing engine-error message rather than replace it: the engine's own
     captured diagnosis is still the primary evidence, the hint only says what
     that diagnosis means and what to do next. A caller that does not recognize
@@ -201,10 +200,9 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
         for stream in (completed.stdout or "", completed.stderr or "")
         for line in stream.splitlines()
     ]
-    matchers = [_runtime_unreachable_hint]
+    matchers = [_runtime_unreachable_hint, _image_missing_hint]
     if completed.returncode == 127:
-        matchers.append(_docker_missing_hint)
-    matchers.append(_image_missing_hint)
+        matchers.insert(1, _docker_missing_hint)
     for matcher in matchers:
         for lowered in lines:
             hint = matcher(lowered, batch_host)
@@ -315,33 +313,11 @@ def _run_openroad(
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
     container_id_wait_s: float = _CONTAINER_ID_WAIT_S,
+    threads: int | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
-    """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    streaming raw stdout/stderr into separately retained log files *while the
-    process runs* (``tail -f`` shows progress; an interrupted run keeps
-    whatever OpenROAD had flushed). The result exposes UTF-8 text
-    (replacement decoding) for existing parsers; an invalid output byte
-    cannot mask the engine failure or lose its logs.
-    Raises ``error_cls`` if the ``openroad``
-    binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
-    from a successfully-launched run is left for the caller to inspect via
-    returned result's ``returncode``. No timeout is introduced. If a runner
-    supplies a timeout exception, its available partial streams are retained;
-    KeyboardInterrupt retains available data and keeps its interruption type.
-    Logs are local debugging evidence, not a successful-stage signal.
-
-    The child runs under ``start_new_session=True`` (issue #5726): its
-    process group contains only the engine invocation -- this process and
-    its own children are never in it -- and :func:`_kill_openroad_run` owns
-    cleanup on timeout, interrupt, SIGTERM and SIGHUP, signaling the
-    group *and* ``docker kill``ing the recorded container, if the wrapper
-    printed its id. ``invocation.json`` is written at launch
-    (``write_launch_snapshot``, ``"outcome": "running"``) and atomically
-    replaced by ``finish()`` -- a ``klt`` killed outright leaves a record
-    that says so, naming the container that may still be running.
-    ``container_id_wait_s`` bounds that launch-time poll of the retained
-    stderr for the wrapper's marker line (tests shrink it; a caller that
-    knows no wrapper is present may pass ``0``)."""
+    """See “Retained OpenROAD logs” in docs/cli/place-and-route.md for log streaming.
+    Keep partial logs; anchor on ``repo_root``; raise ``error_cls`` if launch fails."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -349,6 +325,7 @@ def _run_openroad(
         metrics_path,
         invocation_id=invocation_id,
         script_hash=script_hash,
+        repo_root=repo_root,
     )
 
     def retain(outcome, returncode, stdout, stderr):
@@ -360,14 +337,28 @@ def _run_openroad(
         return data, record
 
     def stop(proc):
-        # A cold pull can deliver the marker after the launch-time poll.
+        # A cold pull may populate the cidfile after the launch-time poll.
         container_id = logs.record["container_id"] or _poll_container_id(logs, proc, 0)
-        _kill_openroad_run(proc, container_id)
+        _kill_openroad_run(proc, container_id, invocation_id)
 
-    argv = ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path]
+    thread_args = [] if threads is None else ["-threads", str(threads)]
+    argv = [
+        "openroad",
+        "-no_init",
+        "-exit",
+        *thread_args,
+        "-metrics",
+        metrics_path,
+        script_path,
+    ]
     with _termination_signals() as arm_signals:
         try:
-            proc = Popen(argv, start_new_session=True, **logs.popen_streams())
+            proc = Popen(
+                argv,
+                start_new_session=True,
+                env=logs.wrapper_environment(),
+                **logs.popen_streams(),
+            )
         except OSError as exc:
             _, record = retain("launch_failed", None, None, None)
             raise error_cls(
@@ -437,9 +428,7 @@ def _openroad_version() -> str | None:
     if not stdout:
         return None
     banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
+    return banner_match.group(1) if banner_match else stdout.split()[0]
 
 
 #: ``report_check_types`` flags whose union is the **setup-side** timing-check
@@ -495,16 +484,16 @@ def _timing_violation_report_lines(
     prints one row per failing endpoint per path group, so the count unit is
     *violating endpoints*, not enumerated timing paths.
     """
+
+    def report_line(flags: tuple[str, ...]) -> str:
+        return f"report_check_types {' '.join(flags)} -violators -format end"
+
     return [
         f'puts "{setup_begin}"',
-        "report_check_types "
-        + " ".join(_SETUP_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_SETUP_CHECK_FAMILY_FLAGS),
         f'puts "{setup_end}"',
         f'puts "{hold_begin}"',
-        "report_check_types "
-        + " ".join(_HOLD_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_HOLD_CHECK_FAMILY_FLAGS),
         f'puts "{hold_end}"',
     ]
 

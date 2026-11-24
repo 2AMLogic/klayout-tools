@@ -5,6 +5,13 @@ A request can supply a tagged mesh or ask `klt em` to mesh a labelled GDS
 region using its PDK stackup. Both paths use `engine: "geode_fem"`,
 `solve_mode: "quasi_static"` and `outputs: ["c"]`.
 
+How close those numbers are to the true answer is answered by
+[`docs/design/em-validation.md`](../design/em-validation.md)
+([#5618](https://github.com/2AMLogic/klayout-tools/issues/5618)): the
+closed-form parallel-plate bar through this repo's own GDS + stackup path,
+the convergence-order gate on the exact coax oracle, and the independent
+`klt mom` cross-check with its committed evidence.
+
 ```
 klt em request.json --format json
 ```
@@ -107,7 +114,7 @@ install guidance. It never produces a result without running the engine.
 - `results.c`: `unit` (`"F"`), `terminals` (label order for a layout, request order for a supplied mesh), `matrix` (Maxwell capacitance, farads).
 - `checks[]`: `name`, `output`, `terminal_pair`, `unit`, `limits`, `status`, `value`, `margin` (positive headroom, negative violation, `null` without limits).
 - `diagnostics[]`: model limitations encountered while translating the stackup.
-- `artifacts`: `mesh`, and with `keep_artifacts` `spec`, `report`, `log`, each a hashed `{path, scope, sha256}` envelope. Retained layout runs also reference the generated Geode layout JSON (`layout`), `mesh_report` and `mesh_log`. The mesh hash and statistics survive temporary artifact cleanup.
+- `artifacts`: `mesh`, and with `keep_artifacts` `spec`, `report`, `log`, each a hashed `{path, scope, sha256}` envelope. Retained layout runs also reference the generated Geode layout JSON (`layout`), `mesh_report` and `mesh_log`. The mesh hash and statistics survive temporary artifact cleanup. Every envelope's `repo` scope is relative to the repository containing the request file (#6764) — never the invoking directory — so one request yields one committed report from any cwd; a supplied path outside that repository (a mesh or `options.output_dir` in another checkout, even the invoking one) is `external`, and a request outside every repository makes every artifact `external`.
 
 `error` (no trustworthy result: bad request, engine failure/timeout, a report
 whose terminals or matrix do not match the request) is the standard error

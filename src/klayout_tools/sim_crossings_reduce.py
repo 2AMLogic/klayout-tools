@@ -30,6 +30,16 @@ from .sim_errors import SimError
 #: The ``crossings.reduce`` names, in report order.
 REDUCTIONS = ("period", "cycle_to_cycle", "tie")
 
+#: The ``crossings.value_from`` selectors (issue #6913): which reduction the
+#: entry's graded ``value`` reads instead of the crossing count. A closed
+#: vocabulary -- an arbitrary dotted path into ``reductions`` is refused.
+VALUE_FROM = ("period.mean", "frequency")
+
+#: Reason token a ``value_from`` entry's ``measurement`` diagnostic leads
+#: with when the selected reduction cannot be computed (too few edges in
+#: the window), per the ``[<reason>]`` convention of ``sim_cycle_mean``.
+INSUFFICIENT_EDGES_CODE = "crossings_insufficient_edges"
+
 
 def validate_reduce(name: Any, reduce: Any) -> None:
     if reduce is None:
@@ -45,6 +55,42 @@ def validate_reduce(name: Any, reduce: Any) -> None:
             f"measurement '{name}': unknown crossings.reduce name(s) "
             f"{unknown}; allowed: {list(REDUCTIONS)}"
         )
+
+
+def validate_value_from(name: Any, value_from: Any) -> None:
+    """Refuse, before any run, a ``crossings.value_from`` that is not one of
+    :data:`VALUE_FROM` -- by name, so a typo cannot silently grade counts."""
+    if value_from is None:
+        return
+    if not isinstance(value_from, str) or value_from not in VALUE_FROM:
+        raise SimError(
+            f"measurement '{name}': crossings.value_from must be one of "
+            f"{list(VALUE_FROM)} (got {value_from!r}) -- it selects the "
+            "reduction the entry's value grades instead of the crossing "
+            "count (seconds for 'period.mean', Hz for 'frequency')"
+        )
+
+
+def graded_value_from(
+    name: Any, reductions: dict[str, Any] | None, value_from: str
+) -> tuple[float | None, str | None]:
+    """The value a ``value_from`` selector grades: ``period.mean`` is the
+    mean period in seconds, ``frequency`` is ``1 / period.mean`` in Hz.
+    Returns ``(value, None)``, or ``(None, message)`` -- leading the
+    ``[crossings_insufficient_edges]`` token -- when the ``period``
+    reduction was omitted (too few edges in the window), so the entry is an
+    error, never a small number."""
+    period = (reductions or {}).get("period")
+    if not isinstance(period, dict) or "omitted" in period:
+        reason = period["omitted"] if isinstance(period, dict) else "was not computed"
+        return None, (
+            f"[{INSUFFICIENT_EDGES_CODE}] measurement '{name}': "
+            f"crossings.period {reason} -- too few edges in the window to "
+            f"grade value_from {value_from!r}; widen the crossings.from/to "
+            "window or drop value_from to grade the edge count"
+        )
+    mean = float(period["mean"])
+    return (mean if value_from == "period.mean" else 1.0 / mean), None
 
 
 def _periods(times: list[float], step: int) -> list[float]:

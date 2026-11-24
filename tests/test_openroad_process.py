@@ -67,6 +67,8 @@ def docker_kills(monkeypatch):
     argvs: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
+        if argv[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=b"expected-owner\n")
         argvs.append(argv)
         return subprocess.CompletedProcess(argv, 0)
 
@@ -214,15 +216,31 @@ def test_a_signal_that_is_never_armed_is_replayed_on_exit(
 # -- _kill_container ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("owner", [b"", b"another-invocation", b"<no value>"])
+def test_container_cleanup_needs_matching_runtime_ownership(monkeypatch, owner):
+    calls = []
+
+    def inspect(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=owner)
+
+    monkeypatch.setattr(process.subprocess, "run", inspect)
+    process._kill_container(CID, "expected-owner")
+    assert len(calls) == 1
+    assert calls[0][:3] == ["docker", "container", "inspect"]
+
+
 def test_kill_container_runs_a_quiet_bounded_docker_kill(monkeypatch):
     seen: list[tuple[list[str], dict]] = []
 
     def fake_run(argv, **kwargs):
+        if argv[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=b"expected-owner\n")
         seen.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(process.subprocess, "run", fake_run)
-    process._kill_container(CID)
+    process._kill_container(CID, "expected-owner")
     [(argv, kwargs)] = seen
     assert argv == ["docker", "kill", CID]
     assert kwargs["check"] is False
@@ -240,7 +258,7 @@ def test_kill_container_is_best_effort(monkeypatch, failure):
         raise failure
 
     monkeypatch.setattr(process.subprocess, "run", failing_run)
-    process._kill_container(CID)  # must not raise
+    process._kill_container(CID, "expected-owner")  # must not raise
 
 
 # -- _kill_openroad_run -------------------------------------------------------
@@ -251,7 +269,7 @@ def test_kill_run_terminates_the_group_and_kills_the_container(
 ):
     killpg_calls = _record_killpg(monkeypatch)
     proc = _FakeProc(["exit"])
-    process._kill_openroad_run(proc, CID)
+    process._kill_openroad_run(proc, CID, "expected-owner")
     assert killpg_calls == [(PGID, signal.SIGTERM)]  # reaped in time: no SIGKILL
     assert docker_kills == [["docker", "kill", CID]]
     assert proc.wait_timeouts == [process._KILL_GRACE_S]
@@ -259,7 +277,7 @@ def test_kill_run_terminates_the_group_and_kills_the_container(
 
 def test_kill_run_without_a_container_never_calls_docker(monkeypatch, docker_kills):
     _record_killpg(monkeypatch)
-    process._kill_openroad_run(_FakeProc(["exit"]), None)
+    process._kill_openroad_run(_FakeProc(["exit"]), None, "expected-owner")
     assert docker_kills == []
 
 
@@ -269,7 +287,7 @@ def test_kill_run_tolerates_a_group_it_cannot_signal(monkeypatch, docker_kills, 
     must not skip the container kill or the reap."""
     killpg_calls = _record_killpg(monkeypatch, error)
     proc = _FakeProc(["exit"])
-    process._kill_openroad_run(proc, CID)
+    process._kill_openroad_run(proc, CID, "expected-owner")
     assert killpg_calls == [(PGID, signal.SIGTERM)]
     assert docker_kills == [["docker", "kill", CID]]
     assert proc.returncode == 0
@@ -280,7 +298,7 @@ def test_kill_run_escalates_to_sigkill_when_the_group_outlives_the_grace(
 ):
     killpg_calls = _record_killpg(monkeypatch)
     proc = _FakeProc(["timeout", "exit"])
-    process._kill_openroad_run(proc, CID)
+    process._kill_openroad_run(proc, CID, "expected-owner")
     assert killpg_calls == [(PGID, signal.SIGTERM), (PGID, signal.SIGKILL)]
     assert docker_kills == [["docker", "kill", CID]]
     assert proc.wait_timeouts == [process._KILL_GRACE_S, process._KILL_GRACE_S]
@@ -295,7 +313,7 @@ def test_kill_run_gives_up_quietly_on_an_unreapable_group(
     caller's own teardown -- the run was already being aborted."""
     killpg_calls = _record_killpg(monkeypatch, error)
     proc = _FakeProc(["timeout", "timeout"])
-    process._kill_openroad_run(proc, CID)
+    process._kill_openroad_run(proc, CID, "expected-owner")
     assert killpg_calls == [(PGID, signal.SIGTERM), (PGID, signal.SIGKILL)]
     assert proc.wait_timeouts == [process._KILL_GRACE_S, process._KILL_GRACE_S]
     assert proc.returncode is None

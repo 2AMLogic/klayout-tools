@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import pytest
 
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from klayout_tools.post_route_sta_instance_paths import (
@@ -111,7 +112,7 @@ def test_run_sta_report_instances_validation_runs_before_engine(tmp_path, monkey
     def fail_run(*args, **kwargs):
         raise AssertionError("engine must not run for an invalid request")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    patch_openroad_run(monkeypatch, fail_run)
     with pytest.raises(PostRouteStaError, match="must not repeat an instance"):
         run_sta(request_path)
 

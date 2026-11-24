@@ -51,15 +51,21 @@ from .extract_validate import validate_run_extract_args
 from .pex import (
     SCHEMA_VERSION,
     PexError,
+    _bound_testbenches,
     _check_dut_declares_a_circuit,
     _find_dut_include,
     _load_testbench_request,
-    _reject_resistance_graph_with_distributed_rc,
     _require_single_dut,
     _resolve_measured_reference,
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_resistance_graph import (
+    _reject_resistance_graph_with_distributed_rc,
+    _reject_resistance_network_without_graph,
+)
+from .pex_runset import PexExtractOptions
+from .pex_sim_evidence import schematic_probes
 from .sim import SimError, run_sim
 
 #: Codes a dry run always reports in ``not_checked[]`` -- what no amount of
@@ -104,28 +110,7 @@ def _extraction_preflight(
     layout_path: str,
     deck_name: str,
     *,
-    top: str | None,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-    deck_options: Mapping[str, str] | None,
-    declared_pins: frozenset[str] | None,
-    rename_declared_pins: bool,
-    tie_declared_pins: bool,
-    label_layers: Mapping[str, tuple[int, int] | None] | None,
-    device_models: Mapping[str, str] | None,
-    critical_nets: Sequence[str] | None,
-    critical_net_patterns: Sequence[str] | None,
-    critical_net_all: bool,
-    critical_net_excludes: Sequence[str] | None,
-    distributed_rc: bool,
-    resistance_graph: bool,
-    resistance_graph_r_cut_ohm: float | None,
-    parasitic_variants: Sequence[str] | None,
-    substrate_tie_ohms: float | None,
-    mom_rlc_net: str | None,
-    mom_rlc_resistance_ohm: float | None,
-    mom_rlc_capacitance_ff: float | None,
-    mom_rlc_inductance_nh: float | None,
+    options: PexExtractOptions,
 ) -> str:
     """Every engine-free check ``run_extract`` makes, in its own order, for
     the ``parasitics=True`` call ``klt pex`` always issues. Returns the
@@ -139,10 +124,10 @@ def _extraction_preflight(
     try:
         pdk_info, _model_bindings = resolve_pdk_and_model_bindings(
             deck_name=deck_name,
-            deck_options=deck_options,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            device_models=device_models,
+            deck_options=options.deck_options,
+            pdk_variant=options.pdk_variant,
+            pdk_root=options.pdk_root,
+            device_models=options.device_models,
         )
         try:
             get_parasitics_deck(deck_name)
@@ -155,27 +140,29 @@ def _extraction_preflight(
                 spef_output=None,
                 report_parasitics="full",
                 substrate_spreading_net=None,
-                substrate_tie_ohms=substrate_tie_ohms,
-                critical_nets=critical_nets,
+                substrate_tie_ohms=options.substrate_tie_ohms,
+                critical_nets=options.critical_nets,
                 parasitics_nets=None,
-                parasitic_variants=parasitic_variants,
+                parasitic_variants=options.parasitic_variants,
                 parasitics_top_cell_only=False,
-                resistance_graph=resistance_graph,
-                resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-                emit_selected_resistance=resistance_graph,
-                critical_net_patterns=critical_net_patterns,
-                critical_net_all=critical_net_all,
-                critical_net_excludes=critical_net_excludes,
+                resistance_graph=options.resistance_graph,
+                resistance_graph_r_cut_ohm=options.resistance_graph_r_cut_ohm,
+                resistance_graph_caps=options.resistance_graph_caps,
+                emit_selected_resistance=options.resistance_graph,
+                emit_resistance_network=options.resistance_network,
+                critical_net_patterns=options.critical_net_patterns,
+                critical_net_all=options.critical_net_all,
+                critical_net_excludes=options.critical_net_excludes,
                 parasitics_net_patterns=None,
                 strict_net_patterns=False,
-                distributed_rc=distributed_rc,
+                distributed_rc=options.distributed_rc,
                 resistance_paths=False,
                 resistance_path_max_nodes=None,
                 resistance_path_max_resistors=None,
-                mom_rlc_net=mom_rlc_net,
-                mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-                mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-                mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+                mom_rlc_net=options.mom_rlc_net,
+                mom_rlc_resistance_ohm=options.mom_rlc_resistance_ohm,
+                mom_rlc_capacitance_ff=options.mom_rlc_capacitance_ff,
+                mom_rlc_inductance_nh=options.mom_rlc_inductance_nh,
                 matched_device_groups=None,
                 parasitics=True,
             )
@@ -184,9 +171,9 @@ def _extraction_preflight(
         preflight = preflight_layout(
             layout_path,
             deck_name,
-            top=top,
-            deck_options=deck_options,
-            label_layers=label_layers,
+            top=options.top,
+            deck_options=options.deck_options,
+            label_layers=options.label_layers,
             refuse_options={
                 "--top-cell-pins": False,
                 "--abstract-cells": False,
@@ -202,17 +189,22 @@ def _extraction_preflight(
                 ),
                 "--def-pins": False,
                 "--pin-source-cells": False,
-                "--rename-declared-pins": rename_declared_pins,
-                "--tie-declared-pins": tie_declared_pins,
+                "--rename-declared-pins": options.rename_declared_pins,
+                "--tie-declared-pins": options.tie_declared_pins,
                 "--subcircuit": False,
                 "--hierarchical-cells": False,
                 "--substrate-spreading": False,
                 "--pdk": pdk_info is not None,
             },
         )
-        require_declared_set_for_rename(rename_declared_pins, declared_pins, None)
         require_declared_set_for_rename(
-            tie_declared_pins, declared_pins, None, flag="--tie-declared-pins"
+            options.rename_declared_pins, options.declared_pins, None
+        )
+        require_declared_set_for_rename(
+            options.tie_declared_pins,
+            options.declared_pins,
+            None,
+            flag="--tie-declared-pins",
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -221,13 +213,14 @@ def _extraction_preflight(
 
 def _resolve_testbenches(
     testbench_paths: Sequence[str],
+    timeout_s: float | None,
 ) -> tuple[list[str], list[str]]:
-    """``run_pex``'s own first pass, which in a real run only happens once
-    extraction has been paid for: ``(body_paths, dut_paths)``."""
+    """Validate schematic probes and resolve each testbench body and DUT."""
     body_paths: list[str] = []
     dut_paths: list[str] = []
     for testbench_path in testbench_paths:
-        request = _load_testbench_request(testbench_path)
+        request = _load_testbench_request(testbench_path, timeout_s)
+        schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):
@@ -274,6 +267,7 @@ def run_pex_dry_run(
     hosts: int | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -288,6 +282,8 @@ def run_pex_dry_run(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -298,6 +294,7 @@ def run_pex_dry_run(
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
     flatten_schematic: bool = False,
+    schematic_top: str | None = None,
     device_only_leg: bool = False,
     extract_only: bool = False,
     submit_only: bool = False,
@@ -340,19 +337,24 @@ def run_pex_dry_run(
         testbench_paths,
         reference_netlist,
         measure_timeout_s,
+        timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
+        schematic_top=schematic_top,
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    _reject_resistance_network_without_graph(resistance_network, resistance_graph)
 
     repo_root = env_provenance.find_repo_root(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    resolved_top = _extraction_preflight(
-        layout_path,
-        deck_name,
+    body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
+    # Issue #7818: the 24 extraction options `_extraction_preflight` reads,
+    # bundled once -- the flat keyword signature above is the public
+    # contract and stays unchanged.
+    options = PexExtractOptions(
         top=top,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
@@ -369,6 +371,8 @@ def run_pex_dry_run(
         distributed_rc=distributed_rc,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_network=resistance_network,
+        resistance_graph_caps=resistance_graph_caps,
         parasitic_variants=parasitic_variants,
         substrate_tie_ohms=substrate_tie_ohms,
         mom_rlc_net=mom_rlc_net,
@@ -376,8 +380,12 @@ def run_pex_dry_run(
         mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
         mom_rlc_inductance_nh=mom_rlc_inductance_nh,
     )
+    resolved_top = _extraction_preflight(
+        layout_path,
+        deck_name,
+        options=options,
+    )
 
-    _body_paths, dut_paths = _resolve_testbenches(testbench_paths)
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
         if command is not None and reference_netlist is not None
@@ -387,6 +395,8 @@ def run_pex_dry_run(
         extract_only, measured_reference_netlist, dut_paths
     )
 
+    _bound_testbenches(schematic_top, resolved_top, reference_netlist_path, body_paths)
+
     # Issue #4616/#4624/#5280: the shard flags the schematic leg would pass,
     # so the nested dry run expands exactly the unit list a real leg would.
     batch_shard = pex_async.batch_shard_flags(
@@ -395,6 +405,7 @@ def run_pex_dry_run(
         hosts=hosts,
         resume=resume,
         capacity_wait_s=capacity_wait_s,
+        timeout_s=timeout_s,
     )
 
     testbenches: list[dict[str, Any]] = []
@@ -427,6 +438,7 @@ def run_pex_dry_run(
         # version: every field below is additive (docs/json-contract.md).
         "schema_version": SCHEMA_VERSION,
         "dry_run": True,
+        **({"simulation_timeout_s": timeout_s} if timeout_s is not None else {}),
         "status": "valid",
         "layout": env_provenance.repo_relative_path(
             layout_path or None, repo_root=repo_root

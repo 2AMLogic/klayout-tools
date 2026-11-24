@@ -139,6 +139,17 @@ def declare_ring_implant_params(pcell: Any, kdb: Any) -> None:
     )
 
 
+def declare_device_well_enclosure(pcell: Any, default_margin_um: float) -> None:
+    """Declare the device well margin separately from the guard ring well."""
+    pcell.param(
+        "device_well_enclosure_um",
+        pcell.TypeDouble,
+        "NWell enclosure of device active (µm)",
+        default=default_margin_um,
+        hidden=True,
+    )
+
+
 def declare_ring_well_margin(pcell: Any, default_margin_um: float) -> None:
     """Declare ``ring_well_margin_um``; the default is the caller's
     ``WELL_ENCLOSURE_MARGIN_UM`` (passed in, like ``esd_device``'s own
@@ -305,6 +316,13 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
         pcell.TypeBoolean,
         "Whether voltage_flavor_extra_mark_layer is a real layer "
         "resolved for params.voltage_flavor on this PDK family",
+        default=False,
+        hidden=True,
+    )
+    pcell.param(
+        "voltage_flavor_well_over_mark",
+        pcell.TypeBoolean,
+        "Extend the PFET nwell to the voltage marker box for HV-well enclosure",
         default=False,
         hidden=True,
     )

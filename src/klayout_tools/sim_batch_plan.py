@@ -49,6 +49,7 @@ def plan_batch_job(
         job_ceiling = _assess_job_ceiling(
             unit_count=unit_count, per_unit_timeout_s=timeout_s, config=config
         )
+        job_ceiling["image_profile"] = config.image_profile or "sim"
         return _apply_job_split(job_ceiling, config)
 
 
@@ -130,8 +131,11 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         return {}
     # Anything else is a corner request: `load_request` already guarantees
     # `netlist` (and `analysis`) are present, so no further shape check is needed.
+    # The loaded request is handed to `_prepare_sim_request` so the file is
+    # read and expanded once per preflight, never re-read.
     resolved = _prepare_sim_request(
         request_path,
+        request=request,
         artifacts_dir=overrides.get("artifacts_dir"),
         backend="batch",
         max_workers=overrides.get("max_workers"),

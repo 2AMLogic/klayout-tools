@@ -111,13 +111,8 @@
 #    replaces the wrapper's shell with the docker client, so no shell
 #    survives to run a `trap`; a signalled client dies with default signal
 #    disposition and the container outlives it.
-# 2. A background poller emits `klt-openroad-cid <64-hex>` on the wrapper's
-#    stderr as soon as the runtime records the cid file.
-#    `src/klayout_tools/_openroad_engine.py` scans the retained stderr log
-#    for that line and records the id in `invocation.json`, so a container
-#    that DOES outlive its caller (the signal was SIGKILL, which no handler
-#    can catch) is identifiable -- and precisely reapable -- from the run's
-#    own record instead of by guessing.
+# 2. Docker writes its ID directly to the invocation's dedicated cidfile.
+#    The engine records the ID and checks Docker's ownership label before cleanup.
 #
 # The trap deliberately does NOT `docker kill` after a normal (unsignalled)
 # completion: the client was reaped, `--rm` already removed the container,
@@ -191,14 +186,12 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 #
 # The container is RECORDED and KILLED when this wrapper dies before the
 # client completes (issue #5726): \`--cidfile\` names it, and the EXIT/INT/
-# TERM/HUP handler below \`docker kill\`s whatever the cid file recorded.
+# TERM/HUP handler below \`docker kill\`s only the container carrying this invocation’s label.
 # The client is backgrounded and waited (not exec'd) precisely so this
 # shell survives to run the handler. After a normal completion the handler
 # only removes the cid file: the client was reaped and \`--rm\` already
 # removed the container. A SIGKILL to this wrapper is uncatchable -- the
-# container then survives, but the stderr marker line
-# (\`klt-openroad-cid <id>\`, emitted by the poller below) leaves it
-# identifiable and precisely reapable from the run's own logs.
+# dedicated cidfile and launch record identify any surviving container.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 MOUNTED_PATHS=("\$PWD")
@@ -280,33 +273,35 @@ fi
 while IFS= read -r v; do
     [[ -n "\$v" ]] && ENV_ARGS+=(-e "\$v")
 done < <(compgen -e OPENROAD_ || true)
-# mktemp guarantees a unique --cidfile path that cannot collide with a
-# concurrent invocation; the file itself is removed again because the
-# runtime refuses to start a container whose cid file already exists.
-CID_FILE="\$(mktemp "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXX")"
-rm -f "\$CID_FILE"
+CID_DIR=
+if [[ -n "\${KLT_OPENROAD_CIDFILE:-}" && -n "\${KLT_OPENROAD_INVOCATION_ID:-}" ]]; then
+    CID_FILE="\$KLT_OPENROAD_CIDFILE"
+    OWNER="\$KLT_OPENROAD_INVOCATION_ID"
+else
+    CID_DIR="\$(mktemp -d "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXXXXXXXX")"
+    CID_FILE="\$CID_DIR/container.cid"
+    OWNER="\${CID_DIR##*/}"
+fi
 CLIENT_PID=
 FINISHED=0
-MARKER_PID=
 cleanup() {
-    # Only kill on an unfinished run: after \`wait\` reaped the client the
-    # container is already gone (--rm); the cid file is all that is left.
     if [[ "\$FINISHED" == 0 ]]; then
-        CID="\$(cat "\$CID_FILE" 2>/dev/null || true)"
-        if [[ -n "\$CID" ]]; then
-            # Async on purpose: the runtime daemon performs the kill, and a
-            # slow or hung daemon must not delay this wrapper's exit -- the
-            # shell is inside its EXIT trap here.
-            docker kill "\$CID" >/dev/null 2>&1 &
+        CID="\$(head -c 65 "\$CID_FILE" 2>/dev/null || true)"
+        if [[ "\$CID" =~ ^[0-9a-f]{64}\$ ]]; then
+            # Verify the immutable label before stopping this invocation's container.
+            (
+                recorded=\$(docker container inspect --format '{{ index .Config.Labels "org.klayout-tools.openroad-invocation" }}' "\$CID" 2>/dev/null) &&
+                    [[ "\$recorded" == "\$OWNER" ]] && docker kill "\$CID"
+            ) >/dev/null 2>&1 &
         fi
         if [[ -n "\$CLIENT_PID" ]]; then
             kill "\$CLIENT_PID" >/dev/null 2>&1 || true
         fi
     fi
-    if [[ -n "\$MARKER_PID" ]]; then
-        kill "\$MARKER_PID" >/dev/null 2>&1 || true
+    if [[ -n "\$CID_DIR" ]]; then
+        rm -f "\$CID_FILE"
+        rmdir "\$CID_DIR" 2>/dev/null || true
     fi
-    rm -f "\$CID_FILE" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -314,6 +309,7 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 docker run --rm -i \\
     --platform linux/amd64 \\
+    --label "org.klayout-tools.openroad-invocation=\$OWNER" \\
     --cidfile "\$CID_FILE" \\
     --user "\$(id -u):\$(id -g)" \\
     -e HOME="\${TMPDIR:-/tmp}" \\
@@ -322,21 +318,6 @@ docker run --rm -i \\
     $IMAGE \\
     $IN_IMAGE_BINARY "\$@" 0<&0 &
 CLIENT_PID=\$!
-(
-    # Emit the container id on stderr as soon as the runtime records it,
-    # and stop once the client is gone. klayout_tools'
-    # _openroad_engine scans the retained stderr log for this line and
-    # records the id in invocation.json (issue #5726) -- including after a
-    # SIGKILL, where the poller itself is the only surviving witness.
-    while kill -0 "\$CLIENT_PID" 2>/dev/null; do
-        if [[ -s "\$CID_FILE" ]]; then
-            printf 'klt-openroad-cid %s\\n' "\$(cat "\$CID_FILE")" >&2
-            exit 0
-        fi
-        sleep 0.1
-    done
-) &
-MARKER_PID=\$!
 STATUS=0
 wait "\$CLIENT_PID" || STATUS=\$?
 FINISHED=1

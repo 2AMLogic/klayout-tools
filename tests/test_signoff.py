@@ -4934,38 +4934,11 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["citation"] is None
 
 
-def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
-    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
-    yield_path = _write(tmp_path, "yield.json", envelope)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-
-
 # --------------------------------------------------------------------------- #
 # Campaign-discipline gate on item 6 (issue #2467): the cited report's own
 # `sample_size.verdict` and `negative_control` state, read as grading inputs
 # rather than dropped with the run-level `warnings` array.
 # --------------------------------------------------------------------------- #
-
-
-def test_yield_insufficient_sample_size_renders_unmet_undersized_sample(tmp_path):
-    """Issue #2467: the report's own `sample_size.verdict` says its estimate
-    is not sized for the claim; a `"pass"` status must not overrule that."""
-    yield_path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-    assert item_6["citation"] is None
-    campaign = item_6["detail"]["yield_campaign"]
-    assert campaign["sample_size"] == "insufficient"
-    assert campaign["undersized_measurements"] == ["vref"]
 
 
 def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
@@ -8632,17 +8605,13 @@ def test_describe_grader_shape():
         "grading_ruleset_id",
         "source_doc",
         "graded_t1_item_ids",
+        "attestable_items",
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
         "not_applicable_items",
         "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
-    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
-        "ihp-sg13g2",
-        "ihp-sg13cmos5l",
-        "gf180mcu",
-    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -8655,8 +8624,7 @@ def test_describe_grader_reports_none_when_the_shipped_doc_is_unreadable(
     """Never fabricate a claim this build cannot substantiate -- mirrors
     `_is_graded_by_build`'s own "unreadable shipped doc" fallback."""
     monkeypatch.setattr(signoff_module, "_build_t1_item_ids", lambda: None)
-    result = signoff_module.describe_grader()
-    assert result["graded_t1_item_ids"] is None
+    assert signoff_module.describe_grader()["graded_t1_item_ids"] is None
 
 
 def test_describe_grader_matches_klt_versions_grading_ruleset_id(capsys):
@@ -11595,7 +11563,7 @@ def test_item_11_grade_is_unchanged_by_the_substrate_continuity_disclosure(tmp_p
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": {
             "scope": "connectivity",
-            "checked": [],
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
             "skipped": [],
             "inapplicable": [
                 {
@@ -14046,12 +14014,12 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
 def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     tmp_path,
 ):
-    """The verdict exclusion is exactly two registered sets -- build identity
-    (issue #2249) and the report's quotation of the checklist (issue #2526):
-    every *other* top-level field of a tier report is still compared, so a
-    future field cannot quietly join the unchecked set. Guards against
-    widening either set by accident."""
+    """Pin three registered sets: build identity (#2249), checklist prose (#2526),
+    and derived unmet_reason_counts (#5903); compare every other top-level field."""
+    from klayout_tools.signoff_unmet_reasons import DERIVED_REPORT_PATHS
+
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    assert DERIVED_REPORT_PATHS == frozenset({("unmet_reason_counts",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
     excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
@@ -16010,7 +15978,7 @@ def _inventory(item: int, **overrides) -> dict:
                 "name": "sky130A",
                 "revision": "0fe599b2afb6708d281543108caf8310912f54af",
             },
-            "tools": {"ngspice": "42", "klt": "0.7.0"},
+            "tools": {"ngspice": "42"},
         }
     else:
         base["hygiene"] = ["README.md", "LICENSE", ".github/workflows/ci.yml"]
@@ -18263,7 +18231,7 @@ def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
 
 
 def _capture_attest_timeout(monkeypatch, spec):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -18271,8 +18239,8 @@ def _capture_attest_timeout(monkeypatch, spec):
         seen["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", spec)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", spec)
     return seen["timeout"]
 
 

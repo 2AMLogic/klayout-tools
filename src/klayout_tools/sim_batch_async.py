@@ -28,7 +28,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from . import remote_transport, sim_batch
+from . import remote_transport, sim_batch, sim_batch_receipt
 from .sim_batch import (
     BATCH_RECEIPT_FILENAME,
     BATCH_TERMINAL_STATES,
@@ -48,11 +48,14 @@ from .sim_batch import (
 )
 from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
+    ShardFingerprint,
     request_sha256,
+    resolve_fingerprint,
     shard_map_request_fields,
     shard_scoped_points,
 )
 from .sim_batch_unstarted import unstarted_fields
+from .sim_errors import SimError
 
 #: Schema version of the two payloads this module builds. They are new
 #: documents (not a field on the sim report), so they start at 1.
@@ -104,6 +107,12 @@ _STATUS_INSTANCE_FIELDS = (
 #: ``new_job_id``'s alphabet -- what ``batch-fleet-provision.sh launch``
 #: accepts, and therefore the only ids that can name a job.
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MISSING_HEAD_CODES = {"404", "404 Not Found", "Not Found", "NotFound", "NoSuchKey"}
+_MISSING_HEAD_ERROR = re.compile(
+    r"^(?:aws: \[ERROR\]: )?An error occurred \((?:404|NotFound|NoSuchKey)\)"
+    r"(?= when calling the HeadObject operation\b|:|$)",
+    re.MULTILINE,
+)
 
 
 def submit_only(
@@ -117,8 +126,9 @@ def submit_only(
     request_dir: str | None = None,
     artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
-    shard_fingerprint: str | None = None,
+    shard_fingerprint: ShardFingerprint | None = None,
     hosts: int | None = None,
+    netlist_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Upload and launch one batch job, then return its identity at once.
 
@@ -138,18 +148,14 @@ def submit_only(
     ``manifest_path`` -- the ``batch-shards.json`` shard map under
     ``artifacts_dir`` that ``--attach`` takes -- and has no single
     ``job_id``. It needs ``artifacts_dir`` and ``shard_fingerprint``.
-    A client ``hosts`` > 1 (``--hosts`` / ``remote.hosts``, issue #5281) takes
-    the same path with that many shards.
+    An explicit host count above one also selects the sharded path.
     """
-    from .sim import SimError
-
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
     job_ceiling, planned_hosts = plan_batch_job(
         config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    # Issue #5281: a client-chosen --hosts/remote.hosts shards the submit too.
     hosts = max(planned_hosts, hosts or 1)
     if hosts > 1:
         return _submit_sharded(
@@ -163,7 +169,7 @@ def submit_only(
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
             runner=runner,
-            shard_fingerprint=shard_fingerprint,
+            shard_fingerprint=resolve_fingerprint(shard_fingerprint),
             hosts=hosts,
             job_ceiling=job_ceiling,
         )
@@ -184,6 +190,9 @@ def submit_only(
         request=request,
         config=config,
         spec=spec,
+        receipt_identity=sim_batch_receipt.corner_receipt_identity(
+            request, netlist_sha256
+        ),
         unit_count=len(corner_points),
         job_ceiling=job_ceiling,
         artifacts_dir=artifacts_dir,
@@ -193,8 +202,6 @@ def submit_only(
 
 def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
     """Refuse more hosts than units (#5281): an idle member is still billed."""
-    from .sim import SimError
-
     if hosts > unit_count:
         raise SimError(
             f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
@@ -205,8 +212,6 @@ def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
 
 def refuse_sharded_deck_submit(hosts: int | None) -> None:
     """Deck lists stay one job; only corner requests shard (#5281)."""
-    from .sim import SimError
-
     if hosts not in (None, 1):
         raise SimError(
             "--submit-only submits one job; --hosts sharding is not "
@@ -232,8 +237,6 @@ def _submit_sharded(
     job_ceiling: dict[str, Any],
 ) -> dict[str, Any]:
     """The sharded ``--submit-only`` payload (issue #4620)."""
-    from .sim import SimError
-
     if artifacts_dir is None or shard_fingerprint is None:
         raise SimError(
             "--submit-only on a sharded request needs an artifacts dir and a "
@@ -282,6 +285,7 @@ def launch_prepared_job(
     spec: Any,
     unit_count: int,
     job_ceiling: dict[str, Any] | None,
+    receipt_identity: dict[str, str] | None = None,
     artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
 ) -> dict[str, Any]:
@@ -289,8 +293,6 @@ def launch_prepared_job(
     ``status: "submitted"`` payload. Shared by the corner and deck-list
     paths (issue #3958); ``job_ceiling`` is ``None`` where the path does not
     assess one (the deck-list path today)."""
-    from .sim import SimError
-
     job_id = new_job_id()
     try:
         submit_job(config, job_id, spec, runner=runner)
@@ -298,7 +300,8 @@ def launch_prepared_job(
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
     launched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    digest = request_sha256(request)
+    if receipt_identity is None:  # deck-list jobs retain their own digest format
+        receipt_identity = {"request_sha256": request_sha256(request)}
     if artifacts_dir is not None:
         _write_batch_receipt(
             os.path.join(artifacts_dir, BATCH_RECEIPT_FILENAME),
@@ -308,7 +311,7 @@ def launch_prepared_job(
                 "region": config.region,
                 "profile": getattr(config, "profile", None),
                 "launched_at": launched_at,
-                "request_sha256": digest,
+                **receipt_identity,
                 "state": None,
             },
         )
@@ -321,7 +324,7 @@ def launch_prepared_job(
         "jobs_prefix": config.jobs_prefix,
         "job_uri": job_uri(config, job_id),
         "launched_at": launched_at,
-        "request_sha256": digest,
+        "request_sha256": receipt_identity["request_sha256"],
         "unit_count": unit_count,
         "job_ceiling": job_ceiling,
     }
@@ -334,13 +337,7 @@ def _job_head(
     ``None`` on a 404; any other failure is a transport error."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
-        config,
-        "s3api",
-        "head-object",
-        "--bucket",
-        config.bucket,
-        "--key",
-        bucket_key,
+        config, "s3api", "head-object", "--bucket", config.bucket, "--key", bucket_key
     )
     try:
         result = run(argv, 60.0)
@@ -353,7 +350,7 @@ def _job_head(
             return {}
         return head if isinstance(head, dict) else {}
     detail = (result.stderr or "").strip()
-    if "404" in detail or "Not Found" in detail or "NoSuchKey" in detail:
+    if detail in _MISSING_HEAD_CODES or _MISSING_HEAD_ERROR.search(detail):
         return None
     raise BatchError(
         f"aws s3api head-object (job.json) failed (exit {result.returncode}): {detail}"
@@ -427,8 +424,6 @@ def read_job_status(
     ``stale_seconds`` (the age of ``updated_at``); ``state`` stays the
     runner's own value. ``now`` is for tests.
     """
-    from .sim import SimError
-
     if not _JOB_ID_RE.match(job_id):
         raise SimError(
             f"invalid batch job id {job_id!r} "
@@ -479,8 +474,6 @@ def _read_status_and_head(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(status, job.json head)``; neither present is a not-found error."""
-    from .sim import SimError
-
     status = _read_status(config, job_id, run)
     if status is not None:
         return status, None

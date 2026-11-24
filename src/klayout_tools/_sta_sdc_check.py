@@ -4,15 +4,14 @@ A flow that keeps its constraints in a committed ``.sdc`` must duplicate them
 into the ``klt sta`` request, and nothing noticed the two diverging. With
 ``request.sdc_check = {"path": "<file>.sdc"}`` this module reads the file with a
 small **pure-Python** reader -- no Tcl is executed, nothing reaches OpenSTA, the
-SDC is never a constraint source -- and compares the four supported commands
+SDC is never a constraint source -- and compares the supported commands
 (``create_clock``, ``set_input_delay``, ``set_output_delay``,
-``set_clock_uncertainty``) with the request's constraints. Every other command
-(and any supported command written in a form the reader does not understand) is
-listed by name in ``unchecked``; it is never silently passed.
+``set_clock_uncertainty`` and ``set_multicycle_path``) with the request. Other commands
+and unsupported forms appear by name in ``unchecked``.
 
 Drift is data, not a gate: the response block is informational and the exit
 code is unaffected. Split out of ``post_route_sta.py`` (per-file size ratchet,
-issue #2766); errors are ``PostRouteStaError``, imported lazily.
+issue #2766); validation raises the shared ``PostRouteStaError``.
 """
 
 from __future__ import annotations
@@ -24,6 +23,9 @@ import re
 from typing import Any
 
 from . import env_provenance
+from ._sta_io_delay_clock import IoDelayMap, entry_bound, entry_clock
+from ._sta_sdc_multicycle import compare_multicycle, parse_multicycle
+from .post_route_sta_errors import PostRouteStaError
 
 _TOLERANCE = 1e-9
 _TOKEN = re.compile(r"\[[^\]]*\]|\S+")
@@ -32,13 +34,8 @@ _SUPPORTED = (
     "set_input_delay",
     "set_output_delay",
     "set_clock_uncertainty",
+    "set_multicycle_path",
 )
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
 
 
 def resolve_sdc_check(field: Any, request_dir: str) -> str | None:
@@ -47,13 +44,15 @@ def resolve_sdc_check(field: Any, request_dir: str) -> str | None:
     if field is None:
         return None
     if not isinstance(field, dict) or set(field) != {"path"}:
-        raise _error('request.sdc_check must be an object {"path": "<file>.sdc"}')
+        raise PostRouteStaError(
+            'request.sdc_check must be an object {"path": "<file>.sdc"}'
+        )
     given = field["path"]
     if not isinstance(given, str) or not given:
-        raise _error("request.sdc_check.path must be a non-empty string")
+        raise PostRouteStaError("request.sdc_check.path must be a non-empty string")
     path = given if os.path.isabs(given) else os.path.join(request_dir, given)
     if not os.path.isfile(path):
-        raise _error(f"sdc_check file not found: {given}")
+        raise PostRouteStaError(f"sdc_check file not found: {given}")
     return os.path.abspath(path)
 
 
@@ -216,7 +215,10 @@ def parse_sdc(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if words[0] in _SUPPORTED:
             reason = "unsupported option or argument form"
             if ";" not in line and "{" not in line and "$" not in line:
-                parsed = _parse_command(words)
+                if words[0] == "set_multicycle_path":
+                    parsed = parse_multicycle(line)
+                else:
+                    parsed = _parse_command(words)
         if parsed is None:
             unchecked.append({"command": words[0], "line": line_no, "reason": reason})
         else:
@@ -243,13 +245,15 @@ def _mismatch(
 
 def _request_delay(
     scalar: float | None,
-    per_port: dict[str, dict[str, float]] | None,
+    per_port: IoDelayMap | None,
     port: str,
     side: str,
 ) -> float | None:
+    """The request's expected delay for ``port``/``side``: the entry's bound
+    when the port is mapped, else the scalar."""
     entry = (per_port or {}).get(port)
     if entry is not None:
-        return entry.get(f"{side}_ns")
+        return entry_bound(entry, side)
     return scalar
 
 
@@ -273,19 +277,26 @@ def _compare_clocks(commands, clocks, out):
             out.append(_mismatch("create_clock", k["port"], None, k["period_ns"]))
 
 
-def _compare_sdc_delays(commands, cmd, scalar, per_port, out):
-    """SDC -> request direction; returns the ``(subject, side)`` values seen."""
-    seen: dict[tuple[str | None, str], float] = {}
+def _compare_sdc_delays(commands, cmd, scalar, per_port, clock_port, out):
+    """SDC -> request direction; returns the ``(subject, side, clock)``
+    values seen. Issue #7399: the SDC command's ``-clock`` must equal the
+    request's reference for that subject (the entry's ``clock`` for a
+    mapped port, else the primary) -- a clock disagreement is a mismatch,
+    never a false ``match``."""
+    seen: dict[tuple[str | None, str, str], float] = {}
     for c in commands:
         if c["cmd"] != cmd:
             continue
         for side in c["sides"]:
-            seen[(c["subject"], side)] = c["value"]
+            sdc_clock = c["clock"]
+            seen[(c["subject"], side, sdc_clock)] = c["value"]
+            entry = None if c["subject"] is None else (per_port or {}).get(c["subject"])
             request = (
                 scalar
-                if c["subject"] is None
+                if entry is None
                 else _request_delay(scalar, per_port, c["subject"], side)
             )
+            expected_clock = entry_clock(entry, clock_port)
             if not _same(c["value"], request):
                 out.append(
                     _mismatch(
@@ -297,21 +308,41 @@ def _compare_sdc_delays(commands, cmd, scalar, per_port, out):
                         line=c["line"],
                     )
                 )
+            elif sdc_clock != expected_clock:
+                out.append(
+                    _mismatch(
+                        cmd,
+                        c["subject"] or "*",
+                        c["value"],
+                        request,
+                        bound=side,
+                        line=c["line"],
+                        sdc_clock=sdc_clock,
+                        request_clock=expected_clock,
+                    )
+                )
     return seen
 
 
-def _compare_delays(commands, cmd, scalar, per_port, out):
-    seen = _compare_sdc_delays(commands, cmd, scalar, per_port, out)
+def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
+    seen = _compare_sdc_delays(commands, cmd, scalar, per_port, clock_port, out)
+    covered = {(subject, side) for subject, side, _clock in seen}
     for side in ("min", "max"):
-        if scalar is not None and (None, side) not in seen:
-            out.append(_mismatch(cmd, "*", None, scalar, bound=side))
-    for port, bounds in sorted((per_port or {}).items()):
+        if scalar is not None and (None, side, clock_port) not in seen:
+            if (None, side) not in covered:
+                out.append(_mismatch(cmd, "*", None, scalar, bound=side))
+    for port, entry in sorted((per_port or {}).items()):
+        expected_clock = entry_clock(entry, clock_port)
         for side in ("min", "max"):
-            want = bounds.get(f"{side}_ns")
+            want = entry_bound(entry, side)
             if want is None:
                 continue
-            got = seen.get((port, side), seen.get((None, side)))
+            got = seen.get(
+                (port, side, expected_clock), seen.get((None, side, expected_clock))
+            )
             if not _same(got, want):
+                if got is None and (port, side) in covered:
+                    continue  # the explicit port line already reported clock drift
                 out.append(_mismatch(cmd, port, got, want, bound=side))
 
 
@@ -354,9 +385,10 @@ def sdc_drift_block(
     clock_port: str,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
-    input_delays: dict[str, dict[str, float]] | None,
-    output_delays: dict[str, dict[str, float]] | None,
+    input_delays: IoDelayMap | None,
+    output_delays: IoDelayMap | None,
     clock_uncertainty: dict[str, float | None] | None,
+    multicycle: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The response's ``sdc_drift`` block: file identity + hash, each
     mismatch, every unchecked command, and ``status`` (``match``/``drift``)."""
@@ -365,7 +397,7 @@ def sdc_drift_block(
             raw = handle.read()
         text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise _error(
+        raise PostRouteStaError(
             f"could not read sdc_check file '{os.path.basename(sdc_path)}': {exc}"
         ) from exc
     commands, unchecked = parse_sdc(text)
@@ -376,6 +408,7 @@ def sdc_drift_block(
         "set_input_delay",
         input_delay_ns,
         input_delays,
+        clock_port,
         mismatches,
     )
     _compare_delays(
@@ -383,9 +416,20 @@ def sdc_drift_block(
         "set_output_delay",
         output_delay_ns,
         output_delays,
+        clock_port,
         mismatches,
     )
     _compare_uncertainty(commands, clock_uncertainty, clock_port, mismatches)
+    mismatches.extend(compare_multicycle(commands, multicycle))
+    # An unreadable command may supply a requested constraint. Only a
+    # missing SDC value relies on inferring absence from the parsed commands.
+    unchecked_commands = {entry["command"] for entry in unchecked}
+    mismatches = [
+        mismatch
+        for mismatch in mismatches
+        if mismatch["sdc_value"] is not None
+        or mismatch["command"] not in unchecked_commands
+    ]
     envelope = env_provenance.repo_relative_path(
         sdc_path, repo_root=env_provenance.find_repo_root(request_dir)
     )

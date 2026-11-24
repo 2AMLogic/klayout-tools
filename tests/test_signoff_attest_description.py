@@ -23,6 +23,7 @@ from klayout_tools.signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
 )
+from test_signoff_attest_duration import _audit_seconds_masked
 
 _DISCLOSURE = "planning-level geometry; not DRC-clean, not extraction-checked"
 #: A bare command spec (items 1/8/9: no `name`).
@@ -115,6 +116,23 @@ def _attest(repo: Path, item: int, description: str | None = ...) -> dict:
     path = repo / "attest" / f"item{item}.json"
     path.write_text(json.dumps(_inventory(item, description)))
     return build_attestation(item, str(path))
+
+
+def _attest_item8(repo: Path, description: str | None = ...) -> dict:
+    """An item-8 attestation that passes (so it grades `met`): the cited
+    evidence envelope must itself be a recognised one, which the shared
+    `_repo` fixture's bare `{status, result}` file is not."""
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "generic",
+                "status": "pass",
+                "result": {"fmax": 100, "area": 5, "power": 2},
+            }
+        )
+    )
+    return _attest(repo, 8, description)
 
 
 def _stream(repo: Path, *, dbu: float = 0.001, empty: bool = False) -> str:
@@ -238,6 +256,56 @@ def test_manifest_echoes_description_into_the_artifact_binding(tmp_path):
     omitted = _grade(repo, _attest(repo, 10), 10)
     binding = omitted["citation"]["artifact_binding"]["attestation"]
     assert "description" not in binding
+
+
+def test_item8_manifest_echoes_description_into_the_citation_attestation(tmp_path):
+    """Issue #6111: item 8 carries no `artifact_binding`, so its met citation
+    echoes the disclosure at `citation.attestation.description` instead."""
+    repo = _repo(tmp_path)
+    item = _grade(repo, _attest_item8(repo, _DISCLOSURE), 8)
+    assert item["status"] == "met"
+    assert "artifact_binding" not in item["citation"]
+    disclosure = item["citation"]["attestation"]
+    assert disclosure["tool_produced"] is True
+    assert disclosure["description"] == _DISCLOSURE
+
+
+@pytest.mark.parametrize("description", [..., None, "", "   \t "])
+def test_item8_without_a_usable_description_keeps_its_four_key_block(
+    tmp_path, description
+):
+    """A missing, null, empty or whitespace-only description omits the key, so
+    the block keeps its pre-#6111 four-key shape."""
+    repo = _repo(tmp_path)
+    item = _grade(repo, _attest_item8(repo, description), 8)
+    assert list(item["citation"]["attestation"]) == [
+        "tool_produced",
+        "producer",
+        "check_count",
+        "passed_count",
+    ]
+
+
+def test_item8_non_string_description_is_omitted(tmp_path):
+    """A hand-edited envelope whose `description` is not a string is not
+    echoed (and does not crash the grader)."""
+    repo = _repo(tmp_path)
+    envelope = _attest_item8(repo, _DISCLOSURE)
+    envelope["attestation"]["description"] = {"scope": "not a string"}
+    item = _grade(repo, envelope, 8)
+    assert item["status"] == "met"
+    assert "description" not in item["citation"]["attestation"]
+
+
+def test_item8_hand_written_block_never_echoes_a_description(tmp_path):
+    """`tool_produced: false` stays exactly that, even if a hand-written
+    envelope's `attestation` block names a description but no producer."""
+    repo = _repo(tmp_path)
+    envelope = _attest_item8(repo, _DISCLOSURE)
+    del envelope["attestation"]["producer"]
+    item = _grade(repo, envelope, 8)
+    assert item["status"] == "met"
+    assert item["citation"]["attestation"] == {"tool_produced": False}
 
 
 def test_description_is_never_graded(tmp_path):
@@ -395,8 +463,12 @@ def test_text_output_is_printable_on_a_legacy_stdout(tmp_path, item):
     assert legacy.returncode == 0, legacy.stderr
     assert "Traceback" not in legacy.stderr
     assert f"description: {_JA_ESCAPED}\n" in legacy.stdout
-    # Complete: every line the UTF-8 run prints, in order, only escaped.
-    assert legacy.stdout == _escaped(reference.stdout)
+    # Complete: every line the UTF-8 run prints, in order, only escaped --
+    # but for the audit line's own seconds, which no two runs share (issue
+    # #6868's CI flake): mask that one value on each side before comparing.
+    assert _audit_seconds_masked(legacy.stdout) == _audit_seconds_masked(
+        _escaped(reference.stdout)
+    )
     envelope = json.loads((repo / "attest" / "env.json").read_text(encoding="utf-8"))
     assert envelope["status"] == "pass"
     assert envelope["attestation"]["description"] == _JA

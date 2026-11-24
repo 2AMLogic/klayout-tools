@@ -1,5 +1,6 @@
 """Cross-field validation of ABC driving cells and cell exclusions."""
 
+import inspect
 from unittest.mock import Mock
 
 import pytest
@@ -24,6 +25,17 @@ LIBRARY_GLOB = "sky130_fd_sc_hd__lpflow_*"
 def test_first_matching_glob_preserves_order_and_case():
     assert first_matching_glob("BUFx2_R", ("buf*", "*x2_*", "BUF*")) == "*x2_*"
     assert first_matching_glob("BUFx2_R", ("buf*",)) is None
+
+
+def test_resolved_globs_is_required_keyword():
+    sig = inspect.signature(synthesize._resolve_abc_constr_request)
+    assert sig.parameters["resolved_globs"].kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(TypeError):
+        sig.bind({"abc_constr": None}, "")
+    with pytest.raises(TypeError):
+        sig.bind({"abc_constr": None}, "", ())
+    bound = sig.bind({"abc_constr": None}, "", resolved_globs=())
+    assert bound.arguments["resolved_globs"] == ()
 
 
 @pytest.mark.parametrize(

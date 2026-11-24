@@ -66,7 +66,7 @@ def patch_openroad_run(monkeypatch, fake_run: Callable) -> None:
     """Share one stub between blocking probes and the isolated OpenROAD launch."""
 
     def popen(argv, **kwargs):
-        return FakePopen(fake_run(argv, **kwargs))
+        return FakePopen(subprocess.run(argv, **kwargs))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(_openroad_engine, "Popen", popen)

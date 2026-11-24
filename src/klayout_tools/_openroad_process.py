@@ -66,7 +66,7 @@ def _termination_signals() -> Iterator[Callable[[], None]]:
 _KILL_GRACE_S = 5.0
 
 
-def _kill_container(container_id: str) -> None:
+def _kill_container(container_id: str, invocation_id: str) -> None:
     """Best-effort ``docker kill`` of a recorded container; never raises.
 
     Runs as a subprocess rather than through the group kill because a
@@ -76,6 +76,22 @@ def _kill_container(container_id: str) -> None:
     best-effort step here.
     """
     try:
+        owner = subprocess.run(
+            [
+                "docker",
+                "container",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "org.klayout-tools.openroad-invocation" }}',
+                container_id,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_KILL_GRACE_S,
+        )
+        if owner.returncode or owner.stdout.strip() != invocation_id.encode("ascii"):
+            return
         subprocess.run(
             ["docker", "kill", container_id],
             stdout=subprocess.DEVNULL,
@@ -87,7 +103,9 @@ def _kill_container(container_id: str) -> None:
         pass
 
 
-def _kill_openroad_run(proc: subprocess.Popen, container_id: str | None) -> None:
+def _kill_openroad_run(
+    proc: subprocess.Popen, container_id: str | None, invocation_id: str
+) -> None:
     """Kill a running engine invocation as thoroughly as possible.
 
     The child runs under ``start_new_session=True``, so its process group
@@ -98,8 +116,8 @@ def _kill_openroad_run(proc: subprocess.Popen, container_id: str | None) -> None
     1. SIGTERM to that group: the wrapper's own EXIT/INT/TERM handler
        ``docker kill``s its container on it.
     2. A direct ``docker kill`` of the recorded id: covers an installed
-       wrapper *older* than that handler (regenerating is a manual step,
-       so stale wrappers persist on hosts) and a handler that failed.
+       wrapper whose handler failed. Older wrappers without an invocation
+       label receive only the process-group signals.
     3. SIGKILL escalation after :data:`_KILL_GRACE_S`, then a final reap.
     """
     try:
@@ -107,7 +125,7 @@ def _kill_openroad_run(proc: subprocess.Popen, container_id: str | None) -> None
     except (ProcessLookupError, PermissionError):
         pass
     if container_id:
-        _kill_container(container_id)
+        _kill_container(container_id, invocation_id)
     try:
         proc.wait(timeout=_KILL_GRACE_S)
         return

@@ -7,7 +7,7 @@ import os
 import pytest
 
 from klayout_tools.cli import main
-from klayout_tools.lvs import check_lvs_report, rerun_lvs_report, run_lvs
+from klayout_tools.lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 
 _SPICE = """
 .subckt inv A Y VPWR VGND
@@ -155,7 +155,7 @@ def test_check_lvs_report_explicit_reference_rescues_unresolvable_scopes(
     report_path.write_text(json.dumps(report))
 
     without = check_lvs_report(str(report_path))
-    assert without["status"] == "drifted"
+    assert without["status"] == "unverifiable"
     fields = {check["field"]: check for check in without["checks"]}
     assert fields["environment.reference_sha256"]["actual"] is None
 
@@ -182,6 +182,38 @@ def test_rerun_lvs_report_explicit_reference_reruns_an_external_reference(
     result = rerun_lvs_report(str(report_path), reference_path=reference_path)
 
     assert result["status"] == "match"
+
+
+def test_rerun_lvs_report_explicit_reference_rescues_a_missing_reference_echo(
+    tmp_path_factory,
+):
+    """Issue #6461: the rerun guard tests the *post-override* reference (the
+    layout arm's rule), so `--reference` rescues even a report whose
+    `reference` echo is missing entirely -- byte-identically to what
+    `--layout` does for a missing layout echo: the rerun proceeds, and the
+    absent echo field is the sole drift (content is still verified via
+    ``environment.reference_sha256``)."""
+    _, reference_path, report_path = _external_reference_report(tmp_path_factory)
+    report = json.loads(report_path.read_text())
+    del report["reference"]
+    report_path.write_text(json.dumps(report))
+
+    result = rerun_lvs_report(str(report_path), reference_path=reference_path)
+
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == ["reference"]
+
+
+def test_rerun_lvs_report_refuses_an_external_reference_cleanly(tmp_path_factory):
+    """Issue #6461: mirror of the external-layout refusal -- the guard tests
+    the resolved reference, so an unresolvable external echo raises the same
+    clean `LvsError` a report missing the field entirely raises (the error
+    docs/cli/lvs.md already documents for either side), never a late
+    reconstruction error."""
+    _, _, report_path = _external_reference_report(tmp_path_factory)
+
+    with pytest.raises(LvsError, match="no 'layout'/'reference' field to rerun"):
+        rerun_lvs_report(str(report_path))
 
 
 def test_lvs_explicit_reference_wins_over_a_pre_4984_bare_string(
@@ -307,10 +339,10 @@ def test_cli_lvs_reference_without_check_is_rejected(tmp_path, capsys):
     )
 
 
-def test_cli_lvs_reference_naming_a_missing_file_drifts_cleanly(
+def test_cli_lvs_reference_naming_a_missing_file_is_unverifiable(
     tmp_path_factory, capsys
 ):
-    """A nonexistent override is a clean `drifted` (with the
+    """A nonexistent override is a clean `unverifiable` (with the
     `input_not_found` diagnostic), never a traceback."""
     _, reference_path, report_path = _external_reference_report(tmp_path_factory)
     capsys.readouterr()
@@ -326,7 +358,7 @@ def test_cli_lvs_reference_naming_a_missing_file_drifts_cleanly(
             "json",
         ]
     )
-    assert code == 3
+    assert code == 4
     result = json.loads(capsys.readouterr().out)
     checks = {check["field"]: check for check in result["checks"]}
     assert "input_not_found" in checks["environment.reference_sha256"]

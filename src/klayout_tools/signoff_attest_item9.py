@@ -14,6 +14,10 @@ The ``depends_on`` declarations (#5850) live in
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
+
+Since issue #5856 the gap-row shape validator and check builders are shared
+with item 8 through :mod:`klayout_tools.signoff_attest_gaprows`; the two
+functions below are thin delegations kept for their callers.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ._jsonnum import is_int
+from . import signoff_attest_gaprows as gaprows
 from .signoff_attest_item9_depends_on import (
     bench_depends_on_map,
     dependency_binding_checks,
@@ -360,48 +364,21 @@ def validate_into(
 
 def validated_unbenched_rows(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``unbenched_rows``: ``[{"row": str, "issue": int}]`` (optional)."""
-    raw = inventory.get("unbenched_rows")
-    if raw is None:
+    if inventory.get("unbenched_rows") is None:  # Item 9 also accepts explicit null.
         return []
-    if not isinstance(raw, list):
-        raise _error("'unbenched_rows' must be a list of {row, issue}")
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(raw):
-        field = f"unbenched_rows[{index}]"
-        if not isinstance(entry, Mapping) or set(entry) != {"row", "issue"}:
-            raise _error(f"'{field}' must be an object with 'row' and 'issue'")
-        row, issue = entry["row"], entry["issue"]
-        if not isinstance(row, str) or not row.strip():
-            raise _error(f"'{field}.row' must be a non-empty string")
-        if not is_int(issue) or issue <= 0:
-            raise _error(f"'{field}.issue' must be a positive integer")
-        if row in seen:
-            raise _error(f"unbenched row '{row}' is declared more than once")
-        seen.add(row)
-        rows.append({"row": row, "issue": issue})
-    return rows
+    return gaprows.validated_gap_rows(inventory, "unbenched_rows", "unbenched")
 
 
 def unbenched_row_checks(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """One visible, passing check per declared bench-less row (sorted)."""
-    return [
-        {
-            "check": "unbenched_row",
-            "role": "row",
-            "row": entry["row"],
-            "issue": entry["issue"],
-            "passed": True,
-        }
-        for entry in sorted(rows, key=lambda e: e["row"])
-    ]
+    return gaprows.gap_row_checks(rows, "unbenched_row")
 
 
 def with_progress(
     run: Callable[..., dict[str, Any]], label_of: Callable[..., str]
 ) -> Callable[..., dict[str, Any]]:
-    """Wrap a command-check runner so each run writes a start and finish line
-    to stderr. Timing stays out of the returned check (reproducible envelope)."""
+    """Write start and finish lines to stderr. The CLI reports elapsed time
+    in live output and omits it from committed checks and drift comparisons."""
 
     def wrapped(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         label = label_of(role, identity)

@@ -1,0 +1,1 @@
+- **Simulation measurement limits support strict bounds** (#7645, 2026-11-23). With `exclusive_min` or `exclusive_max`, a value equal to the bound fails with zero margin.
