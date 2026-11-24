@@ -21,6 +21,7 @@ from helpers.asap7_drc_fixtures import (
     D,
     Shape,
     _fail,
+    _flip,
     _pass,
     _stack,
     box,
@@ -58,7 +59,57 @@ def two_side_cases() -> list[Case]:
                 c.append(_pass(rule, capped(via, "lower", e0, e1, vertical)))
                 for x, y in ((e0 - D, e1), (e0, e1 - D), (e0 - D, e1 - D)):
                     c.append(_fail(rule, capped(via, "lower", x, y, vertical)))
-    return c
+    return c + _v1_notch_cases()
+
+
+# Each group of abutting M1 boxes forms a single polygon. The full ends
+# at y = -8 and 26 enclose V1 by 8 nm. A notch at -3 or 21 leaves 3 nm.
+ONE_TOP_NOTCH = (
+    (-4, -8, 3, 26),
+    (3, -8, 6, 21),
+    (6, -8, 22, 26),
+)
+
+TWO_TOP_NOTCHES = (
+    (-4, -8, 3, 26),
+    (3, -8, 6, 21),
+    (6, -8, 12, 26),
+    (12, -8, 15, 21),
+    (15, -8, 22, 26),
+)
+
+BOTH_ENDS_NOTCHED = (
+    (-4, -8, 3, 26),
+    (3, -3, 6, 21),
+    (6, -8, 22, 26),
+)
+
+# Narrow fingers and opposing notch walls also trip M1 width and spacing.
+NOTCH_RULES = ("M1.W.1", "M1.S.4")
+
+V1_PASS = (
+    ((bar(8, 8, True),), ()),
+    (ONE_TOP_NOTCH, NOTCH_RULES),
+    (TWO_TOP_NOTCHES, NOTCH_RULES),
+)
+V1_FAIL = (
+    ((bar(4, 4, True),), ()),
+    ((bar(8, 0, True),), ()),
+    ((bar(5, 0, True),), ()),
+    (BOTH_ENDS_NOTCHED, NOTCH_RULES),
+)
+
+
+def _v1_notch_cases() -> list[Case]:
+    """Distinguish two short edges at the same end from one at each end."""
+    cases = []
+    for make_case, layouts in ((_pass, V1_PASS), (_fail, V1_FAIL)):
+        for boxes, also in layouts:
+            shapes = _stack("V1", lower=None)
+            shapes.extend(box("M1", *bounds) for bounds in boxes)
+            case = make_case("V1.M1.EN.1", shapes, also=also)
+            cases.extend((case, _flip(case)))
+    return cases
 
 
 def _upper(via: str) -> str:
