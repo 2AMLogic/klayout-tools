@@ -338,6 +338,7 @@
         "klayout_tools.extract_resistance_graph_caps",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
+        "klayout_tools.extract_spef_rc",
         "klayout_tools.extract_split_terminal",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
