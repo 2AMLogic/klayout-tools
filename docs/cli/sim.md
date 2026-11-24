@@ -6947,10 +6947,11 @@ sim` reduces it in Python once every corner has reported:
   measurement carries `limits`.
 - **Coverage.** The entry counts in `coverage.measurements_declared` and, with
   `limits`, `measurements_with_limits` (so it satisfies `klt signoff`'s
-  `no_limits_checked` gate on its own). Its work is recorded per group --
-  `derived_measurement:[name, group_id]` observations and
-  `derived_limit:[name, group_id, key]` bounds, skipped with a reason for an
-  ungraded group -- never as per-corner rows.
+  `no_limits_checked` gate on its own). Work is recorded per group.
+  Without limits, `derived_measurement:[name, group_id]/observation` is checked
+  when the group produces a value and skipped with a reason when it produces
+  none. With limits, each `derived_limit:[name, group_id, key]` row
+  records whether the group checked or skipped that bound.
 - **`klt signoff`.** A passing, `spec_row`-tagged, limited `derive` entry
   credits its row as `derived` exactly as a per-corner measurement does, on a
   `met` citation and -- row-scoped,
