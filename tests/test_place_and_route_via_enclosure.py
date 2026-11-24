@@ -1,8 +1,12 @@
 """Placed ASAP7 V1s share a master, while each M1 repair belongs to one route."""
 
+import shutil
+
 import klayout.db as kdb
 import pytest
 
+from klayout_tools.decks.asap7_rules import DECK_PATH
+from klayout_tools.drc import run_drc_klayout_engine
 from klayout_tools.place_and_route_via_pad import trim_via_pads
 
 
@@ -99,3 +103,32 @@ def test_notch_needs_enclosure_along_the_entire_side():
         (_region(top, metal) - before)
         ^ kdb.Region(kdb.Box(18, 8, 20, 9).transformed(trans))
     ).is_empty()
+
+
+@pytest.mark.skipif(
+    shutil.which("klayout") is None, reason="requires the KLayout binary"
+)
+def test_packaged_deck_removes_only_the_routed_v1_marker(tmp_path):
+    layout, top, _, _ = _layout()
+    path = tmp_path / "placements.gds"
+
+    def markers():
+        layout.write(str(path))
+        report = run_drc_klayout_engine(str(path), str(DECK_PATH))
+        return {
+            (
+                v["cell"],
+                v["bbox"]["left"],
+                v["bbox"]["bottom"],
+                v["bbox"]["right"],
+                v["bbox"]["top"],
+            )
+            for v in report["violations"]
+            if v["rule"] == "V1.M1.EN.1"
+        }
+
+    routed = ("top", 100, 200, 118, 218)
+    bare = ("top", 400, 0, 418, 18)
+    assert markers() == {routed, bare}
+    assert _repair(layout, top) == 1
+    assert markers() == {bare}
