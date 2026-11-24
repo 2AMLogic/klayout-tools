@@ -60,8 +60,10 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
 - `--envelope-out PATH` — also write the JSON envelope to `PATH` whatever
   `--format` is: the success / `submitted` report, or the error envelope on
   failure (byte-identical to what `--format json` emits on stdout / stderr).
-  A path that cannot be written is an exit-`1` error. Additive
-  ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
+  A path that cannot be written is an exit-`1` error. The envelope is staged
+  as a sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Additive ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
   [`extract.md`](extract.md). **One run extracts one top**, and swaps one DUT
   `.include` for it, so a testbench instantiating two or more cells that are

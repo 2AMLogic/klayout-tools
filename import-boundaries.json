@@ -295,6 +295,7 @@
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_abstract_pin_join",
+        "klayout_tools.extract_abstract_poly",
         "klayout_tools.extract_assemble",
         "klayout_tools.extract_report_canonicalize",
         "klayout_tools.extract_validate",

@@ -26,9 +26,11 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   `.gz`; `--format text` still writes JSON to the file). The file is written
   for clean and violating runs alike (exit `3` included) and for
   `--engine both`; stdout and exit codes are unchanged. An unwritable `PATH`
-  is the standard error envelope (exit `1`). Rejected with `--check` and
-  `--list-rules`, which emit no run report. Mirrors `klt sim --report-out`
-  (issue #4393).
+  is the standard error envelope (exit `1`). The report is staged as a
+  sibling temporary file and renamed into place, so `PATH`'s parent
+  directory must be writable; a failed write preserves the previous file.
+  Rejected with `--check` and `--list-rules`, which emit no run report.
+  Mirrors `klt sim --report-out` (issue #4393).
 - `--max-violations N` — `--engine klayout` only (issue #4464): serialize at
   most `N` entries in `violations[]`, the first `N` in the report's
   deterministic sort order; `0` is summary-only (no polygons, `coverage`
