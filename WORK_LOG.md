@@ -8,6 +8,50 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-24
 
+- **PR #7804**: Document directional ambiguity for ASAP7 V0 edges at LIG
+- **PR #7832**: Skip timing-driven global placement for clockless routes
+- **PR #7828**: Repair ASAP7 M1 spacing at remote-via wire sides and routed notches
+- **PR #7827**: Cover missing observations in a limits-less derived measurement
+- **PR #7815**: feat: let an item-5 signoff citation assert the run scope it must cover
+- **PR #7821**: refactor: bundle klt pex extraction options into PexExtractOptions
+- **Issue #7796** (closed): place-and-route (asap7): post-repair re-route clears the stack-enclosure and landing-pair families; pad-vs-neighbour tip spacings and V1.M1.EN.1 landings survive with no covering repair
+- **Issue #7799** (closed): Repair remaining ASAP7 M1 pad-to-neighbor tip spacings on a routed slice
+- **Issue #7801** (closed): klt sim: no regression guards the limits-less derived observation's error skip reason
+- **Issue #7807** (closed): klt signoff: an evidence citation's content_hash pins a run-scope-invariant artifact, so a reduced-coverage run grades identically to the complete one
+- **Issue #7818** (closed): Bundle duplicated PEX extraction-option forwarding and share CLI dry-run kwargs
+- **PR #7745**: fix: point the case-alias merged-net warning at --rename-declared-pins
+- **PR #7749**: Allow batch simulations to select the simlong fleet profile
+- **PR #7746**: test: detect live gates reached only through a nested def in the STA lane guard
+- **PR #7800**: Skip derived observations that produced no value
+- **PR #7740**: test: guard batch dry-run knob validator against resolver drift
+- **PR #7756**: fix: make a joint row's table covered tri-state so an unevaluable member reads unknown
+- **PR #7753**: test: glob read-only dir for leftover staging files in erc output test
+- **PR #7816**: fix: refuse non-finite numbers in klt characterize request validation
+- **PR #7764**: fix: accept escaped identifiers in the sdf output-concat rewrite
+- **PR #7814**: fix: union optional input/output_voltage groups across split Liberty cell-group files
+- **PR #7813**: fix: name a FinFET-valid re-extraction recipe in the klt sta SPEF annotation hint
+- **PR #7820**: refactor: route the last inline number-not-bool guards through _jsonnum and fail CI on new ones
+- **PR #7772**: chore: tighten five place-and-route size-baseline entries
+- **PR #7797**: Prevent failed ngspice expressions from crediting existing node voltages
+- **PR #7811**: docs: restore lvs.py replay and pin_source_cells contract comments
+- **PR #7734**: docs: note that DEF net-name properties change native Region rebuilds, pin with a test
+- **Issue #7826** (closed): klt netlist --output-dir exists only in dev builds: no release can run a multi-netlist regeneration check
+- **Issue #7724** (closed): klt extract: pins labelled twice emit pipe-joined net names (NAME|alias) that are unsafe SPICE node names
+- **Issue #7706** (closed): Live-STA guard: a collected test whose only gate reference sits inside a nested def is no longer detected
+- **Issue #7430** (closed): klt sim: a source_inconclusive derive group counts its /observation row as checked with no value
+- **Issue #6646** (closed): No guard keeps _validate_batch_request_knobs in step with _resolve_batch_config's knob list
+- **Issue #7701** (closed): klt signoff: a joint row's table `covered` reads false for an unevaluable member, which can contradict the item axis
+- **Issue #7719** (closed): tests: read-only-dir leftover-staging-file assertion globs the wrong directory
+- **Issue #7812** (closed): klt characterize accepts NaN for supply_v, temperature_c, nom_process, grid values and constraint_tolerance_ns
+- **Issue #7693** (closed): functional-verification options.sdf: the #7534 output-concat rewrite ignores escaped identifiers, so per-bit assigns with escaped RHS never rewrite
+- **Issue #7809** (closed): Liberty list-merge still refuses a corner when one cell-group file lacks the input_voltage / output_voltage groups the others declare (after #6940)
+- **Issue #7808** (closed): klt sta: the spef_annotation hint prescribes --def-pins (refused by name on a FinFET deck) and omits --def-net-connections; following it leaves every path unannotated
+- **Issue #5580** (closed): Finish _jsonnum consolidation with an AST sweep: 113 inline number/int-not-bool guards survive three regex sweeps, and one copy accepts infinity
+- **Issue #7679** (closed): Tighten the five place-and-route size limits after the stage split lands
+- **Issue #7794** (closed): klt sim credits an invalid operating-point expression when its measurement name matches a circuit node
+- **Issue #7806** (closed): Restore the two lvs.py contract facts #7461 condensed (re-scoped out of #7602)
+- **Issue #7715** (closed): drc: DEF net-name shape properties change what a native klayout.db re-derivation of a deck rule reports; the guide does not say to drop them
+- **Issue #6440** (closed): gen-compose ports_from_labels: landing search certifies a sub-spacing gap between the pad and two non-touching shapes of the port's own net (space, not notch)
 - **PR #7803**: Repair M1 enclosure at individual placed ASAP7 V1 landings
 - **PR #7802**: Use shared numeric validation in cell characterization
 - **PR #7763**: docs(lvs): record live verification of the subckt-call path against sg13g2.lvs

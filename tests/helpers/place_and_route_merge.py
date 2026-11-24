@@ -25,3 +25,16 @@ def _skipped_power_stack_repair(variant: str) -> dict:
         "v4_m5_enclosure": {"targets": 0, "repaired": 0, "left": 0},
         "m3_stub_spacing": {"targets": 0, "repaired": 0, "left": 0},
     }
+
+
+def _skipped_m4_grid_repair(variant: str) -> dict:
+    """Issue #7817: off ASAP7 the M4 grid repair is a *named* no-op, with
+    the same shape `repair_m4_grid` returns everywhere."""
+    return {
+        "status": "skipped",
+        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
+        "patches": 0,
+        "targets": 0,
+        "repaired": 0,
+        "left": 0,
+    }

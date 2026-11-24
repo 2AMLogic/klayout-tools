@@ -151,6 +151,8 @@ def test_cli_merge_only_runs_no_openroad_and_reports_repairs(
         report["power_stack_repair"]["reason"]
         == "no M4/M5/V3/V4 layer in the KLayout layer map"
     )
+    assert report["m4_grid_repair"]["status"] == "skipped"
+    assert report["m4_grid_repair"]["reason"] == "no M4 layer in the KLayout layer map"
     assert report["min_area_repair"] is not None
     assert report["layer_map"]["path"] == str(
         tmp_path / "install" / "asap7" / "libs.tech" / "klayout" / "tech" / "asap7.map"
@@ -231,6 +233,7 @@ def test_cli_matches_a_direct_call_to_the_merger(tmp_path, monkeypatch, capsys):
         "def_net_names",
         "min_area_repair",
         "power_stack_repair",
+        "m4_grid_repair",
         "via_pad_trim",
         "pin_conductor",
     ):
@@ -421,3 +424,4 @@ def test_cli_text_format_prints_merge_summary(tmp_path, monkeypatch, capsys):
         "power_stack_repair: skipped "
         "(no M4/M5/V3/V4 layer in the KLayout layer map)" in out
     )
+    assert "m4_grid_repair: skipped (no M4 layer in the KLayout layer map)" in out

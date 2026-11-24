@@ -767,6 +767,7 @@
         "klayout_tools.place_and_route_multicycle",
         "klayout_tools.place_and_route_layers",
         "klayout_tools.place_and_route_macro_halo",
+        "klayout_tools.place_and_route_m4_grid",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",

@@ -627,6 +627,11 @@ _V0_LIG_ENCLOSURE = (
     "and SLVT library has 1,413 selected V0 wholly inside LIG."
 )
 
+_V0_LIG_DIRECTION = (
+    "In each pinned library, 4,899 selected cuts touch horizontal LIG only on their "
+    "vertical V0 edges. A square LIG has no unique length axis."
+)
+
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _GATE_DISCONTINUOUS, "#2812"),
@@ -644,12 +649,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
     *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
     Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _V0_LIG_ENCLOSURE, "#3147"),
-    Asap7RuleGap(
-        "V0.LIG.AUX.2",
-        "Table 3.11.2",
-        "edge parallel to the LIG length needs the LIG routing direction",
-        "#3147",
-    ),
+    Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _V0_LIG_DIRECTION, "#3147"),
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
     *_v123_spacing_gaps("V1"),
