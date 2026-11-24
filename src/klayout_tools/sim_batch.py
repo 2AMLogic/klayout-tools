@@ -175,6 +175,7 @@ from .sim_batch_contract import (  # noqa: F401
     _POLL_PROGRESS_EVERY,
     BATCH_ARTIFACTS_DIRNAME,
     BATCH_CONCURRENCY_CAP_CODE,
+    BATCH_IMAGE_PROFILE_CODE,
     BATCH_INTERRUPTED_CODE,
     BATCH_JOB_CEILING_CODE,
     BATCH_JOB_COMMAND_FAILED_CODE,
@@ -269,6 +270,8 @@ from .sim_batch_job_timeout import (
     resolve_poll_timeout_s,
 )
 from .sim_batch_knobs import (
+    _read_fleet_config,
+    _resolve_image_profile,
     _resolve_interrupted_grace_s,
     _resolve_max_concurrent_jobs,
     _resolve_max_job_seconds,
@@ -328,6 +331,7 @@ class BatchConfig:
     feature_diagnostic: dict[str, Any] | None = None
     image_pointer_key: str = "images/eda-batch-runner/current.json"
     runner_images: list[dict[str, Any]] | None = None
+    image_profile: str | None = None
 
     def runner_identities(self, pdk: str | None) -> list[dict[str, Any]]:
         """Reuse the pointer snapshot across all gates and shards of this request."""
@@ -345,38 +349,6 @@ class BatchConfig:
         return sim_batch_image.read_batch_runner_images(
             pdk, self.region, command, _run_subprocess
         )
-
-
-def _read_fleet_config(provision_script: str) -> dict[str, str]:
-    """Best-effort read of 2am's ``batch-fleet.env`` sitting beside the
-    resolved provision script.
-
-    Deliberately *not* a shell evaluation: only literal ``KEY=value`` /
-    ``KEY="value"`` lines are honored, anything interpolated (``$``/backtick)
-    or malformed is skipped, and an unreadable/absent file yields ``{}``.
-    This is a convenience source for non-secret fleet identifiers
-    (bucket, jobs prefix, region, submit profile), never a credential path.
-    """
-    path = os.path.join(
-        os.path.dirname(os.path.abspath(provision_script)), FLEET_CONFIG_FILENAME
-    )
-    values: dict[str, str] = {}
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return values
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if not key.startswith("BATCH_") or "$" in value or "`" in value:
-            continue
-        values[key] = value
-    return values
 
 
 def _resolve_provision_script(batch_spec: dict[str, Any]) -> str:
@@ -629,6 +601,7 @@ def _resolve_batch_config(
     corner_count: int,
     timeout_s: float,
     check_runner: bool = True,
+    sim_image_profiles: bool = True,
 ) -> BatchConfig:
     """Resolve every ``batch.*`` knob, raising
     :class:`~klayout_tools.sim.SimError` before any S3 write. Per-field
@@ -669,8 +642,9 @@ def _resolve_batch_config(
         )
     capacity_wait_s = resolve_capacity_wait_s(batch_spec)
     runner_version_check = _resolve_runner_version_check(batch_spec)
+    image_profile = _resolve_image_profile(batch_spec) if sim_image_profiles else None
     max_job_seconds, max_job_seconds_source = _resolve_max_job_seconds(
-        batch_spec, fleet
+        batch_spec, fleet, image_profile
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
@@ -708,6 +682,7 @@ def _resolve_batch_config(
         runner_version_check=runner_version_check,
         max_job_seconds=max_job_seconds,
         max_job_seconds_source=max_job_seconds_source,
+        image_profile=image_profile,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
@@ -762,6 +737,7 @@ def dry_run_runner_check(
             BATCH_RUNNER_FEATURE_CODE,
             BATCH_RUNNER_MISMATCH_CODE,
             BATCH_MAX_UNITS_CODE,
+            BATCH_IMAGE_PROFILE_CODE,
             ENGINE_VERSION_UNMET_CODE,
             # Issue #7543: a malformed poll knob is the request author's,
             # never the host's, so the dry run refuses it like the submit.
@@ -1261,6 +1237,9 @@ def submit_job(
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
+            # Every sim mode and shard publishes its profile through this write.
+            if config.image_profile == "simlong":
+                spec = replace(spec, image_profile=config.image_profile)
             json.dump(spec.to_job_json(), handle)
         spec_copy = ("s3", "cp", job_json_path, f"{prefix}/job.json")
         _run_checked(
@@ -1773,6 +1752,14 @@ def _install_batch_artifacts(
 # --------------------------------------------------------------------------- #
 
 
+def _batch_job_environment(config: BatchConfig, job_id: str) -> dict[str, Any]:
+    """Submit-side identifiers available before the worker reports a status."""
+    environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
+    if config.image_profile is not None:
+        environment["image_profile"] = config.image_profile
+    return environment
+
+
 def _batch_environment(
     config: BatchConfig, job_id: str, status: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1781,8 +1768,7 @@ def _batch_environment(
     a ``fleet[]`` array under sharding), carrying what ``status.json``
     actually observed rather than what was requested."""
     return {
-        "provider": "aws-batch-fleet",
-        "job_id": job_id,
+        **_batch_job_environment(config, job_id),
         "region": status.get("region") or config.region,
         "instance_id": status.get("instance_id"),
         "instance_type": status.get("instance_type"),
@@ -3142,8 +3128,7 @@ def _poll_and_collect(
             _poll_timeout_corners(corner_points, measurements_spec, exc),
             None,
             {
-                "provider": "aws-batch-fleet",
-                "job_id": job_id,
+                **_batch_job_environment(config, job_id),
                 "region": config.region,
                 "state": exc.last_state,
                 **(
@@ -3378,6 +3363,7 @@ def _run_batch(
             environment = {
                 **environment,
                 "job_ceiling": job_ceiling,
+                "image_profile": config.image_profile or "sim",
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
@@ -3414,6 +3400,7 @@ def _run_batch(
         environment = {
             **environment,
             "job_ceiling": job_ceiling,
+            "image_profile": config.image_profile or "sim",
             **_feature_diagnostic_field(config),
         }
     return corners, engine_version, environment

@@ -217,7 +217,7 @@ def _resolve_config(
         synthetic["batch"] = request["batch"]
     try:
         return sim_batch._resolve_batch_config(
-            synthetic, corner_count=1, timeout_s=timeout_s
+            synthetic, corner_count=1, timeout_s=timeout_s, sim_image_profiles=False
         )
     except (sim.SimError, sim_batch.BatchError) as exc:
         raise PlaceAndRouteError(

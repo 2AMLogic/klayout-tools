@@ -10,23 +10,58 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def _is_case_alias(labels: Sequence[str]) -> bool:
+    """True when ``labels`` are 2+ distinct spellings of one name, by case only.
+
+    ``VDD``/``vdd``/``Vdd`` qualify; ``Y``/``Y2``/``y`` do not (``Y2`` is a
+    genuinely different label), and byte-equal labels are not "differing by
+    case" either.
+    """
+    return len(set(labels)) > 1 and len({label.casefold() for label in labels}) == 1
+
+
 def merged_net_label_warnings(
     merged_net_labels: Sequence[dict[str, Any]],
 ) -> list[str]:
-    """Prose ``warnings[]`` line per multi-label merged net (issue #470)."""
+    """Prose ``warnings[]`` line per multi-label merged net (issue #470).
+
+    Every line opens with the same ``net '<name>' merges N distinct labels
+    (<labels>) onto one net`` text. A pure case alias (issue #7724) is then
+    worded as one pin labelled twice and names ``--rename-declared-pins``
+    rather than blaming a short; the wording cannot know whether that flag was
+    already passed, so it stays generic. ``merged_net_labels[]`` itself and the
+    written netlist are not affected.
+
+    The case-alias line must NOT contain "differ only by case": that phrase is
+    the marker of the *cross-net* case-collision warning (issues #4200/#7091,
+    two distinct nets such as ``PB``/``pb``), which is a different finding and
+    which tests and callers tell apart by it.
+    """
     warnings: list[str] = []
     for merged_entry in merged_net_labels:
-        labels_str = ", ".join(merged_entry["labels"])
-        warnings.append(
+        labels = merged_entry["labels"]
+        labels_str = ", ".join(labels)
+        prefix = (
             f"net '{merged_entry['net']}' merges "
-            f"{len(merged_entry['labels'])} distinct labels ({labels_str}) "
-            "onto one net -- KLayout joins multiple labels found on the "
-            "same electrical net (as '|' here and in the written netlist, "
-            "matching NetlistSpiceWriter's own node-name escaping); this "
-            "usually means two differently-named nets were shorted "
-            "together in the layout -- see docs/cli/extract.md's "
-            "'Merged net labels' section."
+            f"{len(labels)} distinct labels ({labels_str}) onto one net -- "
+            "KLayout joins multiple labels found on the same electrical net "
+            "(as '|' here and in the written netlist, matching "
+            "NetlistSpiceWriter's own node-name escaping); "
         )
+        if _is_case_alias(labels):
+            warnings.append(
+                prefix + "the labels differ only in letter case, so this is "
+                "usually one pin labelled twice. With --pins/--def-pins declaring one "
+                "spelling, --rename-declared-pins renames the net to the "
+                "declared name and records the alias in pin_renames.renamed "
+                "-- see docs/cli/extract.md's 'Merged net labels' section."
+            )
+        else:
+            warnings.append(
+                prefix + "this usually means two differently-named nets were "
+                "shorted together in the layout -- see docs/cli/extract.md's "
+                "'Merged net labels' section."
+            )
     return warnings
 
 

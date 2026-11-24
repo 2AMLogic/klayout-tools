@@ -51,12 +51,23 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 GATE_NAMES = ("_live_sky130_env", "_LIVE_ONLY")
 
 
-def _references_gate(nodes: list[ast.AST]) -> bool:
-    """Walk a single collection scope, excluding separately defined helpers."""
+def _references_gate(nodes: list[ast.AST], *, skip_nested_defs: bool) -> bool:
+    """Walk one scope for a gate reference.
+
+    ``skip_nested_defs=True`` is for a *class* scope: a method's own gate
+    must not gate its un-gated siblings, so nested definitions are not
+    entered. ``False`` is for a *function* scope: a gate reached only
+    through a nested ``def`` (``_setup()`` returning ``_live_sky130_env()``)
+    still gates the enclosing test, so the body is walked recursively
+    (issue #7706). Nested ``test*`` helpers are still never yielded as their
+    own entries -- :func:`_gated_functions` only yields direct children.
+    """
     pending = list(nodes)
     while pending:
         node = pending.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if skip_nested_defs and isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
             continue
         if isinstance(node, ast.Name) and node.id in GATE_NAMES:
             return True
@@ -75,7 +86,8 @@ def _gated_functions(nodes, *, prefix="", class_gated=False):
                 value for value in node.args.kw_defaults if value is not None
             ]
             if class_gated or _references_gate(
-                [*node.decorator_list, *node.args.defaults, *kw_defaults, *node.body]
+                [*node.decorator_list, *node.args.defaults, *kw_defaults, *node.body],
+                skip_nested_defs=False,
             ):
                 yield prefix + node.name, node.lineno
 
@@ -95,7 +107,8 @@ def _live_gated_tests(directory: Path = TESTS_DIR) -> dict[str, tuple[str, int]]
                         node.body,
                         prefix=node.name + ".",
                         class_gated=_references_gate(
-                            [*node.decorator_list, *node.body]
+                            [*node.decorator_list, *node.body],
+                            skip_nested_defs=True,
                         ),
                     )
                 )
@@ -321,7 +334,7 @@ class TestMethods:
     def test_marked(self):
         _live_sky130_env()
 
-    def test_ordinary(self):
+    def test_gated_via_nested_helper(self):
         def test_helper(pdk=_live_sky130_env()):
             _live_sky130_env()
 
@@ -348,16 +361,91 @@ class Uncollected:
         "TestMethods.test_keyword_default",
         "TestMethods.test_unmarked",
         "TestMethods.test_marked",
+        "TestMethods.test_gated_via_nested_helper",
         "TestClassGate.test_inherits",
         "TestBodyGate.test_unmarked",
     )
     assert set(found) == {f"{module}.{name}" for name in expected}
+    # The enclosing method is gated through its nested helper, but the nested
+    # `test_helper` is not collected by pytest and is never its own entry.
+    assert not any(node_id.endswith("test_helper") for node_id in found)
     assert _unmarked_gated_tests(found) == [
         f"{module}.{name}: gate present but live_openroad mark missing"
         for name in (
             "TestBodyGate.test_unmarked",
+            "TestMethods.test_gated_via_nested_helper",
             "TestMethods.test_keyword_default",
             "TestMethods.test_unmarked",
             "test_positional_default",
         )
     ]
+
+
+def test_gate_reached_only_through_a_nested_def_is_detected(tmp_path):
+    """A closure-held gate still gates the enclosing collected test (#7706).
+
+    The nested-scope skip in `_references_gate` is only right for a *class*
+    body (else one gated method would gate every sibling); a function's own
+    body must be walked through its nested defs, or a live test that reaches
+    `_live_sky130_env()` via a `_setup()` helper falls out of the lane.
+    """
+    (tmp_path / "test_live_nested_fixture.py").write_text("""
+import pytest
+_live_sky130_env = lambda: False
+_LIVE_ONLY = pytest.mark.skipif(not _live_sky130_env(), reason="fixture")
+
+def test_module_nested_setup():
+    def _setup():
+        return _live_sky130_env()
+    if not _setup():
+        pytest.skip("live PDK unavailable")
+
+async def test_async_nested_setup():
+    def _setup():
+        return _live_sky130_env()
+    assert _setup()
+
+def test_outer_with_nested_test_helper():
+    def test_inner_helper(pdk=_live_sky130_env()):
+        return pdk
+    return test_inner_helper
+
+def test_plain_with_nested_plain_helper():
+    def _setup():
+        return 1
+    assert _setup()
+
+class TestNested:
+    def test_live_method_uses_gate_via_nested_helper(self):
+        def _setup():
+            return _live_sky130_env()
+        assert _setup()
+
+    def test_plain_sibling(self):
+        def _setup():
+            return 1
+        assert _setup()
+
+class TestSiblings:
+    @_LIVE_ONLY
+    def test_decorated(self):
+        pass
+
+    def test_plain_sibling(self):
+        pass
+""")
+    found = _live_gated_tests(tmp_path)
+    expected = (
+        "test_module_nested_setup",
+        "test_async_nested_setup",
+        "test_outer_with_nested_test_helper",
+        "TestNested.test_live_method_uses_gate_via_nested_helper",
+        "TestSiblings.test_decorated",
+    )
+    assert set(found) == {f"test_live_nested_fixture.{name}" for name in expected}
+    # A nested `test*` helper is never reported as its own entry.
+    assert not any("test_inner_helper" in node_id for node_id in found)
+    # One gated method must not gate its un-gated siblings, including when
+    # its own gate is held by a nested def.
+    assert "test_live_nested_fixture.TestSiblings.test_plain_sibling" not in found
+    assert "test_live_nested_fixture.TestNested.test_plain_sibling" not in found
