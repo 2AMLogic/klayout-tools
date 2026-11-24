@@ -105,8 +105,8 @@ def _sadp_metal_family(layer: str, t1: str, t2: str) -> tuple[Asap7Rule, ...]:
         Asap7Rule(
             f"{layer}.W.3",
             t1,
-            "even multiples are enumerated up to the W.2 maximum; wider shapes "
-            f"are reported by {layer}.W.2 only",
+            "even multiples are enumerated up to the W.2 maximum, measured per "
+            f"polygon across the track; wider shapes are reported by {layer}.W.2 only",
         ),
         Asap7Rule(f"{layer}.W.5", t1),
         Asap7Rule(f"{layer}.S.1", t1),
@@ -440,6 +440,7 @@ RULES: tuple[Asap7Rule, ...] = (
     ),
     Asap7Rule("V0.AUX.1", "Table 3.11.2"),
     Asap7Rule("V0.LIG.A.1", "Table 3.11.2"),
+    Asap7Rule("V0.M1.EN.1", "Table 3.11.1"),
     # M1-M3
     *_metal_family("M1"),
     *_metal_family("M2"),
@@ -448,9 +449,12 @@ RULES: tuple[Asap7Rule, ...] = (
     *_via_family("V1", "M2"),
     *_via_family("V2", "M3"),
     *_via_family("V3", "M4"),
+    Asap7Rule("V1.M1.EN.1", "Table 3.13.1"),
     Asap7Rule("V2.M2.EN.1", "Table 3.13.1"),
     Asap7Rule("V3.M3.EN.1", "Table 3.13.1", "stated by Table 3.13.1 note 2"),
     Asap7Rule("V3.M4.EN.2", "Table 3.13.1"),
+    Asap7Rule("V1.M2.EN.2", "Table 3.13.1"),
+    Asap7Rule("V2.M3.EN.2", "Table 3.13.1"),
     # M4-M7 (Tables 3.14.1-3.14.2, 3.16.1-3.16.2)
     *_sadp_metal_family("M4", "Table 3.14.1", "Table 3.14.2"),
     *_sadp_metal_family("M5", "Table 3.14.1", "Table 3.14.2"),
@@ -498,7 +502,7 @@ RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
 
 #: Opt-in absolute grid-origin rules (#4082). Not in :data:`RULES`: they run
 #: only when the caller declares an origin with the matching ``--deck-var``,
-#: so the default 267-category contract is unchanged. The DRM gives the fin
+#: so the default category count excludes the opt-in rules. The DRM gives the fin
 #: and gate pitches (Tables 3.3.1 / 3.4.1) but no absolute origin, so the
 #: origin is the caller's; the checked reference is the FIN lower edge and
 #: the GATE left edge.
@@ -536,10 +540,6 @@ _TRACK = (
 _END_CAP = (
     "corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs "
     "per-via end-cap classification against the upper metal"
-)
-_EXACT_EN = (
-    "exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') "
-    "needs routing direction and a per-side enclosure predicate"
 )
 _LISD_EXACT_3 = (
     "'== 3 nm on at least two opposite sides' is expressible without a routing "
@@ -644,7 +644,6 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     # V0 (Tables 3.11.1 / 3.11.2)
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
-    Asap7RuleGap("V0.M1.EN.1", "Table 3.11.1", _EXACT_EN, "#3147"),
     *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
     Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _ONE_SIDE, "#3147"),
     Asap7RuleGap(
@@ -656,10 +655,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
     *_v123_gaps("V1", "M2"),
-    Asap7RuleGap("V1.M1.EN.1", "Table 3.13.1", _EXACT_EN, "#3147"),
-    Asap7RuleGap("V1.M2.EN.2", "Table 3.13.1", _EXACT_EN, "#3147"),
     *_v123_gaps("V2", "M3"),
-    Asap7RuleGap("V2.M3.EN.2", "Table 3.13.1", _EXACT_EN, "#3147"),
     *_v123_gaps("V3", "M4"),
     # M4-M7 / V4-V7 (Tables 3.14-3.17)
     *_sadp_metal_gaps("M4", "Table 3.14.1", "Table 3.14.2"),
@@ -769,9 +765,9 @@ _SDT_TALL = (
 )
 _SDT_HANDLING = "kept as stated; expected exactly; left out of the clean run"
 
-#: Every retained deviation of the pinned shipped cells (lambdapdk v0.2.17,
-#: asap7sc7p5t_28_{R,L,SL}) from the implemented rules. docs/cli/drc.md
-#: lists the same records.
+#: Retained deviations in lambdapdk v0.2.17's asap7sc7p5t_28_{R,L,SL} cells.
+#: Match a placed source_cell by stripping $VAR<n>, then _ASAP7_75t_<VT>.
+#: The pinned GDS files contain no $ variants. See docs/cli/drc.md for the records.
 SHIPPED_CELL_DEVIATION_RECORDS: tuple[Asap7CellDeviation, ...] = tuple(
     Asap7CellDeviation(
         cell,
@@ -804,9 +800,9 @@ def _deviation_map(
     return out
 
 
-#: ``cell -> rule ids`` view of :data:`SHIPPED_CELL_DEVIATION_RECORDS`: the
-#: exact deviation set the shipped-cell regression compares against. Names
-#: are given without the ``_ASAP7_75t_<VT>`` suffix.
+#: Library cell to rule IDs, derived from :data:`SHIPPED_CELL_DEVIATION_RECORDS`.
+#: The shipped-cell regression checks this exact map. Fold a placed layout
+#: variant to its base cell name before looking it up here.
 SHIPPED_CELL_DEVIATIONS: dict[str, tuple[str, ...]] = _deviation_map(
     SHIPPED_CELL_DEVIATION_RECORDS
 )

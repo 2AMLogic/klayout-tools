@@ -80,6 +80,8 @@ from .gen_describe import (
     _cap_array_validate,
     _diff_pair_describe,
     _diff_pair_validate,
+    # `_diff_pair_layout` moved to `gen_diff_pair.py` (file-size ratchet);
+    # re-exported below so `from .gen import _diff_pair_layout` keeps working.
     _diode_describe,
     _diode_validate,
     _esd_device_describe,
@@ -98,6 +100,9 @@ from .gen_describe import (
     _well_island_describe,
     _well_island_layer_params,
     _well_island_validate,
+)
+from .gen_diff_pair import (  # noqa: F401 -- re-exported (gen_snap.py pattern)
+    _diff_pair_layout,
 )
 from .gen_diode import resolve_diode_voltage_class
 
@@ -617,6 +622,7 @@ def _mos_unit_layout(
     mos_cap: bool = False,
     top_endcap_um: float = 0.0,
     dogbone_terminals: bool = False,
+    gate_pad_growth_um: float = 0.0,
 ) -> dict[str, Any]:
     """One MOS-like unit device: a diffusion strip crossed by ``fingers``
     poly gates, with a contact + local-metal pad in each source/drain
@@ -840,8 +846,15 @@ def _mos_unit_layout(
         pad_half = contact_region_um / 2.0
         clearance_um = max(gate_pad_clearance_um, 0.0)
         stem_um = MIN_SAME_LAYER_SPACING_UM if gate_contact else 0.0
+        # `gate_pad_growth_um` (issue #5557, `diff_pair` strap_splits only)
+        # grows the *metal* landing pad symmetrically around its centre by
+        # this much total, so the pad can host the strap's two gate-track
+        # mcons; the poly comb already covers the grown extent through
+        # `gate_ext_um` below, and the contact stays centred. 0.0 (every
+        # caller but the strapped diff_pair) is byte-for-byte unchanged.
+        pad_half_metal = pad_half + gate_pad_growth_um / 2.0
         pad_y0 = w_um + clearance_um
-        gate_ext_um = clearance_um + stem_um + contact_region_um
+        gate_ext_um = clearance_um + stem_um + contact_region_um + gate_pad_growth_um
         g_cy = pad_y0 + stem_um + contact_region_um / 2.0
         for px0, px1 in poly_positions:
             g_cx = (px0 + px1) / 2.0
@@ -861,7 +874,12 @@ def _mos_unit_layout(
                     )
                 )
                 boxes["metal"].append(
-                    (g_cx - pad_half, g_cy - pad_half, g_cx + pad_half, g_cy + pad_half)
+                    (
+                        g_cx - pad_half,
+                        g_cy - pad_half_metal,
+                        g_cx + pad_half,
+                        g_cy + pad_half_metal,
+                    )
                 )
             gate_xy.append((g_cx, g_cy))
         g_xy = gate_xy[0]
@@ -1291,6 +1309,7 @@ def _mos_array_layout(
     dogbone_terminals: bool = False,
     mirror: bool = False,
     tap_reach_um: float = 0.0,
+    well_enclosure_um: float = WELL_ENCLOSURE_MARGIN_UM,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1303,8 +1322,7 @@ def _mos_array_layout(
     follow it without any further arithmetic here (exactly as ``gate_contact``
     already does).
 
-    Also computes ``well_box_um`` -- a single well shape (per
-    :data:`WELL_ENCLOSURE_MARGIN_UM`) enclosing every cell's (real and dummy)
+    Also computes ``well_box_um`` with ``well_enclosure_um`` around every real and dummy
     active region, the same "one shared tub for the whole matched group"
     shape :func:`_bjt_array_layout` draws for its own shared base well --
     used only when the caller requests ``flavor="pfet"``.
@@ -1508,7 +1526,7 @@ def _mos_array_layout(
                     )
                 )
 
-    margin = WELL_ENCLOSURE_MARGIN_UM
+    margin = well_enclosure_um
     well_box = (min_x0 - margin, min_y0 - margin, max_x1 + margin, max_y1 + margin)
     # `voltage_flavor` marker box (issue #1054, margin widened by #1577):
     # independent of `well_box` -- see `_voltage_flavor_mark_margin_um`'s own
@@ -2323,138 +2341,6 @@ def _parse_well_regions(
             net = entry[4] or None
         regions.append({"box_um": box, "net": net})
     return regions
-
-
-def _diff_pair_layout(
-    w_um: float,
-    l_um: float,
-    splits: int,
-    add_guard_ring: bool,
-    ring_gap_side: str = "",
-    ring_gap_um: float = 0.0,
-    ring_gap_offset_um: float = 0.0,
-    ring_padding_um: float = GUARD_RING_DEFAULT_PADDING_UM,
-    row_spacing_um: float = MIN_SAME_LAYER_SPACING_UM,
-    gate_contact: bool = False,
-    gate_pad_clearance_um: float = 0.0,
-    contact_gate_offset_um: float = 0.0,
-    bottom_endcap_um: float = 0.0,
-    sd_implant_margin_um: float = 0.0,
-    pitch_x_um: float = 0.0,
-    top_endcap_um: float = 0.0,
-    tap_reach_um: float = 0.0,
-) -> dict[str, Any]:
-    """Two matched devices (``"A"``/``"B"``), each split into ``splits``
-    unit sub-instances, interleaved in a true common-centroid cross-quad
-    checkerboard over a 2-row x ``splits``-col grid: ``label(row, col) = "A"
-    if (row + col) is even else "B"`` -- for ``splits=2`` this is exactly the
-    classic differential-pair "A B / B A" layout; it generalises the same
-    way for any ``splits``, each column always holding one A and one B.
-
-    Both rows place their unit device at the same ``x0_um = col *
-    col_pitch``, so the two legs **share one x column per terminal** -- A's
-    and B's ports in a given column differ only in ``y_um`` (issue #1495).
-    That is a property of the interleave, not an oversight: separating the
-    legs in x by a constant per-leg offset would shift one leg's x centroid
-    relative to the other's, destroying exactly the gradient cancellation
-    this layout exists to provide. (Nor is there a cleverer uniform-pitch
-    ordering for odd ``splits``: placing ``2 * splits`` units at distinct
-    multiples of one pitch and partitioning them into two equal-x-centroid
-    halves needs the position sum ``splits * (2 * splits - 1)`` to be even,
-    which fails for every odd ``splits``.) The caveat is documented for
-    callers in ``docs/cli/gen.md`` and surfaced in ``klt gen --list``.
-
-    ``ring_padding_um``/``row_spacing_um`` (issue #484) are the ring-to-core
-    padding and the device-row-to-device-row gap, both fixed at their
-    present-day values by default so omitting them reproduces prior geometry
-    byte-for-byte; a caller that needs more room to route both matched
-    devices' gate nets out of the block can grow either and pay the area.
-    ``pitch_x_um`` (issue #5764) overrides the within-row column pitch
-    (the room a ``gen-compose`` route needs between adjacent units); like
-    ``mos_array``'s #3299 knob it is clamped up to the legal minimum and
-    ``0.0`` (default) is a strict no-op, uniform so common-centroid holds.
-
-    ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
-    it grows each unit's ``bbox_height_um``, so both the row pitch and the
-    automatically-sized guard ring follow it without any further arithmetic
-    here. ``gate_pad_clearance_um`` (issue #1450) is forwarded the same way,
-    with the same knock-on effect. ``contact_gate_offset_um``/
-    ``bottom_endcap_um``/``sd_implant_margin_um`` (issue #1577) are likewise
-    forwarded unchanged -- see :func:`_mos_unit_layout`'s own docstring.
-
-    ``tap_reach_um`` (issue #3648) behaves as in :func:`_mos_array_layout`:
-    positive with ``add_guard_ring`` off adds ``tap_pads`` around the core.
-    """
-    unit = _mos_unit_layout(
-        w_um,
-        l_um,
-        1,
-        gate_contact,
-        gate_pad_clearance_um=gate_pad_clearance_um,
-        contact_gate_offset_um=contact_gate_offset_um,
-        bottom_endcap_um=bottom_endcap_um,
-        sd_implant_margin_um=sd_implant_margin_um,
-        top_endcap_um=top_endcap_um,
-    )
-    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["bbox_height_um"] + row_spacing_um
-    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
-
-    counts = {"A": 0, "B": 0}
-    cells = []
-    for row in range(2):
-        for col in range(splits):
-            label = "A" if (row + col) % 2 == 0 else "B"
-            counts[label] += 1
-            cells.append(
-                {
-                    "row": row,
-                    "col": col,
-                    "label": label,
-                    "n": counts[label],
-                    "x0_um": col * col_pitch,
-                    "y0_um": row * row_pitch,
-                }
-            )
-
-    # True units' footprint at any pitch (#5764): the old shortcut only
-    # equals this at the default pitch (`col_pitch == min_col_pitch`).
-    core_w = (splits - 1) * col_pitch + unit["total_len_um"]
-    core_h = 2 * row_pitch - row_spacing_um
-
-    ring = None
-    ring_offset = (0.0, 0.0)
-    if add_guard_ring:
-        padding = ring_padding_um
-        ring_w = GUARD_RING_DEFAULT_WIDTH_UM
-        ring = _ring_layout(
-            core_w + 2 * padding,
-            core_h + 2 * padding,
-            ring_w,
-            GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
-            ring_gap_side,
-            ring_gap_um,
-            ring_gap_offset_um,
-        )
-        ring_offset = _snap_offset_um(-(ring_w + padding), -(ring_w + padding))
-
-    tap_pads = _optional_tap_pads(
-        add_guard_ring, tap_reach_um, (0.0, 0.0, core_w, core_h), ring_padding_um
-    )
-
-    return {
-        "unit": unit,
-        "cells": cells,
-        "col_pitch_um": col_pitch,
-        "min_col_pitch_um": min_col_pitch,
-        "pitch_x_clamped": pitch_x_clamped,
-        "row_pitch_um": row_pitch,
-        "core_w_um": core_w,
-        "core_h_um": core_h,
-        "ring": ring,
-        "ring_offset_um": ring_offset,
-        "tap_pads": tap_pads,
-    }
 
 
 #: Gap (um) kept between the shared base well and the collector guard ring

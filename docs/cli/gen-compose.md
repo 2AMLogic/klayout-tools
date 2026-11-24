@@ -574,7 +574,17 @@ into the circuit.)
   Case **(2)** now also has two remedies that keep the ring: cut a routing
   opening in it (see "Routing through a ring opening" below), or route on a
   plane the ring has no conductor on (see "Routing *over* a closed ring on a
-  higher plane" below, which needs no floorplan change at all).
+  higher plane" below, which needs no floorplan change at all) — and since
+  #6912 that second remedy is applied *automatically*: the metals-stack
+  plane climb (see "Automatic plane climb (#6920)") now treats the
+  ring-conflict classes (and the self-net pad-crossing classes
+  #433/#453/#1527) as climbable, so an unpinned net whose same-plane leg is
+  refused by the ring check is retried one via above the loop (under the
+  #1960 proof obligations above — every via-drop landing pad still has to
+  clear the ring's trace) instead of coming back in `unrouted_nets[]`. A
+  net that names its own plane (`connectivity[].layer_role`, #1655
+  "explicit wins") never climbs, so the same-plane rejection and its
+  message stay observable exactly as before.
 - **The obstacle-overlap check above is `routing.width_um`-aware, not just a
   zero-width centerline test (#999, fixed).** The bbox/margin heuristic
   described above used to test only the backbone's zero-width *centerline*
@@ -1793,6 +1803,103 @@ to pick the path themselves — the retry only fires for a leg that supplied
 none. As with every other check in this document, the composed output must
 still be re-verified with `klt drc`.
 
+### Interleaved same-block pads: the cross-coupled pair (#7003)
+
+The #1393 retry clears two same-block self-nets that merely *want the same
+lane*. It cannot clear a crossing that is inherent to the pair. The canonical
+shape is the wiring of a cross-coupled inverter pair across two mirrored
+two-unit arrays (`mos_array` with `topology: array`, `rows: 1`, `cols: 2`,
+`mirror: true`, `gate_contact: true`): net `A` ties unit 0's drain to unit 1's
+gate, net `B` ties unit 1's drain to unit 0's gate. In the drain band `A`'s
+pin is west of `B`'s and in the gate band it is east of it, so the two legs
+cross however they are drawn on one plane — and looping `B` around the outside
+of the block changes nothing, because what it collides with is `A` itself,
+not the block. Every lane is exhausted and the leg is reported:
+
+```
+crosses already-routed net 'A' -- a bounded same-block cross-layer detour (4 alternate lanes looped clear of the block's own bbox) was tried first, and each one still conflicted; for a higher plane, name connectivity[].legs[].layer_role or legs[].waypoints_um (issue #7003)
+```
+
+That is the intended escape hatch, not a routing failure: the net graph is
+non-planar, and which net changes plane is the caller's call — the router
+never escalates past `routing.cross_block_layer_role` on its own, because an
+explicit plane always wins over the automatic fallback ("Per-net routing
+planes" below). Declare the legs:
+
+```json
+{
+  "connectivity": [
+    {
+      "net": "A",
+      "pins": [
+        { "block": "n", "port": "U0_D" }, { "block": "n", "port": "U1_G" },
+        { "block": "p", "port": "U0_D" }, { "block": "p", "port": "U1_G" }
+      ],
+      "legs": [{
+        "from_pin": { "block": "n", "port": "U0_D" },
+        "to_pin":   { "block": "n", "port": "U1_G" },
+        "waypoints_um": [[0.91, 0.70], [2.08, 0.70]]
+      }, {
+        "from_pin": { "block": "p", "port": "U0_D" },
+        "to_pin":   { "block": "p", "port": "U1_G" },
+        "waypoints_um": [[7.84, 0.70], [9.01, 0.70]]
+      }, {
+        "from_pin": { "block": "n", "port": "U1_G" },
+        "to_pin":   { "block": "p", "port": "U1_G" }
+      }]
+    },
+    {
+      "net": "B",
+      "pins": [
+        { "block": "n", "port": "U1_D" }, { "block": "n", "port": "U0_G" },
+        { "block": "p", "port": "U1_D" }, { "block": "p", "port": "U0_G" }
+      ],
+      "legs": [{
+        "from_pin": { "block": "n", "port": "U1_D" },
+        "to_pin":   { "block": "n", "port": "U0_G" },
+        "layer_role": "metal2"
+      }, {
+        "from_pin": { "block": "p", "port": "U1_D" },
+        "to_pin":   { "block": "p", "port": "U0_G" },
+        "layer_role": "metal2"
+      }]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.17, "cross_block_layer_role": "metal2" }
+}
+```
+
+With both blocks placed in one row
+(`"placement": {"strategy": "row", "order": ["n", "p"], "spacing_um": 1.0}` —
+the waypoints are that placement's composed-frame coordinates, `p` sitting
+6.93 µm east of `n`), this composes with `unrouted_nets: []`, is `klt drc`-clean
+on sky130A and extracts as the two distinct nodes. Each part is load-bearing:
+
+- **`B`'s crossing legs name a plane above the one `A` draws on.** `metal2`
+  is the plane directly above `metal` (li1 → met1 on sky130A). Use a higher
+  plane that the via ladder can reach. An explicit plane is never retried, and
+  each leg drops to its own pins through the ordinary via ladder, which lands
+  only at the pins. `B`'s inter-block link needs no entry: rejected on li1
+  against `A`'s gate link, it takes the usual #1680 cross-block retry onto
+  `routing.cross_block_layer_role`. Said once for the whole net instead —
+  `"layer_role": "metal2"` on `B`'s entry, no `legs[]` — it routes just as
+  well.
+- **`A` stays on `routing.layer_role`, steered through the gap.** Left to
+  itself, `A`'s drain-to-gate leg takes the #1168 pad hop and runs on
+  `routing.cross_block_layer_role` straight over `B`'s drain pin — exactly
+  where `B`'s via ladder must land, on the way to *any* higher plane, so `B`
+  is rejected whatever plane it names. Each `waypoints_um` pair is the two
+  pins' own x, at a y midway between the S/D row's pads and the gate pads —
+  the li1 gap the leg threads instead, never needing the hop. The gate-to-gate
+  link is named so the automatic spanning tree does not pick the gate-to-drain
+  pair (`n.U1_G` → `p.U0_D`), which does need it.
+- **A leg that must change plane mid-route** takes the plane-bearing
+  waypoints of "Changing plane mid-leg" (#2930).
+
+Nothing here is specific to the cross-coupled pair: any two same-block nets
+whose pads interleave in one band and not in the other share the same
+one-plane crossing, and the same answer.
+
 ## Channel track assignment (#1467)
 
 `#1393` above resolves same-block self-net contention; the route-vs-route
@@ -2329,6 +2436,7 @@ exit codes).
 | `routing.minimal_ladder` | boolean | Optional (issue #6058), default `false`. Shrinks a multi-hop via-drop ladder's **intermediate** hop pads — the pads on metal levels the ladder merely passes through, neither the backbone's own plane nor the pin's own layer — from the fixed 0.42 µm baseline to each pair's own deck floor: the pad layer's minimum-area side, its minimum-width rule, and the via side plus twice *both* the pair's plain enclosure margin and its two-adjacent-edges enclosure margin. On sky130A that floors a met1 pad over via1 at 0.32 µm (`met1.enclosing_adjacent.via.1`: 0.15 µm cut + 2×0.085 µm) where the baseline drew 0.42 µm. The two **terminal** pads of each endpoint (its port's own layer and the leg's route layer) keep today's sizing, and a pair whose deck declares no enclosure rule keeps the baseline (no information justifies shrinking). The route-vs-route collision checks measure the same shrunk footprints drawing inserts (checks and drawn output cannot disagree), and `klt drc` on the composed output stays clean: the floors are read from the same curated deck. **Minimum compatible terminal pitch**: for two equal square pads of side *s* on a layer whose same-layer spacing rule is *d* (axis-aligned, edge to edge), the layer-local pitch is *s + d* — e.g. two 0.320 µm met1 squares against sky130A's `met1.space.1` (0.140 µm) need ≥ 0.460 µm centre-to-centre. A ladder deposits pads on *every* plane it crosses, so derive a route's real bound from the largest `pad side + spacing` on any plane the two routes share — intermediate pads at their minimal-ladder floors, terminal pads at the (unchanged) baseline or override, arrays adding `(max(rows, cols) − 1) × pitch`. Assumptions behind the quoted numbers: sky130A curated deck, single cuts (no `access.via_array`), sky130's li1→met5 metals stack. Cannot be combined with `routing.landing_pad_size_um` (they select two different pad-sizing policies; setting both is an application error, exit 1, naming both fields). `false`/omitted is byte-for-byte today's output. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
+| `options.check_placement` | boolean | Optional (#6942), default `false`. The opt-in **hard placement gate** — the fail-fast counterpart to the advisory checks above. With `true`, the request fails (exit 1, before any routing is drawn and before `options.output` is created or replaced) when any two blocks' declared placed footprints intersect with positive width **and** height, or when any block's real, stream-measured footprint extends past its own declared `bbox_um` beyond the containment tolerance — even with no other block nearby. Edge and corner contact passes (abut-by-design flows are not penalized); a `blocks[].abuts` declaration suppresses only the *clearance* advisory and never exempts a positive-area intersection. Under `strategy: "array"` the growth rule compares the base tile's measured footprint against that tile's own declaration (the array union can hide one tile's growth). A non-boolean value is an application error (exit 1). `false`/omitted: today's behavior byte-for-byte. The same rules are exposed as a library function, `klayout_tools.gen_compose.check_placement_overlap(declared_um, measured_um=None)`, so a hand-rolled merge (`Layout.read` + `Cell.copy_tree` + `CellInstArray`) can run the identical gate as a preflight with no request document, PDK, or second CLI — see "Opt-in placement gate (`options.check_placement`, #6942)" below. |
 
 ### Response
 
@@ -2456,7 +2564,7 @@ exit codes).
 | `generator` | string \| null | Echoed from that block's own `generator_report.generator`; **`null`** for a `source: "cell"` block (#1189), which no generator produced. |
 | `cell_name` | string | The source cell's own name (#1189) — from `generator_report.cell_name` or `cell.cell_name`. This is the cell copied into the composed output (instantiated there under a `"<id>__<cell_name>"` sub-cell). |
 | `source_path` | string | The stream this block's geometry was read from (#2065), exactly as the request spelled it (#2935) — `cell.gds_path` verbatim (a relative path stays relative, resolved against the request file's own directory only for reading, so no host/checkout prefix leaks into a committed response) for a `source: "cell"` block, `generator_report.gds_path` verbatim for a `source: "generator_report"` one. Present for both block kinds: a composition is a *snapshot* of inputs that keep moving under it, so the report says what it was built from rather than leaving a consumer to re-derive it from the request. |
-| `source_digest` | string \| null | A `"sha256:<hex>"` digest of `source_path`'s **decoded geometry** (#2065), or `null` when it cannot be computed (the stream moved or became unreadable between resolve time and report time, or no `klayout` engine is importable — never a fabricated value, matching the `provenance` block's own convention). Deliberately **not** a raw-byte file hash: re-writing geometrically identical output produces different bytes every time (the GDS `BGNLIB`/`BGNSTR` records carry the write time, and element order within a cell follows whatever order the writer emitted), so a byte hash reports drift on every input re-run and cannot distinguish a re-write from a real change. This digest covers the database unit, every cell (sorted by name), and within each cell every shape (keyed by layer/datatype) and every child-cell instance (keyed by the placed cell's *name*, with a regular array's two axes sorted), each rendered canonically and then sorted — so two streams holding the same geometry hash identically regardless of timestamps, element order, cell-table indices, or container format (GDS vs OASIS), while any real geometry or hierarchy change shows up as a different digest. Equality therefore answers "is this composition still built from what its inputs publish today?" without re-deriving geometry. Two blocks read out of the same stream report the same digest (it pins the stream, not the one cell). |
+| `source_digest` | string \| null | A `"sha256:<hex>"` digest of `source_path`'s **decoded geometry** (#2065), or `null` when it cannot be computed (the stream moved or became unreadable between resolve time and report time, or no `klayout` engine is importable — never a fabricated value, matching the `provenance` block's own convention). Deliberately **not** a raw-byte file hash: re-writing geometrically identical output produces different bytes every time (the GDS `BGNLIB`/`BGNSTR` records carry the write time, and element order within a cell follows whatever order the writer emitted), so a byte hash reports drift on every input re-run and cannot distinguish a re-write from a real change. This digest covers the database unit, every cell (sorted by name), and within each cell every shape (keyed by layer/datatype) and every child-cell instance (keyed by the placed cell's *name*, with a regular array's two axes sorted), each rendered canonically and then sorted — so two streams holding the same geometry hash identically regardless of timestamps, element order, cell-table indices, or container format (GDS vs OASIS), while any real geometry or hierarchy change shows up as a different digest. Equality therefore answers "is this composition still built from what its inputs publish today?" without re-deriving geometry. Two blocks read out of the same stream report the same digest (it pins the stream, not the one cell). To recompute it from a committed input — the reason the field is recorded at all — run `klt stats --geometry-digest --format json <source_path> \| jq -r .geometry_digest`: `geometry_digest` ([`stats.md`](stats.md) → "Geometry digest") is this same decoded-geometry digest over the stream, so that command reproduces `source_digest` exactly, while a raw-byte digest (`sha256sum <source_path>`) never will. For comparing the one copied *cell* across streams (rather than the whole stream this digest pins), use [`klt cell-hash --cell NAME LAYOUT`](cell-hash.md) — a cell-scoped digest of the named cell and its descendants, whose value differs from `source_digest` even for a one-cell stream. |
 | `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
 | `bbox_um` | object | Compose places the block's [declared envelope](#a-declared-bbox_um-is-trusted-not-verified-1679) without measuring the written GDS, so this box can understate the block's drawn extent. The starting box is `generator_report.bbox_um` or `cell.bbox_um` (read from the source cell if omitted). Compose applies `orientation` about the block's local origin, then adds `offset_um`. Under **`"array"`** (#1053), `bbox_um` is the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. For the whole output's measured extent, run [`klt cells <gds_path> --top --format json`](cells.md) and read the top cell's `Cell.dbbox()` from `cells[].bbox_um`, whose `{left, bottom, right, top}` fields correspond to Compose's `{x0, y0, x1, y1}`, respectively. [`klt layout-metrics`](layout-metrics.md) reports aggregate counts. |
 | `orientation` | string | Echo of the request's `blocks[].orientation` (#1166), `"none"` when omitted. |
@@ -2516,7 +2624,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, the `options.output` directory does not exist, or — only with `options.check_placement: true` (#6942) — a failed placement gate: a positive-area pairwise footprint intersection or a measured footprint that outgrew its own declaration (see "Opt-in placement gate (`options.check_placement`, #6942)" below), refused before any routing is drawn or the output is written. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -2728,6 +2836,81 @@ externally-produced `generator_report`), treat this warning as a signal that
 the block's own `bbox_um` needs correcting at the source, not merely that the
 two blocks named here should be moved apart — the same undeclared excess
 geometry can overlap a *different* neighbour the next time placement changes.
+
+### Opt-in placement gate (`options.check_placement`, #6942)
+
+Every check above is advisory by stated philosophy: a caller-declared
+overlap is legal input, and `klt drc` remains the rule-compliance authority
+on the composed output. The cost of that stance is the failure shape this
+gate exists for: a block whose generator outgrew its declared footprint (an
+added enclosure overhang, a reworked trunk — any legitimate geometry change)
+composes without a word, and the resulting positive-area pairwise overlap
+only surfaces *hours* later as N chip-level DRC/extract/LVS findings
+attributed to blocks that are each clean standalone, with no pointer back to
+placement.
+
+`"options": {"check_placement": true}` opts into the hard counterpart. With
+the option on, compose refuses the request (application error, exit 1 —
+before any routing is drawn and before `options.output` is created or
+replaced) on either rule, both implemented by
+`klayout_tools.gen_compose.check_placement_overlap`:
+
+1. **Pairwise declared-footprint intersection** — any two distinct blocks
+   whose declared placed footprints intersect with positive width *and*
+   height. The error names both ids and the intersection rectangle in the
+   composed coordinate frame, in µm. When measured footprints differ, the
+   error lists each changed edge. Positive deltas extend outward and negative
+   deltas move inward. Edge and corner
+   contact passes (zero width or height is not a positive-area overlap), so
+   flows that abut by design are not penalized. A `blocks[].abuts`
+   declaration can suppress the clearance *advisory* above — it can never
+   exempt a positive-area intersection here.
+2. **Footprint growth** — a block whose real, stream-measured placed
+   footprint extends past its own declared `bbox_um` beyond the containment
+   tolerance (#1679's check, hardened from warning to opt-in failure) fails
+   even with no other block anywhere near. The error names the block, the
+   declared and measured rectangles, and which sides grew by how much; a
+   declaration that encloses the geometry passes. Under
+   `strategy: "array"`, the growth rule compares the base tile's measured
+   footprint against *that tile's* declaration — the array union describes
+   the whole placement and can hide the growth of one tile.
+
+For example, two blocks whose declared footprints overlap from (9, 2) to
+(10, 5):
+
+```json
+{ "schema_version": 1, "error": { "command": "gen-compose", "message": "options.check_placement failed: blocks 'a' and 'b' overlap: declared footprints intersect over (9.000, 2.000)-(10.000, 5.000) um" } }
+```
+
+The option is off by default and changes nothing when off — every advisory
+above keeps its exact behavior, and a caller-declared overlap remains legal
+input.
+
+**Hand-rolled merges.** The same gate is a plain library function, so a
+merge script this command cannot express today (PDK library cells,
+cross-repo blocks, bespoke generator output — see the `Layout.read()` /
+`Cell.copy_tree()` / `CellInstArray` recipe above) can run the identical
+check as a preflight, with no request document, PDK, or second CLI:
+
+```python
+from klayout_tools.gen_compose import check_placement_overlap
+
+failures = check_placement_overlap(
+    # declared placed footprints, um, in the merged frame
+    {
+        "analog": {"x0": 0.0, "y0": 0.0, "x1": 210.0, "y1": 180.0},
+        "digital": {"x0": 205.0, "y0": 0.0, "x1": 900.0, "y1": 180.0},
+    },
+    # optional: real measured footprints (e.g. kdb.Cell.dbbox() per
+    # placed source), same frame -- omit a block you did not measure
+)
+if failures:
+    raise SystemExit("; ".join(failures))
+```
+
+The function returns a list of failure strings (empty when the placement
+passes) and raises `ValueError` on a malformed box or a measured footprint
+for an id with no declared entry — merge it into your own error path.
 
 ## Array placement (a repeated-block regular tiling, #1053)
 
@@ -3095,6 +3278,7 @@ and the rules come from the active deck:
 | any footprint overlaps a `keepout_layers` shape | `keep_out` |
 | a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
 | a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
+| a pad, merged with everything drawn on its own layer, leaves a notch narrower than the layer's `space` rule (the port net's own metal included: a pad wider than the run it lands on protrudes past it and notches the merged polygon) | `self_notch` |
 
 The port is reported on the net's own layer at the chosen point, so the
 router's existing via-drop draws the stack there. Candidates are ranked by
@@ -3119,8 +3303,11 @@ by via layer `"layer/datatype"`) and the router draws the same array.
 **Response (additive).** Blocks that used the option carry
 `blocks[].derived_ports[]`:
 `{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
-via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
-total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+via_count, via_array, pad_sides_um, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`;
+`pad_sides_um` maps each pad layer to the pad side the search certified, keyed
+`"layer/datatype"` like `ports[].via_array.pitch_um`, so a caller drawing the
+ladder itself draws exactly the footprint that was checked).
 `schema_version` is unchanged.
 
 **Frames (#5609).** `label_um` and `landing.x_um`/`y_um` are in the **source

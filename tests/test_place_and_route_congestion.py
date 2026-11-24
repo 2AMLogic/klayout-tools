@@ -185,25 +185,25 @@ def _wrap_route_stdout(
 
     def run(cmd, **kwargs):
         completed = base_run(cmd, **kwargs)
-        if len(cmd) > 5 and cmd[5].endswith("_route.tcl"):
-            with open(cmd[4], encoding="utf-8") as handle:
+        if len(cmd) > 5 and cmd[-1].endswith("_route.tcl"):
+            with open(cmd[-2], encoding="utf-8") as handle:
                 metrics = json.load(handle)
             metrics.update(extra_metrics)
-            with open(cmd[4], "w", encoding="utf-8") as handle:
+            with open(cmd[-2], "w", encoding="utf-8") as handle:
                 json.dump(metrics, handle)
             if congestion_report is not None:
                 # Where the route stage's own script makes `global_route
                 # -congestion_report_file` land (same naming convention as
                 # `congestion_report_path`, hdl_toplevel `gcd`).
                 report = os.path.join(
-                    os.path.dirname(cmd[5]), "gcd_route_congestion.rpt"
+                    os.path.dirname(cmd[-1]), "gcd_route_congestion.rpt"
                 )
                 with open(report, "w", encoding="utf-8") as handle:
                     handle.write(congestion_report)
             return fake_completed(
                 returncode=0, stdout=completed.stdout + "\n" + extra_stdout
             )
-        if len(cmd) > 5 and cmd[5].endswith("_place.tcl"):
+        if len(cmd) > 5 and cmd[-1].endswith("_place.tcl"):
             return fake_completed(
                 returncode=0, stdout=completed.stdout + "\n" + _GPL_PLACE
             )

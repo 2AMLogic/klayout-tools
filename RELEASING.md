@@ -81,6 +81,21 @@ For each new changelog entry, add one Markdown bullet in
 entries, and removes the consumed files. The release commit includes the
 updated `CHANGELOG.md` and those deletions.
 
+When an open `release/vX.Y.Z` branch incorporates newer changes from
+`main`, refresh its notes before merging the release PR:
+
+```bash
+python3 -I scripts/release_prep.py refresh --version X.Y.Z
+```
+
+Commit the updated release section, signoff notes and fragment deletions on
+the release branch. The previous dated release heading supplies the version
+anchor. Refresh preserves the prepared version and its original release date.
+The release PR's lint job runs the same command with `--check` after each
+update. Exit 1 means there are pending edits, and exit 2 identifies invalid
+release inputs. An ordinary same-version `prepare` still leaves pending
+entries for a future cut.
+
 ## One-time prerequisite (human-only — completed before v0.1.0; kept for reference)
 
 `publish.yml` publishes using [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)
@@ -170,8 +185,10 @@ depending on someone remembering. Design decisions:
 - **A release PR, never a push to `main`** (branch protection rejects direct
   pushes). `scripts/release_prep.py` bumps `base-version`, assembles the
   versioned changelog section, and resolves the
-  "first release after `vPREV`" notes in `docs/cli/signoff.md`; the workflow
-  then runs `uv lock`, `scripts/gen_site_cli_data.py` and
+  "first release after `vPREV`" availability notes in `docs/cli/signoff.md`,
+  each pending `changelog.d/*.md` fragment and the `## Unreleased` body of
+  `CHANGELOG.md`; the workflow then runs `uv lock`,
+  `scripts/gen_site_cli_data.py` and
   `scripts/generate_deck_history.py --as-release vX.Y.Z`. The prep refuses
   (exit 2) when both `## Unreleased` and the fragment directory have no
   entries. This stops an empty release before tagging (issue #6086). Only one
@@ -256,12 +273,18 @@ Let `X.Y.Z` be the new version.
    The workflow builds the tagged commit with `uv build` and publishes the
    resulting sdist/wheel with `uv publish` under PyPI trusted publishing.
 
-4. **Verify availability notes.** Release preparation resolves the
-   `--attest` / `--inventory` availability notes in `docs/cli/signoff.md`
-   anchored on the version being superseded. Review other notes about
-   availability in the release PR. `scripts/release_prep.py prepare` refuses
-   (exit 2) if a "first/next release after" note still references an older
-   version.
+4. **Verify availability notes.** Release preparation resolves
+   "first/next release after" availability notes (e.g. the `--attest` /
+   `--inventory` notes) in three sources, anchored on the version being
+   superseded: `docs/cli/signoff.md`, each pending `changelog.d/*.md`
+   fragment and the `## Unreleased` body of `CHANGELOG.md`. Review other notes
+   about availability in the release PR. `scripts/release_prep.py prepare`
+   refuses (exit 2) if a note in any of the three sources still references an
+   older version. Nothing is written in that case, and the message names the
+   source file and its physical line (`CHANGELOG.md:616: …`,
+   `changelog.d/<file>:3: …`), so fix that note by hand and re-run. Historical
+   `CHANGELOG.md` sections for earlier releases, below the new release
+   heading, are never rewritten and never anchor-checked.
 
 5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see

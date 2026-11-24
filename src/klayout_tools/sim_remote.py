@@ -40,12 +40,9 @@ defines/imports them itself (the same "own same-name function" case
 ``_endpoint_stub_widen_um``) -- the test suite monkeypatches both by their
 ``klayout_tools.sim`` re-export (predating this split), and only a call
 routed back through ``sim`` at call time still observes that patch.
-``CornerPoint``, ``_Checkpoint``, and ``RemoteLauncher`` (the last also
-defined in ``sim.py``, re-exported by it) appear only in type annotations
-here -- ``from __future__ import annotations`` defers them to strings, so
-none needs a *runtime* import, but they are still imported under
-``TYPE_CHECKING`` below so static analysis (ruff's F821, mypy) can resolve
-them without creating a load-time cycle. ``sim.py`` in turn imports this
+``TYPE_CHECKING`` imports ``CornerPoint``, ``_Checkpoint``, and
+``RemoteLauncher`` from their defining modules for type annotations.
+``sim.py`` in turn imports this
 module's entry points back (module scope, no cycle -- this module never
 imports ``sim`` at its own module scope) to preserve
 ``klayout_tools.sim.<name>`` as a working import path for every name the
@@ -64,11 +61,13 @@ from typing import TYPE_CHECKING, Any
 
 from . import remote_fleet, remote_transport, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
-from .sim_echo_checks import check_ngspice_options_echo
+from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 
 if TYPE_CHECKING:
-    from .sim import CornerPoint, RemoteLauncher, _Checkpoint
+    from .remote_launcher import RemoteLauncher
+    from .sim_checkpoint import _Checkpoint
+    from .sim_corner_point import CornerPoint
 
 # --------------------------------------------------------------------------- #
 # Fleet shard/merge engine (Epic #375 Phase 1A, #376) -- pure logic, no AWS
@@ -728,7 +727,7 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
-    check_ngspice_options_echo(request, remote_report)
+    check_runner_option_echoes(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
@@ -757,25 +756,14 @@ def _build_remote_request(
     recursively) and ``netlist`` repointed at the pushed file's job-relative
     path.
 
-    ``models`` is forwarded unchanged -- per decision 4, the remote host
-    resolves its own baked model library the same way ``_resolve_models_lib``
-    resolves a local one (``models.pdk`` plus the AMI's own ``$PDK_ROOT``, so
-    long as ``models.pdk_root`` is not itself an operator-local absolute path
-    that only exists on the caller's own machine -- see docs/cli/sim.md's
-    "Remote backend" section for this constraint). ``options.max_workers`` is
-    dropped so the remote run resolves its own default from that box's own
-    CPU count (see ``_run_remote``'s docstring).
+    The host resolves the forwarded model library against its own PDK_ROOT;
+    models.pdk_root must be accessible on the host (see docs/cli/sim.md).
+    Dropping options.max_workers lets the host size its pool to its CPUs.
 
-    ``explicit_points`` (issue #906's fleet-shard wiring) -- when given --
-    replaces ``corners``/``monte_carlo``/``exclude`` with the internal
-    ``_explicit_points`` wire field (:func:`_corner_points_to_wire`) instead
-    of forwarding them verbatim, so the remote box's own ``run_sim`` runs
-    *exactly* this caller's ``corner_points`` (see ``run_sim``'s handling of
-    ``request["_explicit_points"]``) rather than re-expanding the whole
-    matrix from ranges -- correct only when the whole matrix is meant to run
-    on one host, which a fleet shard is not. ``None`` (the default,
-    ``_run_remote``'s own case) forwards ``corners``/``monte_carlo``
-    unchanged, exactly as before this parameter existed.
+    Explicit points replace the original expansion axes. They carry resolved
+    seeds on a single job and restrict a fleet job to its assigned shard.
+    Each regrade shard receives the corresponding part of the client's
+    ordered selection. Without explicit points the worker expands the request.
 
     ``max_workers`` (issue #2084) -- when given -- pins the remote pool to
     that many concurrent units, which is how a multi-wave single-host run
@@ -783,6 +771,7 @@ def _build_remote_request(
     (the default) keeps the guest's own CPU-derived default.
     """
     from .sim import _corner_points_to_wire
+    from .sim_regrade import REGRADE_REQUEST_FIELD
 
     remote_request = dict(request)
     remote_request.pop("remote", None)
@@ -794,6 +783,14 @@ def _build_remote_request(
         remote_request.pop("monte_carlo", None)
         remote_request.pop("exclude", None)
         remote_request["_explicit_points"] = _corner_points_to_wire(explicit_points)
+        if (spec := request.get(REGRADE_REQUEST_FIELD)) is not None:
+            assigned = {point.corner_id for point in explicit_points}
+            remote_request[REGRADE_REQUEST_FIELD] = {
+                **spec,
+                "select_corner_ids": [
+                    cid for cid in spec["select_corner_ids"] if cid in assigned
+                ],
+            }
 
     options = dict(request.get("options") or {})
     options["timeout_s"] = timeout_s

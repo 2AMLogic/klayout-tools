@@ -46,7 +46,9 @@ from __future__ import annotations
 from typing import Any
 
 from ._digest import sha256_file
+from ._jsonnum import is_number
 from .signoff_na import _na_spec_format
+from .signoff_row_extent import label_list
 
 #: T1 items whose manifest entry may be a **list** of citations with optional
 #: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
@@ -95,6 +97,70 @@ def _na_document(
     return ref, None
 
 
+#: The one T1 item whose ``spec_rows`` accept the ``joint_grid`` form. Item
+#: 6 shares the list form and the reader, not the form.
+JOINT_GRID_ITEM_ID = 5
+
+#: The only keys a ``joint_grid`` object may carry: the explicit ``members``
+#: list plus the PVT axes of a `klt sim` request's ``corners`` block.
+_JOINT_KEYS = frozenset({"members", "process", "supply_v", "temperature_c"})
+
+
+def read_joint_grid(raw: Any) -> dict[str, Any] | None:
+    """Normalize one declared row's ``joint_grid`` object, or ``None`` when
+    it is malformed (the caller degrades its item to ``invalid_evidence``).
+    The stored form keeps the declared values verbatim; the request-side
+    :func:`signoff_joint_rows.required_grid_points` applies axis defaults
+    when grading the stored declaration."""
+    if not isinstance(raw, dict) or set(raw) - _JOINT_KEYS:
+        return None
+    members = raw.get("members")
+    if (
+        not isinstance(members, list)
+        or len(members) < 2
+        or not all(isinstance(m, str) and m for m in members)
+        or len(set(members)) != len(members)
+    ):
+        return None
+    process = raw.get("process")
+    if process is not None and (
+        not isinstance(process, list)
+        or not process
+        or not all(isinstance(p, str) and p for p in process)
+    ):
+        return None
+    supply = raw.get("supply_v")
+    if supply is not None:
+        if not isinstance(supply, dict) or not supply:
+            return None
+        lengths: set[int] = set()
+        for rail, values in supply.items():
+            if (
+                not isinstance(rail, str)
+                or not rail
+                or not isinstance(values, list)
+                or not values
+                or not all(is_number(v) for v in values)
+            ):
+                return None
+            lengths.add(len(values))
+        if len(lengths) != 1:  # rails sweep zipped, as in a sim request
+            return None
+    temperature = raw.get("temperature_c")
+    if temperature is not None and (
+        not isinstance(temperature, list)
+        or not temperature
+        or not all(is_number(t) for t in temperature)
+    ):
+        return None
+    return {
+        "members": list(members),
+        "process": process,
+        "supply_v": supply,
+        "temperature_c": temperature,
+    }
+
+
 def _read_spec_rows(
     manifest: dict[str, Any],
 ) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
@@ -123,6 +189,14 @@ def _read_spec_rows(
     :func:`_check_justified_gap_rationales`. An object that does not
     validate degrades the item to ``invalid_evidence`` -- never silently to
     the free-text form.
+
+    Issue #6969: a row may instead carry ``joint_grid`` (item 5 only -- a
+    bare or partition-qualified ``"5"``/``"5.analog"`` key; item 6 shares
+    this reader but not the form). The object is normalized by
+    :func:`read_joint_grid` and kept under
+    ``joint_grid``; ``joint_grid`` and ``gap`` (either form) are mutually
+    exclusive, and a malformed object degrades the item to
+    ``invalid_evidence`` like every other bad row form.
 
     Issue #6985: a row may instead carry ``structural`` --
     ``{"claim": str, "artifact": {"file", "content_hash"}}`` -- the
@@ -168,6 +242,11 @@ def _read_spec_rows(
                 justified_gap = (
                     _read_justified_gap(gap) if isinstance(gap, dict) else None
                 )
+                # Issue #6969: the joint-grid form, item 5 only.
+                joint_raw = row.get("joint_grid") if isinstance(row, dict) else None
+                joint_grid = (
+                    read_joint_grid(joint_raw) if joint_raw is not None else None
+                )
                 # Issue #6985: ``structural`` must normalize, and is mutually
                 # exclusive with ``gap`` (either form).
                 structural = (
@@ -186,6 +265,20 @@ def _read_spec_rows(
                     or (raw_structural is not None and structural is None)
                     or not isinstance(ratified, bool)
                     or not isinstance(margin, bool)
+                    or (
+                        joint_raw is not None
+                        and (
+                            gap is not None
+                            or raw_structural is not None
+                            or "extent" in row
+                        )
+                    )
+                    or (joint_raw is not None and joint_grid is None)
+                    or (joint_raw is not None and item_id != JOINT_GRID_ITEM_ID)
+                    or (
+                        "extent" in row
+                        and (not label_list(row["extent"]) or not row["extent"])
+                    )
                 ):
                     valid = []
                     break
@@ -198,6 +291,12 @@ def _read_spec_rows(
                         "structural": structural,
                         "ratified": ratified,
                         "timing_margin": margin,
+                        "joint_grid": joint_grid,
+                        **(
+                            {"extent": list(dict.fromkeys(row["extent"]))}
+                            if "extent" in row
+                            else {}
+                        ),
                     }
                 )
             parsed = valid or None
@@ -383,3 +482,19 @@ def justified_gap_report_fields(
                     }
                 )
     return count, findings
+
+
+def _declared_artifact_outcome(
+    failure: tuple[str, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet`` outcome for a failing declared-artifact hash check (a
+    justified gap's rationale, issue #5599, or a structural row's artifact,
+    #6985); ``None`` when it passed. A broken declaration is a distinct
+    documented reason -- never silently demoted to a lesser form, whose
+    reason would be ``partial_coverage``."""
+    if failure is None:
+        return None
+    reason, detail = failure
+    return "unmet", reason, None, {**row_info, **detail}, extra

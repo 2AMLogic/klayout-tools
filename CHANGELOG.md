@@ -14,6 +14,55 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `environment.pdk_revision_comparison` matches the `SOURCES`
+  revision token case-insensitively** (issue #6362, 2026-11-24, additive —
+  `klt sim` `schema_version` unchanged): the `stamp_sha256` arm already
+  ignored case but the `open_pdks <token>` arm was an exact compare, so a
+  declared `options.pdk_revision` spelled in a different case than the
+  worker's token (e.g. upper-case hex) reported a spurious advisory
+  `mismatch` plus a `warning` on a worker that *has* that revision. Both
+  arms now fold case. Matching stays otherwise exact: an abbreviated
+  revision (a 7-character prefix) is still a `mismatch`, and the advisory
+  field still never changes a run's outcome. See `docs/cli/sim.md`.
+- The `klt lvs` report category `device.implausible_dimensions` has severity
+  `warning` and can appear on either side of a matching comparison (#7494).
+- **`klt sim` rejects a malformed `batch.poll_interval_s` /
+  `batch.poll_timeout_s` through the error envelope** (issue #7543,
+  2026-11-23): the last two `request.batch` seconds knobs still parsed with
+  a bare `float()` in `_resolve_batch_config` now go through validating
+  resolvers (`sim_batch_job_timeout.resolve_poll_interval_s` /
+  `resolve_poll_timeout_s`, beside the sibling `resolve_job_timeout_s`), the
+  same early-refusal discipline as every other `batch.*` knob. A
+  non-numeric, `bool`, non-finite or negative value — previously a raw
+  `ValueError`/`TypeError` traceback past the JSON envelope, or silently
+  accepted (`true` read as `1.0`, `nan`, negatives) — is now a documented
+  `{"error": {...}}` envelope with exit 1 on both the dry-run and submit
+  paths, before any S3 write, carrying the new `error.code:
+  "batch_poll_knob_invalid"`; the dry-run runner check re-raises that code
+  so a dry run refuses exactly what the submit refuses. `0` stays accepted
+  for both and absent keys keep the same defaults. **Additive —
+  `schema_version` unchanged:** no success payload field changes, but a
+  request that previously "worked" with `true`/`nan`/negative poll knobs
+  now refuses.
+- **`klt place-and-route` warns on two deck-known gf180mcu power configurations**
+  (issue #7311, 2026-11-23): a `request.power` on `gf180mcu_fd_sc_mcu9t5v0`/
+  `gf180mcu_fd_sc_mcu7t5v0` that applies `power.connects[].split_cuts`
+  (explicitly, or by overriding a preset's `connects`), or whose effective
+  `power.tapcell_distance_um` exceeds 15 µm (the libraries' 100 µm default
+  included), now adds a `warnings[]` string beginning `gf180mcu deck warning
+  (issue #7311)`. The `split_cuts` entry names the applied value and strap
+  pair, the seven `klt drc --deck gf180mcu` rule ids it was measured to trip
+  (#4301) and that other values are unverified; the tap entry names
+  `comp.tap_distance.{nwell,psub}.mv.1`, the effective pitch and whether it is
+  the per-library default or a `power.tapcell.distance_um` override (the 15 µm
+  limit is read from the deck's own rule table). Both are derived from the
+  request alone — no DRC runs inside place-and-route — and go to stderr like
+  every other `warnings` entry. **Additive — `schema_version` unchanged:**
+  `status`, the exit code and `route_drc_violation_count` keep their meanings
+  and no existing field changes, but a full-PDN gf180mcu run's `warnings` is
+  no longer `[]` by default; a consumer asserting an exact empty list on such
+  a run must expect the tap-distance entry. The `split_cuts` field, the
+  presets and the default tapcell pitch are unchanged.
 - **`klt version --format json` lists the install's commands** (#7324): the
   payload gains an additive `commands` field — one `{"name", "summary"}`
   object per top-level verb, sorted by `name`, derived from the live parser
@@ -25,6 +74,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   probe). Verbs hidden from `klt --help` are hidden here too; nested
   subcommands are not listed. `--format text`, `klt --version`, and
   `schema_version` are unchanged.
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
 
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
@@ -501,6 +552,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
   section.
 
+- **`klt gen-compose` label-derived-port landing search (`ports_from_labels`
+  `access`) rejects a same-net notch (#5608)**: a landing pad wider than the run
+  it lands on protrudes past it, and the merged polygon's concave gap —
+  net-agnostic and intra-polygon to the deck's `space` rule — is a real
+  `met*.space.*` finding the search used to certify as legal. Every pad layer of
+  the ladder is now also notch-checked at its own pad size and spacing
+  (`self_notch`, a new category in the no-legal-landing error's per-category
+  counts), so the search can no longer certify a point `compose()`'s own #1520
+  self-notch check (or signoff DRC) later rejects. `derived_ports[].landing`
+  gains an additive `pad_sides_um` map (`"layer/datatype"` -> pad side
+  certified) so a caller drawing the ladder itself draws exactly the checked
+  footprint. `schema_version` is unchanged.
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
@@ -534,6 +597,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   relax a per-row finding, never tighten one, so a layout that failed only
   because of the row split now passes while a real over-limit still fails.
   Distributed pad/load injection and the IR solver are unchanged.
+- **`klt gen --pdk-pcell` refuses `--cell-name` equal to the vendor PCell's
+  own name** (#6128, 2026-11-17): the vendor child keeps its own name (no
+  `<cell-name>__core` rename), so an equal `--cell-name` made KLayout
+  uniquify the **top** to `<name>$1` while the report still said
+  `cell_name: <name>` — the stream's top cell silently differed from both
+  the flag and the contract field. The request now fails before anything is
+  written, with an application error naming the collision and the flag. The
+  default (`<cell>_0`) and every non-colliding name behave exactly as before.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
@@ -577,8 +648,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
-- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
-  2026-11-17): the single-request batch dry run now reaches the same
+- **`klt sim --dry-run` validates batch request settings and runs the
+  batch ceiling/split plan** (#5674, 2026-11-17; widened by #6437,
+  2026-11-18): the single-request batch dry run now reaches the same
   `plan_batch_job` the submit path runs, so a request the fleet would
   refuse is refused by the dry run with the submit path's own
   `error.code` and message — `batch_max_units_per_job_invalid` for a
@@ -586,11 +658,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   `job_ceiling_check: "enforce"` (both used to dry-run clean), and
   `batch_job_ceiling_exceeded` for a request whose bound exceeds
   `max_job_seconds` under `"enforce"` (never checked on this path at
-  all). The dry-run report gains an additive `job_ceiling` field — the
+  all). The dry run now checks `batch.job_ceiling_check`, `max_concurrent_jobs`,
+  `runner_version_check`, `max_job_seconds`, `capacity_wait_s`,
+  `capacity_retries`, `job_timeout_s` and `interrupted_grace_s` before
+  resolving fleet configuration. Malformed values produce the submit path's
+  existing error code and message even without a provision script or bucket.
+  Polling values (`poll_interval_s`, `poll_timeout_s`) are parsed only after
+  both resolve, so malformed polling values can still dry-run as valid on an
+  unconfigured host. The dry-run report gains an additive `job_ceiling` field — the
   `environment.remote.job_ceiling` name and shape, including
   `split`/`effective_hosts` when a split mode is active — present only
-  when a batch configuration resolves on this host, so a configless host
-  dry-runs clean exactly as before. The warn / serial-bound (#4982) /
+  when a batch configuration resolves on this host. The warn / serial-bound (#4982) /
   split stderr notices print as a submit would print them. `hosts` keeps
   its meaning (the request's `remote.hosts`; the planned shard count is
   `job_ceiling.effective_hosts`, never a redefinition), and `--format
@@ -676,6 +754,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   reported `dbu_um` change for gf180mcu only. No JSON field is added,
   renamed or removed; no `schema_version` bump.
 
+- **`klt gen diff_pair` gains `strap_splits` (issue #5557)**: an opt-in
+  (default `false`, so every existing report and stream is unchanged) that
+  straps each matched device's `splits` sub-instances together in-cell on
+  the family's second routing plane (sky130: met1 rails + mcon cuts, with
+  vertical trunks in grown core margins) and reports one `Q1_S`-style
+  S/D/G port triple per device instead of one triple per sub-instance —
+  making the generator's port list match the netlist's device list and
+  closing the mirrored-row-order strap trap for callers who strapped the
+  splits by hand. Requires `gate_contact` and a device width the S/D strap
+  tracks fit (`w_um` >= `2.35` µm); verified on sky130 only — any other
+  family is rejected with a named error before any geometry is drawn.
+  `klt layout-plan execute` derives `strap_splits: true` for a `diff_pair`
+  group resolving `splits > 1` at a strap-fitting width (explicit
+  `params.strap_splits` override wins, divergence warned), so the plan's
+  connectivity binds the device-level ports with no change to its
+  k-th-device ↔ k-th-candidate binding rule. A plan too narrow to strap
+  derives nothing and says so in a `warnings[]` entry (the unstrapped
+  binding leaves `splits - 1` sub-instances per device floating), never
+  silently. DRC-clean and
+  extract-verified (one net per leg, six pairwise-distinct nets) on sky130
+  for `splits` in {2, 3, 8}, nfet and pfet, with and without the
+  automatically-sized guard ring.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -710,6 +810,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extract` / `sim` document, and an unset `$VAR` is a request error naming the
   variable instead of a bare "not found". Additive: a literal path keeps its
   meaning, no `schema_version` bump.
+- **Changed** (#5593, additive — `klt sim` `schema_version` unchanged): a
+  batch run's surfaced `could not find a valid modelname` diagnostic
+  (`model_bin_range`/`ngspice_fatal`, from the retrieved engine log) is now
+  self-attributing: with a usable `worker_environment` capture it names the
+  fleet's observed PDK `variant` and `stamp_sha256` (plus the `SOURCES`
+  revision token when parseable), the `pdk_stamp_comparison` status (and
+  `reason`), and names `options.stage_model_inputs: true` as the remedy --
+  instead of advising a comparison against the submitter's own bin cards,
+  which a local-pass/fleet-fail abort has typically already ruled out. A run
+  that already staged its models is not told to stage again; without a
+  usable capture the message is byte-for-byte unchanged. A declared
+  `options.pdk_revision` on a `batch` run with a readable worker stamp
+  additionally records the advisory `environment.pdk_revision_comparison`
+  (`match` by `stamp_sha256` or revision token, `mismatch`, or
+  `not_comparable`; per-`fleet[]` under sharding) beside
+  `pdk_revision_asserted` -- it never changes the run's outcome. See
+  `docs/cli/sim.md`.
 - **`klt drc --deck gf180mcu` reports fully orphan cuts** (#5915, 2026-11-17):
   the eight single-population conductor-over-cut enclosure rules
   (`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
@@ -757,6 +874,16 @@ not `klt --version`, if you need to detect this kind of drift. See
     keep the generic (accurate) messages.
   Request/response shape change is additive only (a new optional
   `routing.*` request field; no response field changed).
+- **`klt sim --op-lint` honors `--pdk-root` and reports its resolved PDK**
+  (#5751, 2026-11-17): `--pdk-root` was refused with `--op-lint` ("has no
+  effect") although the lint's resolution already reads `models.pdk_root`; it is
+  now folded in exactly as on the graded path (`--job-status` still refuses it).
+  An unpinned lint on a multi-install host now prints the same stderr ambiguity
+  warning as the graded path, and `--format text` prints the `pdk:` /
+  `pdk: WARNING` lines; `--format json` is unchanged. The `batch`
+  `models_pdk_root_host_path` refusal now names `$PDK_ROOT`, the client-side pin
+  that does work there (code and refuse-before-submit behavior unchanged).
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -1277,7 +1404,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `foo.sim`, `sim_request.json` -> `sim_request`). `requests[].report` and
   `set-manifest.json`'s per-request `dir` are unchanged in shape and always
   name the directory actually written -- read them from the envelope rather
-  than re-deriving the path. **Migration:** a set started on 0.9.2 or
+  than re-deriving the path. Consumers spanning 0.9.2 and later can resolve
+  each member report through `set-manifest.json`’s `requests[].dir`, written
+  since 0.8.0. **Migration:** a set started on 0.9.2 or
   earlier and resumed with the new version finds no `batch-shards.json` in
   the renamed directory and re-runs every member from scratch; move the old
   directory first (`mv <outdir>/<stem>.request <outdir>/<stem>`) to resume

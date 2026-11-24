@@ -63,6 +63,8 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
   generated under different `--cell-name`s share that child name (issue
   #5933; pinned by `tests/test_gen_pdk_pcell_vendor_name.py`).
+  A `--cell-name` equal to the vendor PCell's own name is refused before
+  writing the stream because the top and child would share a name (#6128).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -866,24 +868,15 @@ variant (`nfet_03v3_nvt`) is not supported. The device is NMOS-only:
 `flavor="pfet"` with a native `voltage_flavor` fails with a `GenError`
 (`mos_array` and `diff_pair`).
 
-**Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
-declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
-#1577), so `gf180mcu` is the one family whose unit devices are drawn with a
-real, margin-enclosing implant mask (and the tap/guard ring likewise).
-Every other supported family — `sky130`, `sg13g2`, `sg13cmos5l` — draws
-**no** source/drain implant: their curated decks recognise a MOS device
-from `Activ`/`GatPoly`/well alone, so `klt drc` reports such a stream clean
-and, before this issue, nothing else flagged the missing mask either. A
-request on one of those families now reports the omission instead of
-dropping it silently — a `drc_hints.notes` entry naming the family, the
-flavor-selected role and the absent mask, plus the machine-readable
-`drc_hints.sd_implant_present: false` (see below), the same "notes it,
-never silently drops it" contract an unrecognised `voltage_flavor` already
-follows — while the drawn geometry stays byte-for-byte unchanged. Drawing a
-correctly-enclosed implant on those families is deliberately *not* done
-here: it needs a real PDK enclosure rule this repo's curated decks do not
-carry (sg13g2's, for one, transcribes no implant rule of any kind), and a
-wrong margin would be caught by no existing check.
+**Source/drain implant (issues #2580, #7531).** GF180mcu draws Nplus (32/0)
+or Pplus (31/0) over each unit device. Sky130 uses nsdm or psdm.
+On SG13G2, `mos_array` and `diff_pair` cover each PFET active island
+(including array dummies) with pSD (14/0), extend it by 0.18 µm, and join
+implant islands across gaps below 0.31 µm. NWell encloses the active by at
+least 0.31 µm for low-voltage devices and 0.62 µm for high-voltage devices.
+In ring-enabled LV and HV differential pairs, the curated deck reports zero
+violations and the device pSD stays clear of the separate well-tap active. Check `drc_hints.sd_implant_present`
+for the unit-device implant and `drc_hints.notes` for a reported omission.
 
 **Marker over the ring's well (issues #6025, #6458).** With `add_guard_ring` on a
 `flavor="pfet"` `mos_array` or `diff_pair` (`diff_pair`'s default is a ring), the
@@ -2017,6 +2010,36 @@ placing `2 * splits` units at distinct multiples of one pitch and splitting
 them into two halves with an equal x centroid requires the position sum
 `splits * (2 * splits - 1)` to be even, which fails for every odd `splits`.
 
+**Strapping the splits (`strap_splits`).** Unstrapped, the generator reports
+one `Q<d>_<n>_S`/`_D`/`_G` triple *per sub-instance* — `splits=8` yields 48
+ports for the two devices the netlist names — and a caller strapping the
+sub-instances themselves must re-derive the per-row strap from the reported
+port **x coordinates, never from list order**: the numbering ascends with x
+in both rows, but the rows are *staggered by one column* (the checkerboard),
+so a strap spanned from a row's first to last port *by name* leaves that
+row's outermost sub-instance outside the strap — a quiet failure the stream
+still DRC-passes and only the extracted device count catches. With
+`strap_splits: true` the generator draws the strap itself: each device's
+`splits` sub-instances are tied per terminal in-cell on the family's second
+routing plane (sky130: met1 rails landed on each pad through mcon cuts, with
+vertical trunks in the grown core's x margins), the gate landing pads grow
+taller to host the gate tracks, and the report carries exactly one
+`Q1_S`/`Q1_D`/`Q1_G`, `Q2_S`/`Q2_D`/`Q2_G` triple (`M1_*`/`M2_*` with
+`mirror`), emitted device 1 first, each port sitting on its strap rail and
+reporting the strap metal (`metal2`, met1 on sky130) as its layer.
+`device_count` stays `2 * splits`; the guard ring's `TAP_*` ports are
+unaffected. The cell grows to fit the strap (the core widens by the trunk
+margins, the rows grow by the gate-pad growth, and the automatically-sized
+ring, tap pads and well box follow). Constraints, all enforced as clean
+errors: `gate_contact` is required (the gate strap lands on the gate pads'
+local metal — a bare-poly gate has nothing to strap onto), `w_um` must be at
+least the four S/D tracks' floor (`2.35` µm), and the family must be one the
+strapped geometry is verified on (`sky130` — any other family is rejected
+before any geometry is drawn, never drawn unverified). `splits=1` draws no
+strap rails beyond the single pads it has but still reports the same
+device-level names, so a caller's port list shape does not change with the
+split count.
+
 `flavor="pfet"` (composable with `mirror` — a mirror-labelled `pfet` pair is
 a PMOS current mirror) encloses the device pair's own active footprint in a
 well, independent of `add_guard_ring` (a PMOS pair with no automatic ring
@@ -2062,6 +2085,7 @@ above for why, and the hand-drawn-recipe workaround.
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"`/`"lvt"` resolve on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
 | `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
+| `strap_splits`     | bool   | `false` | Strap each device's `splits` sub-instances together in-cell on the second routing plane (met1 via mcon on sky130) and report one `S`/`D`/`G` port triple per device on the strap rails instead of one triple per sub-instance — see "Strapping the splits" above. Requires `gate_contact`, `w_um` >= the S/D track floor, and a verified family (`sky130`); anything else is rejected with a named error, never drawn unverified. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
 
@@ -2687,7 +2711,7 @@ family/variant split the resolver doesn't have. The response's
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 | `voltage_flavor` | string \| null | `mos_array`/`diff_pair`/`guard_ring`/`esd_device` (issues #1054, #6025, #4299): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
 | `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair`/`guard_ring`/`esd_device` (issues #1054, #6025, #4299): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
-| `sd_implant_present` | boolean | `mos_array` only (issue #2580): whether a real source/drain implant mask was drawn for the request's `flavor` on the resolved PDK family — `true` only on `gf180mcu` today (issue #1577); `false` on every family whose role-layer table declares no `"nplus"`/`"pplus"` (`sky130`/`sg13g2`/`sg13cmos5l`), whose request additionally carries a `notes` entry naming the omission. |
+| `sd_implant_present` | boolean | Whether the generator drew the device source/drain implant. Both flavors use drawn implants on gf180mcu and sky130. On SG13G2, `mos_array` and `diff_pair` draw pSD (14/0) for PFETs with a 0.18 µm active enclosure. The device NWell margin is 0.31 µm for LV and 0.62 µm for HV. A missing device implant is described in `notes`. |
 | `well_net` | string \| null | `well_island` only (issue #1421): the net its tie carries (echo of `params.net`), or `null` when unnamed. |
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
 | `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
@@ -2971,7 +2995,9 @@ plus one additive `pdk_pcell` object:
 ```
 
 - `generator` is `"<library>/<cell>"`, and `cell_name` defaults to
-  `<cell>_0`.
+  `<cell>_0`. A `--cell-name` equal to the vendor cell name is refused with
+  an application error (exit `1`): the vendor child keeps its own name, so
+  the top and the child would collide (issue #6128).
 - `dbu_um` is resolved from the PDK's tech LEF exactly as for a built-in
   generator, so a `--pdk-pcell` block and a built-in block resolved against
   the same PDK agree by construction.

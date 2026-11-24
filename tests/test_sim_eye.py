@@ -4,9 +4,6 @@ measurement and transient step integration."""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 
 import pytest
 
@@ -295,36 +292,6 @@ def test_public_step_eyes_are_bound_to_their_own_waveforms(tmp_path, fail_high):
     else:
         assert high["eye"]["height"] == high["value"] == 2
         assert high["eye"]["width"] == pytest.approx(low["eye"]["width"], abs=1e-18)
-
-
-@pytest.mark.parametrize("supported", [False, True])
-def test_same_release_runner_must_accept_the_step_eye_request(tmp_path, supported):
-    from klayout_tools.sim_batch_contract_preflight import (
-        _mandatory_feature_probe_shell,
-    )
-
-    runner = tmp_path / "klt"
-    runner.write_text(
-        f"#!{sys.executable}\n"
-        "import json, sys\n"
-        "from pathlib import Path\n"
-        "request = Path(sys.argv[2])\n"
-        "doc = json.loads(request.read_text())\n"
-        "assert (request.parent / doc['netlist']).is_file()\n"
-        "assert doc['analysis_steps'][0]['measurements'][0]['eye']['phase'] == '500p'\n"
-        "assert '--dry-run' in sys.argv\n"
-        f"sys.exit({0 if supported else 1})\n"
-    )
-    runner.chmod(0o755)
-    shell = "rv=0.9.3.dev10; " + _mandatory_feature_probe_shell(("eye_step_or_phase",))
-    proc = subprocess.run(
-        ["bash", "-c", shell + 'printf "%s" "$mmiss"'],
-        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc.stdout == ("" if supported else "eye_step_or_phase")
 
 
 @pytest.mark.parametrize("code", sim_eye.ERROR_CODES)

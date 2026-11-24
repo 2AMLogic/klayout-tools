@@ -1259,10 +1259,10 @@ def _remote_m2(gap: float, *, far_via: bool = True) -> list[Shape]:
     there. ``far_via`` False omits the V1 under the LISD side's M2 end."""
     shapes: list[Shape] = [
         box("V0", 0, 0, 18, 18),
-        box("M1", -60, 0, 18, 18),
+        box("M1", -62, 0, 18, 18),
         box("V1", -60, 0, -42, 18),
         box("V0", 21 + gap, 82, 39 + gap, 100),
-        box("M1", 21 + gap, 82, 120 + gap, 100),
+        box("M1", 21 + gap, 82, 122 + gap, 100),
         box("M2", -60, 0, -42, 100),
         box("M2", -60, 82, 120 + gap, 100),
     ]
@@ -1353,10 +1353,10 @@ def _row_links(
     if m2:
         return [
             box("V0", 99, low, 117, low + 18),
-            box("M1", 99, low, 117, low + 28),
+            box("M1", 99, low - 2, 117, low + 28),
             box("V1", 99, low, 117, low + 18),
             box("V0", 207, low, 225, low + 18),
-            box("M1", 207, low, 225, low + 28),
+            box("M1", 207, low - 2, 225, low + 28),
             box("V1", 207, low, 225, low + 18),
             box("M2", 99, low, 225, low + 18),
         ]
@@ -1659,6 +1659,8 @@ def _stack(
 
 
 def _via_cases() -> list[Case]:
+    from helpers import asap7_drc_enclosure_fixtures as enclosure
+
     c: list[Case] = []
     for via in _VIA_METALS:
         c += [
@@ -1667,39 +1669,22 @@ def _via_cases() -> list[Case]:
         ]
         # Partly off the upper metal: the via sticks out 1 nm across it. An
         # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
+        # Where it sticks out the metal does not enclose it, so the metal's
+        # "(5 & 5) | (5 & 0)" end-cap rule fires as well.
         off = (
             _stack(via, via_y0=-1)
             if via == "V3"
             else _stack(via, upper=(-50, 1, 68, 19))
         )
+        end_cap = () if via == "V3" else (enclosure.END_CAP_RULES[via],)
         c += [
             _fail(f"{via}.AUX.1", _stack(via, upper=None)),
             _fail(f"{via}.AUX.1", _stack(via, lower=None)),
-            _fail(f"{via}.AUX.1", off),
+            _fail(f"{via}.AUX.1", off, also=end_cap),
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
-    # "At least two opposite sides": the enclosing metal is a 26 nm bar
-    # (4 nm past the via on both sides across it, short of every threshold)
-    # that extends `e0` / `e1` past the via at its two ends -- top/bottom
-    # for a vertical bar, left/right for a horizontal one. The 26 nm width
-    # keeps the bar above the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
-    # The other metal keeps its long default bar.
-    def capped(
-        via: str, which: str, e0: float, e1: float, vertical: bool
-    ) -> list[Shape]:
-        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
-        return _stack(via, **{which: bar})
-
-    for rule, via, which, e in (
-        ("V2.M2.EN.1", "V2", "lower", 5),
-        ("V3.M3.EN.1", "V3", "lower", 5),
-    ):
-        for vertical in (True, False):
-            c.append(_fail(rule, capped(via, which, e - D, e - D, vertical)))
-            c.append(_pass(rule, capped(via, which, e, e, vertical)))
-        # Short at one end only is still short on that pair.
-        c.append(_fail(rule, capped(via, which, e, e - D, True)))
+    c += enclosure.two_side_cases()
 
     # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
     # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
@@ -1716,7 +1701,7 @@ def _via_cases() -> list[Case]:
         _pass("V3.M4.EN.2", m4_capped(11, 15)),
         _pass("V3.M4.EN.2", m4_capped(15, 11)),
     ]
-    return c
+    return [*c, *enclosure.end_cap_cases()]
 
 
 def _transpose(shapes: Iterable[Shape]) -> list[Shape]:
@@ -1755,8 +1740,7 @@ _SADP = {
 
 
 def _sadp_metal_cases(layer: str) -> list[Case]:
-    """Drawn for a horizontally routed layer (bars along x, on track 0 at
-    y = 0) and transposed for M5 / M7."""
+    """Draw horizontal bars on track 0, then transpose them for M5 and M7."""
     direction, g, wmax = _SADP[layer]
 
     def bar(y0: float, h: float, x0: float = 0, x1: float = 200) -> Box:
@@ -1767,25 +1751,27 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
 
     r = f"{layer}."
     c: list[Case] = [
-        # With both horizontal edges on the g grid (AUX.1) every width is a
-        # multiple of g: a width one dbu off any multiple is inseparable
-        # from an off-grid edge.
+        # A width off the g grid necessarily puts an edge off-grid (AUX.1).
         _fail(r + "W.1", [bar(0, g - D)], ids("AUX.1")),
         _pass(r + "W.1", [bar(0, g)]),
         _fail(r + "W.2", [bar(0, wmax + D)], ids("AUX.1")),
         _fail(r + "W.2", [bar(0, wmax + g)]),
-        # The W.2 maximum itself is an even multiple of g (20 g), which
-        # W.3 forbids: the boundary passes W.2 but trips W.3.
+        # At the W.2 maximum, the even 20 g width also trips W.3.
         _pass(r + "W.2", [bar(0, wmax)], ids("W.3")),
         _pass(r + "W.2", [bar(0, wmax - g)]),
         _fail(r + "W.3", [bar(0, 2 * g)]),
         _fail(r + "W.3", [bar(0, 4 * g)]),
         _pass(r + "W.3", [bar(0, 3 * g)]),
+        # A legal 9 g strap and g-wide signal span 14 g across the gap (#7226).
+        _pass(r + "W.3", [bar(g, 9 * g), bar(14 * g, g)]),
+        # Moving the strap off-grid adds only AUX.1.
+        _pass(r + "W.3", [bar(D, 9 * g), bar(14 * g, g)], ids("AUX.1")),
+        # A 14 g length along the track is legal.
+        _pass(r + "W.3", [bar(0, g, 0, 14 * g)]),
+        _fail(r + "W.3", [bar(g, 2 * g), bar(4 * g, g)]),
         _fail(r + "W.5", [bar(0, g, 0, 44 - D)]),
         _pass(r + "W.5", [bar(0, g, 0, 44)]),
-        # Across the track: g apart on tracks 0 and 1. A neighbour one dbu
-        # closer has an off-grid edge (see W.1); it is drawn 3 g wide so it
-        # is not also an off-track minimum-width bar (AUX.2).
+        # The 3 g neighbour isolates spacing from the minimum-width track rule.
         _fail(r + "S.1", [bar(0, g), bar(2 * g - D, 3 * g)], ids("AUX.1")),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, 3 * g)]),
         _pass(r + "S.1", [bar(0, g), bar(2 * g, g)]),
@@ -1794,8 +1780,7 @@ def _sadp_metal_cases(layer: str) -> list[Case]:
         _pass(r + "S.2", [bar(0, g, 0, 100), bar(0, g, 140, 240)]),
         _fail(r + "AUX.1", [bar(g / 2, 3 * g)]),
         _pass(r + "AUX.1", [bar(g, 3 * g)]),
-        # A minimum-width bar between tracks 0 and 1 (on the g grid, off the
-        # 2 g track pitch).
+        # On the g grid but between the 2 g tracks.
         _fail(r + "AUX.2", [bar(g, g)]),
         _pass(r + "AUX.2", [bar(2 * g, g)]),
         _fail(

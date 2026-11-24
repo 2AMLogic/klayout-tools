@@ -5,17 +5,19 @@ netlist description header, ``netlist.write`` (with scratch-dir cleanup on
 failure), narrow-width substitution notes, pin ties and the hash/finish step.
 Returns ``(reported_netlist_path, netlist_sha256, pin_ties)``.
 
-``warnings`` is mutated in place, exactly as the inline block did. The helpers
-it calls that still live in ``extract.py`` are imported inside the function
-body: ``extract.py`` imports this module at its top level, so a module-level
-``from .extract import ...`` would be a circular import.
+The writer appends its diagnostics to the supplied ``warnings`` list.
 """
 
 from __future__ import annotations
 
 import re
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+from .extract_base import ExtractError, _parasitic_model_header_comment
+from .extract_netlist_target import _finish_netlist_write
+from .pdk_models import create_model_binding_delegate
 
 #: KLayout's stock ``NetlistSpiceWriter`` (``use_net_names`` on; reported on
 #: 0.30.12, reproduced on 0.30.10, issue #6732) throws from inside ``Netlist.write`` --
@@ -140,14 +142,6 @@ def write_flat_netlist(
     warnings: Any,
     pin_order: Any = (),
 ) -> tuple[Any, Any, Any]:
-    from .extract import (
-        ExtractError,
-        _apply_pin_ties_if_circuit,
-        _finish_netlist_write,
-        _model_delegate_factory,
-        _parasitic_model_header_comment,
-        _substitution_notes,
-    )
 
     # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
     # the PDK reference CDL's parameter set); every other deck keeps the
@@ -198,3 +192,80 @@ def write_flat_netlist(
             netlist_path, scratch_dir
         )
     return reported_netlist_path, netlist_sha256, pin_ties
+
+
+#: Resistance of the ties ``--tie-declared-pins`` writes (issue #4383): a
+#: micro-ohm rather than a literal ``0``, which ngspice warns about and clamps.
+PIN_TIE_RESISTANCE = "1u"
+
+
+def _apply_pin_ties_if_circuit(
+    netlist_path: str, circuit: Any, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: :func:`_apply_pin_ties_to_spice` on the extracted top
+    circuit; a device-free layout has none (and no ``.SUBCKT``), so skip."""
+    if circuit is not None:
+        _apply_pin_ties_to_spice(netlist_path, circuit.name, ties)
+
+
+def _apply_pin_ties_to_spice(
+    netlist_path: str, top_name: str, ties: Sequence[Mapping[str, Any]]
+) -> None:
+    """Issue #4383: rewrite the written deck so ``top_name``'s ``.SUBCKT``
+    header also lists every tied declared pin (appended after the existing
+    ports, in tie order) and the body gains one ``Rtie_<pin> <pin> <canonical>
+    1u`` per tied pin, just before the matching ``.ENDS``."""
+    if not ties:
+        return
+    with open(netlist_path, encoding="utf-8") as handle:
+        lines = handle.read().split("\n")
+    header_re = re.compile(rf"^\.subckt\s+{re.escape(top_name)}(\s|$)", re.IGNORECASE)
+    start = next((i for i, line in enumerate(lines) if header_re.match(line)), None)
+    if start is None:
+        raise ExtractError(
+            f"--tie-declared-pins: no `.SUBCKT {top_name}` header in '{netlist_path}'"
+        )
+    last_header = start
+    while last_header + 1 < len(lines) and lines[last_header + 1].startswith("+"):
+        last_header += 1
+    end = next(
+        (
+            i
+            for i in range(last_header + 1, len(lines))
+            if lines[i].lower().startswith(".ends")
+        ),
+        None,
+    )
+    if end is None:
+        raise ExtractError(f"--tie-declared-pins: no `.ENDS` in '{netlist_path}'")
+    extra = [pin for tie in ties for pin in tie["tied_pins"]]
+    cards = [
+        f"Rtie_{pin} {pin} {tie['pin']} {PIN_TIE_RESISTANCE}"
+        for tie in ties
+        for pin in tie["tied_pins"]
+    ]
+    lines[last_header] += " " + " ".join(extra)
+    lines[end:end] = cards
+    with open(netlist_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
+def _model_delegate_factory(
+    model_bindings: Any, global_nets: Any, sink: list[Any]
+) -> Callable[[], Any]:
+    """Factory building the model-binding delegate and recording it in ``sink``."""
+
+    def make() -> Any:
+        delegate = create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=global_nets,
+        )
+        sink.append(delegate)
+        return delegate
+
+    return make
+
+
+def _substitution_notes(delegates: list[Any]) -> list[str]:
+    """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
+    return [n for d in delegates for n in getattr(d, "substitution_notes", ())]

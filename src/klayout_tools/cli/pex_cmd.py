@@ -91,6 +91,8 @@ def _submit_request(args: argparse.Namespace) -> dict:
     """The invocation's request, as recorded in a ``--submit-only`` manifest
     (issue #4692): every flag that shapes the run, paths made absolute."""
     request = {k: v for k, v in vars(args).items() if k not in _REQUEST_EXCLUDED}
+    if request.get("timeout_s") is None:
+        request.pop("timeout_s", None)
     for key in _REQUEST_PATH_FIELDS:
         if request.get(key):
             request[key] = os.path.abspath(request[key])
@@ -249,6 +251,7 @@ def run(args: argparse.Namespace) -> int:
                 hosts=args.hosts,
                 resume=args.resume,
                 capacity_wait_s=args.wait_for_capacity,
+                timeout_s=args.timeout_s,
                 deck_options=deck_options,
                 declared_pins=declared_pins,
                 rename_declared_pins=args.rename_declared_pins,
@@ -274,6 +277,7 @@ def run(args: argparse.Namespace) -> int:
                 reference_netlist=args.reference_netlist,
                 measure_timeout_s=args.measure_timeout_s,
                 flatten_schematic=args.flatten_schematic,
+                schematic_top=args.schematic_top,
                 device_only_leg=args.device_only_leg,
                 extract_only=args.extract_only,
                 submit_only=args.submit_only,
@@ -296,6 +300,7 @@ def run(args: argparse.Namespace) -> int:
             hosts=args.hosts,
             resume=args.resume,
             capacity_wait_s=args.wait_for_capacity,
+            timeout_s=args.timeout_s,
             # `--deck-option` (issue #1558): selects a flavour of a shared-geometry
             # device family (e.g. gf180mcu's `poly_res`/`mim_cap`), passed to
             # `klt extract --deck-option`; `None` when the flag was never given.
@@ -375,6 +380,7 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            schematic_top=args.schematic_top,
             # `--device-only-leg` (issue #3298): a parasitic-free third leg
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.

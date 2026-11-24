@@ -1,8 +1,8 @@
 """Replay of a committed DRC report's own recorded run choices, for
 ``klt drc --check --rerun``.
 
-The selectors a ``--rules`` subset ran (issue #2768), the abutment ``tile``
-context (issue #4226) and -- added for issue #6986 -- the PDK variant the
+The ``--top`` cell (issue #7000), selectors for a ``--rules`` subset (issue
+#2768), abutment ``tile`` context (issue #4226), and PDK variant the
 report resolved into ``provenance.pdk`` are all choices the *committed
 report itself* carries, replayed by
 :func:`klayout_tools.drc.rerun_drc_report` so the fresh run reproduces the
@@ -19,6 +19,23 @@ from typing import Any
 
 from ._report_verify import get_path
 from .drc import DrcError, parse_rule_selectors
+
+
+def recorded_native_deck_vars(committed: dict[str, Any]) -> dict[str, str] | None:
+    """Restore the native script globals, leaving the launcher's paths to it."""
+    options = get_path(committed, ("provenance", "deck", "options"))
+    if options is None:
+        return None
+    if not isinstance(options, dict):
+        raise DrcError("provenance.deck.options must be a mapping of names to strings")
+    for name, value in options.items():
+        if name in {"input", "report"}:
+            raise DrcError(f"provenance.deck.options cannot override the {name} path")
+        if not name or name != name.strip() or "=" in name:
+            raise DrcError("provenance.deck.options contains an invalid variable name")
+        if not isinstance(value, str) or "\x00" in name or "\x00" in value:
+            raise DrcError("provenance.deck.options must contain string arguments")
+    return options
 
 
 def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
@@ -56,6 +73,19 @@ def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
     if isinstance(cols, int) and isinstance(rows, int):
         return cols, rows
     return None
+
+
+def _recorded_top(committed: dict[str, Any]) -> str | None:
+    """Read the requested cell scope. Only an omitted field uses the engine default."""
+    if "top" not in committed:
+        return None
+    top = committed["top"]
+    if not isinstance(top, str) or not top.strip():
+        raise DrcError(
+            "committed report's 'top' must be a non-empty cell name string "
+            "to replay the recorded scope"
+        )
+    return top
 
 
 def _rerun_pdk_selection(
