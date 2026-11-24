@@ -317,7 +317,7 @@
     },
     {
       "path": "src/klayout_tools/extract_spef.py",
-      "lines": 992
+      "lines": 972
     },
     {
       "path": "src/klayout_tools/extract_subcircuit.py",
@@ -329,11 +329,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2656
+      "lines": 2643
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2473
+      "lines": 2452
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -342,10 +342,6 @@
     {
       "path": "src/klayout_tools/gen_compose.py",
       "lines": 4700
-    },
-    {
-      "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 695
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
@@ -513,7 +509,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4532
+      "lines": 4364
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -721,7 +717,7 @@
     },
     {
       "path": "tests/test_build_identity.py",
-      "lines": 702
+      "lines": 620
     },
     {
       "path": "tests/test_characterize.py",
@@ -833,7 +829,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6516
+      "lines": 6481
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

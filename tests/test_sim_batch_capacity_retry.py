@@ -7,6 +7,7 @@ fixtures are imported from there.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -40,6 +41,11 @@ class _LaunchAwareRunner(_FakeRunner):
         #: With a message set, the first job launched is refused forever.
         self.stubborn_message: str | None = None
         self._stubborn_job: str | None = None
+        #: Refuse the first ``flaky_count`` distinct jobs launched for as long
+        #: as ``refuse_while()`` holds (the fleet's capacity clearing mid-run).
+        self.flaky_count = 0
+        self.refuse_while = None
+        self._flaky_jobs: set[str] = set()
 
     def __call__(self, argv, timeout_s):
         joined = " ".join(argv)
@@ -54,6 +60,13 @@ class _LaunchAwareRunner(_FakeRunner):
             if job == self._stubborn_job:
                 self.calls.append(list(argv))
                 return fake_completed(returncode=1, stderr=self.stubborn_message)
+        if self.refuse_while is not None and "launch" in argv:
+            job = argv[argv.index("--job") + 1]
+            if len(self._flaky_jobs) < self.flaky_count:
+                self._flaky_jobs.add(job)
+            if job in self._flaky_jobs and self.refuse_while():
+                self.calls.append(list(argv))
+                return fake_completed(returncode=1, stderr=_NO_CAPACITY)
         result = super().__call__(argv, timeout_s)
         if "launch" in argv and getattr(result, "returncode", 1) == 0:
             self.launched.add(argv[argv.index("--job") + 1])
@@ -71,6 +84,7 @@ def _fleet(
     wait_s=0,
     max_concurrent=1,
     clock=None,
+    setup=None,
 ):
     """Run a ``hosts``-shard fleet whose first launches the fake provisioner
     refuses with the given messages; returns ``(runner, sleeps, result)``."""
@@ -88,6 +102,8 @@ def _fleet(
         monkeypatch.setattr(sb.random, "random", lambda: 1.0)
     monkeypatch.setattr(sb, "_abortable_sleep", lambda abort: record)
     runner.stubborn_message = stubborn
+    if setup is not None:
+        setup(runner)
     for message in refusals:
         runner.queue("launch", fake_completed(returncode=1, stderr=message))
     batch = {
@@ -304,3 +320,82 @@ def test_interrupt_during_backoff_returns_the_partial_report(tmp_path, monkeypat
     )
     assert _lost(corners) == [True, False]
     assert environment["interrupted"] is True
+
+
+def _watch_lines(monkeypatch, clock):
+    """Route the fleet's capacity watch onto ``clock`` (the 300s heartbeat
+    throttle would otherwise hide every line after the first) and collect what
+    it prints; returns ``(lines, watches)``."""
+    lines: list[str] = []
+    watches: list[sb._CapacityWatch] = []
+    real = sb._CapacityWatch
+
+    def _make(total):
+        watch = real(total, monotonic=clock.monotonic, emit=lines.append)
+        watches.append(watch)
+        return watch
+
+    monkeypatch.setattr(sb, "_CapacityWatch", _make)
+    return lines, watches
+
+
+def _pending_counts(lines):
+    return [
+        m.group(1)
+        for m in (re.search(r"(-?\d+ of \d+) shards pending", line) for line in lines)
+        if m
+    ]
+
+
+def test_retry_passes_report_the_retried_shard_pending_once(tmp_path, monkeypatch):
+    # Shard 0 is refused on pass 1 and on both retry passes; each pass spends
+    # more than one heartbeat waiting, so every pass prints a line.
+    clock = _FakeClock()
+    lines, _ = _watch_lines(monkeypatch, clock)
+    _, _, (corners, _, _) = _fleet(
+        tmp_path,
+        monkeypatch,
+        hosts=2,
+        stubborn=_NO_CAPACITY,
+        retries=2,
+        wait_s=400,
+        clock=clock,
+    )
+
+    assert _lost(corners) == [True, False]
+    counts = _pending_counts(lines)
+    # Without the per-pass reset the retry passes print "0 of 2" and "-1 of 2".
+    assert set(counts) == {"2 of 2", "1 of 2"}
+    assert counts[0] == "2 of 2"
+    assert counts.count("1 of 2") >= 2  # at least one line per retry pass
+
+
+def test_a_shard_recovered_on_retry_is_pending_until_it_finishes(tmp_path, monkeypatch):
+    # Shards 0 and 1 are refused until t=700s: shard 0 waits out pass 1, shard
+    # 1 gets its single no-wait attempt. In the retry pass shard 1 is queued
+    # behind shard 0 (one worker) and both still count as pending; shards 2
+    # and 3 finished in pass 1 and never do.
+    clock = _FakeClock()
+    lines, watches = _watch_lines(monkeypatch, clock)
+
+    def _flaky(runner):
+        runner.flaky_count = 2
+        runner.refuse_while = lambda: clock.now < 700.0
+
+    _, _, (corners, _, environment) = _fleet(
+        tmp_path,
+        monkeypatch,
+        hosts=4,
+        retries=1,
+        wait_s=400,
+        clock=clock,
+        setup=_flaky,
+    )
+
+    assert _lost(corners) == [False] * 4
+    assert not environment.get("unlaunched_shards")
+    counts = _pending_counts(lines)
+    assert "2 of 4" in counts  # the retry pass: shards 0 and 1, not 4 or 3
+    assert not [c for c in counts if c.startswith(("0 ", "-"))]
+    (watch,) = watches
+    assert not watch._waiting  # nothing left waiting on a launch

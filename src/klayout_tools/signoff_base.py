@@ -33,6 +33,51 @@ from typing import Any
 
 from ._jsongz import READ_ERRORS, open_text
 
+#: T1 item ids whose **only** accepted evidence is an artifact-anchored
+#: ``"generic"`` envelope (issue #2844) -- items 1 (Design sources), 9
+#: (Testbenches shipped) and 10 (Repo hygiene). Before that issue a passing
+#: native envelope of any recognised kind satisfied them, topical relevance
+#: notwithstanding (a clean `klt drc` report "proved" repo hygiene). Now that
+#: ``klt signoff --attest`` (:mod:`.signoff_attest`) produces a mechanically
+#: derived envelope for exactly these three, :func:`_allowed_kinds_for`
+#: restricts them to ``{"generic"}``, so a native citation renders
+#: ``"unmet"``/:data:`_REASON_WRONG_KIND`.
+#:
+#: Item 2 (Layout) is deliberately absent: it is outside issue #2844's scope
+#: and keeps accepting any passing native envelope as before.
+#:
+#: Kept separate from :data:`_ITEM_ALLOWED_KINDS` on purpose: that table also
+#: decides :func:`_is_structurally_ungradeable_item` and
+#: :func:`_is_graded_by_build`, and moving these ids into it would silently
+#: re-rank the fleet roll-up's ``blocking_item`` (issue #2178) -- a separate
+#: behaviour change this tightening does not make.
+_ITEMS_REQUIRING_ATTESTED_EVIDENCE: frozenset[int] = frozenset({1, 9, 10})
+
+#: T1 item 8 (Characterization report, issue #4311): attestable from an
+#: inventory but deliberately *not* in ``_ITEMS_REQUIRING_ATTESTED_EVIDENCE``,
+#: so a bare hand-written generic envelope still grades.
+CHARACTERIZATION_ITEM = 8
+
+#: The T1 items this producer attests from an inventory -- the items whose
+#: evidence :data:`~klayout_tools.signoff._ITEMS_REQUIRING_ATTESTED_EVIDENCE`
+#: restricts to a generic envelope, plus item 8. Item 2 (Layout) stays out of
+#: scope: its binding is the committed stream itself (issue #2718), unchanged
+#: by issue #2844.
+ATTESTABLE_ITEMS: tuple[int, ...] = tuple(
+    sorted(_ITEMS_REQUIRING_ATTESTED_EVIDENCE | {CHARACTERIZATION_ITEM})
+)
+
+#: The one T1 item attested from a committed layout stream rather than an
+#: inventory (issue #4188): ``--attest 2 --input STREAM``. Item 2's binding is
+#: the stream itself, so there is no inventory to hand-write.
+STREAM_ATTESTABLE_ITEM = 2
+
+#: The primary input expected by each generic attestation producer.
+ATTESTATION_INPUT_FLAGS = {
+    **dict.fromkeys(ATTESTABLE_ITEMS, "--inventory"),
+    STREAM_ATTESTABLE_ITEM: "--input",
+}
+
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md. This is *this* command's own
 #: envelope version, independent of the schema_version of any envelope it

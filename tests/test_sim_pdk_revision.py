@@ -194,6 +194,40 @@ def test_pdk_revision_matching_stamp_or_token_is_a_match(value):
     assert comparison["worker_stamp"]["stamp_scope"] == "image"
 
 
+@pytest.mark.parametrize(
+    ("value", "stamp_text"),
+    [
+        # Declared in upper case against the worker's lower-case token (#6362).
+        (_TOKEN.upper(), f"open_pdks {_TOKEN}\n"),
+        # ...and the mirror: an upper-case token in SOURCES, lower-case declared.
+        (_TOKEN, f"open_pdks {_TOKEN.upper()}\n"),
+        # Mixed case on both sides, with surrounding whitespace on the claim.
+        (f"  {_TOKEN[:20].upper()}{_TOKEN[20:]}  ", f"open_pdks {_TOKEN}\n"),
+    ],
+)
+def test_pdk_revision_token_arm_is_case_insensitive_like_the_stamp_arm(
+    value, stamp_text
+):
+    """The ``stamp_sha256`` arm already ignores case; the revision-token arm
+    must too, or the same revision spelled in a different case reports a
+    spurious advisory ``mismatch`` on a worker that *has* that revision."""
+    comparison = _comparison(
+        value, {"worker_environment": _worker_block(stamp_text=stamp_text)}
+    )
+    assert comparison["status"] == "match"
+    assert "warning" not in comparison
+
+
+def test_pdk_revision_token_arm_stays_exact_apart_from_case():
+    """Case-folding is the whole change: a different revision, or an
+    abbreviation of the token, is still an advisory ``mismatch`` (the prefix
+    rule is the widened contract of #6362 options 2/3, deliberately not
+    taken)."""
+    for value in (_TOKEN[:7], _TOKEN[:-1] + "0", _TOKEN + "0"):
+        comparison = _comparison(value, {"worker_environment": _worker_block()})
+        assert comparison["status"] == "mismatch", value
+
+
 def test_pdk_revision_differing_from_stamp_is_an_advisory_mismatch():
     comparison = _comparison(
         "f6eeac7bf3e04b1c", {"worker_environment": _worker_block()}

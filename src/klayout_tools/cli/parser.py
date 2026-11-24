@@ -4245,7 +4245,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "layout and without producing a verdict (issue #4034). Exits 0 "
             "with status 'valid', or 1 with the usual field-path error. "
             "Mutually exclusive with 'file' and --check; the layout-only "
-            "flags (--top, --pdk, --deck, --findings-only, "
+            "flags (--output, --top, --pdk, --deck, --findings-only, "
             "--omit-antenna-tables, --compact, --rerun) are rejected"
         ),
     )
