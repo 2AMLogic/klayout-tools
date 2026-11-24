@@ -1752,6 +1752,7 @@ def run_lvs(
         reference_pin_order_sources=ref_stage.reference_pin_order_sources,
         reference_pin_order_files=ref_stage.reference_pin_order_files,
         reference_netlist_path=ref_stage.reference_netlist_path,
+        prepared_reference=reference_preparation,
         extracted_netlist_path=extracted_netlist_path,
         equivalent_pins_applied=equivalent_pins_applied,
         constant_bindings=constant_bindings,
@@ -3256,7 +3257,7 @@ def _read_reference_netlist(
         detect_subckt_call_devices,
     )
 
-    text = _read_reference_text(path)
+    text = _read_reference_text(path, prepared=gate_level_converted)
     text, read_path, tmp_path = _quote_includes_for_read(text, path, form)
     # Issue #1876: the recovery scan below runs over whichever text is
     # actually handed to `NetlistSpiceReader` -- the original file for the

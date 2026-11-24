@@ -1759,9 +1759,10 @@ schematic flow's simulation-form SPICE. That conversion — and every
 reference-input error it can raise — happens **before the layout is
 extracted** (issue #7822): a reference the narrow grammar below rejects
 names the failing input immediately, rather than after a full device
-extraction (minutes on a large layout) has already run. A valid reference
-is converted once up front and reused after extraction, with the same pin
-bindings, warnings, and provenance as before.
+extraction (minutes on a large layout) has already run. LVS converts the Verilog once and reuses that conversion after extraction.
+Its `environment.reference_sha256` hashes those original file bytes, and
+`environment.reference_module_names` records any escaped names mapped from
+them, even if synthesis replaces the file during the run.
 
 **The layout side must be abstracted too.** Both sides of this compare
 describe a standard cell as a pin-only black box, so the layout netlist has

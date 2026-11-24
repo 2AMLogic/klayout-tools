@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .verilog_module_names import reference_module_names_from_text
 
 
 class _GateLevelPreparation(NamedTuple):
@@ -33,6 +36,7 @@ class _GateLevelPreparation(NamedTuple):
     port_aliases: dict[str, dict[str, str]]
     case_folds: list[dict[str, str]]
     converted_text: str
+    reference_environment: dict[str, Any]
 
 
 def _prepare_reference_stage(
@@ -63,7 +67,8 @@ def _prepare_reference_stage(
         reference_spec.get("pdk_root"),
         pin_order_files=pin_order_files,
     )
-    text = _read_reference_text(reference_netlist_path)
+    source = _read_reference_bytes(reference_netlist_path)
+    text = _decode_reference_text(source)
     port_aliases: dict[str, dict[str, str]] = {}
     case_folds: list[dict[str, str]] = []
     converted = _convert_reference_text(
@@ -82,6 +87,10 @@ def _prepare_reference_stage(
         port_aliases=port_aliases,
         case_folds=case_folds,
         converted_text=converted,
+        reference_environment={
+            "reference_sha256": hashlib.sha256(source).hexdigest(),
+            **reference_module_names_from_text(text),
+        },
     )
 
 
@@ -100,12 +109,26 @@ def _convert_reference_text(path, text, pin_orders, finfet, case_folds, port_ali
     return converted
 
 
-def _read_reference_text(path: str) -> str:
-    """Preserve diagnostics for missing files and misdirected binary input."""
+def _read_reference_bytes(path: str) -> bytes:
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
+        return Path(path).read_bytes()
     except OSError as exc:
         raise _lvs.LvsError(
             f"could not read reference netlist '{path}': {exc}"
         ) from exc
+
+
+def _decode_reference_text(source: bytes) -> str:
+    """Use the reference reader's UTF-8 and universal newline conventions."""
+    return (
+        source.decode("utf-8", errors="replace")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+
+
+def _read_reference_text(path: str, *, prepared: str | None = None) -> str:
+    """Reuse the prepared input when the source may have changed."""
+    if prepared is not None:
+        return prepared
+    return _decode_reference_text(_read_reference_bytes(path))

@@ -1,5 +1,6 @@
 """Gate-level part selects and reference validation before extraction."""
 
+import hashlib
 import json
 import re
 
@@ -12,7 +13,9 @@ from klayout_tools.verilog_netlist import (
     parse_gate_level_verilog,
 )
 from test_lvs import (
+    _GATE_LEVEL_LAYOUT_SPICE,
     _GATE_LEVEL_LIBRARY_SPICE,
+    _GATE_LEVEL_REFERENCE_VERILOG,
     _assign_aliases,
     _make_fake_pdk_library,
     _make_single_nmos_layout,
@@ -220,3 +223,58 @@ def test_run_lvs_gate_level_verilog_valid_reference_proceeds_through_extraction(
     report = run_lvs(json.dumps(request))
     assert calls == ["convert", "extract"]
     assert report["reference_conversion"]["form"] == "gate-level-verilog"
+
+
+def test_report_uses_verilog_bytes_converted_before_reference_rewrite(
+    tmp_path, monkeypatch
+):
+    from klayout_tools import lvs_layout_stage
+
+    original = (
+        _GATE_LEVEL_REFERENCE_VERILOG
+        + r"""
+module \old$cell (a); input a; endmodule
+"""
+    )
+    replacement = original.replace(".A(mid), .Y(out)", ".A(out), .Y(mid)").replace(
+        "old$cell", "new$cell"
+    )
+    path = tmp_path / "ref.v"
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+        },
+        "reference": {
+            "netlist": str(path),
+            "top": "top",
+            "form": "gate-level-verilog",
+            "pdk": "myvariant",
+            "library": "mylib",
+            "pdk_root": _make_fake_pdk_library(
+                tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+            ),
+        },
+    }
+    path.write_text(replacement, encoding="utf-8")
+    changed = run_lvs(json.dumps(request))
+    assert changed["status"] == "mismatch"
+    assert changed["environment"]["reference_module_names"] == {"new$cell": "new_cell"}
+
+    original_bytes = original.replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(original_bytes)
+    resolve_layout = lvs_layout_stage._resolve_layout_stage
+
+    def regenerate(*args, **kwargs):
+        result = resolve_layout(*args, **kwargs)
+        path.write_text(replacement, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(lvs_layout_stage, "_resolve_layout_stage", regenerate)
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert (
+        report["environment"]["reference_sha256"]
+        == hashlib.sha256(original_bytes).hexdigest()
+    )
+    assert report["environment"]["reference_module_names"] == {"old$cell": "old_cell"}
