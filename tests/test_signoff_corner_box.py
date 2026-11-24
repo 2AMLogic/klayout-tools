@@ -259,3 +259,109 @@ def test_malformed_delta_identity_is_an_item_refusal(tmp_path, malformed):
     result = item(broken)
     assert result["reason"] == "invalid_evidence"
     assert result["detail"]["problem"]
+
+
+def mixed_items(tmp_path, evidence, **extras):
+    manifest = _mixed_signal_manifest(evidence=evidence, **extras)
+    return {
+        i["partition"]: i for i in build_tier_report(manifest)["items"] if i["id"] == 7
+    }
+
+
+def test_bare_box_names_itself_when_it_refuses_the_digital_partition(tmp_path):
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+    evidence = {"7.digital": fv}
+
+    bare = mixed_items(tmp_path, evidence, corner_box={"7": CORNERS})
+    assert (bare["digital"]["status"], bare["digital"]["reason"]) == (
+        "unmet",
+        "wrong_kind",
+    )
+    problem = bare["digital"]["detail"]["problem"]
+    assert "corner_box" in problem and '"7.analog"' in problem
+    # `detail.corner_box` keeps its declared/covered/missing shape for graded items.
+    assert "corner_box" not in bare["digital"]["detail"]
+
+    scoped = mixed_items(tmp_path, evidence, corner_box={"7.analog": CORNERS})
+    assert (scoped["digital"]["status"], scoped["digital"]["reason"]) == ("met", None)
+    assert "detail" not in scoped["digital"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "box"),
+    [("mixed-signal", {"7.digital": CORNERS}), ("digital", {"7": CORNERS})],
+)
+def test_scoping_remedy_only_where_it_would_work(tmp_path, kind, box):
+    # An explicit "7.digital" box, or a pure digital block, is not helped by
+    # re-scoping the box to the analog partition.
+    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+    manifest = (
+        _mixed_signal_manifest(evidence={"7.digital": fv}, corner_box=box)
+        if kind == "mixed-signal"
+        else _manifest(kind=kind, evidence={"7": fv}, corner_box=box)
+    )
+    digital = next(
+        i
+        for i in build_tier_report(manifest)["items"]
+        if i["id"] == 7 and i["partition"] in (None, "digital")
+    )
+    assert digital["reason"] == "wrong_kind"
+    problem = digital["detail"]["problem"]
+    assert "corner_box" in problem
+    assert '"7.analog"' not in problem
+
+
+@pytest.mark.parametrize("cited", ["absent", "null"])
+def test_declared_box_with_nothing_cited_is_no_evidence(cited):
+    evidence = {} if cited == "absent" else {"7": None}
+    manifest = _manifest(evidence=evidence, corner_box={"7": CORNERS})
+    result = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 7)
+    assert (result["status"], result["reason"]) == ("unmet", "no_evidence")
+    assert result["citation"] is None
+    assert result["detail"] == {
+        "corner_box": {
+            "declared": 2,
+            "covered": 0,
+            "missing": [{"corner_id": c, "keys": []} for c in CORNERS],
+        }
+    }
+    baseline = next(
+        i
+        for i in build_tier_report(_manifest(evidence=evidence))["items"]
+        if i["id"] == 7
+    )
+    assert (baseline["status"], baseline["reason"]) == ("unmet", "no_evidence")
+
+
+def test_nothing_cited_text_output_names_the_missing_corners(tmp_path, capsys):
+    manifest = _write(
+        tmp_path, "manifest.json", _manifest(evidence={}, corner_box={"7": CORNERS})
+    )
+    main(["signoff", "--manifest", manifest, "--format", "text"])
+    out = capsys.readouterr().out
+    assert "corner box: 0/2 covered" in out
+    assert f"missing corner: {CORNERS[0]}" in out
+
+
+def test_present_entry_still_grades_through_the_box(tmp_path):
+    one = report(tmp_path, "one.json", [row(CORNERS[0])])
+    result = item(one)
+    assert result["reason"] == "partial_coverage"
+    assert result["detail"]["corner_box"]["covered"] == 1
+
+
+def test_malformed_box_with_nothing_cited_still_reports_its_problem():
+    manifest = _manifest(evidence={}, corner_box={"7": []})
+    result = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 7)
+    assert result["reason"] == "invalid_evidence"
+    assert result["detail"]["problem"]
+
+
+def test_box_on_a_block_with_other_partition_scope_and_nothing_cited():
+    # A "7.analog" box does not reach the digital partition: no box there, so
+    # the digital row is the plain uncited result with no corner_box detail.
+    result = mixed_items(None, {}, corner_box={"7.analog": CORNERS})
+    assert result["analog"]["reason"] == "no_evidence"
+    assert "corner_box" in result["analog"]["detail"]
+    assert result["digital"]["reason"] == "no_evidence"
+    assert "detail" not in result["digital"]

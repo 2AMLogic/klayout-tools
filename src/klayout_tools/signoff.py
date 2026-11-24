@@ -6024,7 +6024,11 @@ def _build_tier_item(
     item5_require_derived_invalid = (
         require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
     )
-    report_list = corner_box is not None or (
+    # Issue #7700: a declared box with nothing cited stays ``no_evidence`` (its
+    # detail then names every corner as missing) instead of reaching the
+    # aggregator, which would call it ``partial_coverage``.
+    box_uncited = corner_box is not None and corner_box.awaits_citation(raw_entry)
+    report_list = (corner_box is not None and not box_uncited) or (
         item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     )
     if raw_entry is not None and not graded_by_build:
@@ -6092,6 +6096,8 @@ def _build_tier_item(
         else:
             status, reason, citation, failure_detail = grade_spec(spec)
 
+    if box_uncited and corner_box is not None:
+        failure_detail.update(corner_box.uncited_detail())
     failure_detail.update(sta_item_exception_detail(item_id, extra))
     return {
         "tier": tier,

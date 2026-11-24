@@ -5357,11 +5357,16 @@ IDs in the manifest. For example, a two-corner analog box looks like this.
 ```
 
 The bare key `"7"` applies to either partition. A qualified key overrides
-it for that partition. Each list must contain at least one ID, and its IDs
-must be unique, non-empty strings. Signoff compares them literally. The
-manifest supplies the required box even if a cited report ran only one
-corner. Monte Carlo sample IDs have no special handling and do not count
-toward a base corner.
+it for that partition. On a `mixed-signal` block that means a bare `"7"` box
+also reaches the digital partition, where only a PEX report with `delta[]`
+corner rows can satisfy it: an SDF-annotated `functional-verification`
+report is refused as `wrong_kind`, with a `detail.problem` that names the
+box. Declare the box under `"7.analog"` to scope it to the analog partition
+and leave the digital citation as it was. Each list must contain at least
+one ID, and its IDs must be unique, non-empty strings. Signoff compares them
+literally. The manifest supplies the required box even if a cited report ran
+only one corner. Monte Carlo sample IDs have no special handling and do not
+count toward a base corner.
 
 Each declared corner needs a passing PEX `delta[]` row for every distinct
 `(testbench, measurement)` in the cited reports. A command-mode row has a
@@ -5377,7 +5382,10 @@ The JSON item retains each report's own verdict in `citations_graded`.
 Its `detail.corner_box` gives the declared and covered corner counts. When
 coverage is incomplete, the reason is `partial_coverage` and each entry in
 `missing` names the `corner_id` and the remaining measurement keys. Text
-output prints the count and names the missing corners.
+output prints the count and names the missing corners. A declared box with
+no item 7 citation at all (the `evidence` entry is absent or `null`) is
+`no_evidence`, as it is without a box; its `detail.corner_box` lists every
+declared corner as missing, with an empty `keys`.
 
 `invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
 `detail.problem` string naming the cause, e.g. `member 2 is not a string or
