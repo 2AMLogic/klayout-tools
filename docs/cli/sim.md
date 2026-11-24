@@ -8214,8 +8214,10 @@ them with the job
   `batch` backend, where the worker capture observes a stamp, the claim is
   also **checked** (issue #5593): `environment.pdk_revision_comparison`
   records `{status, worker_stamp}` — `match` when the asserted value equals
-  the worker's `stamp_sha256` (case-insensitive) or its `SOURCES` revision
-  token (`open_pdks <token>`), `mismatch` (with a `warning`, and the
+  the worker's `stamp_sha256` or its `SOURCES` revision token
+  (`open_pdks <token>`), both compared case-insensitively (issue #6362) but
+  otherwise exactly, so an abbreviated revision such as a 7-character prefix
+  is not a match; `mismatch` (with a `warning`, and the
   `worker_stamp` it differs from) when both are readable and neither matches,
   `not_comparable` with `reason: worker_stamp_unavailable` otherwise. Under
   sharding each `fleet[]` member is compared independently (`fleet[]` array
