@@ -1,0 +1,1 @@
+- `klt sim` records a characterization-only derived observation as skipped when an inconclusive source prevents its group from producing a value (#7430).
