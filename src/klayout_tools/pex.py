@@ -218,7 +218,14 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance, output_lock, pex_async, pex_runset, pex_sim_evidence
+from . import (
+    env_provenance,
+    output_lock,
+    pex_async,
+    pex_binding,
+    pex_runset,
+    pex_sim_evidence,
+)
 from ._jsonnum import is_finite_number, is_number
 from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
@@ -623,6 +630,7 @@ def _pin_count_mismatch(
     reference_netlist: str,
     extracted_netlist: str,
     subcircuit: str | None = None,
+    schematic_top: str | None = None,
     ngspice_message: str | None = None,
 ) -> dict[str, Any] | None:
     """The structured ``pin_count_mismatch`` diagnostic (issue #1030), or
@@ -633,7 +641,7 @@ def _pin_count_mismatch(
     declare for the same subcircuit name and reports the first one whose pin
     *counts* differ -- the exact condition ngspice rejects with ``Too
     few/many parameters for subcircuit type``, since `klt pex` reuses the
-    testbench's own unmodified ``X...`` instantiation line on both sides.
+    same positional nodes on both legs, including when their subcircuit names differ.
 
     ``subcircuit`` (when ngspice itself named one) restricts the comparison
     to that subcircuit. ``ngspice_message`` is ngspice's own line, carried
@@ -644,14 +652,19 @@ def _pin_count_mismatch(
     """
     schematic_text = _read_text(reference_netlist)
     extracted_text = _read_text(extracted_netlist)
-    schematic_interfaces = _subckt_interfaces(schematic_text or "")
-    extracted_interfaces = _subckt_interfaces(extracted_text or "")
+    public = schematic_top is not None
+    schematic_interfaces = _subckt_interfaces(
+        schematic_text or "", file_scope_only=public
+    )
+    extracted_interfaces = _subckt_interfaces(
+        extracted_text or "", file_scope_only=public
+    )
 
     candidates = (
         [subcircuit.lower()] if subcircuit is not None else list(extracted_interfaces)
     )
     for key in candidates:
-        schematic_interface = schematic_interfaces.get(key)
+        schematic_interface = schematic_interfaces.get((schematic_top or key).lower())
         extracted_interface = extracted_interfaces.get(key)
         if schematic_interface is None or extracted_interface is None:
             continue
@@ -667,9 +680,9 @@ def _pin_count_mismatch(
                 f"{extracted_interface[0]}` with {len(extracted_interface[1])} "
                 f"pins ({', '.join(extracted_interface[1])}) but the schematic "
                 f"DUT declares {len(schematic_interface[1])} "
-                f"({', '.join(schematic_interface[1])}) -- klt pex re-runs the "
-                "testbench's own unmodified subcircuit instantiation line "
-                "against both, so ngspice refuses the extracted-side deck. "
+                f"({', '.join(schematic_interface[1])}) -- klt pex uses the same "
+                "positional testbench nodes for both subcircuits, so "
+                "ngspice refuses the extracted-side deck. "
                 "Give the schematic subcircuit the same pin list as the "
                 "extracted one (extraction promotes physical nets a schematic "
                 "often does not model, e.g. a device-body/substrate-tap net), "
@@ -755,29 +768,20 @@ def _pin_order_mismatch(
     reference_netlist: str,
     extracted_netlist: str,
     top_cell: str,
+    schematic_top: str | None = None,
 ) -> dict[str, Any] | None:
-    """The structured ``pin_order_mismatch`` diagnostic (issue #2890), or
-    ``None``.
+    """Report equal pin sets whose order differs between the two selected roots.
 
-    `klt pex` reuses the testbench's own positional ``X...`` instantiation
-    line on both legs, but `klt extract` writes the ``.SUBCKT`` header pins
-    in a deterministic order (real ports first, then parasitic references,
-    each alphabetical) while a schematic DUT declares them in symbol order.
-    When both sides declare ``top_cell`` with the same number of pins and the
-    same pin *set* (case-insensitively) but a different *sequence*,
-    :func:`_pin_count_mismatch` stays silent and the extracted leg simulates
-    with signals wired to the wrong pins. Same shape as
-    :func:`_pin_count_mismatch` (``ngspice_message`` is always ``None``: no
-    engine is consulted). Differing counts or pin sets are
-    :func:`_pin_count_mismatch`'s territory; a flat schematic DUT is
-    :func:`_flat_dut_mismatch`'s.
+    X cards connect nodes positionally. Extraction orders its real ports then
+    parasitic references alphabetically; the schematic uses symbol order.
+    The pin-count and flat-DUT checks handle their own failure cases.
     """
-    schematic_interface = _subckt_interfaces(_read_text(reference_netlist) or "").get(
-        top_cell.lower()
-    )
-    extracted_interface = _subckt_interfaces(_read_text(extracted_netlist) or "").get(
-        top_cell.lower()
-    )
+    schematic_interface = _subckt_interfaces(
+        _read_text(reference_netlist) or "", file_scope_only=True
+    ).get((schematic_top or top_cell).lower())
+    extracted_interface = _subckt_interfaces(
+        _read_text(extracted_netlist) or "", file_scope_only=True
+    ).get(top_cell.lower())
     if schematic_interface is None or extracted_interface is None:
         return None
     schematic_pins = [pin.lower() for pin in schematic_interface[1]]
@@ -798,8 +802,7 @@ def _pin_order_mismatch(
             f"with pins in the order ({', '.join(schematic_interface[1])}) "
             "but the extracted netlist declares the same pins in the order "
             f"({', '.join(extracted_interface[1])}) -- klt pex reuses the "
-            "testbench's positional subcircuit instantiation line "
-            "unmodified on both legs, so the extracted leg would wire "
+            "same positional testbench nodes, so the extracted leg would wire "
             "signals and supplies to the wrong pins and report meaningless "
             "deltas. The extracted order is deterministic (real ports "
             "first, then parasitic references, each alphabetical; `--pins` "
@@ -1849,11 +1852,14 @@ def _validate_measure_mode(
     timeout_s: float | None = None,
     extract_only: bool = False,
     flatten_schematic: bool = False,
+    schematic_top: str | None = None,
     device_only_leg: bool = False,
 ) -> list[str] | None:
     """Validate testbench, external measurement-command and extraction-only modes.
     Both dry-run and execution use the same checks before extraction starts.
     """
+    if schematic_top is not None and (extract_only or measure_command is not None):
+        raise PexError("--schematic-top requires testbench mode")
     _validate_simulation_timeout(timeout_s, measure_command, extract_only)
     if extract_only:
         _reject_extract_only_conflicts(
@@ -2056,12 +2062,35 @@ def _stderr_tail(stderr: str | None, *, lines: int = 10) -> str:
     return " -- stderr tail:\n" + "\n".join(tail)
 
 
+def _bound_testbenches(
+    schematic: str | None,
+    physical: str,
+    schematic_path: str,
+    body_paths: Sequence[str],
+    extracted_path: str | None = None,
+) -> list[str | None]:
+    """Resolve the requested roots and every testbench before dispatching a leg."""
+    if schematic is None:
+        return [None] * len(body_paths)
+    try:
+        return pex_binding.bind(
+            schematic, physical, schematic_path, body_paths, extracted_path
+        )
+    except ValueError as exc:
+        raise PexError(
+            f"cannot bind schematic DUT '{schematic}' to layout top "
+            f"'{physical}': {exc}",
+            code="dut_binding",
+        ) from exc
+
+
 def _prepare_extracted_request(
     *,
     testbench_path: str,
     extracted_netlist_path: str,
     work_dir: str,
     label: str,
+    bound_body: str | None = None,
 ) -> str:
     """The extracted-side DUT-swapped request copy -- see
     :func:`_prepare_dut_swapped_request`."""
@@ -2071,6 +2100,7 @@ def _prepare_extracted_request(
         work_dir=work_dir,
         label=label,
         side="extracted",
+        bound_body=bound_body,
     )
 
 
@@ -2100,6 +2130,7 @@ def _prepare_dut_swapped_request(
     dut_netlist_path: str,
     work_dir: str,
     label: str,
+    bound_body: str | None = None,
     side: str,
 ) -> str:
     """Build (and write, under ``work_dir``) a ``side``-side copy of the
@@ -2129,8 +2160,10 @@ def _prepare_dut_swapped_request(
     request_dir = os.path.dirname(os.path.abspath(testbench_path))
 
     schematic_body_path = _resolve_relative(request["netlist"], request_dir)
-    with open(schematic_body_path, encoding="utf-8") as handle:
-        body_text = handle.read()
+    body_text = bound_body
+    if body_text is None:
+        with open(schematic_body_path, encoding="utf-8") as handle:
+            body_text = handle.read()
     body_dir = os.path.dirname(schematic_body_path)
     include_line, _dut_path = _find_dut_include(body_text, body_dir)
     swapped_body_text = _rewrite_dut_include(body_text, include_line, dut_netlist_path)
@@ -2414,6 +2447,7 @@ def _run_device_only_sim(
     testbench_path: str,
     work_dir: str,
     label: str,
+    bound_body: str | None = None,
     backend: Any,
     batch_shard: Mapping[str, int | float | bool | None] | None = None,
 ) -> dict[str, Any] | None:
@@ -2431,6 +2465,7 @@ def _run_device_only_sim(
                 work_dir=work_dir,
                 label=label,
                 side="device-only",
+                bound_body=bound_body,
             ),
             artifacts_dir=os.path.join(work_dir, label, "device-only"),
             backend=backend,
@@ -2529,6 +2564,7 @@ def run_pex(
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
     flatten_schematic: bool = False,
+    schematic_top: str | None = None,
     device_only_leg: bool = False,
     extract_only: bool = False,
     submit_only: bool = False,
@@ -2813,6 +2849,7 @@ def run_pex(
         timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
+        schematic_top=schematic_top,
         device_only_leg=device_only_leg,
     )
     command_mode = command is not None
@@ -2992,7 +3029,9 @@ def run_pex(
         for label, identity in zip(labels, input_identity, strict=True)
     }
     legs.verify(
-        extracted_netlist_sha256=extracted_netlist_sha256, request_sha256=request_shas
+        extracted_netlist_sha256=extracted_netlist_sha256,
+        request_sha256=request_shas,
+        schematic_top=schematic_top,
     )
     # One `reference_netlist` for the whole run either way: every testbench's
     # single `.include` target in testbench mode, the caller's own
@@ -3011,13 +3050,20 @@ def run_pex(
     # Issue #2889: `--flatten-schematic` -- the netlist the schematic leg
     # actually runs (and every diagnostic below compares) is a flattened
     # copy of the DUT; `reference_netlist` keeps naming the caller's file.
+    bound_bodies = _bound_testbenches(
+        schematic_top,
+        extract_report["top"],
+        reference_netlist_path,
+        [item["netlist"] for item in input_identity],
+        extracted_netlist_path,
+    )
     schematic_flatten: dict[str, Any] | None = None
     schematic_netlist_path = reference_netlist_path
     if flatten_schematic:
         schematic_netlist_path, schematic_flatten = _flatten_schematic_dut(
             reference_netlist_path,
             work_dir=work_dir,
-            top=extract_report["top"],
+            top=schematic_top or extract_report["top"],
             repo_root=repo_root,
             wrap_pins=(
                 _subckt_interfaces(_read_text(extracted_netlist_path) or "").get(
@@ -3026,25 +3072,8 @@ def run_pex(
             ),
         )
 
-    # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
-    # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
-    # output is diagnosed once, up front, for the whole run -- unlike
-    # `_pin_count_mismatch` below (reactive: only ever consulted once a
-    # simulation attempt has already come back with nothing measured), this
-    # must run *before* either side simulates, since a testbench with no
-    # `.ic` card might otherwise just simulate a disconnected fixture and
-    # report a spurious passing number rather than an error at all (see
-    # `_flat_dut_mismatch`'s own docstring).
-    #
-    # Issue #2478: inapplicable in `--measure-command` mode, and therefore
-    # always `None` there. This diagnostic exists because testbench mode
-    # re-runs the testbench's own unmodified `X...` instantiation line
-    # against both netlists, so a flat schematic DUT leaves every
-    # source/probe disconnected on the extracted side. A caller-supplied
-    # command builds each side's deck itself from the netlist path it is
-    # handed, so neither the premise nor the consequence holds -- reporting
-    # it anyway would be a false alarm, and (worse) would skip the
-    # extracted-side measurement the harness is perfectly able to take.
+    # The testbench expects a callable DUT. An unwrapped schematic fragment
+    # leaves the fixture disconnected unless flattening produced a wrapper.
     flat_dut_mismatch = (
         None
         if command_mode or extract_only
@@ -3081,43 +3110,10 @@ def run_pex(
 
     testbenches_summary: list[dict[str, Any]] = []
     delta: list[dict[str, Any]] = []
-    # Issue #1030 / #1041: populated (once) when the schematic/extracted
-    # top-level pin-list mismatch is detected -- reported as a named,
-    # structured field in this run's own JSON report rather than left buried
-    # in a per-corner ngspice.log. One field for the whole run: every
-    # testbench shares one reference_netlist and one extracted netlist, so
-    # the mismatch is a property of the pair, not of a testbench.
-    #
-    # Issue #1041: detection is now *proactive* by default, from the two
-    # netlists' own `.SUBCKT` headers -- `extract_report["top"]` names
-    # exactly the subcircuit `klt extract` wrapped its output in (the same
-    # anchor `_flat_dut_mismatch` above already uses), so this pre-flight
-    # `_pin_count_mismatch` call is scoped to that one instantiated
-    # subcircuit and cannot false-positive on an unrelated helper `.SUBCKT`
-    # elsewhere in either netlist (the false-positive guard the issue's own
-    # Notes section calls out). Doing this before any extracted-side
-    # simulation makes detection identical on every ngspice version --
-    # previously (#1030) it only fired *reactively*, after an extracted-side
-    # `klt sim` call already came back with nothing measured, which depended
-    # on the installed ngspice actually refusing the mismatched deck (older
-    # ngspice, e.g. 42, silently accepts many pin-count mismatches instead,
-    # simulating to completion with dangling terminals and a plausible but
-    # meaningless "pass" -- see docs/cli/pex.md). Skipped when
-    # `flat_dut_mismatch` already fired: the schematic DUT declares no
-    # `.SUBCKT` at all there, so this check could not find a same-named
-    # interface to compare anyway, and the two diagnostics stay mutually
-    # exclusive as before.
-    #
-    # `_pin_count_mismatch_from_report`/`_pin_count_mismatch_from_message`
-    # below remain as the *reactive* fallback for mismatches this static
-    # header comparison cannot see -- e.g. a subcircuit name only one side
-    # declares, or an unreadable header -- and are only ever consulted when
-    # this pre-flight check did not already find one.
-    #
-    # Issue #2478: like `flat_dut_mismatch` above, inapplicable (and always
-    # `None`) in `--measure-command` mode -- the testbench `X...`-line reuse
-    # that makes a pin-count difference fatal is exactly what that mode does
-    # not do.
+    # Compare the two selected headers once for every testbench. Older
+    # ngspice versions can silently simulate a mismatched call with dangling
+    # terminals. When static comparison is inconclusive, the extracted
+    # engine's own pin-count error is still handled below (#1030, #1041).
     pin_count_mismatch: dict[str, Any] | None = None
     # Issue #2990: the first extracted-side `SimError` that is not a pin-count
     # mismatch (e.g. a batch-fleet capacity refusal), `None` otherwise.
@@ -3129,6 +3125,7 @@ def run_pex(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
             subcircuit=extract_report["top"],
+            schematic_top=schematic_top,
         )
 
     # Issue #2890: same pins in a different order. Pre-flight like the two
@@ -3142,6 +3139,7 @@ def run_pex(
         extract_only=extract_only,
         reference_netlist=reference_netlist_path,
         extracted_netlist=extracted_netlist_path,
+        schematic_top=schematic_top,
         top_cell=extract_report["top"],
     )
 
@@ -3243,6 +3241,7 @@ def run_pex(
                 extracted_request_path = _prepare_extracted_request(
                     testbench_path=testbench_path,
                     extracted_netlist_path=leg_extracted,
+                    bound_body=bound_bodies[index],
                     work_dir=work_dir,
                     label=label,
                 )
@@ -3357,6 +3356,7 @@ def run_pex(
             testbench_path=testbench_path,
             work_dir=work_dir,
             label=label,
+            bound_body=bound_bodies[index],
             backend=backend,
             batch_shard=batch_shard,
         )
