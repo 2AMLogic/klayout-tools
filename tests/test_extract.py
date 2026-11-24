@@ -624,9 +624,7 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
     assert report["schema_version"] == 4
-    # Issue #2659: the `{path, scope}` envelope, not the raw input path --
-    # this module's `tmp_path` override seeds a `.git` marker, so the layout
-    # resolves inside a repo.
+    # The tmp_path fixture seeds a .git marker for repo-relative paths (#2659).
     assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
@@ -667,8 +665,10 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
         "pdk",
         "deck",
         "input",
+        "klayout_version_mismatch",
     }
     assert isinstance(prov["klt_version"], str)
+    assert isinstance(prov["klayout_version_mismatch"], bool)
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "sky130"
     assert prov["deck"]["content_hash"].startswith("sha256:")
