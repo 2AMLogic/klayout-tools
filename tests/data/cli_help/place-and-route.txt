@@ -27,6 +27,7 @@ positional arguments:
 options:
   -h, --help show this help message and exit
   --threads N|max OpenROAD threads per process (overrides request.threads, default 1)
+  --from-def DEF run only the DEF->GDS merge on an existing routed DEF (issue #7721): resolve the LEF/GDS views from the request, run the merge-time repair passes (min-area, via-pad trim with tip_check/router_fill_scan, power- stack) on that routing, and write <top>_from_def.gds under the stage root -- no OpenROAD stage, stage ODB or commit record needed, so a committed routed stream can be re-graded on a later pin. Not combinable with --check/--rerun/--resume/--backend. See docs/cli/place-and-route.md, 'Merging a committed routed DEF (--from-def)'
   --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
   --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
   --backend {local,batch} where the units of a `pdk.rebuild_corners` request run (default: the request's `backend` field, then $KLT_SIM_BACKEND, then local). `batch` submits one job per corner to the Spot batch fleet and never falls back to running OpenROAD on this host; a single-unit request stays local under a host-default batch. See docs/cli/place-and-route.md, 'Physical rebuild per corner'

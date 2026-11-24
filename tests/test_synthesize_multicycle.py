@@ -12,6 +12,7 @@ from klayout_tools.cli import main
 from klayout_tools.synthesize_constrained_timing import (
     constrained_timing_fields,
     mapped_sta_constraints,
+    mapped_sta_macros,
 )
 
 CLOCK = {"port": "clk", "period_ns": 2.0}
@@ -69,7 +70,7 @@ def test_no_entries_need_no_sta_engine(tmp_path, constraints):
             hdl_toplevel="top",
             cell_library=PDK["cell_library"],
             corner=PDK["corner"],
-            macros=[],
+            sta_macros=[],
             pdk_root=None,
             pdk_variant=None,
         )
@@ -132,7 +133,7 @@ def test_sta_receives_named_clocks_resolved_macro_paths_and_all_entries(
             hdl_toplevel="top",
             cell_library=PDK["cell_library"],
             corner=PDK["corner"],
-            macros=[macro],
+            sta_macros=mapped_sta_macros(constraints, [macro]),
             pdk_root=str(tmp_path),
             pdk_variant="sky130A",
         )

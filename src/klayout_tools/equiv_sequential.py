@@ -15,22 +15,17 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
-import time
+from dataclasses import dataclass
 from typing import Any
 
-from ._engine_proc import run_in_group
-from ._provenance import (
-    INPUT_ROLE_SOURCE,
-    _combined_content_hash,
-    _yosys_version,
-    build_provenance,
-)
+from ._provenance import _yosys_version
 from .equiv import (
-    SCHEMA_VERSION,
+    _build_report,
     _classify_sat_result,
     _decode_bin,
+    _run_yosys_subprocess,
     _side_prep_lines,
+    _write_yosys_log,
     _yosys_error_message,
 )
 from .equiv_errors import EquivError
@@ -105,71 +100,6 @@ _MAX_STAGE1_REFINEMENTS = 3
 # module's own docstring, "Engine: yosys-sequential" section, for the full
 # rationale.
 # --------------------------------------------------------------------------- #
-
-
-class _YosysRunResult:
-    """Small return-value bundle for :func:`_run_yosys_subprocess` -- mirrors
-    the local variables ``run_equiv``'s own combinational path already
-    tracks inline (``timed_out``/``returncode``/``stdout``/``stderr``), just
-    packaged so the sequential engine's two near-identical stages can share
-    one subprocess-running helper instead of duplicating it."""
-
-    def __init__(
-        self,
-        *,
-        timed_out: bool,
-        returncode: int | None,
-        stdout: str,
-        stderr: str,
-        elapsed_s: float,
-    ) -> None:
-        self.timed_out = timed_out
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.elapsed_s = elapsed_s
-
-
-def _run_yosys_subprocess(
-    script_path: str, timeout_s: float, binary: str = "yosys"
-) -> _YosysRunResult:
-    """Run ``<binary> -s <script_path>``, bounded by ``timeout_s`` -- the
-    same subprocess-invocation shape ``run_equiv``'s own combinational path
-    uses inline, factored out so the sequential engine's two stages
-    (:func:`_run_sequential`) can share it.
-
-    ``binary`` (issue #2423) is the resolved absolute path
-    ``_resolve_yosys_binary`` settled on for this run; both of
-    :func:`_run_sequential`'s call sites always pass it explicitly -- the
-    ``"yosys"`` default exists only so a direct test of this function need
-    not also stub binary resolution.
-    """
-    started = time.monotonic()
-    timed_out = False
-    stdout = stderr = ""
-    returncode: int | None = None
-    try:
-        completed = run_in_group(
-            [binary, "-s", script_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        returncode = completed.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    except OSError as exc:
-        raise EquivError(f"could not launch yosys: {exc}") from exc
-    elapsed_s = round(time.monotonic() - started, 3)
-    return _YosysRunResult(
-        timed_out=timed_out,
-        returncode=returncode,
-        stdout=stdout,
-        stderr=stderr,
-        elapsed_s=elapsed_s,
-    )
 
 
 def _write_sequential_stage1_script(
@@ -699,45 +629,26 @@ def _parse_sequential_replay_outputs(
     return sim_cycle_entries, sim_diverging_union
 
 
-def _build_sequential_report(
-    *,
-    engine: str,
-    engine_version: str | None,
-    yosys_binary: str | None,
-    sim_backend: str,
-    status: str,
-    gold: dict[str, Any],
-    gate: dict[str, Any],
-    port_map: dict[str, str] | None,
-    timeout_s: float,
-    elapsed_s: float,
-    induction_depth: int,
-    counterexample: dict[str, Any] | None,
-    diagnostics: list[dict[str, str]],
-    stage1_script_path: str,
-    stage1_log_path: str,
-    stage2_script_path: str | None,
-    stage2_log_path: str | None,
-    netlist_path: str,
-    stage1_blacklist_path: str | None = None,
-    resume: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """The ``"yosys-sequential"`` engine's own report builder -- mirrors
-    :func:`_build_report`'s shape (``schema_version``/``engine``/``status``/
-    ``gold``/``gate``/``port_map``/``timeout_s``/``elapsed_s``/
-    ``counterexample``/``diagnostics``/``artifacts``/``provenance``) plus
-    two additive fields this engine alone needs: ``induction_depth`` (the
-    effective ``equiv_induct -seq``/stage-2 ``sat -seq`` depth actually
-    used) and ``artifacts.stage2_script_path``/``artifacts.stage2_log_path``
+@dataclass(frozen=True)
+class _SequentialReportContext:
+    """The envelope fields that never change within one
+    ``"yosys-sequential"`` run, bound once by :func:`_run_sequential` so
+    every return path -- and a resumed run's reconstructed one -- reports
+    them identically. :meth:`build` adds the per-outcome fields through the
+    shared :func:`_build_report`, which is what keeps this engine's envelope
+    the combinational engine's own shape plus the two additive fields it
+    alone needs: ``induction_depth`` (the effective ``equiv_induct -seq``/
+    stage-2 ``sat -seq`` depth actually used) and
+    ``artifacts.stage2_script_path``/``artifacts.stage2_log_path``
     (``None`` when stage 2 never ran, i.e. stage 1 alone reached
-    ``"equivalent"``) -- ``artifacts.script_path``/``artifacts.log_path``
-    keep referring to stage 1 (always run), matching the combinational
-    engine's own singular ``script_path``/``log_path`` field names so a
-    caller that only reads those two fields still gets a meaningful path.
+    ``"equivalent"``). ``artifacts.script_path``/``artifacts.log_path`` keep
+    referring to stage 1 (always run), matching the combinational engine's
+    own singular ``script_path``/``log_path`` field names so a caller that
+    only reads those two fields still gets a meaningful path.
 
-    ``artifacts.stage1_blacklist_path`` (issue #1353) is the
-    ``equiv_make -blacklist`` file stage 1's cut-point refinement loop wrote,
-    or ``None`` when no refinement was needed -- the auditable record of
+    ``stage1_blacklist_path`` (issue #1353) is the ``equiv_make
+    -blacklist`` file stage 1's cut-point refinement loop wrote, or
+    ``None`` when no refinement was needed -- the auditable record of
     exactly which internal wire pairings the proof dropped.
 
     ``resume`` (issue #2280) is the additive ``resume`` envelope block,
@@ -746,60 +657,65 @@ def _build_sequential_report(
     the same present-only-when-requested convention ``klt sim``'s
     ``environment.resume`` block uses).
     """
-    all_sources = gold["sources"] + gate["sources"]
-    if len(all_sources) == 1:
-        # Issue #2027: `klt equiv`'s inputs are HDL sources (the golden and
-        # gate-level designs), never a layout stream -- see
-        # `docs/json-contract.md`'s `provenance.input.role`.
-        provenance = build_provenance(
-            input_path=all_sources[0], input_role=INPUT_ROLE_SOURCE
-        )
-    else:
-        provenance = build_provenance()
-        provenance["input"] = {
-            "content_hash": _combined_content_hash(all_sources),
-            "role": INPUT_ROLE_SOURCE,
-        }
 
-    report: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "engine": engine,
-        "engine_version": engine_version,
-        # Issue #2423: same convention as `_build_report`'s own
-        # `yosys_binary` -- see that field's comment.
-        "yosys_binary": yosys_binary,
-        "sim_backend": sim_backend,
-        "status": status,
-        "gold": gold,
-        "gate": gate,
-        "port_map": port_map,
-        "timeout_s": timeout_s,
-        "elapsed_s": elapsed_s,
-        "induction_depth": induction_depth,
-        "counterexample": counterexample,
-        "diagnostics": diagnostics,
-        "artifacts": {
-            "script_path": stage1_script_path,
-            "netlist_path": netlist_path if os.path.isfile(netlist_path) else None,
-            "log_path": stage1_log_path if os.path.isfile(stage1_log_path) else None,
-            "stage2_script_path": stage2_script_path,
-            "stage2_log_path": (
-                stage2_log_path
-                if stage2_log_path is not None and os.path.isfile(stage2_log_path)
-                else None
-            ),
-            "stage1_blacklist_path": (
-                stage1_blacklist_path
-                if stage1_blacklist_path is not None
-                and os.path.isfile(stage1_blacklist_path)
-                else None
-            ),
-        },
-        "provenance": provenance,
-    }
-    if resume is not None:
-        report["resume"] = resume
-    return report
+    engine: str
+    engine_version: str | None
+    yosys_binary: str | None
+    sim_backend: str
+    gold: dict[str, Any]
+    gate: dict[str, Any]
+    port_map: dict[str, str] | None
+    timeout_s: float
+    induction_depth: int
+    stage1_script_path: str
+    stage1_log_path: str
+    netlist_path: str
+    resume: dict[str, Any] | None
+
+    def build(
+        self,
+        *,
+        status: str,
+        elapsed_s: float,
+        counterexample: dict[str, Any] | None,
+        diagnostics: list[dict[str, str]],
+        stage2_script_path: str | None = None,
+        stage2_log_path: str | None = None,
+        stage1_blacklist_path: str | None = None,
+    ) -> dict[str, Any]:
+        return _build_report(
+            resume=self.resume,
+            engine=self.engine,
+            engine_version=self.engine_version,
+            yosys_binary=self.yosys_binary,
+            sim_backend=self.sim_backend,
+            status=status,
+            gold=self.gold,
+            gate=self.gate,
+            port_map=self.port_map,
+            timeout_s=self.timeout_s,
+            elapsed_s=elapsed_s,
+            induction_depth=self.induction_depth,
+            counterexample=counterexample,
+            diagnostics=diagnostics,
+            script_path=self.stage1_script_path,
+            netlist_path=self.netlist_path,
+            log_path=self.stage1_log_path,
+            extra_artifacts={
+                "stage2_script_path": stage2_script_path,
+                "stage2_log_path": (
+                    stage2_log_path
+                    if stage2_log_path is not None and os.path.isfile(stage2_log_path)
+                    else None
+                ),
+                "stage1_blacklist_path": (
+                    stage1_blacklist_path
+                    if stage1_blacklist_path is not None
+                    and os.path.isfile(stage1_blacklist_path)
+                    else None
+                ),
+            },
+        )
 
 
 def _new_blacklist_candidates(
@@ -889,20 +805,8 @@ def _load_stage1_record_for_resume(
 def _resume_report_from_committed_stage1(
     stage1_record: dict[str, Any],
     *,
-    engine: str,
-    engine_version: str | None,
-    yosys_binary: str | None,
-    sim_backend: str,
-    gold: dict[str, Any],
-    gate: dict[str, Any],
-    port_map: dict[str, str] | None,
-    effective_timeout_s: float,
-    induction_depth: int,
-    script1_path: str,
-    log1_path: str,
-    netlist_path: str,
+    report_ctx: _SequentialReportContext,
     blacklist_path: str,
-    resume_block: dict[str, Any],
     resume_diagnostics: list[dict[str, str]],
 ) -> tuple[dict[str, Any] | None, set[str], int, str | None]:
     """Adopt a loader-validated stage-1 commit record (issue #2280): the
@@ -931,7 +835,9 @@ def _resume_report_from_committed_stage1(
         _write_equiv_blacklist(blacklist_path, blacklisted)
     active_blacklist_path = blacklist_path if blacklisted else None
 
-    resume_block["resumed_stage"] = 1  # a record is only loaded under resume
+    resume_block = report_ctx.resume
+    assert resume_block is not None  # a record is only ever loaded under resume
+    resume_block["resumed_stage"] = 1
     refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
         refinements, blacklisted
     )
@@ -942,27 +848,12 @@ def _resume_report_from_committed_stage1(
         return None, blacklisted, refinements, active_blacklist_path
 
     return (
-        _build_sequential_report(
-            engine=engine,
-            engine_version=engine_version,
-            yosys_binary=yosys_binary,
-            sim_backend=sim_backend,
+        report_ctx.build(
             status="equivalent",
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            timeout_s=effective_timeout_s,
             elapsed_s=0.0,
-            induction_depth=induction_depth,
             counterexample=None,
             diagnostics=refinement_diagnostics,
-            stage1_script_path=script1_path,
-            stage1_log_path=log1_path,
-            stage2_script_path=None,
-            stage2_log_path=None,
-            netlist_path=netlist_path,
             stage1_blacklist_path=active_blacklist_path,
-            resume=resume_block,
         ),
         blacklisted,
         refinements,
@@ -1003,6 +894,21 @@ def _run_sequential(
 
     int_timeout = max(1, round(effective_timeout_s))
     engine_version = _yosys_version(yosys_binary)
+    report_ctx = _SequentialReportContext(
+        engine=engine,
+        engine_version=engine_version,
+        yosys_binary=yosys_binary,
+        sim_backend=sim_backend,
+        gold=gold,
+        gate=gate,
+        port_map=port_map or None,
+        timeout_s=effective_timeout_s,
+        induction_depth=induction_depth,
+        stage1_script_path=script1_path,
+        stage1_log_path=log1_path,
+        netlist_path=netlist_path,
+        resume=resume_block,
+    )
     fingerprint = stage_fingerprint(
         gold=gold,
         gate=gate,
@@ -1049,20 +955,8 @@ def _run_sequential(
             active_blacklist_path,
         ) = _resume_report_from_committed_stage1(
             stage1_record,
-            engine=engine,
-            engine_version=engine_version,
-            yosys_binary=yosys_binary,
-            sim_backend=sim_backend,
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            effective_timeout_s=effective_timeout_s,
-            induction_depth=induction_depth,
-            script1_path=script1_path,
-            log1_path=log1_path,
-            netlist_path=netlist_path,
+            report_ctx=report_ctx,
             blacklist_path=blacklist_path,
-            resume_block=resume_block,
             resume_diagnostics=resume_diagnostics,
         )
         if resumed_report is not None:
@@ -1087,14 +981,7 @@ def _run_sequential(
                 script1_path, effective_timeout_s - total_elapsed_s, yosys_binary
             )
             total_elapsed_s = round(total_elapsed_s + stage1.elapsed_s, 3)
-            try:
-                with open(log1_path, "w", encoding="utf-8") as handle:
-                    handle.write(stage1.stdout)
-                    if stage1.stderr:
-                        handle.write("\n--- stderr ---\n")
-                        handle.write(stage1.stderr)
-            except OSError:
-                pass
+            _write_yosys_log(log1_path, stage1)
 
             if (
                 stage1.timed_out
@@ -1128,18 +1015,9 @@ def _run_sequential(
             write_partial_stage_record(
                 record_path, fingerprint, reason="process_timeout"
             )
-            return _build_sequential_report(
-                engine=engine,
-                engine_version=engine_version,
-                yosys_binary=yosys_binary,
-                sim_backend=sim_backend,
+            return report_ctx.build(
                 status="inconclusive",
-                gold=gold,
-                gate=gate,
-                port_map=port_map or None,
-                timeout_s=effective_timeout_s,
                 elapsed_s=total_elapsed_s,
-                induction_depth=induction_depth,
                 counterexample=None,
                 diagnostics=refinement_diagnostics
                 + [
@@ -1153,13 +1031,7 @@ def _run_sequential(
                         ),
                     }
                 ],
-                stage1_script_path=script1_path,
-                stage1_log_path=log1_path,
-                stage2_script_path=None,
-                stage2_log_path=None,
-                netlist_path=netlist_path,
                 stage1_blacklist_path=active_blacklist_path,
-                resume=resume_block,
             )
 
         if stage1.returncode != 0:
@@ -1205,27 +1077,12 @@ def _run_sequential(
         )
 
         if stage1_all_proven:
-            return _build_sequential_report(
-                engine=engine,
-                engine_version=engine_version,
-                yosys_binary=yosys_binary,
-                sim_backend=sim_backend,
+            return report_ctx.build(
                 status="equivalent",
-                gold=gold,
-                gate=gate,
-                port_map=port_map or None,
-                timeout_s=effective_timeout_s,
                 elapsed_s=total_elapsed_s,
-                induction_depth=induction_depth,
                 counterexample=None,
                 diagnostics=refinement_diagnostics,
-                stage1_script_path=script1_path,
-                stage1_log_path=log1_path,
-                stage2_script_path=None,
-                stage2_log_path=None,
-                netlist_path=netlist_path,
                 stage1_blacklist_path=active_blacklist_path,
-                resume=resume_block,
             )
 
     # Stage 1 left one or more $equiv cells unproven -- register-
@@ -1257,30 +1114,14 @@ def _run_sequential(
     )
 
     stage2 = _run_yosys_subprocess(script2_path, effective_timeout_s, yosys_binary)
-    try:
-        with open(log2_path, "w", encoding="utf-8") as handle:
-            handle.write(stage2.stdout)
-            if stage2.stderr:
-                handle.write("\n--- stderr ---\n")
-                handle.write(stage2.stderr)
-    except OSError:
-        pass
+    _write_yosys_log(log2_path, stage2)
 
     total_elapsed_s = round(total_elapsed_s + stage2.elapsed_s, 3)
 
     if stage2.timed_out:
-        return _build_sequential_report(
-            engine=engine,
-            engine_version=engine_version,
-            yosys_binary=yosys_binary,
-            sim_backend=sim_backend,
+        return report_ctx.build(
             status="inconclusive",
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            timeout_s=effective_timeout_s,
             elapsed_s=total_elapsed_s,
-            induction_depth=induction_depth,
             counterexample=None,
             diagnostics=refinement_diagnostics
             + [
@@ -1295,13 +1136,9 @@ def _run_sequential(
                     ),
                 }
             ],
-            stage1_script_path=script1_path,
-            stage1_log_path=log1_path,
             stage2_script_path=script2_path,
             stage2_log_path=log2_path,
-            netlist_path=netlist_path,
             stage1_blacklist_path=active_blacklist_path,
-            resume=resume_block,
         )
 
     if stage2.returncode != 0:
@@ -1332,27 +1169,14 @@ def _run_sequential(
                     ),
                 }
             ]
-        return _build_sequential_report(
-            engine=engine,
-            engine_version=engine_version,
-            yosys_binary=yosys_binary,
-            sim_backend=sim_backend,
+        return report_ctx.build(
             status="inconclusive",
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            timeout_s=effective_timeout_s,
             elapsed_s=total_elapsed_s,
-            induction_depth=induction_depth,
             counterexample=None,
             diagnostics=refinement_diagnostics + diagnostics2,
-            stage1_script_path=script1_path,
-            stage1_log_path=log1_path,
             stage2_script_path=script2_path,
             stage2_log_path=log2_path,
-            netlist_path=netlist_path,
             stage1_blacklist_path=active_blacklist_path,
-            resume=resume_block,
         )
 
     cycles = _parse_multicycle_signal_table(stage2.stdout)
@@ -1389,25 +1213,12 @@ def _run_sequential(
         else "counterexample"
     )
 
-    return _build_sequential_report(
-        engine=engine,
-        engine_version=engine_version,
-        yosys_binary=yosys_binary,
-        sim_backend=sim_backend,
+    return report_ctx.build(
         status=status3,
-        gold=gold,
-        gate=gate,
-        port_map=port_map or None,
-        timeout_s=effective_timeout_s,
         elapsed_s=total_elapsed_s,
-        induction_depth=induction_depth,
         counterexample=counterexample,
         diagnostics=refinement_diagnostics + diagnostics2,
-        stage1_script_path=script1_path,
-        stage1_log_path=log1_path,
         stage2_script_path=script2_path,
         stage2_log_path=log2_path,
-        netlist_path=netlist_path,
         stage1_blacklist_path=active_blacklist_path,
-        resume=resume_block,
     )
