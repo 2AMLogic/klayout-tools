@@ -330,7 +330,9 @@ def test_declared_box_with_nothing_cited_is_no_evidence(cited):
         for i in build_tier_report(_manifest(evidence=evidence))["items"]
         if i["id"] == 7
     )
+    # Apart from the summary, it is the row a manifest without a box produces.
     assert (baseline["status"], baseline["reason"]) == ("unmet", "no_evidence")
+    assert {k: v for k, v in result.items() if k != "detail"} == baseline
 
 
 def test_nothing_cited_text_output_names_the_missing_corners(tmp_path, capsys):

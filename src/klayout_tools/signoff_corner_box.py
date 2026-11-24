@@ -7,6 +7,7 @@ from .signoff_row_extent import label_list
 from .signoff_unmet_reasons import (
     _REASON_CHECK_FAILED,
     _REASON_INVALID_EVIDENCE,
+    _REASON_NO_EVIDENCE,
     _REASON_PARTIAL_COVERAGE,
     _REASON_WRONG_KIND,
 )
@@ -43,17 +44,6 @@ class CornerBox:
     original_reasons: dict[int, str] = field(default_factory=dict)
     wrong_kind_problem: str = _WRONG_KIND_PROBLEM
 
-    def awaits_citation(self, raw_entry: Any) -> bool:
-        """A well-formed box with nothing cited is plain ``no_evidence``.
-
-        A malformed declaration still reports its own problem (#7700).
-        """
-        return raw_entry is None and self.problem is None
-
-    def uncited_detail(self) -> dict[str, Any]:
-        """The ``detail`` for an item whose box has no citation to grade."""
-        return {"corner_box": self.coverage({})}
-
     def member_disclosure(self, spec: dict, status: str) -> dict[str, str]:
         reason = self.original_reasons.get(id(spec))
         if status == "met" and reason:
@@ -89,6 +79,9 @@ class CornerBox:
     def grade(self, envelopes: dict[int, dict], graded: list, extra: dict) -> tuple:
         summary = self.coverage(envelopes)
         detail = {"corner_box": summary}
+        if not graded:
+            # Issue #7700: nothing cited is `no_evidence`, as without a box.
+            return "unmet", _REASON_NO_EVIDENCE, None, detail, {}
         if summary["missing"]:
             return "unmet", _REASON_PARTIAL_COVERAGE, None, detail, extra
         citations = [grade[2] for _, _, grade in graded]
