@@ -126,6 +126,80 @@ def _pad_self_notch(
     return bool(_pad_introduced_notches_dbu(layer_region, pad, spacing_dbu))
 
 
+def _pad_self_space(
+    x: int,
+    y: int,
+    half: int,
+    spacing_dbu: int,
+    layer_region: Any,
+) -> bool:
+    """Whether the pad footprint at ``(x, y)`` sits closer than
+    ``spacing_dbu`` to a *non-touching* polygon of ``layer_region`` (#6440).
+
+    The inter-polygon half of the same-net legality test that
+    :func:`_pad_self_notch` starts: a pad landing between two separate
+    shapes of its own net can leave a sub-``space`` gap to each, which is a
+    net-agnostic ``met*.space.*`` finding even though both facing edges are
+    the port net's own metal. ``_pad_self_notch`` cannot see it (the pad
+    never merges with either shape, so there is no notch to find) and
+    ``clearance`` skips the port net's own metal.
+
+    **Overlap is exempt.** A polygon the pad touches or overlaps is the metal
+    it is *meant* to land on and merge with, so it is dropped before the
+    check -- the same exemption :func:`_pad_self_notch` makes, and the same
+    shape as ``gen_compose_via_cuts``'s own-cut test. A gap *inside* the merged
+    polygon the pad joins is a notch, and stays ``_pad_self_notch``'s.
+
+    **Windowed, pad-relative.** Only polygons within ``spacing_dbu`` of the pad
+    can be closer than ``spacing_dbu`` to it, so the check runs against those
+    alone. They are *selected* (``interacting``), never clipped (``&``): a
+    clipped polygon grows a fake edge at the window boundary, whereas a whole
+    selected one yields exactly the verdict a whole-layer check would. Because
+    the gap measured is always pad-to-shape, a sub-spacing gap that already
+    exists elsewhere on the layer (DRC-dirty input) cannot reject a candidate
+    that does not come near it.
+
+    Other nets' metal is in ``layer_region`` too, but ``clearance`` (checked
+    first in :func:`_first_rejection`) has already kept the pad
+    ``spacing_dbu`` clear of it in a stricter, Chebyshev, metric -- so this
+    only ever fires for the port net's own metal. ``False`` when
+    ``spacing_dbu <= 0`` (no ``space`` rule to test)."""
+    import klayout.db as kdb
+
+    if spacing_dbu <= 0:
+        return False
+    pad = kdb.Region(kdb.Box(x - half, y - half, x + half, y + half))
+    nearby = layer_region.interacting(_box(x, y, half, spacing_dbu))
+    return not nearby.not_interacting(pad).separation_check(pad, spacing_dbu).is_empty()
+
+
+def _own_net_rejection(
+    x: int,
+    y: int,
+    pad_half: dict[_LayerPair, int],
+    space_dbu: dict[_LayerPair, int],
+    self_region: dict[_LayerPair, Any],
+) -> tuple[str, str] | None:
+    """``(category, detail)`` for the first same-net legality test a pad
+    breaks, or ``None``: every pad layer is notch-checked (#5608) and then
+    space-checked (#6440) against the metal it lands in. Both run only after
+    ``clearance`` has cleared the pad of every *other* net."""
+    for pair, half in pad_half.items():
+        if _pad_self_notch(x, y, half, space_dbu[pair], self_region[pair]):
+            return (
+                "self_notch",
+                f"pad {pair[0]}/{pair[1]} notches the net's own metal",
+            )
+    for pair, half in pad_half.items():
+        if _pad_self_space(x, y, half, space_dbu[pair], self_region[pair]):
+            return (
+                "self_space",
+                f"pad {pair[0]}/{pair[1]} too close to a separate shape of the "
+                "net's own metal",
+            )
+    return None
+
+
 def _first_rejection(
     x: int,
     y: int,
@@ -151,13 +225,7 @@ def _first_rejection(
     for pair, half in pad_half.items():
         if not (obstacles[pair] & _box(x, y, half, space_dbu[pair])).is_empty():
             return "clearance", f"pad {pair[0]}/{pair[1]} too close to another net"
-    for pair, half in pad_half.items():
-        if _pad_self_notch(x, y, half, space_dbu[pair], self_region[pair]):
-            return (
-                "self_notch",
-                f"pad {pair[0]}/{pair[1]} notches the net's own metal",
-            )
-    return None
+    return _own_net_rejection(x, y, pad_half, space_dbu, self_region)
 
 
 def _grid_candidates(
@@ -226,8 +294,8 @@ def _stack_obstacles(
     """``(obstacles, self_region)`` per layer: the regions the landing must
     stay clear of -- every *other* net's metal under a pad, and every
     existing cut under a new cut -- plus the *full* merged per-layer region
-    each pad lands in (the self-notch test needs the whole layer, not the
-    net-subtracted obstacle, #5608)."""
+    each pad lands in (the self-notch and self-space tests need the port
+    net's own metal, which the net-subtracted obstacle omits, #5608/#6440)."""
     import klayout.db as kdb
 
     obstacles: dict[_LayerPair, Any] = {}
@@ -312,6 +380,7 @@ def _search_landing(
         "via_spacing": 0,
         "clearance": 0,
         "self_notch": 0,
+        "self_space": 0,
     }
     samples: dict[str, list[str]] = {key: [] for key in counts}
     for x, y in candidates:
