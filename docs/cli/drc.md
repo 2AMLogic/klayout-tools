@@ -4300,9 +4300,10 @@ presence test, and what counts as "in the stream" depends on `--top`:
   hierarchy. A layer counts only if it carries at least one shape (text labels
   included) in that cell or any of its descendants. A layer that is in the
   stream's layer table but empty across that hierarchy, such as one drawn only
-  in a sibling top cell, is dropped before rule evaluation. It appears in
-  neither field, and the rules that read it are skipped as absent-layer rules,
-  exactly as for a stream containing only that hierarchy.
+  in a sibling top cell, is absent from both fields. Each rule uses the
+  selected hierarchy to determine applicability. For example, a contact in
+  that hierarchy can violate its enclosure rule when the enclosing metal
+  appears only in a sibling cell.
 
 #### `coverage.skipped` vs. `coverage.inapplicable`
 
