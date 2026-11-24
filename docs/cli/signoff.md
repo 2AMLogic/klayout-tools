@@ -1029,7 +1029,7 @@ envelope's own verdict produces):
 | Key | Carried on | Value |
 | --- | ---------- | ----- |
 | `detail.nothing_checked_reasons` | `nothing_checked` only | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
-| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only) and `runset_unrecognised_device` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only), `runset_unrecognised_device` and `runset_inductor_terminal_order` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
 
 `cited_evidence` is present on **either** route into `nothing_checked` and on
 a failing or partial run, and neither key is consulted by any grading rule.
@@ -2789,8 +2789,9 @@ an inventory the author did not write.
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
-| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
-| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
+| | `spec_rows`: list of row ids | yes, non-empty | each row outside `uncited_rows` has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
+| | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no citation fails its `citation` check unless it is listed in `uncited_rows` |
+| | `uncited_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `uncited_row` check per entry (role `row`), **passing**: the known, owned gap and the issue that owns closing it are visible to the grader instead of the row being dropped from `spec_rows` — item 8's counterpart of item 9's `unbenched_rows`. The `row` must be declared in `spec_rows` and have no cited paths: a row that is both listed and cited, a row not in `spec_rows`, or a malformed entry is refused (exit `1`). Whether an uncited row should fail T1 item 8 is a grading-policy decision this producer does not make. *First ships in the first release after `v0.9.2`; `v0.9.2` refuses `uncited_rows` as an unknown field.* |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
@@ -2801,7 +2802,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
-| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -3180,6 +3181,19 @@ the running version in `running`. Attestation exits 3 and leaves the
 output file untouched. If the running version contains `+unknown`, the check
 passes with `"unverifiable": true`. A pinned value containing `+unknown` is
 compared literally when the running build is known.
+
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
 
 When upgrading an inventory that already pins klt, update the pin to the
 build you will use and regenerate its committed envelope to include the new
@@ -4241,9 +4255,9 @@ tier-verdict report by different rules:
 
 | Install | What `git_commit`/`git_tag` say | What actually grades the report |
 | --- | --- | --- |
-| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | `signoff.py` as it stood at `abc123` |
-| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff.py` — but installed with no shared `.git` history against the wheel to compare |
-| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | `signoff.py` as it stands on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
+| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | the `signoff*.py` grading modules as they stood at `abc123` |
+| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff*.py` modules — but installed with no shared `.git` history against the wheel to compare |
+| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | the `signoff*.py` modules as they stand on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
 
 `git_commit`/`git_tag` (in `klt version --format json`, and in every tier /
 fleet report's `build` block) identify the **source checkout** each install
@@ -4255,16 +4269,27 @@ grading rules produced it.
 Two mechanisms close that gap, both driven by the same content hash:
 
 1. **`grading_ruleset_id`** — a `sha256:`-prefixed content hash of the
-   shipped `signoff.py` grading module, reported by `klt version --format
+   shipped `signoff*.py` grading modules (issue #7434: every module in the
+   package directory whose filename matches, not just `signoff.py` — the
+   per-item grading rules and the `reason` vocabulary they emit live across
+   the whole leaf family, and a named subset would silently lose coverage
+   again with every future leaf split; each file's basename is mixed into
+   the digest before its bytes, so a rename or a content move between two
+   leaves changes the id too), reported by `klt version --format
    json` (see [`version.md`](version.md)) and echoed into every tier / fleet
    report's own `build` block (above), so a committed report names the
    grading rules that produced it, not just the source checkout. It is
    **identical** between two installs of byte-identical grading code
    (the wheel and the `git+...` snapshot in the table above both report the
    same id, with no shared git history required to prove it) and **changes**
-   whenever `signoff.py`'s grading logic changes (the `main` checkout in the
-   table reports a different id from the tag it moved past). `null` only if
-   this install's `signoff.py` cannot be read at all — never fabricated.
+   whenever any grading module's logic changes — including an edit confined
+   to a leaf such as `signoff_power_delivery.py` (the `main` checkout in the
+   table reports a different id from the tag it moved past). Modules outside
+   the `signoff*.py` family (`design_evidence_tiers.py`, `coverage.py`,
+   `metrics.py`, ...) are deliberately not covered; the checklist doc itself
+   is covered separately by the report's `source_doc_content_hash`.
+   `null` only if this install's `signoff*.py` grading modules cannot be
+   read at all — never fabricated.
 2. **`klt signoff --describe-grader`** — enumerates, at runtime and without
    reading source, which T1 checklist item ids this build has grading rules
    for at all, alongside the same `grading_ruleset_id`:
@@ -4320,6 +4345,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    `path` and `reviewed_by` (`signoff_runset.PINNED_RUNSETS`), so a block can
    check its runset is pinned before running `klt lvs --engine
    klayout-runset`.
+
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
 
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`
@@ -5184,6 +5215,72 @@ whatever shape item 5's evidence has, including a single citation object or no
 item 5 evidence at all.
 Additive: no `schema_version` bump.
 
+**Joint grid coverage across benches (issue #6969).** Derived coverage reads
+one cited envelope's tags. A coverage-style row — "every implemented bench
+exercised the full ratified PVT grid, with the supply and temperature verified
+as applied" — is a property of a **set** of envelopes, one per bench: citing
+any one envelope with `rows: [...]` for it would assert the joint property on
+one bench's evidence, and a `gap` understates benches that each prove their
+half. A `spec_rows` row may instead carry `joint_grid` (item 5 only; a
+partition-qualified `"5.analog"` key works too):
+
+```json
+{"id": "pvt_grid_all_benches",
+ "joint_grid": {
+   "members": ["sim/bench_a.json", "sim/bench_b.json"],
+   "process": ["tt", "ss", "ff"],
+   "supply_v": {"vdd": [1.62, 1.8, 1.98]},
+   "temperature_c": [-40, 27, 125]}}
+```
+
+- `members` names citations of the same item-5 evidence list, matched by the
+  citation's `file` (or its joined `command`). The list is explicit, so
+  dropping a bench from the evidence cannot silently shrink the joint claim:
+  a name no citation carries is `invalid_evidence`.
+- The grid uses the same shape as a `klt sim` request's `corners` block —
+  supply rails sweep **zipped** by index, as a set — and the required points
+  are its product (process x supply x temperature). An absent axis takes the
+  request-side default (`process` null, no supply rail, 27 C). Supply values
+  compare as numbers (`27` and `27.0` are one point; no tolerance).
+- The row is `covered` — and `row_sources` reads it `"derived"`, never
+  `"asserted"`, so `require_derived_rows` passes it — only when **every**
+  named member graded `met` and its envelope's `corners[]` contains every
+  required grid point with every corner at that point `pass` (a point swept
+  twice — a `params` axis — must pass at *every* corner), **and** it carries
+  at least one condition probe: a passing, `limits`-bearing `measurements[]`
+  entry tagged `spec_row: "<row id>"` (the #3778 tag; `klt sim`'s rolled-up
+  `status` is `pass` only when the measurement passed at every corner that
+  reported it).
+- Otherwise the row is uncovered — `unmet` / `partial_coverage`, listed in
+  `detail.uncovered_rows` like any uncovered row — and `detail.joint_rows`
+  names, per member with a shortfall, its `missing_points` (labels in the
+  envelope's own `corner_id` PVT spelling, e.g. `ff/1.980V/-40C`) and whether
+  its condition probe is `missing`. A member that graded anything but `met`
+  misses every point: a failed envelope is not evidence for the joint
+  property, even when its per-row truth was captured (#6027).
+- A citation naming a joint row in its own `rows` is `invalid_evidence` — the
+  same refusal as naming an undeclared or `gap` row; that is exactly the
+  one-bench false claim this form exists to prevent.
+- A `joint_grid` row cannot also declare `extent`, `structural`, or `gap` (either form). A malformed
+  `joint_grid` — not an object, an unknown key, an empty, shorter-than-two or
+  duplicate-bearing `members`, a non-string member, an empty axis, a
+  non-numeric axis value, supply rails of differing lengths — degrades item 5
+  alone to `invalid_evidence`, never raises. A `joint_grid` on item 6's rows
+  is likewise `invalid_evidence` (item 6 shares the reader, not the form).
+- A **Monte Carlo member** is stated unsupported, not guessed at
+  (`invalid_evidence` naming the member): sampled corners echo their base
+  point's `process`/`supply_v`/`temperature_c`, but "a grid point counts only
+  when every sample drawn at it passed" is not a traced `klt sim` contract.
+
+The per-spec-row table renders a joint row as one `state: "joint"` record —
+no single measurement is quotable — carrying `joint` = `{covered, members:
+[{member, missing_points, missing_probe}]}` from a static re-read of the same
+citations (a command-backed, unreadable or Monte Carlo member reads `null`/
+`null`, "not evaluable from the report alone"); `--format text` prints
+`[JOINT]` with one indented line per member shortfall. A manifest declaring
+no `joint_grid` row omits every new key and renders byte-identically;
+additive, no `schema_version` bump.
+
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
 reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
 digital partition a passing citation set that includes `sta` or
@@ -5271,6 +5368,36 @@ for item 7. The manifest is the record of which cells were cited; `klt
 signoff` does not check they cover the hierarchy. A single string/object
 entry renders exactly as before.
 
+To require a particular set of PVT corners for item 7, declare the corner
+IDs in the manifest. For example, a two-corner analog box looks like this.
+
+```json
+{"corner_box": {"7.analog": ["tt/1.800V/27C", "ss/1.620V/125C"]}}
+```
+
+The bare key `"7"` applies to either partition. A qualified key overrides
+it for that partition. Each list must contain at least one ID, and its IDs
+must be unique, non-empty strings. Signoff compares them literally. The
+manifest supplies the required box even if a cited report ran only one
+corner. Monte Carlo sample IDs have no special handling and do not count
+toward a base corner.
+
+Each declared corner needs a passing PEX `delta[]` row for every distinct
+`(testbench, measurement)` in the cited reports. A command-mode row has a
+null testbench. Schematic-only `skipped` rows contribute no requirements
+or credit. Extra corners need no coverage. A report with an aggregate
+`error` caused only by row errors can contribute its passing measurements.
+A second report can supply the missing comparisons. Any limit failure
+still fails the item, and every citation must pass the usual freshness,
+post-layout and coverage checks. Reports predating the row identity fields
+need a fresh run to contribute to a declared box.
+
+The JSON item retains each report's own verdict in `citations_graded`.
+Its `detail.corner_box` gives the declared and covered corner counts. When
+coverage is incomplete, the reason is `partial_coverage` and each entry in
+`missing` names the `corner_id` and the remaining measurement keys. Text
+output prints the count and names the missing corners.
+
 `invalid_evidence` on the list-accepting items (4, 5, 6, 7) carries a
 `detail.problem` string naming the cause, e.g. `member 2 is not a string or
 an object with 'file'/'command'`.
@@ -5331,7 +5458,7 @@ The block is a **projection of the same evidence grading already read**, not a
 second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
 because of it. Its rules:
 
-- **States.** Every declared row gets a record, in one of five states.
+- **States.** Every declared row gets a record, in one of six states.
   `graded` — at least one cited, file-backed envelope carries a
   `spec_row`-tagged measurement naming the row. `gap` — the row declares a
   free-text or justified gap. The record quotes the free text or the
@@ -5340,6 +5467,11 @@ because of it. Its rules:
   disposition (#6985): the record has no measured values and instead
   carries the disposition's `claim` and `artifact` (with its content
   hash); grading refuses citations naming the row, exactly as for a gap.
+  `joint` — the row declares a `joint_grid` (issue #6969): no single
+  measurement is quotable, so the record carries the per-member projection
+  under `joint` (`{covered, members: [{member, missing_points,
+  missing_probe}]}`, `null`/`null` for a member the projection cannot read —
+  command-backed, unreadable, or Monte Carlo).
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
@@ -6474,6 +6606,7 @@ actually ran and failed):
 | `"runset_not_pinned"`     | no  | **Items 4 and 11** (issue #2870). The cited `lvs` report is `"engine": "klayout-runset"` but its `provenance.runset.content_hash` is not in the signoff-side allowlist of PDK-published runsets (`signoff_runset.PINNED_RUNSETS`). Cite a report produced with the PDK's own runset at a pinned revision, or a curated-deck report. |
 | `"runset_hash_mismatch"`  | no  | **Items 4 and 11** (issue #2870). A `klayout-runset` report whose runset file (`deck_file`) no longer hashes to the recorded `provenance.runset.content_hash`: the runset changed since the run. Re-run `klt lvs`. |
 | `"runset_unrecognised_device"` | no | **Item 4 and item 11's LVS half** (issues #2870, #6902). A `klayout-runset` report read `status: "match"` but cannot prove every device was recognised: `device_census` per-class layout/reference counts differ (compared case-insensitively — SPICE names are case-insensitive and the sides arrive in different case), a census is malformed (each class needs a non-negative integer count), or the report carries no `device_census.reference_source` evidence (a pre-#6902 report fails closed — re-run `klt lvs` with a klt that emits it), or a source class has too few converted devices even when all class totals add up. The pinned SKY130 reader renames `sky130_fd_pr__special_nfet_01v8` subcircuit calls when `convert_subckts=true`. The grader credits only calls counted in `reference_source_subcircuits`. `coverage.declared_not_recognized` is disclosure only — a PDK runset declares classes no real block instantiates. `detail.runset_device_gaps` names each gap. |
+| `"runset_inductor_terminal_order"` | no | **Item 4 and item 11's LVS half** (issue #6903). The cited `klayout-runset` report failed while carrying the `topology.known_limitation` entry naming the pinned IHP sg13g2 runset's mirrored-`inductor2` terminal-order limitation (`details.limitation: "mirrored-inductor2-terminal-order"`): the runset orders an inductor2's two winding terminals by port-polygon x position and compares the order, so a mirrored spiral extracts terminal-reversed however it is wired, and its `LA`/`LB` port texts (which the runset uses as net names) surface the reversal as `port.name_mismatch` strict-port findings. The report's `status` stays exactly what the runset reported (the entry is a warning; the error beside it is what failed) — this reason *names* the known defect instead of rendering a bare `check_failed` (item 11: instead of `lvs_did_not_pass`/`check_failed`, with `detail.inductor_terminal_order` carrying the three net names). Never `met`: whether a report produced through a normalisation step may grade items 4/11 is the operator decision routed in #6914. |
 | `"power_port_unproven"`   | no  | **Item 11 only** (issue #2839, provisional). The port-accessibility half is in force (manifest `power_ports.required`, or port evidence cited) but no `klt socket-check` envelope carrying `power_ports` facts is cited — none at all, or one produced before #2839. See "Item 11 port accessibility" above. |
 | `"no_edge_power_port"`    | no  | **Item 11 only** (issue #2839). A declared supply has no port: no `POWER`/`GROUND` socket pin of that name, its label not where the descriptor says, or no drawn conductor under it. |
 | `"power_port_interior_only"` | no | **Item 11 only** (issue #2839). The supply has drawn port(s), but none lies within the policy's edge band of a counted outline edge with a clear approach channel. |
