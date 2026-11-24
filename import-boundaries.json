@@ -933,6 +933,7 @@
         "klayout_tools.signoff_attest_command",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
+        "klayout_tools.signoff_attest_gaprows",
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
