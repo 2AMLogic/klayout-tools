@@ -26,6 +26,7 @@ from . import (
     sim_stress,
     sim_tian,
     sim_transfer_meas,
+    sim_windowed,
 )
 from ._meas_lint import check_meas_signal_position
 from .sim_case_names import validate_case_variant_names, validate_measurement_shapes
@@ -299,6 +300,7 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
 
 
 _EXCLUSIVE_FORM_VALIDATORS = (
+    sim_windowed.validate_form_exclusive,
     sim_slope_band_meas.validate_form_exclusive,
     sim_settled.validate_form_exclusive,
     sim_step_resolution.validate_form_exclusive,
@@ -311,10 +313,7 @@ _EXCLUSIVE_FORM_VALIDATORS = (
 
 
 def _validate_measurement_form(spec: dict[str, Any]) -> None:
-    """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
-    one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
-    the round trip through the deck and back out of the log. See
-    :func:`_validate_measurement_forms` for why each rule exists."""
+    """Validate the measurement form and its name."""
     for validator in _EXCLUSIVE_FORM_VALIDATORS:
         if validator(spec):
             return
