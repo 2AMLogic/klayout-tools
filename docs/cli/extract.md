@@ -3247,6 +3247,30 @@ shapes involved are legal, well-formed, and often not even touching — the
 collision is between *labels* on a shared pad, not between wires), so this
 is currently the only place in the toolchain that surfaces it.
 
+**Case-only aliases (issue #7724).** A pin labelled twice with spellings that
+differ only by case (`VDD` and `vdd`, `A` and `a`) is merged like any other
+multi-label net and comes out as `VDD|vdd`, in `nets[]`, in `.SUBCKT`, and in
+every device and `--parasitics` star node (`VDD|vdd__t7`). That `|` name is
+accepted by a simulator but not as the name you meant: ngspice lower-cases
+node names, so it reads the net back as `vdd|vdd`, which never matches a
+testbench node or a declared pin called `VDD`. The failure is a silent
+name mismatch, not a parse error. When every label of a merged net is the same
+name up to case, the `warnings[]` entry therefore says the labels differ only
+in letter case (instead of suggesting two nets were shorted) and names the fix: with
+`--pins`/`--def-pins` declaring one spelling, `--rename-declared-pins` renames
+the net to the declared name — the written netlist, `nets[]` and the star nodes
+carry that name and no `|` — and records the alias in `pin_renames.renamed`
+(`{"from": "A|a", "to": "A"}`); see
+["Renaming promoted pins to their declared name"](#renaming-promoted-pins-to-their-declared-name---rename-declared-pins-issue-2854)
+below (the rename is skipped, with a `declared_pin_rename_collision` finding,
+when another net already carries the declared name). Without the flag the
+default `NAME|alias` spelling above is kept on purpose: it is the documented
+contract. Only the warning prose differs for a case alias — `merged_net_labels[]`,
+`nets[]` and the written netlist are identical for every input — and a merge
+in which any label differs by more than case (`Y`/`Y2`/`y`) keeps the original
+wording. The warning cannot tell whether the flag was already passed, so it
+names it either way.
+
 **Known limitation (false positives).** The heuristic is a substring split,
 not a provenance check: KLayout's `Net.expanded_name()` does not record
 *why* a net carries a multi-label name, only the final joined string. A
