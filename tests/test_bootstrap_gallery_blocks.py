@@ -111,11 +111,7 @@ def test_bootstrap_block_records_the_corpus_pdk(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bg, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(bg, "BLOCKS_ROOT", tmp_path / "blocks")
-    monkeypatch.setattr(
-        bg,
-        "run_klt",
-        lambda *args: {"layer_count": 1, "cell_count": 1, "cells": [{"instances": 0}]},
-    )
+    monkeypatch.setenv("PATH", "")  # Metrics come from the checked-out library.
 
     bg.bootstrap_block(gds_path, "gf180mcu", skip_signals=True)
 
@@ -126,7 +122,11 @@ def test_bootstrap_block_records_the_corpus_pdk(tmp_path, monkeypatch):
         / "output"
         / "layout.json"
     )
-    assert json.loads(written.read_text())["pdk"] == "gf180mcu"
+    layout = json.loads(written.read_text())
+    assert layout["pdk"] == "gf180mcu"
+    assert layout["layer_count"] == 1
+    assert layout["cell_count"] == 1
+    assert layout["instance_count"] == 0
 
 
 @pytest.mark.parametrize("slug", sorted(bg.NO_ARTIFACTS_SLUGS))
