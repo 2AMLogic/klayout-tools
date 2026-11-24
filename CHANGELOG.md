@@ -2148,7 +2148,6 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 - **`klt sim` captures model library, OSDI preload, and corner section library hashes before dispatch.** Reports retain those hashes if a file changes or is deleted during the run (#6508, 2026-11-18).
 
-- **File-size ledger mismatches point authors to the PR checkout log** to compare the file and its ledger entry at the tested base and merge commits (#6518, 2026-11-18).
 
 - **`klt power` reports the drawn cross-section density beside the per-row
   one** (#6525, 2026-11-18): each `ir_drop_map.nets[].islands[].edges[]`
