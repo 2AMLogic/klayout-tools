@@ -1,7 +1,7 @@
 - **`klt sim` can pin the `trrandom` transient-noise stream and discloses
   transient-noise reproducibility on every qualifying run** (#5772,
-  2026-11-16): a request-level `options.transient_noise_seed` (integer,
-  ngspice only) emits `setseed N` as the first command of every corner
+  2026-11-16): a request-level `options.transient_noise_seed` (integer from 1
+  through 2147483647 inclusive, ngspice only) emits `setseed N` as the first command of every corner
   deck's `.control` block — measured on ngspice-47 to be the one placement
   that replays a `trrandom` stream (`.spiceinit` and `.options seed=` do not
   reach the generator) — and is echoed as

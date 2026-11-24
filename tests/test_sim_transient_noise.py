@@ -150,6 +150,31 @@ def test_run_sim_transient_noise_seed_rejects_non_integer(tmp_path):
             sim.run_sim(str(request))
 
 
+@pytest.mark.parametrize("seed", [-1, 0, 2**31, 2**32 + 73])
+def test_run_sim_rejects_transient_noise_seed_outside_ngspice_range(
+    tmp_path, monkeypatch, seed
+):
+    (tmp_path / "body.spice").write_text("Vr a 0 trrandom(2 1n 1m)\nR1 a 0 1k\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"transient_noise_seed": seed},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+    with pytest.raises(
+        sim.SimError, match=r"options\.transient_noise_seed.*1.*2147483647"
+    ):
+        sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize("seed", [1, 2**31 - 1])
+def test_transient_noise_accepts_ngspice_seed_endpoints(seed):
+    assert sim_tn.validate_seed(seed, "ngspice") == seed
+
+
 def test_run_sim_transient_noise_seed_refused_for_xyce(tmp_path):
     """`setseed` is an ngspice `.control` command; the Xyce deck has no
     control block, so the option is refused by name rather than silently

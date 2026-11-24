@@ -48,9 +48,10 @@ def validate_seed(value: Any, engine: str) -> int | None:
     echo and scope statement live on ``environment.transient_noise``.
 
     ``None``/absent normalises to ``None`` -- no ``setseed`` line, decks
-    byte-identical to before this issue. Anything else must be an integer (a
-    bool is a JSON ``true``/``false``, not the integer ngspice's command
-    takes). ``engine: "xyce"`` refuses a declared value outright -- the
+    byte-identical to before this issue. A declared seed must be an integer
+    from 1 through 2147483647 inclusive. Reject booleans before the integer
+    check because Python treats booleans as integers.
+    ``engine: "xyce"`` refuses a declared value outright -- the
     command has no Xyce equivalent and the Xyce deck has no ``.control``
     block to carry it -- rather than silently accepting it with no effect.
     """
@@ -67,6 +68,12 @@ def validate_seed(value: Any, engine: str) -> int | None:
             "'xyce': it emits `setseed` in the ngspice `.control` block, "
             "which the Xyce deck does not have; use engine 'ngspice' or "
             "drop the option"
+        )
+    # ngspice's setseed takes a positive signed 32-bit integer.
+    if not 1 <= value < 2**31:
+        raise SimError(
+            "options.transient_noise_seed must be between 1 and 2147483647 "
+            f"(inclusive), got {value}"
         )
     return value
 
