@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from klayout_tools import sim_set
 from klayout_tools.sim_batch_observer import current_job_observer
@@ -53,6 +54,59 @@ def test_stuck_member_becomes_not_launched_entry(tmp_path, monkeypatch):
     assert manifest["requests"][2]["error_code"] == sim_set.NOT_LAUNCHED_CODE
 
 
+def test_refused_member_locates_a_later_report_with_colliding_stems(
+    tmp_path, monkeypatch
+):
+    _fast_poll(monkeypatch)
+    path = _write_set(tmp_path, 1)[0]
+    out = tmp_path / "out"
+    late = out / "req0-1" / sim_set.REPORT_FILENAME
+    late.parent.mkdir(parents=True)
+    late.write_text(json.dumps(_fake_report(job_id="job-stale")))
+    release = threading.Event()
+    finished = threading.Event()
+
+    def run(path, *, artifacts_dir, **kwargs):
+        if Path(artifacts_dir) == late.parent:
+            observer = current_job_observer()
+            observer.on_job("job-late")
+            observer.on_state("job-late", "pending")
+            release.wait(10)
+            return _fake_report(job_id="job-late")
+        return _fake_report(job_id="job-first")
+
+    original = sim_set._run_one
+
+    def observe_completion(index, *args, **kwargs):
+        entry = original(index, *args, **kwargs)
+        if index == 1:
+            finished.set()
+        return entry
+
+    monkeypatch.setattr(sim_set, "_run_one", observe_completion)
+    try:
+        envelope = sim_set.run_sim_set(
+            [path, path], outdir=str(out), capacity_wait_s=0.05, run=run
+        )
+        first, refused = envelope["requests"]
+        assert first["status"] == "pass" and "expected_report" not in first
+        assert refused["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert refused["job_ids"] == ["job-late"] and refused["report"] is None
+        candidate = Path(refused["expected_report"])
+        assert candidate == late
+        assert json.loads(candidate.read_text())["environment"]["remote"]["job_id"] == (
+            "job-stale"
+        )
+    finally:
+        release.set()
+        assert finished.wait(10)
+    assert (
+        json.loads(candidate.read_text())["environment"]["remote"]["job_id"]
+        in (refused["job_ids"])
+    )
+    assert refused["report"] is None
+
+
 def test_never_launching_job_ends_unstarted_members_as_not_launched(
     tmp_path, monkeypatch
 ):
@@ -80,6 +134,7 @@ def test_never_launching_job_ends_unstarted_members_as_not_launched(
         assert entry["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
         assert "job-stuck" in entry["error"]["message"]
         assert entry["job_ids"] == []
+        assert "expected_report" not in entry
     assert report["status"] == "error"
     manifest = json.loads((tmp_path / "out" / sim_set.MANIFEST_FILENAME).read_text())
     for i in (1, 2):
