@@ -2708,8 +2708,10 @@ Reproduce: `python scripts/lvs_array_bench.py --rows 91 --cols 91 --form hier
 byte-identical to `--format json` stdout (gzip-compressed when `PATH` ends
 `.gz`), written for match, mismatch and inconclusive runs alike; stdout and
 exit codes are unchanged. An unwritable `PATH` is the standard error envelope
-(exit `1`). Rejected with `--check`, which emits no run report. Mirrors
-`klt drc -o` (#4393).
+(exit `1`). The report is staged as a sibling temporary file and renamed into
+place, so `PATH`'s parent directory must be writable; a failed write
+preserves the previous file. Rejected with `--check`, which emits no run
+report. Mirrors `klt drc -o` (#4393).
 
 ## Deck-pin assertion (`--expect-deck-hash`)
 

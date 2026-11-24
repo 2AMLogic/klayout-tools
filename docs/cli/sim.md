@@ -163,7 +163,9 @@ this document (and the code) win.
   compressed report is citable as manifest evidence with no decompressed
   second copy. Given together with `-o`, `--report-out` wins outright and
   no implicit `<outdir>/report.json` copy is written (see `--outdir`
-  above).
+  above). The report is staged as a sibling temporary file and renamed into
+  place, so the path's parent directory must be writable; a failed write
+  preserves the previous file.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
