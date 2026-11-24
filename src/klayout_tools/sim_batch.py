@@ -3682,11 +3682,11 @@ class _BatchFleetRun:
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Retry capacity-refused shards in order with a fresh wait budget."""
-        refused = sorted(self.capacity_refused)
+        """Reset the wait budget and pending count for the capacity-refused shards."""
         self.started = time.monotonic()
         self.budget_spent.clear()
-        return refused
+        self.watch.start_retry_pass(self.capacity_refused)
+        return sorted(self.capacity_refused)
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
         return self._guarded(shard_points, self._run_one_shard)
