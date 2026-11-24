@@ -179,6 +179,27 @@ def test_violating_endpoint_lines_filters_strictly_negative_slack():
     )
 
 
+def test_violating_endpoint_lines_query_each_distinct_group_once_per_side():
+    """`sta::path_group_names` can list one name twice (a design clock named
+    `asynchronous` or `unconstrained` collides with the built-in group), and
+    the name-keyed query then returns that group's endpoints twice -- so the
+    seen-list must reset per side, guard the loop body, and be recorded
+    *before* the query. Verified live on OpenSTA 26Q3-1510 (PR #7449)."""
+    text = "\n".join(post_route_sta._violating_endpoint_lines(5))
+    ordered = [
+        "foreach klt_ve_side {max min} {",
+        "set klt_ve_seen {}",
+        "foreach klt_ve_group [sta::path_group_names] {",
+        "if {[lsearch -exact $klt_ve_seen $klt_ve_group] >= 0} {",
+        "continue",
+        "lappend klt_ve_seen $klt_ve_group",
+        "foreach klt_pe [find_timing_paths",
+    ]
+    positions = [text.index(fragment) for fragment in ordered]
+    assert positions == sorted(positions)
+    assert text.count("sta::path_group_names") == 1
+
+
 def test_capture_used_the_shipped_tcl():
     """Fixture drift guard: the capture must come from the Tcl this module
     emits today (the ask-11 block is the knob-10 request)."""
@@ -348,6 +369,54 @@ def test_live_engine_boundary_violating_endpoints(tmp_path):
     assert len(block["hold"]) == 1
     assert block["hold"][0]["endpoint"] == "ff_a/RESET_B"
     assert block["hold_truncated"] is True
+
+
+@_LIVE_ONLY
+@pytest.mark.parametrize("clock_name", ["asynchronous", "unconstrained"])
+@pytest.mark.parametrize("cap", [2, 10])
+def test_live_engine_clock_named_like_a_builtin_group_lists_each_endpoint_once(
+    tmp_path, clock_name, cap
+):
+    """PR #7449 review: a design clock named like a built-in path group makes
+    `sta::path_group_names` list that name twice. Before the per-side
+    distinct-name dedupe, `asynchronous` returned `ff_a/RESET_B` (and
+    `ff_bus1/D`) twice with `status: "inconsistent"`, and `unconstrained` at
+    cap 2 reported a false `hold_truncated`. The same two hold violators as
+    the `clk` case must come back once each, complete, and consistent."""
+    import re
+
+    from test_post_route_sta import (
+        _WORST_PATH_CAPTURES,
+        _boundary_constraints,
+        _write,
+    )
+
+    original = _WORST_PATH_CAPTURES["netlist"]
+    netlist = re.sub(r"\bclk\b", clock_name, original)
+    # The rename must have taken effect everywhere (`\bclk\b` is
+    # case-sensitive, so the flops' `.CLK(...)` pins are left alone).
+    assert netlist != original
+    assert not re.search(r"\bclk\b", netlist)
+    _write(tmp_path / "boundary.v", netlist)
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": {
+            **_boundary_constraints(clock_port=clock_name),
+            "max_violating_endpoints": cap,
+        },
+    }
+    report = run_sta(_setup_live_request(tmp_path, request), pdk_variant="sky130A")
+
+    block = report["violating_endpoints"]
+    assert block["status"] == "ok", block["reason"]
+    assert [(row["startpoint"], row["endpoint"]) for row in block["hold"]] == [
+        ("rst_n", "ff_a/RESET_B"),
+        ("bus[1]", "ff_bus1/D"),
+    ]
+    assert block["hold_truncated"] is False
+    assert len(block["hold"]) == report["hold_violation_count"] == 2
 
 
 def _setup_live_request(tmp_path, request: dict) -> str:

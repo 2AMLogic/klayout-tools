@@ -22,7 +22,12 @@
     "puts \"===KLT_STA_VIOLATING_ENDPOINTS_BEGIN===\"",
     "if {[catch {",
     "    foreach klt_ve_side {max min} {",
+    "        set klt_ve_seen {}",
     "        foreach klt_ve_group [sta::path_group_names] {",
+    "            if {[lsearch -exact $klt_ve_seen $klt_ve_group] >= 0} {",
+    "                continue",
+    "            }",
+    "            lappend klt_ve_seen $klt_ve_group",
     "            foreach klt_pe [find_timing_paths -path_delay $klt_ve_side -path_group [list $klt_ve_group] -group_path_count 11 -endpoint_path_count 1 -slack_max 0 -sort_by_slack] {",
     "                set klt_ve_s [$klt_pe slack]",
     "                if {$klt_ve_s < 0} {",
@@ -48,5 +53,5 @@
       }
     }
   },
-  "note": "Real engine output captured live (not synthesized): the stdout blocks are the verbatim marker-delimited regions the shipped Tcl emits, and the two report_check_types regions are the same session's violator reports behind setup_violation_count/hold_violation_count. The design is combinational-only (the available liberty has no flip-flops), so every row is an output-setup / output-hold check against virtual capture clocks -- two path groups per side (oclk1: y1,y2; oclk2: y3), which is what exercises the global worst-first resort across groups. Engine facts verified on this capture: -slack_max is inclusive (<=) at the boundary, so the emitter's strict $s < 0 filter is what keeps zero-slack ends out; -group_path_count caps per path group, so the Python side re-sorts globally and trims to the request cap; path ends expose no path_group_name property, so the emitter iterates sta::path_group_names and -path_group [list $name] (list-quoting is load-bearing: a bare multi-word name like {gated clock} splits, warns 'unknown path group', and silently disables the filter)."
+  "note": "Real engine output captured live (not synthesized): the stdout blocks are the verbatim marker-delimited regions the shipped Tcl emits, and the two report_check_types regions are the same session's violator reports behind setup_violation_count/hold_violation_count. The design is combinational-only (the available liberty has no flip-flops), so every row is an output-setup / output-hold check against virtual capture clocks -- two path groups per side (oclk1: y1,y2; oclk2: y3), which is what exercises the global worst-first resort across groups. Engine facts verified on this capture: -slack_max is inclusive (<=) at the boundary, so the emitter's strict $s < 0 filter is what keeps zero-slack ends out; -group_path_count caps per path group, so the Python side re-sorts globally and trims to the request cap; path ends expose no path_group_name property, so the emitter iterates sta::path_group_names and -path_group [list $name] (list-quoting is load-bearing: a bare multi-word name like {gated clock} splits, warns 'unknown path group', and silently disables the filter). 2026-11-24 (PR #7449 review): violating_endpoints_tcl_ask_11 was refreshed for the per-side distinct-group dedupe (a design clock named asynchronous makes sta::path_group_names list that name twice). The stdout blocks above were produced by the pre-dedupe Tcl; re-running the refreshed Tcl on this same design with the same engine image returned identical VPATH rows, because every group name here is distinct."
 }

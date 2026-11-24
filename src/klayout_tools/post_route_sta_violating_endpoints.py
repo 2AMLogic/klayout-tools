@@ -62,7 +62,13 @@ def _violating_endpoint_lines(max_violating_endpoints: int | None) -> list[str]:
     are requested per group and the Python side re-sorts globally and trims
     to N -- N+1, not N, is what makes ``*_truncated`` derivable. The engine
     sorts only within a group (verified: the capture's hold side arrives
-    group-major, not worst-first). ``-slack_max`` is inclusive at the
+    group-major, not worst-first). ``sta::path_group_names`` can list one
+    name twice -- a design clock named ``asynchronous`` or ``unconstrained``
+    collides with the built-in group of that name -- and the name-keyed
+    query returns that group's endpoints each time, duplicating rows before
+    the global cap (so ``*_truncated`` and ``status`` go wrong). Each
+    distinct name is therefore queried once per side, first-seen order, so
+    tied slacks keep the engine's order. ``-slack_max`` is inclusive at the
     boundary, so the strict ``$klt_ve_s < 0`` filter is what keeps a
     zero-slack endpoint out of the list -- the same population
     ``report_check_types -violators`` counts (slack < 0), one row per
@@ -77,7 +83,12 @@ def _violating_endpoint_lines(max_violating_endpoints: int | None) -> list[str]:
         f'puts "{_VIOLATING_ENDPOINTS_BEGIN}"',
         "if {[catch {",
         "    foreach klt_ve_side {max min} {",
+        "        set klt_ve_seen {}",
         "        foreach klt_ve_group [sta::path_group_names] {",
+        "            if {[lsearch -exact $klt_ve_seen $klt_ve_group] >= 0} {",
+        "                continue",
+        "            }",
+        "            lappend klt_ve_seen $klt_ve_group",
         "            foreach klt_pe [find_timing_paths -path_delay "
         f"$klt_ve_side -path_group [list $klt_ve_group] "
         f"-group_path_count {ask} -endpoint_path_count 1 "
