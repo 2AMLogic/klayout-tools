@@ -282,3 +282,41 @@ def test_seed_echo_check_fails_on_missing_or_different_echo():
         sim_tn.check_transient_noise_seed_echo(
             declared, {"environment": {"transient_noise": {"seed": 7}}}
         )
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {"vr": "trrandom"},
+        {"vn": "trnoise"},
+        {"vr": "trrandom", "vn": "trnoise"},
+    ],
+)
+def test_seeded_monte_carlo_noise_disclosure_matches_the_source_kinds(
+    tmp_path, monkeypatch, capsys, sources
+):
+    cards = {
+        "vr": "Vr a 0 trrandom(2 1n 1m)",
+        "vn": "Vn b 0 trnoise(1m 1n 0 0)",
+    }
+    path = _noise_mc_request(
+        tmp_path,
+        "\n".join([*(cards[name] for name in sources), "R1 a b 1k", ""]),
+        {"n": 2, "seed": 1, "vary": "mismatch"},
+    )
+    request = json.loads(path.read_text())
+    request["options"] = {"transient_noise_seed": 73}
+    path.write_text(json.dumps(request))
+    _stub_subprocess_run(monkeypatch)
+
+    environment = sim.run_sim(str(path))["environment"]
+    mc = environment["monte_carlo"]
+    assert mc["unseeded_sources"] == [
+        {"name": name, "keyword": kind} for name, kind in sorted(sources.items())
+    ]
+    note = mc["unseeded_sources_note"]
+    assert "not governed by monte_carlo.seed" in note
+    assert environment["transient_noise"]["reproducibility_note"] in note
+    assert ("redraws" in note) == ("trnoise" in sources.values())
+    assert ("setseed 73" in note) == ("trrandom" in sources.values())
+    assert capsys.readouterr().err.count(note) == 1
