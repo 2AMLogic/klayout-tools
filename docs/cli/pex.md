@@ -1214,6 +1214,19 @@ simulate at the PDK subcircuit's own defaults, so a delta over them is not
 a delta over the drawn sizes — it is the only way measured parameters reach
 the cards (issue #5513).
 
+**Top ports on a merged leg.** Use `--pins RP,RN` to expose declared
+curated pin-layer labels on the runset's top subcircuit. Each requested
+label must identify a distinct curated net with a unique runset match.
+The header lists their final curated SPICE names in alphabetical order
+(`.SUBCKT RES RN RP` in this example). Use the same order in the schematic
+DUT. `--rename-declared-pins` also applies the curated extractor's
+single-alias rename before the join. The ordered
+`extraction.net_correspondence.declared_ports` rows record the declaration,
+the curated name and cluster, and the original runset node and cluster.
+A missing pin, a split net, an unresolved correspondence or a conflicting
+node name produces `merged_pin_unresolved` before simulation. Omitting
+`--pins` uses the top interface written by the runset.
+
 **Refused by name, never silently ignored.** Every option that only makes sense
 with a richer curated parasitic model is refused with the flag spelled out
 (`engine 'klayout-runset' cannot honour --critical-net, --distributed-rc …`),
@@ -1221,10 +1234,9 @@ exit 1 — under the merged route too, which serves the curated deck's default
 lumped model only: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
 `--resistance-network` (both runset shapes re-emit lumped per-net networks;
 issue #6899), `--mom-rlc-*`, `--parasitic-variant`, `--substrate-tie-ohms`, `--deck-option`,
-`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--pdk`,
+`--tie-declared-pins`, `--pdk`,
 `--pdk-root` (the same table `klt extract` refuses them from), plus
-`--label-layer` *without* `--deck` (with `--deck` it routes to the curated
-leg, above),
+`--label-layer`, `--pins` and `--rename-declared-pins` *without* `--deck`,
 `--device-only-leg` (the runset leg *is* already the parasitic-free one) and
 `--tie-net` (it ties nets the curated deck reports as unbiased PMOS bodies,
 which this engine never computes). `--dry-run` is refused too: its preflight
