@@ -2400,15 +2400,7 @@ def _extract_device_only_leg(
     layout_path: str,
     deck_name: str | None,
     *,
-    top: str | None,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-    deck_options: Any,
-    declared_pins: Any,
-    rename_declared_pins: bool,
-    tie_declared_pins: bool,
-    label_layers: Any,
-    device_models: Any = None,
+    options: pex_runset.PexExtractOptions,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The parasitic-free leg's netlist path and its parity against the
     parasitic extraction (issue #3298), or ``(None, None)`` without
@@ -2424,16 +2416,8 @@ def _extract_device_only_leg(
             layout_path,
             deck_name,
             output=f"{stem}.device-only{ext}",
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
             parasitics=False,
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            label_layers=label_layers,
-            device_models=device_models,
+            **options.device_only_kwargs(),
         )
     except ExtractError as exc:
         raise PexError(f"device-only extraction failed: {exc}") from exc
@@ -2876,6 +2860,35 @@ def run_pex(
     requests = [_load_testbench_request(path, timeout_s) for path in testbench_paths]
     probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
 
+    # Issue #7818: the 24 extraction options every helper downstream of this
+    # entry point reads, bundled once -- the flat keyword signature above is
+    # the public contract and stays unchanged.
+    options = pex_runset.PexExtractOptions(
+        top=top,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
+        label_layers=label_layers,
+        device_models=device_models,
+        critical_nets=critical_nets,
+        critical_net_patterns=critical_net_patterns,
+        critical_net_all=critical_net_all,
+        critical_net_excludes=critical_net_excludes,
+        distributed_rc=distributed_rc,
+        resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_network=resistance_network,
+        resistance_graph_caps=resistance_graph_caps,
+        parasitic_variants=parasitic_variants,
+        substrate_tie_ohms=substrate_tie_ohms,
+        mom_rlc_net=mom_rlc_net,
+        mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+        mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+        mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    )
     try:
         # Issue #6559/#6606: the engine dispatch (curated / runset / the
         # `--deck`-under-runset merged route) and the option mapping live in
@@ -2885,30 +2898,7 @@ def run_pex(
             deck_name,
             runset=runset,
             output=output,
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            label_layers=label_layers,
-            device_models=device_models,
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            critical_nets=critical_nets,
-            critical_net_patterns=critical_net_patterns,
-            critical_net_all=critical_net_all,
-            critical_net_excludes=critical_net_excludes,
-            distributed_rc=distributed_rc,
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            resistance_network=resistance_network,
-            resistance_graph_caps=resistance_graph_caps,
-            parasitic_variants=parasitic_variants,
-            substrate_tie_ohms=substrate_tie_ohms,
-            mom_rlc_net=mom_rlc_net,
-            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+            options=options,
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -2922,15 +2912,7 @@ def run_pex(
         extracted_netlist_path,
         layout_path,
         deck_name,
-        top=top,
-        pdk_variant=pdk_variant,
-        pdk_root=pdk_root,
-        deck_options=deck_options,
-        declared_pins=declared_pins,
-        rename_declared_pins=rename_declared_pins,
-        tie_declared_pins=tie_declared_pins,
-        label_layers=label_layers,
-        device_models=device_models,
+        options=options,
     )
 
     # Issue #4245: `--tie-net` merges reported-unbiased body nets into

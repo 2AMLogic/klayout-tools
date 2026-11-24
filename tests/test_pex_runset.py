@@ -24,7 +24,12 @@ import shutil
 import pytest
 
 from klayout_tools.pex import PexError, run_pex
-from klayout_tools.pex_runset import PexRunset, extraction_fields
+from klayout_tools.pex_runset import (
+    DEFAULT_EXTRACT_OPTIONS,
+    PexExtractOptions,
+    PexRunset,
+    extraction_fields,
+)
 from test_extract_runset import _inputs, _run
 from test_extract_runset import fake_klayout as fake_klayout
 from test_pex import _write_harness, resistor_layout
@@ -54,6 +59,50 @@ def _extract_only(tmp_path, *, runset=None, deck=None, n_dev=1, **kwargs):
 
 # The route and its machine-readable disclosure
 # --------------------------------------------------------------------------- #
+
+
+def test_extract_options_bundle_maps_the_run_extract_arguments():
+    """Issue #7818: :class:`PexExtractOptions` is the one place the 24
+    extraction options map onto ``run_extract``'s kwargs (emission switches
+    included) and the device-only leg's 9-option subset."""
+    import inspect
+
+    from klayout_tools.extract import run_extract
+
+    accepted = set(inspect.signature(run_extract).parameters)
+    options = PexExtractOptions(
+        top="TOP",
+        critical_nets=["A"],
+        resistance_graph=True,
+        resistance_network=True,
+    )
+    kwargs = options.run_extract_kwargs()
+    # Every mapped name is a real `run_extract` parameter (typo guard).
+    assert set(kwargs) <= accepted
+    assert (kwargs["top"], kwargs["critical_nets"]) == ("TOP", ["A"])
+    # The derived emission switches track their flags (issues #4037/#6899).
+    assert kwargs["emit_selected_resistance"] is True
+    assert kwargs["emit_resistance_network"] is True
+    # The all-defaults bundle passes every option as None/False -- the exact
+    # `run_extract` call a pre-bundle caller made with no flags given.
+    defaults = DEFAULT_EXTRACT_OPTIONS.run_extract_kwargs()
+    assert set(defaults) == set(kwargs)
+    assert all(value is None or value is False for value in defaults.values())
+    # The device-only leg serves exactly the 9 parasitics-free options
+    # (issue #3298: the parasitics-only options are not passed).
+    device_only = options.device_only_kwargs()
+    assert set(device_only) <= accepted
+    assert set(device_only) == {
+        "top",
+        "pdk_variant",
+        "pdk_root",
+        "deck_options",
+        "declared_pins",
+        "rename_declared_pins",
+        "tie_declared_pins",
+        "label_layers",
+        "device_models",
+    }
 
 
 def test_runset_route_states_engine_and_that_no_parasitics_are_carried(
