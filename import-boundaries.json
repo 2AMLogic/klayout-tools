@@ -719,6 +719,7 @@
         "klayout_tools.pex_binding",
         "klayout_tools.pex_errors",
         "klayout_tools.pex_merged_leg",
+        "klayout_tools.pex_merged_pins",
         "klayout_tools.pex_net_correspondence",
         "klayout_tools.pex_netlist_text",
         "klayout_tools.pex_resistance_graph",
@@ -2161,6 +2162,12 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.pex_merged_pins",
+      "exporter": "klayout_tools.extract_report_canonicalize",
+      "symbol": "_normalized_netlist_sha256",
+      "reason": "Issue #7787: after binding declared ports, merged PEX must recompute the same connectivity digest as the runset extractor from the effective device and net records."
+    },
     {
       "consumer": "klayout_tools.equiv",
       "exporter": "klayout_tools._yosys_error_messages",
