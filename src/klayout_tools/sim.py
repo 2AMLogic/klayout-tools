@@ -1321,9 +1321,7 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # own device instances to name a likely culprit before falling
         # back to ngspice's raw line.
         "model_bin_range",
-        re.compile(
-            r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
-        ),
+        sim_bin_range.MODELNAME_ABORT_RE,
     ),
     (
         # The generic shapes of an ngspice deck abort (issue #3879): `Error
@@ -4338,6 +4336,7 @@ def _run_sim_corners(
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
+            request=request,
             corners_lost=corners_lost,
             artifacts_dir=artifacts_dir,
             checkpoint_path=checkpoint_path if checkpoint_retained else None,
@@ -4386,7 +4385,6 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
     remote = environment.get("remote")
@@ -9473,7 +9471,9 @@ def _classify_diagnostics(
                 # The follow-on "could not find a valid modelname" is a
                 # consequence of the superseding cause, not a bin range.
                 continue
-            message = _diagnose_modelname_error(netlist_path) or message
+            message = _diagnose_modelname_error(netlist_path) or _line_containing(
+                log_text, match.end() - 1
+            )
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:

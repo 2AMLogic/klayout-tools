@@ -127,7 +127,13 @@ from .sim_batch_features import (
     refusal_diagnostic,
     warn_unverified_features,
 )
-from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_hints import (
+    _BATCH_ENGINE_LOG_HEAD_BYTES,
+    _find_engine_logs,
+    attribute_modelname,
+    hint_existing_fatal,
+    with_runner_hints,
+)
 from .sim_batch_log import read_collected_log
 from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
@@ -2203,35 +2209,17 @@ def _read_job_identity(
     }
 
 
-#: Engine logs a collected ``outputs/`` tree may hold (``keep_artifacts`` runs
-#: copy each corner's log under ``artifacts/``). Only read to surface the
-#: engine's fatal error; never copied wholesale into the JSON.
-_BATCH_ENGINE_LOG_NAMES = ("ngspice.log", "xyce.log")
-
-#: Bytes read from the head of an engine log (a fatal include/parse error is
-#: printed before the simulation starts) and lines kept in a failure tail.
-_BATCH_ENGINE_LOG_HEAD_BYTES = 256 * 1024
+#: Lines/chars kept in the failure tail of an engine log.
 _BATCH_ENGINE_LOG_TAIL_LINES = 12
 _BATCH_ENGINE_LOG_TAIL_CHARS = 1500
 
 
-def _find_engine_logs(collected: str) -> list[str]:
-    """Paths of every engine log under a collected ``outputs/`` tree, sorted."""
-    found: list[str] = []
-    for root, _dirs, files in os.walk(collected):
-        found.extend(
-            os.path.join(root, name)
-            for name in files
-            if name in _BATCH_ENGINE_LOG_NAMES
-        )
-    return sorted(found)
-
-
-def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
-    """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
-    ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
-    for ``log_text``, tagged ``analysis_started: false`` when the log shows no
-    analysis began (issue #3879), or ``None``."""
+def _fatal_log_diagnostic(
+    log_text: str, worker_environment: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Classify an ngspice deck abort and record whether analysis started.
+    For a modelname abort, report the PDK stamp captured by the job's worker.
+    Return None if the log contains no classified fatal diagnostic."""
     from .sim import (
         _NGSPICE_FATAL_CODES,
         _classify_diagnostics,
@@ -2241,11 +2229,17 @@ def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     for diagnostic in _classify_diagnostics(log_text):
         if diagnostic.get("code") in _NGSPICE_FATAL_CODES:
             _mark_analysis_not_started([diagnostic], log_text)
-            return with_runner_hints(attribute_modelname(diagnostic, log_text))
+            return with_runner_hints(
+                attribute_modelname(diagnostic, log_text, worker_environment)
+            )
     return None
 
 
-def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
+def _surface_log_fatal(
+    corners: list[dict[str, Any]],
+    collected: str,
+    worker_environment: dict[str, Any] | None = None,
+) -> None:
     """Add the ngspice deck-abort diagnostic (``missing_include``,
     ``netlist``, ``model_bin_range``, ``ngspice_fatal``) to every errored
     corner whose retrieved engine log shows ngspice failing while reading the
@@ -2254,7 +2248,8 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
     ``measurement ... produced no value``. Corners are matched to logs through
     ``artifacts.log`` (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one
     log in the tree it applies to every such corner. A no-op when no log was
-    collected."""
+    collected. ``worker_environment`` (issue #5593) feeds the modelname
+    attribution of :func:`_fatal_log_diagnostic`."""
     logs = _find_engine_logs(collected)
     if not logs:
         return
@@ -2280,16 +2275,16 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
         if log_path is None:
             continue
         _, evidence = read_collected_log(log_path, _BATCH_ENGINE_LOG_HEAD_BYTES)
-        found = _fatal_log_diagnostic(evidence)
+        found = _fatal_log_diagnostic(evidence, worker_environment)
         if found is not None:
             diagnostics.append(found)
 
 
-def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
-    """For a job that failed without a usable report: a short message
-    fragment carrying the tail of the retrieved engine log, or stating the
-    log was unavailable, plus the ``missing_include`` diagnostic when the log
-    shows one."""
+def _engine_log_note(
+    collected: str, worker_environment: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any] | None]:
+    """Return a readable engine-log tail and its worker-attributed fatal cause.
+    A job without a collected log gets an explanation and no diagnostic."""
     logs = _find_engine_logs(collected)
     if not logs:
         return (
@@ -2301,7 +2296,8 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(evidence)
+    diagnostic = _fatal_log_diagnostic(evidence, worker_environment)
+    return f"{os.path.basename(logs[0])} tail: {tail}", diagnostic
 
 
 def _job_failure_corners(
@@ -2457,7 +2453,6 @@ def _recover_failed_job_corners(
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            log_note, log_diagnostic = _engine_log_note(collected)
             report = None
             try:
                 report = read_collected_report(collected)
@@ -2469,6 +2464,9 @@ def _recover_failed_job_corners(
             except BatchError as exc:
                 note = str(exc)
             identity = _read_job_identity(collected, request, report=report)
+            log_note, log_diagnostic = _engine_log_note(
+                collected, identity.get("worker_environment")
+            )
             if runner_error is None:
                 runner_error, stderr_note = _read_stderr_envelope(collected)
                 if runner_error is None:
@@ -3205,13 +3203,13 @@ def _poll_and_collect(
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
-        environment = {
-            **environment,
-            **_read_job_identity(collected, request, report=report),
-        }
+        identity = _read_job_identity(collected, request, report=report)
+        environment = {**environment, **identity}
         environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
-        _surface_log_fatal(corners, collected)
+        # Issue #5593: the surfaced modelname abort names the fleet's own
+        # PDK stamp from this job's worker capture, not the submitter's.
+        _surface_log_fatal(corners, collected, identity.get("worker_environment"))
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
