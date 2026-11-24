@@ -50,7 +50,7 @@ from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 from .sim_job_cancel import _run_job_cancel as _run_job_cancel
 from .sim_job_status import _run_job_status as _run_job_status
-from .sim_measurement_text import print_measurement_head
+from .sim_measurement_text import print_measurement_head, print_monte_carlo
 from .sim_op_lint_text import _print_op_lint_text as _print_op_lint_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -427,20 +427,7 @@ def _print_text(report: dict) -> None:
                 # Issue #1723: name the SVG next to the failing measurement
                 # so an agent (or a human) knows exactly what to open.
                 print(f"    plot: {plot}")
-            mc = m.get("monte_carlo")
-            if mc is not None:
-                stats = f"n={mc['n']} mean={mc['mean']!r} sigma={mc['stddev']!r}"
-                quantiles = "  ".join(
-                    f"{key}={value!r}" for key, value in mc["quantiles"].items()
-                )
-                print(f"    mc: {stats}  {quantiles}".rstrip())
-                window = mc["sigma_window"]
-                if window is not None:
-                    print(
-                        f"    mc: mean+/-{window['k']:g}sigma = "
-                        f"[{window['low']!r}, {window['high']!r}] "
-                        f"[{window['status']}] (margin={window['margin']!r})"
-                    )
+            print_monte_carlo(m.get("monte_carlo"))
 
     corners = report["corners"]
     if not corners:

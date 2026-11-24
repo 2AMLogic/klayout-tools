@@ -785,7 +785,7 @@ def test_diff_pair_zero_netlist_w_falls_back_to_generator_default(tmp_path, pdk_
 
     group = response["device_groups"][0]
     assert "w_um" not in group["resolved_params"]
-    assert not any("splits" in warning for warning in response["warnings"])
+    assert not any("auto-divided" in warning for warning in response["warnings"])
 
 
 # ---------------------------------------------------------------------------
