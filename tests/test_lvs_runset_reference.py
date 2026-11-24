@@ -306,16 +306,50 @@ def test_sg13g2_explicit_device_map_and_child_circuits_take_precedence(tmp_path)
     )
     mapped = _sg13g2_text(
         tmp_path,
-        text + ".subckt child a b c s\n.ends child\n",
+        text
+        + ".subckt child a b c s\n.ends child\n"
+        + ".subckt npn13G2v a b c d\n.ends npn13G2v\n"
+        + ".subckt sg13_hv_nmos a b c d\n.ends sg13_hv_nmos\n",
         device_map={
             "npn13G2v": {"kind": "bipolar", "class": "my_npn"},
             "sg13_hv_nmos": "my_nmos",
         },
     ).splitlines()
-    assert not [x for x in mapped if "npn13G2v" in x or "sg13_hv_nmos" in x]
+    elements = [line for line in mapped if not line.startswith(".")]
+    assert not any("npn13G2v" in line or "sg13_hv_nmos" in line for line in elements)
     assert any(" my_npn " in x or x.endswith(" my_npn") for x in mapped)
     assert any(" my_nmos " in x for x in mapped)
     assert "Xchild a b c s child" in mapped  # genuine hierarchy untouched
+
+
+@pytest.mark.parametrize("included", [False, True], ids=["inline", "included"])
+@pytest.mark.parametrize(
+    ("model", "params"),
+    [("npn13G2", ""), ("sg13_hv_nmos", " W=1u L=0.5u")],
+)
+def test_sg13g2_defined_native_name_keeps_reachable_child(
+    tmp_path, model, params, included
+):
+    import klayout.db as kdb
+
+    call = f"Xchild a b c d {model}{params}"
+    definition = f".subckt {model} a b c d{params}\nR1 a b 1k\nR2 c d 2k\n.ends\n"
+    if included:
+        (tmp_path / "cells.sp").write_text(definition)
+        definition = ".include cells.sp\n"
+    converted = _sg13g2_text(tmp_path, _schem(call) + definition)
+    assert call in converted.splitlines()
+
+    netlist = kdb.Netlist()
+    netlist.read(str(tmp_path / "reference_converted.sp"), kdb.NetlistSpiceReader())
+    top = netlist.circuit_by_name("LAYOUT")
+    (child,) = top.each_subcircuit()
+    child_circuit = child.circuit_ref()
+    assert child_circuit.name.partition("(")[0] == model.upper()
+    assert [device.device_class().name for device in child_circuit.each_device()] == [
+        "RES",
+        "RES",
+    ]
 
 
 def test_sg13g2_native_primitives_ignore_other_decks(tmp_path, fake_klayout):

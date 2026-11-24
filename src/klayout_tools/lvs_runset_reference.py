@@ -116,14 +116,30 @@ def rename_top_subckt(text: str, old: str, new: str) -> str:
 _SG13G2_RF_CARDS = {"INDUCTOR": ("L", 3), "SG13_HV_SVARICAP": ("C", 4)}
 
 
-def _sg13g2_rf_reference(text: str, source: str, binding: Any) -> tuple[str, set[str]]:
-    """Prepare the element cards the native SG13G2 reader pairs with RF devices."""
+def _sg13g2_rf_card(tokens: list[str], positional: list[str]) -> str:
+    name = positional[-1]
+    prefix, count = _SG13G2_RF_CARDS[name.upper()]
+    terminals = len(positional) - 1
+    if terminals != count:
+        raise LvsError(f"SG13G2 {name} requires {count} terminals, got {terminals}")
+    return " ".join(
+        [prefix + tokens[0][1:], *(t for t in tokens[1:] if t.lower() != "params:")]
+    )
+
+
+def _sg13g2_reference_cards(
+    text: str, source: str, binding: Any, explicit: frozenset[str]
+) -> tuple[str, set[int]]:
+    """Write native element cards and preserve hierarchical or unresolved X calls."""
     from ._spice_text import fold_spice_continuations
+    from .lvs_runset_sg13g2_cards import native_card, native_primitive_names
     from .netlist_normalize import _binding_known, _split_params, _tokenize
     from .netlist_normalize_scan import recovery_subckt_names
 
-    defined = recovery_subckt_names(text, source, set(_SG13G2_RF_CARDS))
+    primitives = set(_SG13G2_RF_CARDS) | native_primitive_names()
+    defined = recovery_subckt_names(text, source, primitives)
     lines = fold_spice_continuations(text.split("\n"))
+    kept: set[int] = set()
     enclosing = ""
     for i, line in enumerate(lines):
         head = line.lstrip().split(None, 2)
@@ -135,61 +151,28 @@ def _sg13g2_rf_reference(text: str, source: str, binding: Any) -> tuple[str, set
             enclosing = ""
         elif head[0][:1].lower() == "x":
             tokens = _tokenize(line)
-            positional, _ = _split_params(tokens[1:])
+            positional, params = _split_params(tokens[1:])
             name = positional[-1] if positional else ""
             model = name.upper()
-            if model not in _SG13G2_RF_CARDS or _binding_known(name, binding):
+            if model not in primitives or name in explicit:
                 continue
-            # A PDK unit test may give its top the same name as the primitive
-            # inside it. A call to a separate defined circuit is hierarchy.
+            if model in _SG13G2_RF_CARDS and _binding_known(name, binding):
+                continue
+            # PDK unit fixtures may give a top the same name as the primitive
+            # it contains. Calls to a separate defined circuit are hierarchy.
             if model in defined and model != enclosing:
+                kept.add(i)
                 continue
-            prefix, count = _SG13G2_RF_CARDS[model]
-            terminals = len(positional) - 1
-            if terminals != count:
-                raise LvsError(
-                    f"SG13G2 {name} requires {count} terminals, got {terminals}"
-                )
-            lines[i] = " ".join(
-                [
-                    prefix + tokens[0][1:],
-                    *(t for t in tokens[1:] if t.lower() != "params:"),
-                ]
+            card = (
+                _sg13g2_rf_card(tokens, positional)
+                if model in _SG13G2_RF_CARDS
+                else native_card(tokens, positional, params)
             )
-    return "\n".join(lines), defined
-
-
-def _sg13g2_native_reference(
-    text: str, explicit: frozenset[str]
-) -> tuple[str, set[int]]:
-    """Issue #7836: write the native ``Q``/``M`` card for each SG13G2 bipolar
-    or MOS call (see :mod:`.lvs_runset_sg13g2_cards`), unless ``explicit`` (the
-    request's own ``device_map`` names) claims the callee.
-
-    Returns the text and the line indices of the table calls it could not
-    convert: those stay ``X`` cards, hidden from the generic conversion, so
-    the unresolved-call scan names each one instead of the conversion
-    guessing a generic class for it."""
-    from ._spice_text import fold_spice_continuations
-    from .lvs_runset_sg13g2_cards import native_card, native_primitive_names
-    from .netlist_normalize import _split_params, _tokenize
-
-    primitives = native_primitive_names()
-    lines = fold_spice_continuations(text.split("\n"))
-    kept: set[int] = set()
-    for i, line in enumerate(lines):
-        if line.lstrip()[:1] not in ("X", "x"):
-            continue
-        tokens = _tokenize(line)
-        positional, params = _split_params(tokens[1:])
-        callee = positional[-1] if positional else ""
-        if callee.upper() not in primitives or callee in explicit:
-            continue
-        card = native_card(tokens, positional, params)
-        if card is None:
-            kept.add(i)
-        else:
-            lines[i] = card
+            if card is None:
+                # Leave the original X call visible to the unresolved-call scan.
+                kept.add(i)
+            else:
+                lines[i] = card
     return "\n".join(lines), kept
 
 
@@ -214,9 +197,7 @@ def _protect_passthrough_calls(
     binding, explicit = _build_subckt_map(deck, device_map)
     kept: set[int] = set()
     if sg13g2_reference is not None:
-        text, defined = _sg13g2_rf_reference(text, sg13g2_reference, binding)
-        text, kept = _sg13g2_native_reference(text, explicit)
-        passthrough = passthrough | defined
+        text, kept = _sg13g2_reference_cards(text, sg13g2_reference, binding, explicit)
     saved: dict[str, str] = {}
     lines = text.split("\n")
     for i, line in enumerate(lines):
