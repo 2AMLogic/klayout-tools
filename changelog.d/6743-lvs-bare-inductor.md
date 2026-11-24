@@ -1,0 +1,1 @@
+- LVS now identifies extracted inductor X cards in a bare layout netlist and asks for the layout deck needed to recover the devices.
