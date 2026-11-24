@@ -6393,14 +6393,6 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
     return _spice_text_logical_lines(netlist_text)
 
 
-_UNSEEDED_NOISE_NOTE = (
-    "trnoise()/trrandom() sources are not governed by monte_carlo.seed "
-    "(ngspice seeds them from the process id): re-running this request "
-    "redraws their noise, and samples run in separate batch jobs or hosts "
-    "may share a noise stream."
-)
-
-
 def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
     """Map lower-cased top-level independent voltage-source names to the
     explicit waveform keyword (``pwl``/``pulse``/``sin``/...) they declare.
