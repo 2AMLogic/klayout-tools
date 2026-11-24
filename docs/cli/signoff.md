@@ -3182,6 +3182,19 @@ output file untouched. If the running version contains `+unknown`, the check
 passes with `"unverifiable": true`. A pinned value containing `+unknown` is
 compared literally when the running build is known.
 
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
+
 When upgrading an inventory that already pins klt, update the pin to the
 build you will use and regenerate its committed envelope to include the new
 check. The other tool versions and the PDK name and revision are checked for

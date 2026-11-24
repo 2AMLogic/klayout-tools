@@ -222,6 +222,11 @@ def add_signoff_parser(
         ),
     )
     signoff_parser.add_argument(
+        "--update-tool-pin",
+        action="store_true",
+        help="update the item-9 inventory klt pin after a passing re-attestation",
+    )
+    signoff_parser.add_argument(
         "--attest",
         metavar="ITEM",
         type=int,
