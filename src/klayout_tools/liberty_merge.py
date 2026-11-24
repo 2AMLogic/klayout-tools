@@ -20,7 +20,10 @@ its local name refuses instead of dangling. Top-level ``lu_table_template``
 and ``power_lut_template`` groups are a second exception: they are unioned
 by name. Differing direct index values are safe only when every referencing
 table supplies all its own axes. The first definition is kept, and the ones the
-first file lacks are appended after its header. Each file's cell groups are
+first file lacks are appended after its header. A third exception (issue
+#7809): an optional library-level ``input_voltage``/``output_voltage`` group
+that some files declare and others lack entirely is unioned by name, not
+compared (see :mod:`liberty_merge_voltage`). Each file's cell groups are
 appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
@@ -47,6 +50,7 @@ from .liberty_merge_syntax import (
     _tokens,
     inherited_table_axis,
 )
+from .liberty_merge_voltage import VoltageUnion
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
@@ -122,8 +126,9 @@ def merge_liberty(paths: list[str]) -> str:
 
 
 def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[str]]:
-    """Validate headers/cell names across files; ``(header, extra templates,
-    bodies)``. Extra templates are those the first header does not define."""
+    """Validate headers/cell names across files; ``(header, extra header
+    groups, bodies)``. The extras are the templates and voltage groups the
+    first header does not define."""
     header = ""
     header_fields: dict[str, str] = {}
     first_path = paths[0]
@@ -133,6 +138,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     ambiguous_axes: dict[str, set[str]] = {}
     extra: list[str] = []
     bodies: list[str] = []
+    voltage = VoltageUnion()
     for path, text in zip(paths, texts, strict=True):
         file_header, body, cells, condition_count = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
@@ -140,6 +146,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
             first_condition_count = condition_count
+            voltage.first(path, file_header, fields, text)
         else:
             retained = "".join(raw for _, raw in file_templates) + body
             first_fields, other_fields, context = _reconcile_conditions(
@@ -150,7 +157,10 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 retained,
                 single_condition=first_condition_count == condition_count == 1,
             )
-            mismatch = header_mismatch(
+            first_fields, other_fields, clash = voltage.reconcile(
+                first_path, first_fields, path, other_fields, file_header, text
+            )
+            mismatch = clash or header_mismatch(
                 first_path, first_fields, texts[0], path, other_fields, text
             )
             if mismatch:
@@ -166,6 +176,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 )
             seen[cell] = path
         bodies.append(body)
+    if dangling := voltage.dangling():
+        raise LibertyMergeError(dangling)
+    extra.extend(voltage.extra)
     if ambiguous_axes:
         for path, text in zip(paths, texts, strict=True):
             if inherited := inherited_table_axis(text, ambiguous_axes):
