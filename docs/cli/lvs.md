@@ -328,9 +328,15 @@ a PDK runset's own SPICE reader takes it literally (as an extra net, losing
 cap with `a`/`b` labels on met3 (70/5) and met4 (71/5): with the `0` the compare
 was `mismatch` (`device.property`, net `0` unmatched); without it, `match`.
 
+**IHP SG13G2 RF devices.** With `sg13g2.lvs` and `reference.form: "subckt-call"`,
+the native reader receives a three-terminal `L` card for `inductor` and a
+four-terminal `C` card for `sg13_hv_svaricap`. Terminal order and device
+parameters carry through. Explicit device mappings take precedence, and a
+call to a separately defined subcircuit keeps its hierarchy.
+
 **RF/bipolar subcircuits and differently named tops (issue #5402).** Under
 `reference.form: "subckt-call"`, an `X` card whose subcircuit is in the
-runset's own `DEVICE_LIST` (e.g. IHP `inductor`, `sg13_hv_svaricap`) and is
+runset's own `DEVICE_LIST` and is
 neither a curated binding nor in `reference.device_map` is left untouched in
 the converted reference for the runset's reader to pair, instead of failing
 with `could not convert subckt-call reference netlist`. Curated and
@@ -5756,8 +5762,10 @@ engines, with `options.netgen_setup` still composed ahead of them. A
 A `"gate-level-verilog"` reference **is** replayed too (issue #4353): its
 `reference_conversion` echo carries `form`, `library`, `pdk`, `pdk_root` and
 the resolved `pin_order_files`, so `--rerun` re-reads the Verilog with the
-same pin-order sources. A gate-level report committed before that echo
-existed stays best-effort.
+same pin-order sources. For portable reports, the verifier locates the recorded PDK
+variant on its host and resolves repo-scoped files relative to the report’s repository.
+An external pin-order file has no recorded location and cannot be replayed.
+Reports predating the conversion echo retain best-effort replay.
 A `layout.label_layers` override **is** replayed (issue #2686) from the
 report's top-level `label_layers` echo, `null` roles included; a report
 without that field (no override, or committed before it existed) replays

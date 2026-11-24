@@ -117,7 +117,7 @@ A request naming both, or neither, is a request error.
 Unknown top-level keys are rejected (exit 1, naming the key and listing the
 known fields), matching `klt extract`; only `schema` is always allowed.
 The optional `sdc_check` field (see "SDC drift check") compares a committed
-`.sdc` with the constraints below. It lists `set_clock_transition` under
+`.sdc` with the constraints below. It compares explicit setup and hold multicycle paths and lists `set_clock_transition` under
 `sdc_drift.unchecked`. Set `constraints.clock_transition_ns` to apply the
 primary clock’s ideal slew during analysis.
 
@@ -201,6 +201,10 @@ primary clock’s ideal slew during analysis.
     "unconstrained_endpoints": { "status": "ok", "count": 0, "sample": [], "truncated": false, "reason": null },
     "unclocked_registers": { "status": "ok", "count": 0, "sample": [], "truncated": false, "reason": null },
     "sample_limit": 20
+  },
+  "liberty_warnings": {
+    "count": 0, "by_code": { "STA-1253": 0, "STA-1311": 0 },
+    "sample": [], "sample_limit": 5, "truncated": false
   },
   "fmax_mhz": 512.3456,
   "setup_violation_count": 3,
@@ -306,6 +310,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
 | `constraint_completeness` | object | Additive field (issue #2780), present on every response and every `corners[]` entry. Whether every timing endpoint is constrained and every register is clocked in this session — **separate from `timing_status`**, which only says whether the slack numbers are measurements: a design can report a finite WNS (`timing_status: "constrained"`) and still have unconstrained endpoints or unclocked registers. `{status, unconstrained_endpoints, unclocked_registers, sample_limit}`; `status` is `"complete"` \| `"incomplete"` \| `"unknown"`. Each check is `{status: "ok" \| "unavailable", count, sample, truncated, reason}` — a check that could not run reports `count: null`, never `0`. See "Constraint completeness" below. |
+| `liberty_warnings` | object | Additive field (issue #7411), present on every response and every `corners[]` entry. The OpenSTA Liberty-reader warnings that **discarded a timing model**: `STA-1253` (a timing table names a `lu_table_template` the library does not define) and `STA-1311` (the timing group left with no table models). The group is dropped, so the arc has no delay model and the reported slacks may omit the paths it would have launched — for a sequential cell's CLK-to-Q group, typically every register-launched path. `{count, by_code, sample, sample_limit, truncated}`; `by_code` always carries both keys (zeroed on a clean deck, `count: 0`), and `sample` holds up to 5 verbatim warning lines with the deck quoted by its report identity, never an absolute host path. A warning, not a refusal — `status`/`timing_status`/exit codes are unchanged. See "Liberty model warnings" below. |
 | `fmax_mhz` | number \| null | OpenROAD's `timing__fmax` in Hz, converted to MHz and rounded to four decimals. For each clock, OpenSTA takes the largest `period − path slack` among eligible same-clock, same-edge, single-cycle setup-side paths, including port paths. OpenROAD reports the highest reciprocal across clocks with a usable period. If none qualify, it tries an unconstrained combinational delay estimate. An absent metric yields null. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
@@ -661,6 +666,67 @@ Fixtures with real engine output for the fully constrained, mixed,
 unconstrained, combinational-only, 25-flop (truncated) and false-path cases
 are in `tests/fixtures/sta_constraint_completeness/`.
 
+## Liberty model warnings (`liberty_warnings`, issue #7411)
+
+When a Liberty file names a `lu_table_template` the library does not define,
+OpenSTA's reader warns and drops the table; the timing group it leaves
+behind ends up with no table models and is discarded too:
+
+```
+[WARNING STA-1253] <liberty> line N, table_template delay_template_7x7 not found.
+[WARNING STA-1311] <liberty> line N, no table models found in timing group.
+```
+
+The arc then has no delay model. For a sequential cell's CLK-to-Q group
+that removes every register-launched path from the analysis:
+`report_checks` returns only input-port-launched paths, `check_timing`
+reports the flop-driven output pins as unconstrained endpoints, and the
+response still reads `timing_status: "constrained"` with finite slacks.
+Until issue #7411 the only indirect tell was
+`constraint_completeness.status: "incomplete"` — which a reader had to
+know to interpret as *arcs missing* rather than *constraints missing*.
+
+Every response and every `corners[]` entry now carries a
+`liberty_warnings` block, always present so the field is a stable
+contract:
+
+```json
+"liberty_warnings": {
+  "count": 2,
+  "by_code": { "STA-1253": 1, "STA-1311": 1 },
+  "sample": [
+    "[WARNING STA-1253] <outside repo> line 4021, table_template delay_template_7x7 not found.",
+    "[WARNING STA-1311] <outside repo> line 4021, no table models found in timing group."
+  ],
+  "sample_limit": 5,
+  "truncated": false
+}
+```
+
+- `count`/`by_code` — the two codes that mean *a model was dropped*,
+  nothing else. Unrelated `[WARNING STA-*]` lines (SPEF reader codes,
+  units complaints) are not counted. Identical lines are deduplicated.
+- `sample` — up to `sample_limit` (5) verbatim lines; the deck is quoted
+  by its report identity (`<outside repo>` above), never an absolute host
+  path. `truncated` is `true` when `count` exceeds the sample.
+- Both stdout and stderr are scanned — OpenROAD builds differ in which
+  stream the logger writes to.
+
+On a `pdk.corners` response each `corners[]` entry carries its own block
+from its own session (every corner is a fresh session that reads its own
+deck), so a warning is attributed to the corner whose Liberty produced
+it. `--format text` prints one `liberty_warnings:` summary line plus the
+sample next to `constraint_completeness`, and is silent on a clean deck.
+
+This is a warning, not a refusal: a library with one dropped non-critical
+group is legitimate, so `status`, `timing_status`, the exit code and the
+slack values themselves are unchanged. The warning counts cannot
+establish how many register-launched paths were affected — read the block
+as "these slacks may omit the paths the discarded groups would have
+launched". `klt place-and-route` surfaces the same codes as one
+`warnings[]` entry ([`place-and-route.md`](place-and-route.md),
+"Measured power delivery").
+
 ## Multi-corner characterization (`pdk.corners`, issue #1871)
 
 `klt sta`'s own reason to exist ("Why this exists" above) is characterizing
@@ -718,6 +784,7 @@ closes that gap natively:
       "total_negative_hold_slack_ns": 0.0,
       "timing_status": "constrained",
       "constraint_completeness": { "status": "complete", "...": "..." },
+      "liberty_warnings": { "count": 0, "...": "..." },
       "fmax_mhz": 401.552,
       "setup_violation_count": 5,
       "hold_violation_count": 0,
@@ -738,9 +805,10 @@ closes that gap natively:
 `provenance.pdk`/`provenance.input` (the shared-geometry `content_hash`
 this whole feature exists to let a caller trust). They are never repeated
 inside a `corners[]` entry. The fields that *do* vary per corner — the
-resolved liberty deck, (issue #2739) the propagated-clock evidence, and
-(issue #2780) the constraint-completeness block — move into each
-`corners[]` entry's own `deck`/`clock_propagation`/`constraint_completeness`
+resolved liberty deck, (issue #2739) the propagated-clock evidence,
+(issue #2780) the constraint-completeness block and (issue #7411) the
+liberty-warnings block — move into each `corners[]` entry's own
+`deck`/`clock_propagation`/`constraint_completeness`/`liberty_warnings`
 fields,
 alongside that corner's own
 `worst_slack_ns`/`total_negative_slack_ns`/`worst_hold_slack_ns`/
@@ -1756,6 +1824,7 @@ data hold path and is what `into.hold` reports, under its own
   Mode values, destination pins, through pins and pin patterns are outside
   that contract. Register multicycle exceptions have their own selectors in
   `constraints.multicycle_paths`. When `sdc_check`
+  compares multicycle exceptions, it checks each setup and hold multiplier. When it
   reads `set_case_analysis`, `set_false_path -to` or `set_false_path -through`,
   it lists each command and its source line in `sdc_drift.unchecked`. The
   supplied SDC is comparison data only. The JSON request supplies the timing
@@ -1945,6 +2014,27 @@ equal the request's reference for that subject -- the entry's `clock` for a
 mapped port, else the primary clock -- so a clock disagreement is a mismatch,
 never a false `match`. A per-corner period map matches when the SDC period
 equals any corner's value.
+For `set_multicycle_path`, the reader compares each positive integer
+multiplier exactly. Specify one of `-setup` or `-hold`, both `-from` and
+`-to`, and optionally `-through`. Each selector can be a bare name,
+`[get_cells S]` or `[get_pins S]` using the same selector alphabet as the
+request. Matching uses the selector strings. Each missing, extra or changed
+side gets a mismatch with its selection, bound and both multiplier values.
+An absent value is `null`. An SDC-sourced difference includes its line
+number. Changing a selector removes one selection and adds another. Forms
+with implicit sides, edge flags, repeated selectors or Tcl lists appear in
+`unchecked`.
+
+With nonempty `constraints.multicycle_paths`, flat and multi-corner reports
+also carry `provenance.request_sha256`. To reproduce it from the loaded JSON
+object, compute
+`hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()`.
+The hash covers every request field, including relative DEF, Verilog, SPEF
+and SDC path strings as written. Whitespace and object key order in the file
+have no effect. The separate `provenance.input.content_hash` identifies the
+geometry input bytes. Omitted or empty multicycle paths leave the request
+digest absent.
+
 Comments, blank lines and `\` continuations are handled; anything else --
 other commands, or a checked command using an option/form the reader does not
 understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
@@ -1962,7 +2052,7 @@ mismatch with `sdc_value: null`.
      "sdc_value": 0.9, "request_value": 0.8, "line": 4}
   ],
   "unchecked": [
-    {"command": "set_multicycle_path", "line": 7,
+    {"command": "set_case_analysis", "line": 7,
      "reason": "command not in the checked subset"}
   ],
   "status": "drift"
