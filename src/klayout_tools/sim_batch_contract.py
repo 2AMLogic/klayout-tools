@@ -171,12 +171,15 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
     # the only route to .meas cards on a noise analysis. Untagged.
     "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+    "analysis_steps[].measurements[].on_unreached": None,  # #7093, after v0.9.2
     # measurements[].search (#4121), after v0.7.0: a mandatory feature (an
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
     # The untagged strict-limit fields use the mandatory "exclusive_bounds" worker gate.
     "measurements[].limits.exclusive_min / exclusive_max": None,
+    # #5772: verify the seed in the collected report until a runner release is tagged.
+    "options.transient_noise_seed": None,
     # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
     # a supply_v rail value finer than three decimals is spelled at full
     # precision in corner_id instead of .3f, so sub-milli rungs keep distinct

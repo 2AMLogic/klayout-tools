@@ -279,8 +279,10 @@ two steps:
    at least one passing test and no failures (skips are allowed —
    [`functional-verification.md`](functional-verification.md)), `klt sta` on
    its *reported timing* rather than a `status` field (that verb's `status`
-   is always `"ok"`: every corner it reports must be `timing_status:
-   "constrained"` with non-negative setup and hold slack — see "Digital-flow
+   is always `"ok"`, and a present non-`"ok"` one fails: every corner it
+   reports must be `timing_status: "constrained"` with non-negative setup and
+   hold slack; `geometry_source` is disclosed but not graded unless the entry
+   opts in with `require_routed_geometry` — see "Digital-flow
    evidence: `klt sta` and `klt functional-verification`" below), and a
    **generic**
    evidence envelope on its own `status: "pass"` (see "Generic evidence
@@ -1029,7 +1031,7 @@ envelope's own verdict produces):
 | Key | Carried on | Value |
 | --- | ---------- | ----- |
 | `detail.nothing_checked_reasons` | `nothing_checked` only | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
-| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only) and `runset_unrecognised_device` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only), `runset_unrecognised_device` and `runset_inductor_terminal_order` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
 
 `cited_evidence` is present on **either** route into `nothing_checked` and on
 a failing or partial run, and neither key is consulted by any grading rule.
@@ -2802,7 +2804,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
-| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -3181,6 +3183,19 @@ the running version in `running`. Attestation exits 3 and leaves the
 output file untouched. If the running version contains `+unknown`, the check
 passes with `"unverifiable": true`. A pinned value containing `+unknown` is
 compared literally when the running build is known.
+
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
 
 When upgrading an inventory that already pins klt, update the pin to the
 build you will use and regenerate its committed envelope to include the new
@@ -4333,6 +4348,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    check its runset is pinned before running `klt lvs --engine
    klayout-runset`.
 
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
+
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`
    outcome to the partitions that may use it (see "Item 6 `not_applicable`").
@@ -4627,7 +4648,8 @@ newer `klt`"* versus *"this citation points at the wrong artifact"*.
 Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
 its own** — `status` is always `"ok"` (the verb reports timing, it does not
 judge it). So `klt signoff` derives a verdict from the reported timing
-instead. Every corner the run reported must satisfy both of:
+instead (a `status` other than `"ok"` still fails, see below). Every corner
+the run reported must satisfy both of:
 
 1. `timing_status == "constrained"`. OpenSTA's unconstrained-design sentinel
    is `1e+39` — a *positive* number, so a naive `worst_slack_ns >= 0` rule
@@ -4640,6 +4662,50 @@ instead. Every corner the run reported must satisfy both of:
 
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
+
+**The envelope's own `status` is graded (issue #7711).** `klt sta` always
+emits `status: "ok"` and a failed run never emits the envelope
+([`sta.md`](sta.md)). In manifest mode, a present top-level `status` with
+any other value grades `unmet` with reason `check_failed`. The value appears in
+`detail.sta_status`, including JSON `null`. An absent `status` still gives
+`unrecognized_envelope`. In envelope-aggregation mode, a non-ok string fails
+the check and a missing or non-string status fails envelope validation.
+Per-corner entries carry no `status`.
+
+**`geometry_source` is *not* part of the default predicate (issue #7711).** It
+is a caller-supplied label — `"routed"`, `"placement_estimate"` or
+`"netlist_estimate"` ([`sta.md`](sta.md)) — and item 5 is the pre-layout
+corner-timing item (item 7 is the post-layout one and does not accept `sta`),
+so a pre-route estimate with closed timing is deliberately still `met`. It is
+surfaced on every `sta` citation as `detail.geometry_source`, so a reader can
+see what a `met` rested on; require routed geometry with the opt-in below.
+
+**Opt-in: `require_routed_geometry` (issue #7711).** An evidence entry citing
+a `klt sta` envelope may add `"require_routed_geometry": true` (same
+entry-level shape as `require_annotation_complete`). Then the envelope's
+top-level `geometry_source` must be the literal string `"routed"`; otherwise
+the item is `unmet` with reason `check_failed` and
+`detail.sta_geometry_not_routed` is `{geometry_source: <value>}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `"placement_estimate"`, `"netlist_estimate"` and any other string → unmet.
+  The check is an exact string match, with no case folding.
+- An otherwise valid STA timing citation with a missing, `null` or non-string
+  `geometry_source` gives `check_failed` under this option. The diagnostic
+  carries the original JSON value, or `null` for an absent key. The default
+  still reports `unrecognized_envelope` for these shapes.
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- It composes with the two opt-ins below on one entry; when several fail,
+  the first of annotation, constraints, geometry is the one reported.
+
+It does not re-derive routedness from the DEF: the label is the caller's
+claim (see [`sta.md`](sta.md)), and the option only requires that the claim
+be `"routed"`.
+
+The key, `detail.sta_status`, `detail.sta_geometry_not_routed` and the
+citation's `detail.geometry_source` are additive: no existing field changes
+meaning, so `schema_version` is unchanged. The `status` guard changes the
+verdict only for an envelope `klt sta` cannot have produced.
 
 **Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
 say whether a SPEF was actually applied to the timing. An evidence entry
@@ -4920,8 +4986,9 @@ new. Outcomes:
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
   when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
-  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
-  **passing** measurements grade (issue #6027): those rows leave
+  failing `klt sim` citation still credits the rows its tagged, **passing**
+  measurements carrying a recognised, non-null `min`/`max` bound grade (issue
+  #6027): those rows leave
   `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
   bench with one known-failing row can claim the rows its envelope genuinely
   carries. A row whose tagged measurement fails — or that the failing
@@ -5096,7 +5163,8 @@ spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
 its envelope has at least one `spec_row`-tagged measurement, a named row counts
 as covered only if the envelope has a *passing* measurement tagged with it that
-declares `limits`; a named row with no such measurement is uncovered
+carries a recognised, non-null `min`/`max` bound; a named row with no such
+measurement is uncovered
 (`partial_coverage`, listed in `detail.uncovered_rows`). A tag for a row the
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
@@ -5196,6 +5264,73 @@ whatever shape item 5's evidence has, including a single citation object or no
 item 5 evidence at all.
 Additive: no `schema_version` bump.
 
+**Joint grid coverage across benches (issue #6969).** Derived coverage reads
+one cited envelope's tags. A coverage-style row — "every implemented bench
+exercised the full ratified PVT grid, with the supply and temperature verified
+as applied" — is a property of a **set** of envelopes, one per bench: citing
+any one envelope with `rows: [...]` for it would assert the joint property on
+one bench's evidence, and a `gap` understates benches that each prove their
+half. A `spec_rows` row may instead carry `joint_grid` (item 5 only; a
+partition-qualified `"5.analog"` key works too):
+
+```json
+{"id": "pvt_grid_all_benches",
+ "joint_grid": {
+   "members": ["sim/bench_a.json", "sim/bench_b.json"],
+   "process": ["tt", "ss", "ff"],
+   "supply_v": {"vdd": [1.62, 1.8, 1.98]},
+   "temperature_c": [-40, 27, 125]}}
+```
+
+- `members` names citations of the same item-5 evidence list, matched by the
+  citation's `file` (or its joined `command`). The list is explicit, so
+  dropping a bench from the evidence cannot silently shrink the joint claim:
+  a name no citation carries is `invalid_evidence`.
+- The grid uses the same shape as a `klt sim` request's `corners` block —
+  supply rails sweep **zipped** by index, as a set — and the required points
+  are its product (process x supply x temperature). An absent axis takes the
+  request-side default (`process` null, no supply rail, 27 C). Supply values
+  compare as numbers (`27` and `27.0` are one point; no tolerance).
+- The row is `covered` — and `row_sources` reads it `"derived"`, never
+  `"asserted"`, so `require_derived_rows` passes it — only when **every**
+  named member graded `met` and its envelope's `corners[]` contains every
+  required grid point with every corner at that point `pass` (a point swept
+  twice — a `params` axis — must pass at *every* corner), **and** it carries
+  at least one condition probe. A probe is a passing `measurements[]` entry
+  tagged `spec_row: "<row id>"` (the #3778 tag) with a recognised, non-null
+  `min` or `max` bound in `limits`. Zero counts as a bound. The rolled-up
+  `status` is `pass` only when the measurement passed at every corner that
+  reported it.
+- Otherwise the row is uncovered — `unmet` / `partial_coverage`, listed in
+  `detail.uncovered_rows` like any uncovered row — and `detail.joint_rows`
+  names, per member with a shortfall, its `missing_points` (labels in the
+  envelope's own `corner_id` PVT spelling, e.g. `ff/1.980V/-40C`) and whether
+  its condition probe is `missing`. A member that graded anything but `met`
+  misses every point: a failed envelope is not evidence for the joint
+  property, even when its per-row truth was captured (#6027).
+- A citation naming a joint row in its own `rows` is `invalid_evidence` — the
+  same refusal as naming an undeclared or `gap` row; that is exactly the
+  one-bench false claim this form exists to prevent.
+- A `joint_grid` row cannot also declare `extent`, `structural`, or `gap` (either form). A malformed
+  `joint_grid` — not an object, an unknown key, an empty, shorter-than-two or
+  duplicate-bearing `members`, a non-string member, an empty axis, a
+  non-numeric axis value, supply rails of differing lengths — degrades item 5
+  alone to `invalid_evidence`, never raises. A `joint_grid` on item 6's rows
+  is likewise `invalid_evidence` (item 6 shares the reader, not the form).
+- A **Monte Carlo member** is stated unsupported, not guessed at
+  (`invalid_evidence` naming the member): sampled corners echo their base
+  point's `process`/`supply_v`/`temperature_c`, but "a grid point counts only
+  when every sample drawn at it passed" is not a traced `klt sim` contract.
+
+The per-spec-row table renders a joint row as one `state: "joint"` record —
+no single measurement is quotable — carrying `joint` = `{covered, members:
+[{member, missing_points, missing_probe}]}` from a static re-read of the same
+citations (a command-backed, unreadable or Monte Carlo member reads `null`/
+`null`, "not evaluable from the report alone"); `--format text` prints
+`[JOINT]` with one indented line per member shortfall. A manifest declaring
+no `joint_grid` row omits every new key and renders byte-identically;
+additive, no `schema_version` bump.
+
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
 reads "multi-corner STA **plus** a bit-exact functional test suite", so on a
 digital partition a passing citation set that includes `sta` or
@@ -5213,9 +5348,10 @@ there is no `schema_version` bump; note that a digital manifest citing only
 metric measured in that same sweep". A digital item 5 whose passing citations
 are all `klt sim` grades `met` only when the manifest declares at least one
 `spec_rows` row with `"timing_margin": true` (boolean, default `false`) **and**
-each such row is evidenced by a cited `klt sim` envelope: a passing,
-`limits`-bearing `measurements[]` entry tagged `spec_row: "<row>"`, whose name
-has a passing measurement in **every** `corners[]` entry. A manifest-asserted
+each such row is evidenced by a cited `klt sim` envelope: a passing
+`measurements[]` entry with a recognised, non-null `min`/`max` bound, tagged
+`spec_row: "<row>"`, whose name has a passing measurement in **every**
+`corners[]` entry. A manifest-asserted
 `rows` list is not enough; the tag must be in the envelope. Otherwise the item is
 `unmet` / `timing_margin_missing`, with
 `detail.missing_timing_margin: [{"row": "<id>", "corners": [...]}]` (`row` is
@@ -5373,7 +5509,7 @@ The block is a **projection of the same evidence grading already read**, not a
 second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
 because of it. Its rules:
 
-- **States.** Every declared row gets a record, in one of five states.
+- **States.** Every declared row gets a record, in one of six states.
   `graded` — at least one cited, file-backed envelope carries a
   `spec_row`-tagged measurement naming the row. `gap` — the row declares a
   free-text or justified gap. The record quotes the free text or the
@@ -5382,6 +5518,11 @@ because of it. Its rules:
   disposition (#6985): the record has no measured values and instead
   carries the disposition's `claim` and `artifact` (with its content
   hash); grading refuses citations naming the row, exactly as for a gap.
+  `joint` — the row declares a `joint_grid` (issue #6969): no single
+  measurement is quotable, so the record carries the per-member projection
+  under `joint` (`{covered, members: [{member, missing_points,
+  missing_probe}]}`, `null`/`null` for a member the projection cannot read —
+  command-backed, unreadable, or Monte Carlo).
   `no_evidence` — no citation
   names the row. `unattributable` — a citation names the row but its envelope
   carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
@@ -5483,8 +5624,9 @@ and `partial_coverage` is an existing reason.
 **Derived coverage on a `klt yield` envelope, and `reported` measurements
 (issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
 written: when a citation carries `rows` **and** its envelope has at least one
-`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
-measurement grades are covered. One case is added on top of it, for `klt
+`spec_row`-tagged measurement, only the rows a tagged measurement with a
+recognised, non-null `min`/`max` bound grades are covered. One case is added on
+top of it, for `klt
 yield` envelopes only:
 
 - a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
@@ -5585,8 +5727,9 @@ every other item grades it `wrong_kind`. It reuses `klt sim`'s
 - `kind`, `status` (`"pass"` is the passing token), `method` and
   `measurements[]` are required. `method` is a disclosure echoed on the
   citation (`citation.method`); it is never graded.
-- A row is covered only by a passing, `limits`-bearing measurement tagged
-  `spec_row: <row>`, and the citation passes only if `status` is `pass` and
+- A row is covered only by a passing measurement with a recognised, non-null
+  `min`/`max` bound, tagged `spec_row: <row>`, and the citation passes only
+  if `status` is `pass` and
   every `corners[]` point entry (the per-point list, optional) passes.
   Otherwise `partial_coverage` with `detail.uncovered_rows`, or
   `check_failed`. Derived rows report `row_coverage.row_sources: "derived"`.
@@ -6516,6 +6659,7 @@ actually ran and failed):
 | `"runset_not_pinned"`     | no  | **Items 4 and 11** (issue #2870). The cited `lvs` report is `"engine": "klayout-runset"` but its `provenance.runset.content_hash` is not in the signoff-side allowlist of PDK-published runsets (`signoff_runset.PINNED_RUNSETS`). Cite a report produced with the PDK's own runset at a pinned revision, or a curated-deck report. |
 | `"runset_hash_mismatch"`  | no  | **Items 4 and 11** (issue #2870). A `klayout-runset` report whose runset file (`deck_file`) no longer hashes to the recorded `provenance.runset.content_hash`: the runset changed since the run. Re-run `klt lvs`. |
 | `"runset_unrecognised_device"` | no | **Item 4 and item 11's LVS half** (issues #2870, #6902). A `klayout-runset` report read `status: "match"` but cannot prove every device was recognised: `device_census` per-class layout/reference counts differ (compared case-insensitively — SPICE names are case-insensitive and the sides arrive in different case), a census is malformed (each class needs a non-negative integer count), or the report carries no `device_census.reference_source` evidence (a pre-#6902 report fails closed — re-run `klt lvs` with a klt that emits it), or a source class has too few converted devices even when all class totals add up. The pinned SKY130 reader renames `sky130_fd_pr__special_nfet_01v8` subcircuit calls when `convert_subckts=true`. The grader credits only calls counted in `reference_source_subcircuits`. `coverage.declared_not_recognized` is disclosure only — a PDK runset declares classes no real block instantiates. `detail.runset_device_gaps` names each gap. |
+| `"runset_inductor_terminal_order"` | no | **Item 4 and item 11's LVS half** (issue #6903). The cited `klayout-runset` report failed while carrying the `topology.known_limitation` entry naming the pinned IHP sg13g2 runset's mirrored-`inductor2` terminal-order limitation (`details.limitation: "mirrored-inductor2-terminal-order"`): the runset orders an inductor2's two winding terminals by port-polygon x position and compares the order, so a mirrored spiral extracts terminal-reversed however it is wired, and its `LA`/`LB` port texts (which the runset uses as net names) surface the reversal as `port.name_mismatch` strict-port findings. The report's `status` stays exactly what the runset reported (the entry is a warning; the error beside it is what failed) — this reason *names* the known defect instead of rendering a bare `check_failed` (item 11: instead of `lvs_did_not_pass`/`check_failed`, with `detail.inductor_terminal_order` carrying the three net names). Never `met`: whether a report produced through a normalisation step may grade items 4/11 is the operator decision routed in #6914. |
 | `"power_port_unproven"`   | no  | **Item 11 only** (issue #2839, provisional). The port-accessibility half is in force (manifest `power_ports.required`, or port evidence cited) but no `klt socket-check` envelope carrying `power_ports` facts is cited — none at all, or one produced before #2839. See "Item 11 port accessibility" above. |
 | `"no_edge_power_port"`    | no  | **Item 11 only** (issue #2839). A declared supply has no port: no `POWER`/`GROUND` socket pin of that name, its label not where the descriptor says, or no drawn conductor under it. |
 | `"power_port_interior_only"` | no | **Item 11 only** (issue #2839). The supply has drawn port(s), but none lies within the policy's edge band of a counted outline edge with a clear approach channel. |

@@ -38,6 +38,9 @@ Like `klt synthesize`/`klt lvs`/`klt sim`, `klt place-and-route` takes a
   search order.
 - `--backend` — where a `pdk.rebuild_corners` request's units run:
   `local` or `batch` (the Spot batch fleet). See "Backend selection".
+- `--from-def <DEF>` — run *only* the DEF→GDS merge on an existing routed
+  DEF (no OpenROAD stage). See
+  [Merging a committed routed DEF (`--from-def`)](#merging-a-committed-routed-def---from-def).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -547,6 +550,75 @@ that produced it. See [OpenROAD threads](#openroad-threads).
   per corner), and `--resume` together with `--check`.
 * Out of scope: resuming inside a stage, and the `--backend batch` path.
 
+## Merging a committed routed DEF (`--from-def`, issue #7721)
+
+The merge-time repair family — `min_area_repair`, `via_pad_trim` (with its
+`tip_check` and the nested `router_fill_scan`), `power_stack_repair` — runs
+inside the DEF→GDS merge, so a plain `klt drc` re-grade of an old stream
+never invokes it, and `--resume` reuses the merge only when the stage
+`.odb` checkpoints and `*.commit.json` records are still on disk with
+matching input hashes — artifacts a committed result set does not carry
+alongside its GDS/DEF. Every evidence set committed before a repair
+therefore stays red on every later pin, with no way to tell "the repairs
+would clear this stream" from "they don't cover it".
+
+`--from-def` closes that gap with a local, no-OpenROAD entry point:
+
+```
+klt place-and-route request.json --from-def <routed.def>
+```
+
+It resolves the tech/cell LEF, standard-cell GDS view and macro views from
+the request exactly as a placement run does (`--pdk`/`--pdk-root` honored),
+runs *only* the existing DEF→GDS merge — repairs included, byte-for-byte
+the same code path — on the supplied routed DEF, and writes its GDS to
+`<stage_root>/<hdl_toplevel>_from_def.gds` (`outputs.dir` honored). The
+distinct `_from_def` name means a re-merge never overwrites the committed
+`<hdl_toplevel>.gds` it is being compared against; a populated
+`outputs.dir` is allowed (that is the whole point), and the caller's input
+DEF is only ever read. No OpenROAD process is launched, no stage ODB or
+commit record is read or written, and the output directory is taken under
+the same advisory lock every cooperating `klt` writer holds.
+
+**Request shape.** The same request document the original run took, with
+only the fields the merge consumes required: `hdl_toplevel` and
+`pdk.cell_library`. `netlist`, `floorplan` and `seed` may be omitted —
+or left in from the original request, untouched and unread. A request
+setting `post_route_spef` is refused by name: that pass needs the route
+stage's own OpenSTA checkpoint, which only a placement run produces.
+
+**Response.** `status`, `hdl_toplevel`, `def_path` (the supplied DEF),
+`gds_path`, `gds_dbu_um`, and the merge's own report fields — `layer_map`,
+`def_net_names`, `min_area_repair`, `via_pad_trim` (with
+`tip_check.router_fill_scan`), `power_stack_repair`, `pin_conductor` —
+all in the same shape a route-stage run reports them. The additive
+`from_def` block reports the actual merge inputs (`tech_lef`, `cell_lef`,
+`cell_gds`, `macro_lefs`, `macro_gds`) together with the supplied DEF's
+`def_content_hash`, so a consumer can pin which committed routing a report
+graded. Routing, stage timing and ODB metrics are absent: they exist only
+when a placement run produced them.
+
+**Errors** (exit 1, existing checks): a missing `--from-def` file, an
+unresolvable PDK/LEF pair, a missing standard-cell GDS view, or a DEF that
+does not define the request's `hdl_toplevel` top cell. `--from-def` is
+mutually exclusive with `--check`, `--rerun`, `--resume` and `--backend`.
+
+**Comparing the original and regenerated stream with the same deck** — the
+post-hoc repair-validation workflow:
+
+```
+# original committed stream
+klt drc --engine klayout --deck <deck> artifacts/gcd.gds --format json > old.json
+# same routing, merged under the current pin's repair passes
+klt place-and-route request.json --from-def artifacts/gcd.def
+klt drc --engine klayout --deck <deck> artifacts/gcd_from_def.gds --format json > new.json
+```
+
+Success is running the current repair passes on the same routing and
+reporting what they did (`min_area_repair`, `via_pad_trim.tip_check`,
+`power_stack_repair` in the response above) — an arbitrary consumer design
+can still have violations afterwards.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -925,6 +997,9 @@ layouts" and "DEF-derived declared pins" sections for the full mechanism.
 
 ## Hard-macro placement (`request.macros`)
 
+`lef` stays required here: the LEF-less (blackbox-only) macro declaration is
+`klt synthesize`-only (issue #5612), and a LEF-less entry is a request error.
+
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line
 in "Out of scope" below into an additive request field, closing that gap
 exactly the way its own note anticipated. `request.macros` is an optional
@@ -1179,11 +1254,23 @@ Two details are deliberate:
 Omitting both fields emits neither line and leaves the generated Tcl
 byte-identical to before this field existed.
 
-**Still out of scope, deliberately**: per-port delay maps, and a full
-caller-supplied SDC passthrough (`read_sdc`) — which would also cover false
-paths, multicycle paths, and clock uncertainty, none of which have a surface
-here today. Both are tracked as follow-on work to issue #1865 rather than
-folded into it.
+Per-port delay maps and full caller-supplied SDC remain follow-on work to
+issue #1865. For multicycle exceptions, use `constraints.multicycle_paths`.
+
+### Multicycle paths
+
+Each entry supplies a launch selector (`from`), a capture selector (`to`),
+positive `setup` and `hold` multipliers, and an optional `through` pin selector.
+A clock period is required. Floorplan checks that the endpoints resolve and
+share a timed path before placement starts. Every checkpoint, corner sweep and
+SPEF timing session reapplies the pair after restoring the design and clocks.
+An invalid entry exits with status 1 and names its request index.
+
+The response echoes `multicycle_paths` in request order, including each index
+and an optional `through` value (`null` when omitted). Each rebuilt corner
+carries its own echo. Omitted or empty entries leave the Tcl and response
+unchanged. All checks run in the existing engine sessions. For selector syntax
+and path-specific timing measurements, see [standalone STA multicycle paths](sta.md#multicycle-paths-constraintsmulticycle_paths-issue-6921).
 
 ### Detect the sentinel mechanically: `timing_status`
 
@@ -2429,6 +2516,7 @@ live re-measurement above.
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. On the gf180mcu libraries an applied `split_cuts` adds a `warnings[]` entry naming the rule ids it is measured to trip under `klt drc --deck gf180mcu` (issue #7311; `{Metal3 0.128}`, #4301). |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — no `create_clock` is emitted, the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.multicycle_paths` | array of objects, optional | Paired setup and hold exceptions for clocked paths. See [Multicycle paths](#multicycle-paths). |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |

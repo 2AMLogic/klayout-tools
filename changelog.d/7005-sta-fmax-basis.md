@@ -1,1 +1,1 @@
-- Standalone STA text reports flag the frequency estimate's opposite-edge limitation. The field reference explains which paths contribute to the OpenROAD metric.
+- Standalone STA text reports flag the frequency estimate's opposite-edge limitation. The field reference explains which paths contribute to the OpenROAD metric (#7005).
