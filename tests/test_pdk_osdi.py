@@ -110,6 +110,26 @@ def test_unknown_setup_and_pdk_without_osdi(tmp_path, capsys):
     assert status == 0 and result["identity"]["models"] == []
 
 
+@pytest.mark.parametrize("name", ["ihp-sg13g2", "sg13g2", "sg13g2A"])
+def test_every_sg13g2_family_variant_requires_osdi_setup(tmp_path, capsys, name):
+    # Classified through pdk_variant_family, not a literal name tuple: an
+    # sg13g2-family variant that is not literally ihp-sg13g2/sg13g2 must not
+    # pass as "0 models" when its setup is missing.
+    variant = install(tmp_path)
+    (variant / "libs.tech/ngspice/.spiceinit").unlink()
+    variant = variant.rename(variant.with_name(name))
+    status, result = check(variant, capsys, variant=name)
+    assert status and result["error"]["code"] == "osdi_setup_unreadable"
+
+
+def test_sg13g2_family_variant_with_a_readable_setup_lists_its_models(tmp_path, capsys):
+    variant = install(tmp_path)
+    variant = variant.rename(variant.with_name("sg13g2A"))
+    status, report = check(variant, capsys, variant="sg13g2A")
+    assert status == 0
+    assert [r["name"] for r in report["identity"]["models"]] == ["one.osdi", "two.osdi"]
+
+
 @pytest.mark.parametrize("mode", ["ok", "reject", "no_registration", "exit"])
 def test_probe_requires_positive_isolated_model_registration(
     tmp_path, capsys, monkeypatch, mode
