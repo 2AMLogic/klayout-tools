@@ -334,6 +334,42 @@ four-terminal `C` card for `sg13_hv_svaricap`. Terminal order and device
 parameters carry through. Explicit device mappings take precedence, and a
 call to a separately defined subcircuit keeps its hierarchy.
 
+**IHP SG13G2 bipolar and MOS calls (issue #7836).** The `sg13g2.lvs` reader
+turns only `M`/`C`/`R`/`Q`/`L`/`D` cards into devices, so under
+`reference.form: "subckt-call"` these calls are written as the native card, in
+the form the PDK's own xschem symbols emit for LVS (C/B/E/S or D/G/S/B pin
+order):
+
+| Call | Native card |
+| --- | --- |
+| `X.. npn13G2v Nx= El=` | `Q.. npn13G2v le=<El>u we=120n m=<Nx>` |
+| `X.. npn13G2l Nx= El=` | `Q.. npn13G2l le=<El>u we=70n m=<Nx>` |
+| `X.. npn13G2 Nx=` | `Q.. npn13G2 le=900n we=70n m=<Nx>` |
+| `X.. sg13_{lv,hv}_{n,p}mos w= l= ng= m=` | `M.. <same model> w= l= ng= m=` |
+
+`El` is in micrometres (the symbol's `El * 1e-6` is the `u` suffix) and `Nx`
+defaults to `1`. The MOS card keeps the runset's own class name, so it pairs
+with the layout side instead of landing under the generic `nfet`/`pfet`. The
+card keeps the call's instance name (`XQ2` becomes `QXQ2`, device name
+`XQ2`). A call this conversion cannot write faithfully (not four terminals, a
+bipolar without a plain numeric `El`, a MOS without `w` or `l`) is not
+guessed at: it stays an `X` call and is reported as a
+`reference.unresolved_subckt_call` error naming the circuit, instance and
+model, while its sibling calls still compare. Explicit
+`reference.device_map` entries take precedence, a call to a separately named
+child circuit keeps its hierarchy, and other bipolar models (for example
+`pnpMPA`) are reported the same way until they are written as plain `Q` cards.
+For this runset the unresolved-call scan no longer exempts a callee just
+because a side declares a device class of that name: its reader converts no
+`X` card, so a declaration cannot show that a given call survived.
+Live-verified with klayout 0.30.12 and the pinned IHP-Open-PDK v0.3.0
+(`5cccb161`) `sg13g2.lvs` on the PDK's `bjt_devices/npn13G2v` testcase: all 67
+bipolars rewritten as `X.. npn13G2v Nx= El=` calls compare with the same device
+tallies and findings as the native `Q` netlist, and one swapped card keeps the
+reference count at 67 (it read 66 with no finding before). Regression tests:
+`tests/test_lvs_runset_sg13g2_cards.py` (pinned reader) and
+`tests/test_lvs_runset_reference.py` (hermetic).
+
 **RF/bipolar subcircuits and differently named tops (issue #5402).** Under
 `reference.form: "subckt-call"`, an `X` card whose subcircuit is in the
 runset's own `DEVICE_LIST` and is
