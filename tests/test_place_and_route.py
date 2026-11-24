@@ -71,6 +71,7 @@ from pathlib import Path
 import pytest
 
 from helpers.place_and_route_merge import (
+    _skipped_m4_grid_repair,
     _skipped_power_stack_repair,
     _skipped_via_pad_trim,
 )
@@ -8677,14 +8678,13 @@ def test_merge_def_to_gds_success(tmp_path):
         "output_dbu_um": 0.001,
         "path": None,
         "resolution": "none",
-        # This DEF declares no `NETS` section at all, so the issue #1488
-        # single-pin marker pass has nothing to do.
+        # This DEF declares no `NETS` section, so the #1488 marker pass is idle.
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
         # Issue #2139: no layer map resolved here either, so the merged
         # GDS's routed-net layers cannot be matched against the deck's own
-        # `*.area.*` rules -- reported as a named skip, never a silent
-        # clean. See `tests/test_place_and_route_min_area.py` for the pass
-        # exercised against a fixture that *does* carry a layer map.
+        # `*.area.*` rules -- a named skip, never a silent clean (see
+        # `tests/test_place_and_route_min_area.py` for the pass against a
+        # fixture that *does* carry a layer map).
         "min_area_repair": {
             "status": "skipped",
             "reason": (
@@ -8700,6 +8700,7 @@ def test_merge_def_to_gds_success(tmp_path):
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
         "power_stack_repair": _skipped_power_stack_repair("sky130A"),
+        "m4_grid_repair": _skipped_m4_grid_repair("sky130A"),
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
@@ -8716,9 +8717,8 @@ def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
     own wall-clock time; without the `time.sleep()` below (crossing a whole
     GDS2 timestamp second between the two runs) that pre-fix failure could
     be flaky -- passing by accident if both runs land within the same
-    wall-clock second -- rather than reliably reproducing the bug. The fix
-    removes the wall-clock dependency entirely, so this stays reliable
-    (and fast: the sleep is the only appreciable cost) either way."""
+    wall-clock second. The fix removes the wall-clock dependency entirely,
+    so this stays reliable either way."""
     root = tmp_path / "install"
     cell_name = "testcell"
     tech_lef = tmp_path / "tech.tlef"
@@ -8738,10 +8738,10 @@ def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
 
     for i, out_path in enumerate((out_path_1, out_path_2)):
         if i:
-            # Force the two runs to land in different wall-clock seconds so
-            # a pre-fix regression (a bare `.write()` stamping GDS2's
-            # whole-second-resolution BGNLIB/BGNSTR timestamp fields)
-            # reliably fails this assertion instead of merely being flaky.
+            # Force the two runs into different wall-clock seconds so a
+            # pre-fix regression (a bare `.write()` stamping GDS2's
+            # whole-second BGNLIB/BGNSTR fields) fails reliably, not
+            # just when the runs straddle a second boundary.
             time.sleep(1.1)
         place_and_route._merge_def_to_gds(
             def_path=str(def_path),
@@ -8804,10 +8804,9 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
         "path": str(map_path),
         "resolution": "family",
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
-        # Issue #2139: this fixture's map does resolve `met1` -> `68/20`, so
-        # the repair pass runs; the gf180mcu deck carries no plain
-        # `*.area.*` rule on that layer, so it has nothing to check and says
-        # so rather than reporting a clean it never measured.
+        # Issue #2139: this fixture's map resolves `met1` -> `68/20`, so the
+        # repair pass runs; the gf180mcu deck carries no plain `*.area.*`
+        # rule there, so it says so rather than reporting an unmeasured clean.
         "min_area_repair": {
             "status": "skipped",
             "reason": (
@@ -8822,6 +8821,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
         "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
+        "m4_grid_repair": _skipped_m4_grid_repair("gf180mcuC"),
         # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
         "pin_conductor": {"status": "unchanged", "layers": []},
     }
