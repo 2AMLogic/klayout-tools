@@ -51,6 +51,7 @@ from .extract_runset_flags import (
 )
 from .extract_runset_spice import DeviceParams
 from .extract_spef import ExtractError
+from .pex_errors import PexError
 
 
 @dataclass(frozen=True)
@@ -143,8 +144,6 @@ def refuse_unsupported(
     ]
     if not refused:
         return
-    from .pex import PexError  # lazy: `pex` imports this module
-
     raise PexError(
         f"engine '{RUNSET_ENGINE}' cannot honour {', '.join(refused)} -- "
         f"{'these flags are' if len(refused) > 1 else 'this flag is'} specific "
@@ -155,9 +154,10 @@ def refuse_unsupported(
 
 
 def extraction_fields(extract_report: Mapping[str, Any]) -> dict[str, Any]:
-    """The additive ``extraction`` fields stating what a runset-engine leg is
-    and is not -- ``{}`` for any other engine, which keeps that envelope
-    byte-identical.
+    """Forward a curated hierarchy census or report the runset leg's fields.
+
+    Curated FinFET extraction reports direct and instantiated counts separately.
+    A runset leg carries the following fields:
 
     - ``engine`` -- ``"klayout-runset"``.
     - ``parasitics_carried`` -- ``false`` for a plain runset leg (no R/C
@@ -192,7 +192,14 @@ def extraction_fields(extract_report: Mapping[str, Any]) -> dict[str, Any]:
       disagreement between the two engines is reported, not compared.
     """
     if extract_report.get("engine") != RUNSET_ENGINE:
-        return {}
+        census_keys = (
+            "device_count_scope",
+            "instantiated_device_counts",
+            "instantiated_device_count",
+        )
+        return {
+            key: extract_report[key] for key in census_keys if key in extract_report
+        }
     uncarried = extract_report.get("params_not_carried") or {}
     counts = extract_report.get("instantiated_device_counts")
     if counts is None:  # an extract report predating the hierarchy-aware count
@@ -237,6 +244,7 @@ def run_extract_leg(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -287,6 +295,7 @@ def run_extract_leg(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -327,6 +336,7 @@ def run_extract_leg(
         # which is the exact `run_extract` call made before they existed.
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=resistance_graph,
         parasitic_variants=parasitic_variants,
         substrate_tie_ohms=substrate_tie_ohms,

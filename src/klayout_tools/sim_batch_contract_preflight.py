@@ -240,6 +240,20 @@ def assess_remote_runner_features(
     )
 
 
+# Development builds can share a release segment while accepting different request
+# fields. Have the worker's own CLI validate a self-contained deck before launch.
+_CROSSINGS_VALUE_FROM_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/deck.spice" "$probe/probe.json"; rmdir "$probe"' EXIT
+    echo 'V1 out 0 1' > "$probe/deck.spice" || exit 1
+    cat > "$probe/probe.json" <<'KLT_CROSSINGS_PROBE' || exit 1
+{"netlist":"deck.spice","analysis":{"kind":"tran","args":"1n 4n"},
+ "measurements":[{"name":"period","crossings":{"signal":"v(out)","level":0.5,
+ "value_from":"period.mean"}}]}
+KLT_CROSSINGS_PROBE
+    klt sim "$probe/probe.json" --backend local --dry-run --format json
+)"""
+
 # The first supported release segment also identifies development images built
 # before phase selection and stepped eyes. Exercise the installed worker CLI.
 _EYE_STEP_PROBE = """(
@@ -255,6 +269,23 @@ KLT_EYE_PROBE
 )"""
 
 
+# A post-0.9.2 worker can share the release segment while predating the
+# object form. Validate one local request with the worker's installed CLI.
+_OSDI_PDK_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$probe"' EXIT
+    cd "$probe" || exit 1
+    mkdir -p sample/libs.tech/ngspice || exit 1
+    touch sample/libs.tech/ngspice/model.osdi || exit 1
+    echo 'V1 test 0 1' > body.sp || exit 1
+    cat > request.json <<'KLT_OSDI_PROBE' || exit 1
+{"netlist":"body.sp","analysis":{"kind":"op"},"models":{"pdk":"sample","pdk_root":"."},
+"options":{"osdi_preload":[{"pdk_relative":"libs.tech/ngspice/model.osdi"}]}}
+KLT_OSDI_PROBE
+    klt sim request.json --backend local --dry-run --format json
+)"""
+
+
 def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
     """Shell setting ``$mmiss`` to the ``features`` the runner is not known
     to support, from ``$rv`` (the runner's ``klt --version`` string). It
@@ -265,12 +296,25 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
-    if "eye_step_or_phase" in features:
-        floor = _feature_release_key("eye_step_or_phase")
+    if "_regrade" in features:
+        # A pre-feature dev build can report the same release segment as a
+        # capable worker. Check the worker command before starting the grid.
         checks += (
-            f' if [ "$mk" -ge {floor} ] && ! {_EYE_STEP_PROBE} >/dev/null 2>&1; then '
-            'mmiss="${mmiss}${mmiss:+, }eye_step_or_phase"; fi;'
+            f' if [ "$mk" -ge {_feature_release_key("_regrade")} ] && '
+            '! klt sim --help 2>/dev/null | grep -F -- "--regrade" >/dev/null; '
+            'then mmiss="${mmiss}${mmiss:+, }_regrade"; fi;'
         )
+    for name, probe in (
+        ("crossings_value_from", _CROSSINGS_VALUE_FROM_PROBE),
+        ("eye_step_or_phase", _EYE_STEP_PROBE),
+        ("osdi_pdk_relative", _OSDI_PDK_PROBE),
+    ):
+        if name in features:
+            floor = _feature_release_key(name)
+            checks += (
+                f' if [ "$mk" -ge {floor} ] && ! {probe} >/dev/null 2>&1; then '
+                f'mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
+            )
     names = ", ".join(features)
     return (
         "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "

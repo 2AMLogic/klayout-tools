@@ -393,7 +393,7 @@ klt place-and-route <request.json> [--format text|json]
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status` | string | `"ok"` — like synthesis, place-and-route has no pass/fail concept of its own; see "Exit codes." |
+| `status` | string | *(Superseded by issue #6905: place-and-route now has a verdict of its own — `"failed"`, with exit `1` and the full report, when the routed result carries a confirmed open or an unrouted signal net; see `docs/cli/place-and-route.md`'s `status` row and "Exit codes" for the current contract.)* `"ok"` — like synthesis, place-and-route has no pass/fail concept of its own; see "Exit codes." |
 | `stage_reached` | string | The last stage this run actually completed — `"floorplan"` / `"place"` / `"cts"` / `"route"`. See "Partial-completion design" below. |
 | `seed` | integer | Echo of the request's seed. |
 | `die_area_um2` / `core_area_um2` | number | From `initialize_floorplan`'s own report (OpenROAD survey §3, `IFP-0102`/`IFP-0104`). |
@@ -443,6 +443,8 @@ response where those differ never gets emitted.
 | `0` | Place-and-route reached (at least) the requested `target_stage`; the documented payload is on stdout. |
 | `1` | Failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set (mirroring ORFS's own `methods_defined > 1` check, OpenROAD survey §2), or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+
+*(Superseded by issue #6905 for exit `1`: it also covers a completed run whose routed result carries a confirmed open or an unrouted signal net, with the full report on stdout; see `docs/cli/place-and-route.md`'s "Exit codes". Exit `3` is unchanged.)*
 
 **No exit code `3`.** Timing slack and violation counts are **data**, not a
 built-in pass/fail gate — a negative `worst_slack_ns` is an expected,
@@ -563,7 +565,7 @@ survey's own §8); `coverage` is `null` unless `options.coverage: true` and
 
 This is the **one contract of the three that does define an exit `3`**,
 deliberately: unlike synthesis and place-and-route (which report metrics
-with no pass/fail concept of their own, per §4/§5's "Exit codes" sections),
+with no pass/fail concept of their own, per §4/§5's "Exit codes" sections — as originally scoped; place-and-route's was later superseded by issue #6905),
 functional verification's entire purpose is a pass/fail verdict — per Epic
 #391's own body, this is "the hard gate in #387's `valid` field." `status:
 "pass"` → exit `0` → `valid: true` at the `klt eval` boundary; `status:

@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 267 --format json
+#       --expect-rule-categories 268 --format json
 #
 # or directly:
 #
@@ -189,6 +189,17 @@ def two_side_enclosure_violation(via, metal, d)
   short_h = via.interacting(vert(metal).enclosing(vert(via), d, projection).second_edges)
   short_v = via.interacting(horz(metal).enclosing(horz(via), d, projection).second_edges)
   short_h & short_v
+end
+
+# V1.M1.EN.1 requires one complete side to clear 5 nm and its opposite
+# to clear 2 nm. Edge fragments from two notches on the same side still
+# have the same direction, so they cannot stand in for opposite sides.
+def insufficient_enclosure_axis(via, short_edges, long_edges, angle)
+  edges = long_edges.with_angle(angle)
+  forward = edges.select { |e| e.p2.x > e.p1.x || e.p2.y > e.p1.y }
+  backward = edges.select { |e| e.p2.x < e.p1.x || e.p2.y < e.p1.y }
+  via.interacting(short_edges.with_angle(angle)) +
+    (via.interacting(forward) & via.interacting(backward))
 end
 
 # Area thresholds are given in nm^2; KLayout areas are in um^2.
@@ -647,8 +658,12 @@ end
 end
 # Enclosure "on at least two opposite sides" (5 nm by the lower metal for V2
 # and V3 -- note 2 states V3.M3.EN.1 by reference to V2.M2.EN.1 -- and 11 nm
-# by M4 for V3). V1.M1.EN.1 ("5 & 2") and V(x).M(x+1).EN.2 ("(5 & 5) |
-# (5 & 0)") are per-side rules and are not checked yet (asap7_rules.py).
+# by M4 for V3). V1 by M1 has different minimums on the two sides.
+v1_short_2 = m1.enclosing(v1, 2.nm, projection).second_edges
+v1_short_5 = m1.enclosing(v1, 5.nm, projection).second_edges
+(insufficient_enclosure_axis(v1, v1_short_2, v1_short_5, 0) &
+ insufficient_enclosure_axis(v1, v1_short_2, v1_short_5, 90))
+  .output("V1.M1.EN.1", "Table 3.13.1: M1 enclosure of V1 on opposite sides at least 5 nm and 2 nm")
 two_side_enclosure_violation(v2, m2, 5.nm)
   .output("V2.M2.EN.1", "Table 3.13.1: min enclosure of V2 by M2 on at least two opposite sides 5 nm")
 two_side_enclosure_violation(v3, m3, 5.nm)
@@ -684,12 +699,6 @@ def along_space(m, dir, d)
   dir == :h ? hspace(m, d) : vspace(m, d)
 end
 
-# Edges whose distance apart is the width across the track (horizontal
-# edges for a horizontally routed layer).
-def track_edges(m, dir)
-  dir == :h ? horz(m) : vert(m)
-end
-
 # Off-grid vertices, checking only the coordinate across the track.
 def across_ongrid(l, dir, g)
   dir == :h ? l.ongrid(0.25.nm, g) : l.ongrid(g, 0.25.nm)
@@ -706,9 +715,14 @@ end
   (dir == :h ? m.sized(0, -(wmax / 2).nm) : m.sized(-(wmax / 2).nm, 0))
     .output("#{name}.W.2", "Table #{t}.1: max #{across} #{name} width #{wmax} nm")
   # Even integer multiples of the minimum width up to the W.2 maximum (wider
-  # shapes are W.2 violations): 2g, 4g, ..., wmax.
+  # shapes are W.2 violations): 2g, 4g, ..., wmax. Region#width, so both
+  # edges of a pair lie in one polygon: an edge-set width also pairs a wide
+  # shape's edge with a separate shape's edge across the gap, a distance
+  # that is a spacing (S.1), not a width (#7226). with_angle keeps only the
+  # across-track measurement, which Region#width cannot restrict itself.
   (2 * g).step(wmax, 2 * g).map do |w|
-    track_edges(m, dir).width((w + 0.25).nm, projection).with_distance(w.nm, (w + 0.25).nm)
+    m.width((w + 0.25).nm, projection).with_distance(w.nm, (w + 0.25).nm)
+      .with_angle(dir == :h ? 0 : 90)
   end.inject(:+)
     .output("#{name}.W.3", "Table #{t}.1: #{across} #{name} width may not be an even integer multiple of #{g} nm")
   along_width(m, dir, 44.nm)

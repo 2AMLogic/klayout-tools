@@ -219,7 +219,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_runset, pex_sim_evidence
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
 from ._text import read_text as _read_text
@@ -230,7 +230,7 @@ from .coverage import (
     rollup_status,
     work_id,
 )
-from .extract import ExtractError, run_extract
+from .extract import SPICE_GLOBAL_GROUND_NODE, ExtractError, run_extract
 from .pex_asap7 import (
     adapt_leg_netlists,
     netlist_adaptation_for_deck,
@@ -243,6 +243,7 @@ from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
     TIE_SOURCE_DECLARED,
     _body_bias_report,
 )
+from .pex_errors import PexError as PexError
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -253,8 +254,13 @@ from .pex_netlist_text import (
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
-from .pex_resistance_graph import _resistance_graph_echo
+from .pex_resistance_graph import (
+    _reject_resistance_graph_with_distributed_rc,
+    _resistance_graph_echo,
+)
 from .sim import SimError, load_request, run_sim
+from .sim_osdi_pin import rebase_osdi_preload
+from .sim_request_overrides import refuse_corner_only_flags
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
 __all__ = [
@@ -325,27 +331,6 @@ MEASURE_COMMAND_TIMEOUT_S = 1800.0
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
 #: measurement, so :func:`_row_status` needs no command-mode special case.
 _MEASUREMENT_STATUSES = ("pass", "fail", "error")
-
-
-class PexError(Exception):
-    """Raised when a `klt pex` run cannot be completed: a bad testbench
-    request, a testbench with no `.include`/`.inc` DUT reference, testbenches
-    that reference different schematic netlists, or a failure in the
-    extraction/simulation steps this command drives (wrapping the original
-    :class:`~klayout_tools.extract.ExtractError` /
-    :class:`~klayout_tools.sim.SimError`).
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other `klt` verb's error contract.
-
-    ``code`` is an optional machine-readable classification emitted as the
-    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
-    (every pre-#2889 error) keeps the envelope byte-identical.
-    """
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _validate_tie_nets(
@@ -427,6 +412,13 @@ def _tie_nets_in_legs(
     _apply_tie_nets(extracted_netlist_path, ties)
     if device_only_netlist_path is not None:
         _apply_tie_nets(device_only_netlist_path, ties)
+
+
+def _substrate_tie_fields(parasitics: Mapping[str, Any]) -> dict[str, Any]:
+    tie = parasitics.get("substrate_dc_tie")
+    if tie is None:
+        return {}
+    return {"substrate_dc_tie": {**tie, "reference_node": SPICE_GLOBAL_GROUND_NODE}}
 
 
 def _parasitic_integrity_report(
@@ -1833,33 +1825,35 @@ def _resolve_reference_netlist_path(
     return dut_paths[0]
 
 
+def _validate_simulation_timeout(
+    timeout_s: float | None, measure_command: Sequence[str] | None, extract_only: bool
+) -> None:
+    if timeout_s is None:
+        return
+    if not is_finite_number(timeout_s) or timeout_s <= 0:
+        raise PexError("--timeout-s must be a finite positive number of seconds")
+    if extract_only or measure_command is not None:
+        raise PexError(
+            "--timeout-s requires testbench mode and cannot be used with "
+            "--extract-only or --measure-command (use --measure-timeout-s for commands)"
+        )
+
+
 def _validate_measure_mode(
     measure_command: Sequence[str] | None,
     testbench_paths: Sequence[str],
     reference_netlist: str | None,
     measure_timeout_s: float | None,
     *,
+    timeout_s: float | None = None,
     extract_only: bool = False,
     flatten_schematic: bool = False,
     device_only_leg: bool = False,
 ) -> list[str] | None:
-    """Resolve and validate which of :func:`run_pex`'s input contracts
-    this call uses (issue #2478) -- returning the measurement command's argv
-    when it is ``--measure-command`` mode, and ``None`` when it is the
-    default testbench mode (or ``--extract-only`` mode, issue #3739, which
-    measures nothing and so is validated here as a third, mutually exclusive
-    contract).
-
-    One place, one set of messages, so the library and the CLI can never
-    disagree about what "exactly one of the two" means (the CLI deliberately
-    does *not* express the exclusion with an argparse mutually-exclusive
-    group -- `<testbench>` is a positional, and argparse's own message for
-    that case says much less than these do).
-
-    Issue #5477: ``--extract-only`` accepts ``--reference-netlist`` -- it
-    buys the ``model_mismatch`` comparison alone (see :func:`run_pex`), so it
-    is not in the conflict list below; every other conflict is unchanged.
+    """Validate testbench, external measurement-command and extraction-only modes.
+    Both dry-run and execution use the same checks before extraction starts.
     """
+    _validate_simulation_timeout(timeout_s, measure_command, extract_only)
     if extract_only:
         _reject_extract_only_conflicts(
             [
@@ -2115,11 +2109,9 @@ def _prepare_dut_swapped_request(
     ``"extracted"``). Returns the written request file's path, suitable for
     :func:`~klayout_tools.sim.run_sim`.
 
-    A relative ``models.lib`` the original request declares *in the
-    request-dir-relative shape* (no ``models.pdk``/``models.pdk_root``) is
-    resolved to an absolute path first -- the written copy lives in
-    ``work_dir``, not next to the original testbench file, so a relative
-    reference would otherwise resolve against the wrong directory.
+    Resolve request-relative OSDI preloads and literal ``models.lib`` paths
+    against the original testbench directory. Keep literal PDK-root preloads
+    for the executing host to resolve.
 
     A ``models`` block that *does* carry ``pdk``/``pdk_root`` is copied
     through **unmodified** (issue #1395): in that shape a relative ``lib``
@@ -2147,6 +2139,7 @@ def _prepare_dut_swapped_request(
         handle.write(swapped_body_text)
 
     swapped_request = copy.deepcopy(request)
+    rebase_osdi_preload(swapped_request, request_dir)
     models = swapped_request.get("models")
     if (
         isinstance(models, dict)
@@ -2367,18 +2360,6 @@ def _device_only_parity(
     }
 
 
-def _reject_resistance_graph_with_distributed_rc(
-    resistance_graph: bool, distributed_rc: bool
-) -> None:
-    """Issue #4037: the ladder keeps the legacy per-level resistance."""
-    if resistance_graph and distributed_rc:
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
-
-
 def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
@@ -2477,11 +2458,17 @@ def _device_only_result_fields(
     }
 
 
-def _load_testbench_request(testbench_path: str) -> dict[str, Any]:
+def _load_testbench_request(
+    testbench_path: str, timeout_s: float | None = None
+) -> dict[str, Any]:
     """``load_request`` with a :class:`SimError` re-raised as a
     :class:`PexError` naming the testbench."""
     try:
-        return load_request(testbench_path)
+        request = load_request(testbench_path)
+        refuse_corner_only_flags(
+            request, pdk_root=None, timeout_s=timeout_s, collect_partial=False
+        )
+        return request
     except SimError as exc:
         raise PexError(f"testbench '{testbench_path}': {exc}", code=exc.code) from exc
 
@@ -2514,6 +2501,7 @@ def run_pex(
     hosts: int | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -2528,6 +2516,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2598,17 +2587,20 @@ def run_pex(
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
     before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
-    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
-    to ``klt extract``'s terminal-aware resistance graph and make the
-    extracted netlist use each ``resistance_source == "graph"`` net's
-    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
-    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
-    ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`` entry,
-    only when the flag was given -- otherwise the report and netlist are
-    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
-    (the ladder stays on the legacy scalar, so a critical net would mix sources).
+    ``resistance_graph``/``resistance_graph_r_cut_ohm``/``resistance_graph_caps``
+    (``klt pex --resistance-graph [--resistance-graph-r-cut OHM]
+    [--resistance-graph-max-* N]``, issues #4037, #6964) forward to ``klt
+    extract``'s terminal-aware resistance graph and make the extracted netlist
+    use each ``resistance_source == "graph"`` net's ``selected_resistance_ohm``
+    as its lumped R (``legacy`` nets keep the legacy scalar). The caps raise
+    the graph builder's per-net size limits. ``extraction.resistance_graph``
+    echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
+    values -- only when a cap was given) and one ``{net, net_id,
+    resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
+    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
+    the graph flag, the report and netlist are byte-identical. Combining it with
+    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
+    legacy scalar, so a critical net would mix resistance sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
@@ -2635,34 +2627,20 @@ def run_pex(
     `delta[]` rows) reflect a MoM-grade parasitic on exactly the net a
     caller has singled out as critical. See ``run_extract``'s own
     ``mom_rlc_net`` docstring paragraph for the full substitution/validation
-    rules. ``None`` (the default) for all four skips this entirely --
-    byte-identical to before this feature existed. ``backend`` is passed
-    through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
-    extracted side, every testbench) -- see ``docs/cli/sim.md``'s
-    "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
-    (issue #4616) are likewise passed to each of those calls, so each side's
-    batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
-    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
-    its own ``batch-shards.json``).
-    ``artifacts_dir`` overrides where this command
-    writes its own generated artifacts (the extracted-side testbench body/
-    request copies, see :func:`_prepare_extracted_request`, and each `klt
-    sim` call's own ``options.keep_artifacts`` output, namespaced per
-    testbench and per side as ``<artifacts_dir>/<testbench label>/
-    schematic|extracted/``); it defaults to a ``.klt/pex/`` directory next
-    to ``layout_path`` (the same "next to the input" convention `klt
-    render`/`klt sim` already use).
+    rules. All four default to ``None``, which disables substitution.
+    Each testbench simulation receives ``backend`` and the optional per-corner
+    ``timeout_s`` override. See ``docs/cli/sim.md``, "Execution backends".
+    Each side shards its own grid with ``max_units_per_job``, ``max_concurrent_jobs``,
+    ``hosts``, ``resume`` and ``capacity_wait_s``, and attaches using its own
+    ``batch-shards.json``. Omitted overrides preserve the request's batch settings.
+    ``artifacts_dir`` defaults to ``.klt/pex/`` beside ``layout_path``. It holds
+    the generated testbench/request copies (see :func:`_prepare_extracted_request`)
+    and each simulation's ``options.keep_artifacts`` output under
+    ``<artifacts_dir>/<testbench label>/schematic|extracted/``.
 
-    Each testbench's schematic-side run reuses the testbench file
-    *completely unmodified* -- `run_sim(testbench_path, ...)`, exactly the
-    request a caller already runs today (AC #2's "reusing the existing
-    testbench conventions, no parallel testbench format"). The extracted-
-    side run re-points only the testbench's `.include`/`.inc` DUT reference
-    at the freshly-extracted netlist (see :func:`_prepare_extracted_request`)
-    and tags `netlist_source: "extracted"`, reusing `klt sim`'s existing
-    field (`docs/cli/sim.md`'s "Post-layout verification") rather than
-    inventing a parallel mechanism.
+    The schematic leg passes the original testbench file to `run_sim`. The
+    extracted leg redirects its DUT include to the extracted netlist and sets
+    `netlist_source: "extracted"` (see :func:`_prepare_extracted_request`).
 
     Every testbench must `.include`/`.inc` the *same* resolved schematic DUT
     file -- `klt pex` reports one `reference_netlist` for the whole run, not
@@ -2837,6 +2815,7 @@ def run_pex(
         testbench_paths,
         reference_netlist,
         measure_timeout_s,
+        timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
         device_only_leg=device_only_leg,
@@ -2858,7 +2837,7 @@ def run_pex(
     )
 
     # Validate side selectors on every testbench before running extraction.
-    requests = [_load_testbench_request(path) for path in testbench_paths]
+    requests = [_load_testbench_request(path, timeout_s) for path in testbench_paths]
     probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
 
     try:
@@ -2886,6 +2865,7 @@ def run_pex(
             distributed_rc=distributed_rc,
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
@@ -3190,6 +3170,7 @@ def run_pex(
         hosts=hosts,
         resume=resume,
         capacity_wait_s=capacity_wait_s,
+        timeout_s=timeout_s,
     )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
@@ -3438,6 +3419,7 @@ def run_pex(
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
+        **({"simulation_timeout_s": timeout_s} if timeout_s is not None else {}),
         "layout": env_provenance.repo_relative_path(
             layout_path or None, repo_root=repo_root
         ),
@@ -3457,19 +3439,10 @@ def run_pex(
             "net_count": extract_report["net_count"],
             "netlist_sha256": extracted_netlist_sha256,
             "model": parasitics.get("model"),
-            # Additive field (issue #976): echoes `--critical-net` back --
-            # `[]` when the flag was never given, byte-identical to before
-            # this feature existed.
+            # Preserve the extraction defaults for older reports (#976, #977).
             "critical_nets": parasitics.get("critical_nets") or [],
-            # Additive field (issue #977): echoes `--distributed-rc` back --
-            # `False` when the flag was never given, byte-identical to
-            # before this feature existed.
             "distributed_rc": bool(parasitics.get("distributed_rc")),
-            # Additive field (issue #988, Epic #709 Phase 3a): `None`
-            # unless `--mom-rlc-net` was given, in which case it is `klt
-            # extract`'s own substitution report (see
-            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
-            # byte-identical to before this feature existed otherwise.
+            # Echo the extractor's MOM substitution report when requested (#988).
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
             # Additive field (issue #2686): `klt extract`'s own
             # `label_layers` echo for this run's extraction -- the applied
@@ -3503,6 +3476,7 @@ def run_pex(
             # actually read -- `klt extract`'s own `pdk` block (`variant`,
             # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
             "pdk": extract_report.get("pdk"),
+            **_substrate_tie_fields(parasitics),
             # Additive fields (issue #6559): present only for a runset leg.
             **pex_runset.extraction_fields(extract_report),
             # Additive field (issue #2764): the extraction's own
@@ -3524,7 +3498,9 @@ def run_pex(
             **(
                 {
                     "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
+                        parasitics,
+                        resistance_graph_r_cut_ohm,
+                        resistance_graph_caps,
                     )
                 }
                 if resistance_graph

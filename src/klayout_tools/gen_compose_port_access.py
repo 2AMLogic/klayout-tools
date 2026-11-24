@@ -22,9 +22,7 @@ via-drop ladder draws the stack at the chosen point; the search only decides
 *where* that is legal. The search is grid-based, bounded and deterministic:
 candidates are ranked by distance to the label (ties by ``x`` then ``y``).
 
-Dependency direction mirrors ``gen_compose_routing.py``: ``gen_compose.py``
-imports this module, this module imports ``gen_compose`` names only inside
-functions.
+Loading the source cell defers to the composer when layout geometry is needed.
 """
 
 from __future__ import annotations
@@ -35,15 +33,17 @@ from typing import Any
 from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
+from .gen_compose_base import GenComposeError
+from .gen_compose_layer_rules import (
+    _landing_pad_side_um_for_pair as _landing_pad_side_um_for_pair,
+)
 from .gen_compose_routing import (
-    _landing_pad_side_um_for_layer,
-    _min_enclosing_margin_um_for_layer,
-    _min_width_um_for_layer,
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
 )
-from .gen_compose_via_cuts import landing_pad_half_dbu
+from .gen_compose_via_cuts import _array_extra_um, _stack_sizes, landing_pad_half_dbu
+from .gen_compose_via_cuts import via_drop_cut_side_um as via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 
 #: Default cap on landing candidates evaluated per port (nearest-first).
@@ -62,19 +62,13 @@ _MAX_ARRAY_SIDE = 16
 _LayerPair = tuple[int, int]
 
 
-def _err(message: str) -> Exception:
-    from .gen_compose import GenComposeError
-
-    return GenComposeError(message)
-
-
 def _parse_layer_pair(raw: Any, where: str) -> _LayerPair:
     if (
         not isinstance(raw, dict)
         or not is_int(raw.get("layer"))
         or not is_int(raw.get("datatype"))
     ):
-        raise _err(
+        raise GenComposeError(
             f"{where} must be a JSON object with integer 'layer'/'datatype' "
             "fields (the same shape `klt layers` reports)"
         )
@@ -85,7 +79,9 @@ def _parse_layer_list(raw: Any, where: str, *, required: bool) -> list[_LayerPai
     if raw is None and not required:
         return []
     if not isinstance(raw, list) or (required and not raw):
-        raise _err(f"{where} must be a{' non-empty' if required else 'n'} array")
+        raise GenComposeError(
+            f"{where} must be a{' non-empty' if required else 'n'} array"
+        )
     return [_parse_layer_pair(item, f"{where}[{i}]") for i, item in enumerate(raw)]
 
 
@@ -94,7 +90,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     ``via_array`` (``[rows, cols]`` cuts per via hop), ``keepout_layers``, and the
     optional search knobs ``grid_um`` / ``max_candidates``."""
     if not isinstance(raw, dict):
-        raise _err(f"{where} must be a JSON object")
+        raise GenComposeError(f"{where} must be a JSON object")
     unknown = set(raw) - {
         "up_to",
         "via_array",
@@ -103,10 +99,12 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         "max_candidates",
     }
     if unknown:
-        raise _err(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
+        raise GenComposeError(
+            f"{where} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     up_to = raw.get("up_to")
     if not isinstance(up_to, str) or not up_to:
-        raise _err(
+        raise GenComposeError(
             f"{where}.up_to is required (a routing layer role such as "
             "'metal4', the same names routing.layer_role accepts)"
         )
@@ -116,15 +114,17 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
         or len(via_array) != 2
         or not all(is_int(n) and n >= 1 for n in via_array)
     ):
-        raise _err(f"{where}.via_array must be [rows, cols] of integers >= 1")
+        raise GenComposeError(
+            f"{where}.via_array must be [rows, cols] of integers >= 1"
+        )
     if max(via_array) > _MAX_ARRAY_SIDE:
-        raise _err(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
+        raise GenComposeError(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
     grid_um = raw.get("grid_um")
     if grid_um is not None and (not is_finite_number(grid_um) or grid_um <= 0):
-        raise _err(f"{where}.grid_um must be a number > 0")
+        raise GenComposeError(f"{where}.grid_um must be a number > 0")
     max_candidates = raw.get("max_candidates", DEFAULT_MAX_CANDIDATES)
     if not is_int(max_candidates) or max_candidates < 1:
-        raise _err(f"{where}.max_candidates must be an integer >= 1")
+        raise GenComposeError(f"{where}.max_candidates must be an integer >= 1")
     return {
         "up_to": up_to,
         "via_array": (int(via_array[0]), int(via_array[1])),
@@ -152,11 +152,13 @@ def _parse_label_names(
             if entry.get("access") is not None:
                 access = _parse_access(entry["access"], f"{at}.access")
         else:
-            raise _err(f"{at} must be a label string or an object with 'name'")
+            raise GenComposeError(
+                f"{at} must be a label string or an object with 'name'"
+            )
         if not isinstance(name, str) or not name:
-            raise _err(f"{at} needs a non-empty label name")
+            raise GenComposeError(f"{at} needs a non-empty label name")
         if name in seen:
-            raise _err(f"{where}.names contains duplicate name '{name}'")
+            raise GenComposeError(f"{where}.names contains duplicate name '{name}'")
         seen.add(name)
         names.append({"name": name, "access": access})
     return names
@@ -175,14 +177,16 @@ def parse_ports_from_labels(raw: Any, where: str) -> dict[str, Any] | None:
         return None
     where = f"{where}.ports_from_labels"
     if not isinstance(raw, dict):
-        raise _err(f"{where} must be a JSON object")
+        raise GenComposeError(f"{where} must be a JSON object")
     unknown = set(raw) - {"layers", "names", "access"}
     if unknown:
-        raise _err(f"{where} has unknown field(s): {', '.join(sorted(unknown))}")
+        raise GenComposeError(
+            f"{where} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     layers = _parse_layer_list(raw.get("layers"), f"{where}.layers", required=True)
     raw_names = raw.get("names")
     if not isinstance(raw_names, list) or not raw_names:
-        raise _err(f"{where}.names must be a non-empty array")
+        raise GenComposeError(f"{where}.names must be a non-empty array")
     shared = raw.get("access")
     shared_access = None if shared is None else _parse_access(shared, f"{where}.access")
 
@@ -228,7 +232,7 @@ class _MacroNets:
         try:
             self.deck = get_extraction_deck(_pdk_family(variant))
         except (GenError, UnknownDeckError) as exc:
-            raise _err(
+            raise GenComposeError(
                 f"ports_from_labels: no extraction deck for '{variant}': {exc}"
             ) from exc
         self.layout = src_layout
@@ -310,19 +314,19 @@ def _resolve_label(
         if not hits:
             continue
         if len({net.cluster_id for net, _ in hits}) > 1:
-            raise _err(
+            raise GenComposeError(
                 f"ports_from_labels: label '{name}' at ({x * nets.dbu}, "
                 f"{y * nets.dbu}) um touches several unconnected nets "
                 "(overlapping metals) -- cannot tell which one it names"
             )
         resolved.append((hits[0][0], hits[0][1], x, y))
     if not resolved:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: label '{name}' sits on no conductor of the "
             "PDK deck's metal stack (checked every text of that name)"
         )
     if len({r[0].cluster_id for r in resolved}) > 1:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: label '{name}' appears on more than one "
             "distinct net -- ambiguous"
         )
@@ -352,31 +356,6 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
     return best
 
 
-def _stack_sizes(
-    variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
-) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
-    """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
-    as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
-    from .gen_compose import _VIA_DROP_SIZE_UM, _fixed_cut_side_um, _via_fixed_size_um
-
-    cuts: dict[_LayerPair, float] = {}
-    for via, _, _ in ladder:
-        floor = _min_width_um_for_layer(variant, via)
-        cuts[via] = _fixed_cut_side_um(
-            max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-            _via_fixed_size_um(variant, via),
-        )
-    pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
-    for via, lower, upper in ladder:
-        for metal in (lower, upper):
-            side = _landing_pad_side_um_for_layer(variant, metal)
-            enclosure = _min_enclosing_margin_um_for_layer(variant, metal, via)
-            if enclosure is not None:
-                side = max(side, cuts[via] + 2 * enclosure[0])
-            pads[metal, via] = side
-    return pads, cuts
-
-
 def _array_pitches_um(
     variant: str,
     cuts_um: dict[_LayerPair, float],
@@ -395,11 +374,6 @@ def _array_pitches_um(
         raw = side + _min_spacing_um(variant, via)
         pitches[via] = math.ceil(raw / unit - 1e-9) * unit
     return pitches
-
-
-def _array_extra_um(array: tuple[int, int], pitch_um: float) -> float:
-    """How much wider than one cut the (square-bounded) array footprint is."""
-    return (max(array) - 1) * pitch_um
 
 
 def _box(x: int, y: int, half: int, grow: int = 0) -> Any:
@@ -459,7 +433,7 @@ def _grid_candidates(
         ny = len(range(-(-box.bottom // step) * step, box.top + 1, step))
         total += nx * ny
     if total > _MAX_ENUMERATED_POINTS:
-        raise _err(
+        raise GenComposeError(
             "ports_from_labels: the port net spans too many grid points "
             f"({total}) -- raise access.grid_um to coarsen the search"
         )
@@ -535,16 +509,17 @@ def _search_landing(
     net_layer: _LayerPair,
     label_xy: tuple[int, int],
     access: dict[str, Any],
+    pad_override_um: float | None = None,
 ) -> dict[str, Any]:
     """Find the nearest legal via-stack landing on ``net``; raises a
     ``GenComposeError`` listing per-category rejections when none exists."""
     up_to_layer = _resolve_route_layer(variant, access["up_to"])
     ladder, ladder_error = _resolve_via_drop_layer(nets.deck, up_to_layer, net_layer)
     if ladder_error is not None:
-        raise _err(f"ports_from_labels: port '{name}': {ladder_error}")
+        raise GenComposeError(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    hop_pads_um, cuts_um = _stack_sizes(variant, ladder)
+    hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pads_um: dict[_LayerPair, float] = {}
@@ -603,7 +578,7 @@ def _search_landing(
         if len(samples[category]) < _REJECTION_SAMPLES:
             samples[category].append(f"({x * dbu:g}, {y * dbu:g}) um: {detail}")
     if not candidates:
-        raise _err(
+        raise GenComposeError(
             f"ports_from_labels: no candidate landing point for port '{name}' on "
             f"layer {net_layer[0]}/{net_layer[1]}: no grid point at "
             f"grid_um={step * dbu:g} falls inside the net shapes and the net has "
@@ -612,7 +587,7 @@ def _search_landing(
         )
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     detail_lines = "; ".join(s for key in counts for s in samples[key])
-    raise _err(
+    raise GenComposeError(
         f"ports_from_labels: no legal landing for port '{name}' on layer "
         f"{net_layer[0]}/{net_layer[1]} up to '{access['up_to']}' -- "
         f"{len(candidates)} candidate(s) rejected ({summary})"
@@ -630,6 +605,7 @@ def derive_label_ports(
     cell_name: str,
     spec: dict[str, Any],
     variant: str,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Resolve ``spec`` (from :func:`parse_ports_from_labels`) against the
     cell in ``gds_path``. Returns ``(ports, reports, warnings)`` in
@@ -647,7 +623,7 @@ def derive_label_ports(
     for entry in spec["names"]:
         name = entry["name"]
         if name not in labels:
-            raise _err(
+            raise GenComposeError(
                 f"blocks '{block_id}': ports_from_labels name '{name}' matches "
                 "no text label on the listed layers"
             )
@@ -656,7 +632,14 @@ def derive_label_ports(
         landing = None
         if entry["access"] is not None:
             landing = _search_landing(
-                nets, variant, name, net, metal, (x, y), entry["access"]
+                nets,
+                variant,
+                name,
+                net,
+                metal,
+                (x, y),
+                entry["access"],
+                pad_override_um,
             )
             if landing["truncated"]:
                 warnings.append(

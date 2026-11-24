@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .pex_async import batch_shard_flags, validate_capacity_wait
+from .pex_errors import PexError
+
 
 def capacity_shard(
     capacity_wait_s: float | None, backend: str | None
@@ -17,8 +20,6 @@ def capacity_shard(
     rule ``klt pex`` applies (#5280).
     """
     from .characterize import CharacterizeError
-    from .pex import PexError
-    from .pex_async import batch_shard_flags, validate_capacity_wait
 
     try:
         validate_capacity_wait(capacity_wait_s, backend)

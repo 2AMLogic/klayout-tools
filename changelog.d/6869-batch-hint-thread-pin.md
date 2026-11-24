@@ -1,0 +1,1 @@
+- **The batch convergence warning reports each worker’s simulator launch thread pin alongside its OpenMP setting** (#6869, 2026-11-21).

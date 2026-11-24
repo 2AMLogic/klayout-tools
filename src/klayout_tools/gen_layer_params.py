@@ -13,21 +13,15 @@ that read them (``_device_layer_params``, ``_pdk_family``,
 to translate a resolved PDK family into the concrete ``kdb.LayerInfo``
 layer pairs and geometry floors it draws on.
 
-This module has no top-level dependency on ``gen.py`` -- the one-way split
-the parent issue documents holds exactly: nothing here calls forward into
-``gen.py``'s geometry-building code. Two names genuinely belong to ``gen.py``
-proper (``GenError``, used across its whole validation surface, and
-``WELL_ENCLOSURE_MARGIN_UM``, a general geometry constant used well beyond
-this subsystem) -- the handful of functions here that need them import them
-back lazily, at call time, the same way this module's own functions already
-import ``klayout.db`` lazily to avoid paying for it up front. By the time
-any of these functions actually runs, ``gen`` has always finished importing
-this module and is fully loaded, so the lazy import never raises.
+Layer resolvers use the shared geometry constants and validation errors from
+``gen_base``. Geometry-building code can import these resolvers directly.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .gen_base import WELL_ENCLOSURE_MARGIN_UM, GenError
 
 # Data tables live in gen_layer_tables.py (#3722); re-exported here.
 from .gen_layer_mv_ring import apply_hv_mark_margins, apply_mos_array_mv_ring_margins
@@ -237,29 +231,10 @@ def _gate_top_endcap_um(family: str) -> float:
 #: :func:`_device_layer_params`'s ``sd_implant_layer``/``sd_implant_present``
 #: -- the family's ``"nplus"``/``"pplus"`` role, selected by ``flavor``).
 #:
-#: ``gf180mcu`` only (issue #1577): 0.25um, closing ``DF.12`` ("COMP not
-#: covered by Nplus or Pplus is forbidden") -- this repo's curated
-#: ``gf180mcu`` deck draws no implant over a unit device's body at all today,
-#: so a bare ``Comp`` shape violates it unconditionally, independent of any
-#: margin value. 0.25um is not the DF.12 margin itself (DF.12 is a coverage
-#: rule, not a distance -- covering ``active`` exactly, margin ``0.0``,
-#: already satisfies it) but the margin two *other* real rules need once the
-#: implant exists at all and starts covering the gate the same way it covers
-#: the source/drain (``NP.5a``/``PP.5a``, "Overlap of N-channel/P-channel
-#: gate", 0.23um each -- the implant must either not touch the gate poly at
-#: all, or enclose it with 0.23um margin; since DF.12 forces full ``active``
-#: coverage, only the second option is available, and the gate spans
-#: ``active``'s own full height with *zero* margin at ``y == 0``/``y ==
-#: w_um``). 0.25um clears that with headroom and comfortably exceeds
-#: ``NP.5b``/``PP.5b``'s smaller 0.16um COMP-extension margin too.
-#:
-#: A family absent from this table gets ``0.0`` (see
-#: :func:`_sd_implant_margin_um`), and :func:`_device_layer_params` never
-#: resolves a ``sd_implant_layer`` for one either (no family besides
-#: gf180mcu and, since issue #2934, sky130 declare the ``"nplus"``/``"pplus"``
-#: roles) -- sg13g2's/sg13cmos5l's curated decks recognise a MOS device from
-#: ``active``/``well`` alone, with no implant mask at all, so every existing
-#: caller there keeps byte-for-byte identical geometry (no implant drawn).
+#: GF180mcu DF.12 requires an implant over every Comp body. The implant must
+#: enclose the full-height gate by 0.23 µm (NP.5a/PP.5a) and extend past
+#: Comp by 0.16 µm (NP.5b/PP.5b). The 0.25 µm margin clears both (#1577).
+#: SG13G2 PFET arrays resolve their device-specific pSD in :func:`_device_implant`.
 _PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # NP.5a/PP.5a (gate overlap) are 0.23um
     # sky130 (issue #2934): n/psdm.5a, "min. n/psdm enclosure diff except
@@ -278,6 +253,26 @@ _PDK_SD_IMPLANT_MARGIN_UM: dict[str, float] = {
 _PDK_SD_IMPLANT_MIN_SPACE_UM: dict[str, float] = {
     "sky130": 0.38,  # nsdm.2/psdm.2 (sky130A_mr.drc)
 }
+
+
+def _device_implant(family: str, flavor: str) -> tuple[Any, float, float]:
+    """Drawing layer, active enclosure and inter-island spacing, in µm."""
+    if family == "sg13g2" and flavor == "pfet":
+        import klayout.db as kdb
+
+        return kdb.LayerInfo(14, 0), 0.18, 0.31  # pSD.c and pSD.b
+    role = "nplus" if flavor == "nfet" else "pplus"
+    return (
+        _role_layer_info(family, role),
+        _sd_implant_margin_um(family),
+        _sd_implant_min_space_um(family),
+    )
+
+
+def _device_well_enclosure_um(family: str, params: dict[str, Any]) -> float:
+    if family == "sg13g2" and params.get("flavor") == "pfet":
+        return 0.62 if params.get("voltage_flavor") == "hv" else 0.31  # NW.c1 / NW.c
+    return WELL_ENCLOSURE_MARGIN_UM
 
 
 def _sd_implant_min_space_um(family: str) -> float:
@@ -449,8 +444,6 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`), or
     :data:`WELL_ENCLOSURE_MARGIN_UM` (the pre-#1577 behaviour -- the same box
     the well shape uses) for a family that declares none."""
-    from .gen import WELL_ENCLOSURE_MARGIN_UM
-
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
@@ -474,8 +467,6 @@ _PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
 def _ring_well_margin_um(family: str) -> float:
     """Return ``family``'s n-tap ring nwell enclosure margin (see
     :data:`_PDK_RING_WELL_MARGIN_UM`), or :data:`WELL_ENCLOSURE_MARGIN_UM`."""
-    from .gen import WELL_ENCLOSURE_MARGIN_UM
-
     return _PDK_RING_WELL_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
@@ -603,8 +594,6 @@ def _reject_deferred_family(generator_name: str, family: str) -> None:
     """Raise :class:`GenError` when ``generator_name`` explicitly defers
     ``family`` (see :data:`_GENERATOR_FAMILY_DEFERRED`) -- a no-op for every
     other generator/family pair."""
-    from .gen import GenError
-
     if family in _GENERATOR_FAMILY_DEFERRED.get(generator_name, ()):
         raise GenError(
             f"generator '{generator_name}': PDK family '{family}' is not "
@@ -817,8 +806,6 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
     the valid names -- mirroring :func:`_pdk_family`'s unsupported-family
     error so a bad ``res_array`` ``flavor`` request fails clearly and early
     (during layer resolution, before any geometry is drawn)."""
-    from .gen import GenError
-
     flavors = _PDK_RES_FLAVOR_LAYERS[family]
     try:
         return flavors[flavor]
@@ -1168,8 +1155,6 @@ def _metal_res_layers(family: str, level: int) -> dict[str, tuple[int, int]]:
     Raises :class:`GenError` for a family with no metal-resistor levels
     configured at all, or a ``level`` outside the ones that family declares --
     mirrors :func:`_res_flavor_layers`'s own unsupported-value error."""
-    from .gen import GenError
-
     levels = _PDK_METAL_RES_LEVELS.get(family)
     if not levels:
         raise GenError(
@@ -1615,8 +1600,6 @@ def _pdk_family(variant: str) -> str:
     generators draw PDK-specific layers (unlike ``resistor_strip``, which is
     PDK-agnostic and never calls this).
     """
-    from .gen import GenError
-
     family = pdk_variant_family(variant)
     if family in _PDK_ROLE_LAYERS:
         return family
@@ -2006,28 +1989,15 @@ def _device_layer_params(
     if (family, voltage_flavor) in _NFET_ONLY_VOLTAGE_FLAVORS and (
         params.get("flavor", "nfet") != "nfet"
     ):
-        from .gen import GenError
-
         raise GenError(
             f"params.voltage_flavor '{voltage_flavor}' is an NMOS-only device "
             f"on PDK family '{family}' (no PMOS counterpart); use "
             "flavor='nfet'"
         )
-    # Source/drain implant (issue #1577): the family's `"nplus"`/`"pplus"`
-    # role, selected by `flavor` (`esd_device`'s own params never carry a
-    # `flavor` key at all -- that generator is always NMOS-style, so the
-    # `"nfet"` fallback below resolves it exactly the way `mos_array`'s own
-    # `flavor` default does). `sd_implant_present` additionally requires a
-    # positive resolved margin (:func:`_sd_implant_margin_um`) -- a family
-    # that declares the role but not the margin (none do today) would
-    # otherwise draw a zero-size implant box, and a family with neither
-    # (every family besides gf180mcu) never resolves a layer here at all.
     flavor = params.get("flavor", "nfet")
-    sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
-    sd_implant = _role_layer_info(family, sd_implant_role)
+    sd_implant, sd_implant_margin, sd_implant_space = _device_implant(family, flavor)
     npc = _role_layer_info(family, "npc")
     npc_margin = _PDK_NPC_MARGIN_UM.get(family, 0.0)
-    sd_implant_margin = _sd_implant_margin_um(family)
     # MOS capacitor (issue #3283): the marker layer must resolve and `w_um`
     # must clear the deck's own COMP min-width rule for the selected oxide,
     # else the request fails here rather than drawing an unmarked or
@@ -2083,7 +2053,8 @@ def _device_layer_params(
         "npc_present": npc is not None and npc_margin > 0,
         "npc_margin_um": npc_margin if npc is not None else 0.0,
         "npc_min_space_um": _PDK_NPC_MIN_SPACE_UM.get(family, 0.0),
-        "sd_implant_min_space_um": _sd_implant_min_space_um(family),
+        "device_well_enclosure_um": _device_well_enclosure_um(family, params),
+        "sd_implant_min_space_um": sd_implant_space,
     }
     if mos_cap_mark is not None:
         # Only `mos_array` declares these PCell params (`diff_pair` shares this
@@ -2178,8 +2149,6 @@ def _resistor_layer_params(
     flavor_layers = _res_flavor_layers(family, flavor)
     min_width_um = _res_flavor_min_width_um(family, flavor)
     if params["width_um"] < min_width_um:
-        from .gen import GenError
-
         raise GenError(
             f"generator 'res_array': params.width_um must be >= {min_width_um} "
             f"for flavor '{flavor}' on PDK family '{family}'"
@@ -2250,8 +2219,6 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     docstring) and two extra top-plate recognition masks; both are per-family
     *data* rather than per-family code, in :data:`_PDK_CAP_GEOMETRY_MIN_UM`
     and :data:`_PDK_CAP_TOP_PLATE_REQUIRES` respectively."""
-    from .gen import GenError
-
     roles = _PDK_ROLE_LAYERS[family]
     top = roles.get("cap_top_plate")
     bottom = roles.get("cap_bottom_plate")
@@ -2278,8 +2245,6 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
 def _check_cap_stack_supported(family: str, params: dict[str, Any]) -> None:
     """Reject ``stack=2`` on a family it is not verified on, or without
     ``connect="parallel"`` (issue #3332). A no-op for ``stack=1``."""
-    from .gen import GenError
-
     if params.get("stack", 1) != 2:
         return
     if family not in _PDK_CAP_STACK_GEOMETRY_UM:
@@ -2298,8 +2263,6 @@ def _check_cap_parallel_supported(family: str, params: dict[str, Any]) -> None:
     """Reject ``connect="parallel"`` on a family it is not verified on, or a
     unit plate side outside that family's characterised range (issue #3022).
     A no-op for ``connect="independent"``."""
-    from .gen import GenError
-
     if params.get("connect", "independent") != "parallel":
         return
     unit_range = _PDK_CAP_PARALLEL_UNIT_RANGE_UM.get(family)
@@ -2686,8 +2649,6 @@ def _bond_pad_layer_params(
     :func:`_cap_family_layers`'s own explicit missing-role check rather than
     passing ``None`` through to a PCell layer param that requires a real
     ``kdb.LayerInfo``."""
-    from .gen import GenError
-
     family = _pdk_family(pdk_info["variant"])
     pad = _role_layer_info(family, "pad")
     top_metal = _role_layer_info(family, "top_metal")
@@ -2813,7 +2774,6 @@ def _diode_layer_params(
     geometry."""
     import klayout.db as kdb
 
-    from .gen import GenError
     from .gen_diode import DIODE_FAMILY_VOLTAGE_CLASSES
     from .gen_pcells.diode import DIODE_LAYER_ROLES
 

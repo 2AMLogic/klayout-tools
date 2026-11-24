@@ -336,6 +336,12 @@ With no `--keep`, the guard cannot run, and the output says so
 (`guard.checked: false`). An object that is already absent is `absent` and a
 success. Duplicate targets are collapsed.
 
+Keys get the same pre-flight: every `REF` is `stat`ed, and the key `stat`
+returns must name the requested digest and, when the `REF` carries one — an
+`artifact:<key>` URI or a `MANIFEST[#SELECTOR]` entry — be that key. If any
+key disagrees, `delete` exits `1` with `error.code: "key_mismatch"` before
+the first delete call, so nothing is deleted, whether or not `--yes` is given.
+
 The broker must implement `POST /v1/delete`. If the delete call itself is
 refused with 404, 405 or 501 — `stat` had already reported the object
 present, so the route, not the object, is what is missing — `delete` exits
@@ -383,7 +389,7 @@ Campaign outputs are cited the same way.
 | Code | Meaning |
 |---|---|
 | `0` | Done: stored, fetched and verified, every entry ok, or delete (dry run, deleted or absent) |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`; a route-level 404/405/501 on delete — a broker with no `/v1/delete` — is code `"unsupported_operation"` instead), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`; a route-level 404/405/501 on delete — a broker with no `/v1/delete` — is code `"unsupported_operation"` instead), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `put`, `get` or `delete` whose broker key disagrees with the requested digest, or — `get` and `delete` only — with the key in an `artifact:<key>` URI / `MANIFEST[#SELECTOR]` entry, or — `put` only — an upload the broker bound to an `x-amz-checksum-sha256` that is not the file's digest (each `key_mismatch`), a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
 | `2` | Usage error |
 | `3` | `verify` only: at least one checked entry is missing or mismatched (broker-backed or `--local`) |
 

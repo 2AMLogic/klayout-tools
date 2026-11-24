@@ -133,6 +133,7 @@ def test_extraction_fields_are_empty_for_any_other_engine():
 #: before this route existed (pinned from `run_pex`'s source at the time); the
 #: default engine must neither gain nor lose one.
 CURATED_EXTRACTION_KEYS = {
+    "substrate_dc_tie",
     "deck",
     "netlist_adaptation",
     "device_count",
@@ -183,6 +184,10 @@ REFUSED_BY_NAME = [
     ({"distributed_rc": True}, "--distributed-rc"),
     ({"resistance_graph": True}, "--resistance-graph"),
     ({"resistance_graph_r_cut_ohm": 1.0}, "--resistance-graph-r-cut"),
+    (
+        {"resistance_graph": True, "resistance_graph_caps": {"max_cells": 8}},
+        "--resistance-graph-max-cells",
+    ),
     ({"parasitic_variants": ["no-coupling"]}, "--parasitic-variant"),
     ({"substrate_tie_ohms": 5.0}, "--substrate-tie-ohms"),
     ({"mom_rlc_net": "n1"}, "--mom-rlc-net"),

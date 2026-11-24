@@ -1,0 +1,1 @@
+- `klt signoff --attest --check` accepts a scope description first echoed by a different producer build when both envelopes pin the same inventory. Changed checks, inventory bindings and explicit disclosures still report drift. (#7627)

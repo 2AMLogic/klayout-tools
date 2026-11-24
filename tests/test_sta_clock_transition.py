@@ -8,7 +8,7 @@ import pytest
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import run_sta
 from test_post_route_sta import (
-    _live_sky130_env,
+    _LIVE_ONLY,
     _setup_multi_corner_env,
     _setup_success_env,
     _stub_openroad_clock_capture,
@@ -98,7 +98,7 @@ def test_propagated_clock_rejects_transition(tmp_path, monkeypatch, capsys):
     assert not scripts
 
 
-@pytest.mark.skipif(_live_sky130_env() is None, reason="requires OpenROAD and sky130A")
+@_LIVE_ONLY
 def test_live_ideal_clock_transition_reduces_setup_slack(tmp_path):
     (tmp_path / "top.v").write_text(
         "module top(input clk, input d, output q); wire ck, fq;\n"

@@ -10,6 +10,9 @@ ratchet itself lives in ``tests/test_sim_runner_feature_registry_coverage.py``.
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pytest
 
 from klayout_tools import sim
@@ -234,3 +237,188 @@ def test_known_old_image_refuses_mandatory_overrides_even_with_warn(
             _overrides_request(tmp_path, "warn"), corner_count=1, timeout_s=30
         )
     assert error.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+
+
+# --- measurements[].crossings.value_from (issue #6913) ---------------------
+
+_CROSSINGS_VALUE_FROM_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "measurements": [
+        {
+            "name": "f_ro1",
+            "crossings": {
+                "signal": "v(ro1)",
+                "level": 0.9,
+                "value_from": "frequency",
+            },
+        }
+    ],
+}
+
+
+def test_crossings_value_from_is_a_registered_mandatory_runner_feature():
+    """#6913: `crossings.value_from` is detected pre-launch and mandatory --
+    an older runner would reject the unknown key (at best) or grade the raw
+    crossing count, so a fleet runner older than v0.9.3 never sees the job.
+    First release segment 0.9.3: the field is not in the v0.9.2 tag."""
+    assert sb._request_features(_CROSSINGS_VALUE_FROM_REQUEST) == [
+        "crossings_value_from"
+    ]
+    quiet = {
+        "models": {"pdk": "sky130A"},
+        "options": {},
+        "measurements": [
+            {"name": "t", "crossings": {"signal": "v(x)", "level": 0.5}},
+            {
+                "name": "u",
+                "crossings": {"signal": "v(x)", "level": 0.5, "value_from": None},
+            },
+        ],
+    }
+    assert sb._request_features(quiet) == []
+    assert "crossings_value_from" in sb._MANDATORY_RUNNER_FEATURES
+    assert sb._missing_runner_features(["crossings_value_from"], "0.9.2") == [
+        "crossings_value_from"
+    ]
+    assert sb._missing_runner_features(["crossings_value_from"], "0.9.3") == []
+    assert sb._missing_runner_features(["crossings_value_from"], None) is None
+
+
+def test_prelaunch_refuses_crossings_value_from_on_an_old_image(tmp_path, monkeypatch):
+    """#6913: a v0.9.2 runner image predates `crossings_value_from` (first
+    release segment 0.9.3), and the feature is mandatory -- so the submit
+    path refuses before any S3 write or launch, `warn` included, with the
+    nothing-was-submitted text."""
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.9.2")])
+    for check in ("enforce", "warn"):
+        assessment = sb._assess_published_runner(
+            _CROSSINGS_VALUE_FROM_REQUEST, _config(tmp_path, runner_version_check=check)
+        )
+        with pytest.raises(sim.SimError) as raised:
+            sb._enforce_published_runner_features(
+                _CROSSINGS_VALUE_FROM_REQUEST, assessment
+            )
+        assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+        message = str(raised.value)
+        assert "crossings_value_from" in message
+        assert "the request was not submitted and no instance was launched" in message
+
+
+@pytest.mark.parametrize("backend", ["batch", "remote"])
+@pytest.mark.parametrize("accepts_selector", [False, True])
+def test_crossings_preflight_checks_the_worker_parser(
+    tmp_path, backend, accepts_selector
+):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _runner_preflight_script,
+        remote_feature_preflight,
+    )
+
+    worker = tmp_path / "klt"
+    worker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "klt 0.9.3.dev1"; exit 0; fi\n'
+        'test "$1" = sim && grep -Fq "value_from" "$2" || exit 1\n'
+        'test -f "$(dirname "$2")/deck.spice" || exit 1\n'
+        'test "$3 $4 $5" = "--backend local --dry-run" || exit 1\n'
+        'touch "$EDA_OUTPUT_DIR/probed"\n'
+        + ("exit 0\n" if accepts_selector else "exit 1\n")
+    )
+    worker.chmod(0o755)
+    environment = dict(
+        os.environ,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        EDA_OUTPUT_DIR=str(tmp_path),
+        TMPDIR=str(tmp_path),
+    )
+    request = _CROSSINGS_VALUE_FROM_REQUEST
+
+    def preflight(req):
+        if backend == "remote":
+            return remote_feature_preflight(req)
+        return _runner_preflight_script(
+            "0.9.3", enforce=True, required_features=tuple(sb._request_features(req))
+        )
+
+    plain = subprocess.run(["bash", "-c", preflight({}) + " true"], env=environment)
+    assert plain.returncode == 0 and not (tmp_path / "probed").exists()
+    result = subprocess.run(
+        ["bash", "-c", preflight(request) + ' touch "$EDA_OUTPUT_DIR/launched"'],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert (tmp_path / "probed").is_file()
+    assert (tmp_path / "launched").exists() == accepts_selector
+    assert result.returncode == (0 if accepts_selector else 87)
+    if not accepts_selector:
+        assert "crossings_value_from" in result.stderr
+    assert not list(tmp_path.glob("*/probe.json"))
+
+
+@pytest.mark.parametrize(
+    "feature", ["crossings_value_from", "eye_step_or_phase", "osdi_pdk_relative"]
+)
+@pytest.mark.parametrize("supported", [True, False], ids=["accept", "refuse"])
+def test_same_release_runner_probes_the_requested_sim_feature(
+    tmp_path, feature, supported
+):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _mandatory_feature_probe_shell,
+    )
+
+    # Validate the files inside the stub, while the generated shell's temporary
+    # directory still exists. Record validation separately from the chosen exit
+    # status so a broken fixture cannot masquerade as a deliberate refusal.
+    worker = tmp_path / "klt"
+    worker.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+assert sys.argv[1] == "sim"
+assert sys.argv[3:] == ["--backend", "local", "--dry-run", "--format", "json"]
+request = Path(sys.argv[2])
+doc = json.loads(request.read_text())
+assert (request.parent / doc["netlist"]).read_text().strip()
+feature = os.environ["PROBE_FEATURE"]
+if feature == "crossings_value_from":
+    assert doc["measurements"][0]["crossings"]["value_from"] == "period.mean"
+elif feature == "eye_step_or_phase":
+    assert doc["analysis_steps"][0]["measurements"][0]["eye"]["phase"] == "500p"
+elif feature == "osdi_pdk_relative":
+    preload, = doc["options"]["osdi_preload"]
+    relative = Path(preload["pdk_relative"])
+    assert not relative.is_absolute()
+    models = doc["models"]
+    assert (request.parent / models["pdk_root"] / models["pdk"] / relative).is_file()
+else:
+    raise AssertionError(feature)
+with Path(os.environ["PROBE_LOG"]).open("a") as log:
+    print(feature, file=log)
+sys.exit(int(os.environ["PROBE_EXIT"]))
+"""
+    )
+    worker.chmod(0o755)
+    log = tmp_path / "validated"
+    shell = "rv=0.9.3.dev10; " + _mandatory_feature_probe_shell((feature,))
+    proc = subprocess.run(
+        ["bash", "-c", shell + 'printf "%s" "$mmiss"'],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PROBE_FEATURE": feature,
+            "PROBE_LOG": str(log),
+            "PROBE_EXIT": "0" if supported else "1",
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert log.read_text().splitlines() == [feature]
+    assert proc.stdout == ("" if supported else feature)

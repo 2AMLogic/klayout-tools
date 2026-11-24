@@ -15,10 +15,14 @@ sizing policy:
   (issue #6058);
 * ``_drawn_pad_side_um`` -- the side the composed GDS will really carry;
 * ``_pad_conflict_escape_note`` -- the named fix, per the pad's policy;
-* ``_leg_conflict_message`` -- the #1057 overlap / #1386 spacing verdict,
-  upgraded to consult the pad rejection first;
+* ``_conductive_contact_message`` -- the #7024/#7221 shared-edge or
+  shared-corner short between a candidate and an accepted net;
+* ``_leg_conflict_message`` -- the #1057 overlap, #7024/#7221 contact and
+  #1386 spacing verdicts, upgraded to consult the pad rejection first;
 * ``_landing_pad_conflict_reason`` -- the rejection itself;
-* ``_terminal_pitch_um`` -- centre-to-centre pitch of a pad vs a region.
+* ``_terminal_pitch_um`` -- centre-to-centre pitch of a pad vs a region;
+* ``_pad_other_block_contact_reason`` -- the #7325 pad-vs-other-block
+  electrical-contact rejection.
 
 ``gen_compose_landing_pads`` re-imports ``_pad_is_intermediate`` (its
 resolver needs it) and re-exports the message entry points, so every
@@ -27,16 +31,40 @@ path keeps resolving unchanged -- the same convention the earlier splits
 of this family (``gen_compose_layer_rules``, ``gen_compose_via_cuts``,
 ``gen_compose_landing_pads`` itself) established.
 
-Same conventions as the modules it was split from:
-``gen_compose.py``/``gen_compose_routing.py`` names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_drop_array_extra_um``) are imported *inside*
-the functions that use them, so this module never has a load-time
-dependency back on them.
+The resolver and conflict checks share the landing-pad and via-cut geometry.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
+
+from .gen_compose_base import _VIA_LANDING_SIZE_UM, _drop_array_extra_um
+from .gen_compose_plane_change import RouteConflict
+
+
+def leg_pad_notch_conflict(
+    region: Any,
+    layer: tuple[int, int] | None,
+    spacing: tuple[float, str] | None,
+    dbu: float,
+) -> RouteConflict | None:
+    """Check the primary layer's drawn pad and backbone on the output grid."""
+    if spacing is None:
+        return None
+    required_um, rule = spacing
+    spacing_dbu = round(required_um / dbu)
+    if spacing_dbu <= 0:
+        return None
+    gaps = region.merged().notch_check(spacing_dbu)
+    if gaps.is_empty():
+        return None
+    closest_um = min(pair.distance() for pair in gaps) * dbu
+    return RouteConflict(
+        f"this leg's landing pad and backbone form a {closest_um:.4g}um notch "
+        f"on layer {layer}. '{rule}' requires at least {required_um:.4g}um "
+        "of spacing. Move the turn farther from the landing pad."
+    )
 
 
 def _pad_is_intermediate(
@@ -55,6 +83,25 @@ def _pad_is_intermediate(
     return terminal_layers is not None and pad_layer not in terminal_layers
 
 
+def _conductive_contact_message(
+    cand_region: Any, other_region: Any, other_net: str
+) -> str | None:
+    """The short verdict for a shared edge or corner (#7024, #7221), or ``None``.
+
+    A shared edge -- or a single shared corner point -- conducts even when
+    the polygon intersection has no area. ``kdb.Region.interacting`` is
+    "shares at least one point": the rule ``kdb.LayoutToNetlist`` connects
+    on, so `klt extract` would read the two nets as one node. A positive
+    gap never interacts, and neither does a pair whose *bounding boxes*
+    merely meet. The caller has already ruled out a positive-area overlap.
+    """
+    if cand_region.interacting(other_region).is_empty():
+        return None
+    if (cand_region.edges() & other_region.edges()).is_empty():
+        return f"shares a conductive corner with already-routed net '{other_net}'"
+    return f"shares a conductive edge with already-routed net '{other_net}'"
+
+
 def _leg_conflict_message(
     variant: str,
     via_drops: list[dict[str, Any]],
@@ -71,15 +118,20 @@ def _leg_conflict_message(
 
     Relocated verbatim from ``compose()``'s ``_leg_conflict`` loop body
     (issue #5803, beside the pad-vs-pitch rejection it now folds in): the
-    #1057 overlap test, the #1386 spacing-aware test on the primary entry
-    only (``check_spacing`` -- the #1913 intermediate/far pad entries are
-    checked for electrical contact, #7024), each upgraded to consult
+    #1057 overlap test; the electrical-contact test (#7024, #7221) -- a
+    shared edge or corner, on the primary entry and the #1913
+    intermediate/far pad entries alike, whatever the deck's space rules
+    say; then the #1386 spacing-aware test on the primary entry only
+    (``check_spacing``). The overlap and spacing tests consult
     :func:`_landing_pad_conflict_reason` first so a conflict at a landing
     pad names pad-vs-pitch instead of a generic backbone crossing. Returns
-    ``None`` when neither test fires -- the caller keeps looping.
+    ``None`` when no test fires -- the caller keeps looping.
 
-    Messages (and their thresholds) are byte-identical to the pre-#5803
-    wording; only the pad-involving conflicts can change what they say.
+    The overlap and spacing messages (and their thresholds) are
+    byte-identical to the pre-#5803 wording. What they say changes only
+    for a pad-involving conflict and -- #7221 -- for a touching pair on
+    the primary entry, which now reports the contact rather than the
+    spacing miss it used to be caught as.
     """
     if not (cand_region & other_region).is_empty():
         if not check_spacing:
@@ -96,13 +148,13 @@ def _leg_conflict_message(
             if reason is not None:
                 return reason
         return f"crosses already-routed net '{other_net}'"
+    # The contact test runs on both entries and ahead of the spacing branch:
+    # an electrical contact is a short whether or not the deck has a space
+    # rule for the layer.
+    contact = _conductive_contact_message(cand_region, other_region, other_net)
+    if contact is not None:
+        return contact
     if not check_spacing:
-        # A shared edge conducts even when the polygon intersection has no area.
-        if (
-            cand_region.bbox().touches(other_region.bbox())
-            and not (cand_region.edges() & other_region.edges()).is_empty()
-        ):
-            return f"shares a conductive edge with already-routed net '{other_net}'"
         return None
     cand_spacing = spacing_lookup(cand_layer)
     if cand_spacing is None:
@@ -261,10 +313,8 @@ def _drawn_pad_side_um(
     with the mode answers its per-pair floor directly, so report that
     rather than re-max-ing the baseline over it.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
     from .gen_compose_ladder_floors import _intermediate_landing_pad_floor_um
     from .gen_compose_layer_rules import _landing_pad_floor_um
-    from .gen_compose_routing import _drop_array_extra_um
     from .gen_compose_via_cuts import via_drop_cut_side_um
 
     if getattr(side_for_pair, "minimal_ladder", False) and _pad_is_intermediate(
@@ -341,3 +391,94 @@ def _terminal_pitch_um(
         (edge.euclidian_distance(centre) for edge in other_region.edges()), default=0
     )
     return (int(nearest) + int(round(side_um / 2.0 / dbu))) * dbu
+
+
+def _pad_other_block_contact_reason(
+    pad_boxes: list[Any],
+    net_label: str,
+    other_block_ids: list[str],
+    geometry_for: Callable[[str, tuple[int, int], float | None], dict[str, Any] | None],
+    drawing_dbu: float,
+) -> str | None:
+    """The pad-vs-other-block electrical-contact rejection (issue #7325).
+
+    Called from ``compose()``'s ``_leg_conflict`` after the #1520 own-block
+    notch loop: every pad a candidate leg draws
+    (:func:`.gen_compose_landing_pads._landing_and_widen_pad_boxes` -- a
+    via-drop's landings on *every* plane of its ladder, intermediate and
+    terminal alike, plus stub-widen boxes) is tested against every placed
+    block hosting **no** pin of the net being routed, on the pad's own
+    layer. A pad touching such a block's own drawn geometry merges with it
+    electrically, so both nets can compose ``routed: true`` while `klt
+    extract` reads one node -- the silent short #7325 records, invisible
+    to `klt drc` (two touching shapes on one layer are one polygon, never
+    a spacing violation) and to the route-vs-route half of the check
+    (block geometry never enters ``accepted_route_regions``).
+
+    The predicate is ``kdb.Region.interacting`` -- shares at least one
+    point: overlap, shared edge *or* shared corner -- the same rule
+    extraction resolves layer connectivity with, so a corner-only touch is
+    rejected exactly like the edge share of #7325's reproducer (#7024
+    applied the same predicate to already-routed *route* geometry).
+    Contact-only by design: a mere near miss against another block's metal
+    stays a plain `klt drc` finding on the composed GDS, the same honest
+    backstop the #1913 intermediate entries leave in place.
+
+    Own-block and same-net landings are excluded by construction: the pad's
+    own block (and every block hosting one of this net's pins) is absent
+    from ``other_block_ids`` -- a pad merging with the wire at its own
+    declared port is the intended landing (#1520), never a violation.
+
+    The request's geometry reader caches each block, layer and grid. Match
+    the own-block notch check's grid for each box: the writer's grid for
+    via landings and the source layout's grid for stub-widen boxes.
+
+    This is the *other-block* half of a pair. Its same-block sibling, the
+    #1520 notch check (:func:`.gen_compose_routing._pad_self_notch_violation_um`),
+    exists because a port hand-declared on a pre-existing ``blocks[].cell``
+    stream's own internal wire -- the only way to declare a port on a cell no
+    ``klt`` verb generated -- lets a pad land close enough to a *different*
+    part of that same wire (e.g. a perpendicular leg near a corner the port
+    sits close to) to break the deck's same-layer spacing rule, though both
+    shapes are one electrical node. ``kdb.Region.notch_check`` sees it
+    because the pad and the wire merge into one polygon; the overlap and
+    inflate comparisons in ``_leg_conflict`` have no second shape to test.
+
+    Returns the rejection wording naming the pad, the block and the net --
+    carrying a ``_CLIMBABLE_REASON_MARKERS`` fragment so the #6920 plane
+    climb can lift the leg to a plane that clears the block -- or ``None``
+    when every pad keeps clear of every other block.
+    """
+    import klayout.db as kdb
+
+    for pad_layer, _own_block_id, box, drop in pad_boxes:
+        scale = drawing_dbu if drop is not None else None
+        for other_block in other_block_ids:
+            geometry = geometry_for(other_block, pad_layer, scale)
+            if geometry is None:
+                continue
+            dbu = geometry["dbu"]
+            pad_region = kdb.Region(
+                kdb.Box(
+                    int(round(box[0] / dbu)),
+                    int(round(box[1] / dbu)),
+                    int(round(box[2] / dbu)),
+                    int(round(box[3] / dbu)),
+                )
+            )
+            if pad_region.interacting(geometry["region"]).is_empty():
+                continue
+            return (
+                f"draws a pad ({box[0]:.4g}, {box[1]:.4g}) - "
+                f"({box[2]:.4g}, {box[3]:.4g}) on layer {pad_layer} that "
+                f"touches block '{other_block}'s own drawn geometry on "
+                "that layer -- a pad touches a block hosting no pin of "
+                f"its net, so `klt extract` reads net '{net_label}' and "
+                "that block's metal as one node: a silent short the "
+                "'routed' verdict would otherwise hide (issue #7325). "
+                "Separate the blocks (placement.origins_um), reach this "
+                "net's pin from a clear side (waypoints_um), or route "
+                "this net on another plane (connectivity[].layer_role, "
+                "or routing.cross_block_layer_role)"
+            )
+    return None

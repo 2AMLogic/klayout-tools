@@ -33,27 +33,14 @@ this module's public routing entry points (``route_two_pin``,
 a handful of the layer-resolution/geometry helpers below) exactly as they
 called the same functions when this was one file.
 
-Dependency surface is intentionally narrow and mostly one-directional:
-``gen_compose.py``'s own module-scope constants/helpers this module needs
-(``GenComposeError``, ``_DIRECTION_VECTORS``, ``_ORIENTATION_KDB_ARGS``,
-``_VIA_LANDING_SIZE_UM``, ``_load_block_cell``, ``_port_has_geometry``) are
-imported *inside* the handful of functions that use them (the same deferred-
-import discipline ``gen_pcells/*.py`` uses to depend on ``gen.py``) rather
-than at module scope, so this module never has a load-time dependency back
-on ``gen_compose.py`` -- only ``gen_compose.py`` depends on this module at
-import time. Two of those same functions (``_endpoint_stub_widen_um``,
-``_self_net_cross_layer_lane_waypoints_um``) are *also* looked up this way
-even though :func:`route_two_pin` (defined in this module) could otherwise
-call them as ordinary same-module names -- the test suite monkeypatches
-both by their ``klayout_tools.gen_compose`` re-export (predating this
-split), and only a call routed back through ``gen_compose`` at call time
-still observes that patch. ``gen_compose.py`` in turn imports this module's
-entire routing API back (module scope, no cycle -- this module never
-imports ``gen_compose`` at its own module scope) purely to preserve
-``klayout_tools.gen_compose.<name>`` as a working import path for every
-name the test suite/callers used before this split, plus the one name it
-calls directly itself (``_ring_port_side``, for ``_validate_block_port``'s
-ring-gap-port check).
+Shared errors, port geometry, orientation constants and via sizing come
+from ``gen_compose_base`` at module scope. Reading block geometry imports
+``_load_block_cell`` and ``_rescale_block_layout`` from ``gen_compose``
+inside the function to avoid a circular import. The stub-widening and
+cross-layer retry helpers look up ``_endpoint_stub_widen_um`` and
+``_self_net_cross_layer_lane_waypoints_um`` through ``gen_compose`` at call
+time so tests can patch their re-exports. The composition runner exposes the
+routing API to callers and uses ``_ring_port_side`` to check ring-gap ports.
 """
 
 from __future__ import annotations
@@ -69,6 +56,14 @@ from .decks import (
     get_extraction_deck,
 )
 from .gen import RING_SIDE_DIRECTIONS, _pdk_family
+from .gen_compose_base import (
+    _DIRECTION_VECTORS,
+    _ORIENTATION_KDB_ARGS,
+    _VIA_LANDING_SIZE_UM,
+    GenComposeError,
+    _port_has_geometry,
+)
+from .gen_compose_base import _drop_array_extra_um as _drop_array_extra_um
 
 # Layer-rule resolution (``routing.layer_role`` -> ``(layer, datatype)`` and
 # the deck floors that pair implies) lives in ``gen_compose_layer_rules``
@@ -414,8 +409,6 @@ def _resolve_cross_block_route_layer(
     issue #1567 removed the earlier single-hop-only restriction here, the
     same as it did for :func:`_resolve_via_drop_layer` itself).
     """
-    from .gen_compose import GenComposeError
-
     route_layer = _resolve_route_layer(variant, layer_role)
     try:
         cross_layer = _resolve_route_layer(variant, cross_layer_role)
@@ -669,8 +662,6 @@ def manhattan_backbone(
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
     """
-    from .gen_compose import _DIRECTION_VECTORS
-
     ax, ay = a
     bx, by = b
     va = _DIRECTION_VECTORS[dir_a_deg]
@@ -1295,7 +1286,6 @@ def _leg_plane_clears_ring(
     ring_half_um = _ring_trace_half_width_um(block)
     if ring_half_um is None:
         return False  # the ring does not say how wide its trace is
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     # A via-drop's landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
     # sized from the PDK's own contact-enclosure convention), independent of
@@ -1718,11 +1708,7 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import (
-        _ORIENTATION_KDB_ARGS,
-        _load_block_cell,
-        _rescale_block_layout,
-    )
+    from .gen_compose import _load_block_cell, _rescale_block_layout
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
@@ -2037,8 +2023,6 @@ def _self_net_drawn_short(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _port_has_geometry
-
     region = geometry["region"]
     dbu = geometry["dbu"]
 
@@ -2140,10 +2124,6 @@ def _same_layer_short_reason(
     same_block_self_net: bool,
     margin_eps_um: float,
 ) -> str | None:
-    # Looked up at call time, as ``route_two_pin`` does: the test suite's
-    # ``klayout_tools.gen_compose.<name>`` re-export takes effect here.
-    from .gen_compose import _port_has_geometry
-
     # Self-net pad-crossing check (#433): the whole-block bbox check below
     # skips a self-net's own block entirely (a same-block net's backbone
     # is, by construction, always inside its own block's bbox -- that
@@ -3734,7 +3714,6 @@ def route_two_pin(
     # looked up dynamically inside `_endpoint_stub_widen_entries`/
     # `_same_block_cross_layer_retry` (see their comments) so a monkeypatch of
     # `klayout_tools.gen_compose.<name>` still takes effect.
-    from .gen_compose import _DIRECTION_VECTORS
 
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -4290,8 +4269,6 @@ def route_bundle(
     not part of the ``klt gen-compose`` response (``compose()`` projects
     every leg down to ``pins``/``routed``/``route_length_um``/``reason``).
     """
-    from .gen_compose import GenComposeError
-
     if len(pins) < 2:
         raise GenComposeError("route_bundle() needs at least 2 pins")
     if waypoints_um is not None and len(pins) != 2:
@@ -4824,12 +4801,3 @@ def _drop_array(
     if pitch is None:
         return None
     return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
-
-
-def _drop_array_extra_um(drop: dict[str, Any]) -> float:
-    """Extra side length (um) a drop's cut array adds to its landing pad over
-    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
-    array = drop.get("array")
-    if not array:
-        return 0.0
-    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

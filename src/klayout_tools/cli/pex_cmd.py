@@ -42,6 +42,7 @@ from ._parsing import (
     parse_declared_pins,
     parse_device_models,
     parse_label_layers,
+    parse_resistance_graph_caps,
     parse_tie_nets,
 )
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
@@ -90,6 +91,8 @@ def _submit_request(args: argparse.Namespace) -> dict:
     """The invocation's request, as recorded in a ``--submit-only`` manifest
     (issue #4692): every flag that shapes the run, paths made absolute."""
     request = {k: v for k, v in vars(args).items() if k not in _REQUEST_EXCLUDED}
+    if request.get("timeout_s") is None:
+        request.pop("timeout_s", None)
     for key in _REQUEST_PATH_FIELDS:
         if request.get(key):
             request[key] = os.path.abspath(request[key])
@@ -248,6 +251,7 @@ def run(args: argparse.Namespace) -> int:
                 hosts=args.hosts,
                 resume=args.resume,
                 capacity_wait_s=args.wait_for_capacity,
+                timeout_s=args.timeout_s,
                 deck_options=deck_options,
                 declared_pins=declared_pins,
                 rename_declared_pins=args.rename_declared_pins,
@@ -262,6 +266,7 @@ def run(args: argparse.Namespace) -> int:
                 distributed_rc=args.distributed_rc,
                 resistance_graph=args.resistance_graph,
                 resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+                resistance_graph_caps=parse_resistance_graph_caps(args),
                 parasitic_variants=args.parasitic_variants,
                 substrate_tie_ohms=args.substrate_tie_ohms,
                 mom_rlc_net=args.mom_rlc_net,
@@ -294,6 +299,7 @@ def run(args: argparse.Namespace) -> int:
             hosts=args.hosts,
             resume=args.resume,
             capacity_wait_s=args.wait_for_capacity,
+            timeout_s=args.timeout_s,
             # `--deck-option` (issue #1558): selects a flavour of a shared-geometry
             # device family (e.g. gf180mcu's `poly_res`/`mim_cap`), passed to
             # `klt extract --deck-option`; `None` when the flag was never given.
@@ -342,6 +348,9 @@ def run(args: argparse.Namespace) -> int:
             # never given, unchanged from every call site that predates them.
             resistance_graph=args.resistance_graph,
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            # `--resistance-graph-max-*` (issue #6964): the explicit caps as
+            # `{builder keyword: value}`; `None` when never given.
+            resistance_graph_caps=parse_resistance_graph_caps(args),
             # `--substrate-tie-ohms` (issue #3089): `None` when never given.
             substrate_tie_ohms=args.substrate_tie_ohms,
             # `--mom-rlc-net`/`--mom-rlc-resistance-ohm`/

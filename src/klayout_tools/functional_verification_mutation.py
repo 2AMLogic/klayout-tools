@@ -215,7 +215,7 @@ def run_functional_verification_with_mutations(
         raise _fv.FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
-    module, module_dir, testcase, plusargs = _fv._resolve_testbench_target(
+    module, module_dirs, testcase, plusargs = _fv._resolve_testbench_target(
         None, request_doc["testbench"], request_dir
     )
     parameters = _fv._resolve_parameters(request_doc.get("parameters"))
@@ -331,7 +331,7 @@ def run_functional_verification_with_mutations(
                 env=env,
                 build_log=build_log,
                 module=module,
-                module_dir=module_dir,
+                module_dirs=module_dirs,
                 testcase=testcase,
                 random_seed=random_seed,
                 test_dir=mutant_dir,

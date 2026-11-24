@@ -155,7 +155,8 @@ Scope (phase 2, this module's current state):
 to a nonexistent block ``id``/port name is an application error, exit code
 1); geometry is *advisory* -- ``klt drc`` remains the rule-compliance
 authority on the composed output, so a routed net (``routed: true``) is not a
-DRC-clean guarantee.
+DRC-clean guarantee. Set ``options.check_placement`` to fail before writing
+on declared overlap or measured footprint growth (:func:`check_placement_overlap`).
 
 PDK resolution goes through the one resolver every other verb uses
 (:func:`klayout_tools.pdk.find_pdk`) -- this module never implements its own
@@ -196,11 +197,41 @@ from .gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     GenError,
-    _cut_fixed_size_um,
     _pdk_family,
 )
-from .gen import (
-    _fixed_cut_side_um as _fixed_cut_side_um,
+from .gen_compose_base import (
+    _DIRECTION_VECTORS as _DIRECTION_VECTORS,
+)
+from .gen_compose_base import (
+    _ORIENTATION_DIRECTION_MAP as _ORIENTATION_DIRECTION_MAP,
+)
+from .gen_compose_base import (
+    _ORIENTATION_KDB_ARGS as _ORIENTATION_KDB_ARGS,
+)
+from .gen_compose_base import (
+    _ORIENTATIONS as _ORIENTATIONS,
+)
+from .gen_compose_base import (
+    _VIA_DROP_SIZE_UM as _VIA_DROP_SIZE_UM,
+)
+from .gen_compose_base import (
+    _VIA_LANDING_SIZE_UM as _VIA_LANDING_SIZE_UM,
+)
+from .gen_compose_base import (
+    GenComposeError as GenComposeError,
+)
+from .gen_compose_base import (
+    _apply_orientation_um as _apply_orientation_um,
+)
+from .gen_compose_base import (
+    _nearest_grid_point_within,
+    _port_probe_position_um,
+)
+from .gen_compose_base import (
+    _orient_port as _orient_port,
+)
+from .gen_compose_base import (
+    _port_has_geometry as _port_has_geometry,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_dbu import DbuReconcileError, reconcile_block_dbu
@@ -211,6 +242,10 @@ from .gen_compose_draw import (
 from .gen_compose_draw import (
     _insert_via_cuts as _insert_via_cuts,
 )
+from .gen_compose_footprints import _bbox_contains, check_composed_footprints
+from .gen_compose_footprints import (
+    check_placement_overlap as check_placement_overlap,
+)
 from .gen_compose_ladder_floors import (
     _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
 )
@@ -218,9 +253,11 @@ from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
     _make_landing_pad_side_um,
+    _pad_other_block_contact_reason,
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
+from .gen_compose_pad_conflicts import leg_pad_notch_conflict
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -268,6 +305,13 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_compose_via_cuts import (
+    _cut_fixed_size_um as _cut_fixed_size_um,
+)
+from .gen_compose_via_cuts import (
+    _fixed_cut_side_um as _fixed_cut_side_um,
+)
+from .gen_compose_via_cuts import _via_fixed_size_um as _via_fixed_size_um
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
@@ -294,137 +338,9 @@ SCHEMA_VERSION = 1
 #: to avoid colliding with that reservation.
 SUPPORTED_PLACEMENT_STRATEGIES = {"row", "explicit", "array"}
 
-#: Unit outward vector (dx, dy) for each orthogonal ``direction_deg`` a
-#: ``klt gen`` port reports. Ports only ever face an axis (0/90/180/270 --
-#: see ``gen.py``'s generators), so the router never has to snap a diagonal.
-_DIRECTION_VECTORS: dict[int, tuple[int, int]] = {
-    0: (1, 0),
-    90: (0, 1),
-    180: (-1, 0),
-    270: (0, -1),
-}
-
-#: Supported ``blocks[].orientation`` values (#1166) -- a block's own
-#: mirror/rotation, applied about that block's own local (pre-translation)
-#: origin *before* ``offset_um`` translates it into the composed frame.
-#: ``"mirror_x"`` negates local ``x`` (a horizontal flip -- a block's
-#: right-edge port moves to its left edge, and vice versa; this is the
-#: minimum case that unblocks a CMOS inverter's shared-drain net, per
-#: #1164's root cause #1), ``"mirror_y"`` negates local ``y`` (a vertical
-#: flip), ``"rotate_180"`` negates both. See :func:`_apply_orientation_um`
-#: for the point transform and :data:`_ORIENTATION_KDB_ARGS` for the
-#: equivalent ``kdb.Trans`` construction every geometry-writing consumer
-#: (:func:`_write_composed_gds`, :func:`read_block_layer_geometry`) applies
-#: to actually-drawn shapes, so a block's reported metadata (``bbox_um``,
-#: ``ports[]``) never disagrees with its drawn geometry.
-_ORIENTATIONS = frozenset({"none", "mirror_x", "mirror_y", "rotate_180"})
-
-#: ``kdb.Trans(rot, mirrx, x, y)`` arguments -- ``rot`` a 0..3 count of
-#: 90-degree CCW rotation steps, ``mirrx`` whether to mirror at the x-axis
-#: *before* that rotation is applied -- producing the identical point
-#: transform as :func:`_apply_orientation_um` for each orientation. Verified
-#: against ``klayout.db.Trans``'s own semantics: ``rot=0, mirrx=True`` maps
-#: ``(x, y) -> (x, -y)`` (``"mirror_y"``), ``rot=2, mirrx=True`` maps
-#: ``(x, y) -> (-x, y)`` (``"mirror_x"``), and ``rot=2, mirrx=False`` maps
-#: ``(x, y) -> (-x, -y)`` (``"rotate_180"``).
-_ORIENTATION_KDB_ARGS: dict[str, tuple[int, bool]] = {
-    "none": (0, False),
-    "mirror_x": (2, True),
-    "mirror_y": (0, True),
-    "rotate_180": (2, False),
-}
-
-#: ``direction_deg`` -> ``direction_deg`` remap for each orientation
-#: (#1166): a mirrored/rotated block's ports face a different absolute
-#: direction even though the port's own name/role is unchanged (e.g. a
-#: ``mirror_x``'d block's drain, still named ``D``, now faces ``-x`` instead
-#: of ``+x``). Applied once, in :func:`_parse_blocks`, to every port's own
-#: ``direction_deg`` -- every downstream consumer (:func:`_DIRECTION_VECTORS`
-#: lookups, ring-side classification, stub-widen) then reads an
-#: already-correct direction without repeating this remap itself.
-_ORIENTATION_DIRECTION_MAP: dict[str, dict[int, int]] = {
-    "none": {0: 0, 90: 90, 180: 180, 270: 270},
-    "mirror_x": {0: 180, 90: 90, 180: 0, 270: 270},
-    "mirror_y": {0: 0, 90: 270, 180: 180, 270: 90},
-    "rotate_180": {0: 180, 90: 270, 180: 0, 270: 90},
-}
-
-
-def _apply_orientation_um(x: float, y: float, orientation: str) -> tuple[float, float]:
-    """Transform one local-frame point per a block's own ``orientation``
-    (#1166), applied about that block's own origin -- *before* ``offset_um``
-    translates it into the composed frame. See :data:`_ORIENTATIONS`'s
-    docstring for the exact per-value semantics.
-    """
-    if orientation == "mirror_x":
-        return -x, y
-    if orientation == "mirror_y":
-        return x, -y
-    if orientation == "rotate_180":
-        return -x, -y
-    return x, y
-
-
-#: Via-drop square side (um, issue #454) -- the same generic contact/via
-#: budget every `klt gen` generator's own unit devices already use
-#: (`gen.CONTACT_SIZE_UM`), so a via-drop's via is never a second, unvalidated
-#: size. `compose()` widens it per via layer to the deck's own minimum (#1501)
-#: and clamps it down to the layer's fixed size where the foundry rule is a
-#: maximum too (#2585, :func:`_via_fixed_size_um`).
-_VIA_DROP_SIZE_UM = CONTACT_SIZE_UM
-
-
-def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
-    """The fixed drawn side (um) of a via-drop cut on ``via_layer`` for the
-    resolved PDK ``variant`` (issue #2585, see
-    :func:`klayout_tools.gen_layer_params._cut_fixed_size_um`), or ``0.0``
-    when the layer has no upper size bound or the family cannot be resolved
-    at all -- an unresolvable family degrades to the unclamped via size,
-    exactly like :func:`_min_width_um_for_layer`'s own floor lookup."""
-    try:
-        family = _pdk_family(variant)
-    except GenError:
-        return 0.0
-    return _cut_fixed_size_um(family, via_layer)
-
-
-#: Landing-pad square side (um, issue #454) drawn on *both* sides of a
-#: via-drop (the backbone's own ``route_layer`` and the target pin's own
-#: layer), independent of the route's own ``width_um`` -- the same
-#: `CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM` contact-enclosure convention
-#: `gen.py`'s own unit-device layouts already use (e.g. `_bjt_unit_layout`'s
-#: `contact_region_um`), not a new unvalidated margin. Drawing an explicit
-#: landing pad -- rather than relying on the backbone's own trace width --
-#: guarantees the via's enclosure requirement is met even when a caller
-#: requests a `routing.width_um` narrower than a full contact-enclosure
-#: footprint (e.g. sky130's own `li1.width.1` minimum, 0.17um).
-_VIA_LANDING_SIZE_UM = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-
-
-class GenComposeError(Exception):
-    """Raised when a composition request cannot be fulfilled.
-
-    Covers an unresolvable PDK, a malformed request shape, a ``blocks[]``/
-    ``connectivity[]`` reference to a nonexistent ``id``/port, an
-    unsupported ``placement.strategy``, and a GDS read/write failure -- the
-    CLI turns this into a clean stderr message + exit code 1, never a
-    traceback (see ``docs/cli/gen-compose.md``'s exit code table).
-
-    ``code`` / ``details`` are an optional machine-readable classification
-    (``error.code`` and extra ``error`` fields in the JSON envelope); only the
-    ``pins[].request`` failures (#3971) set them today.
-    """
-
-    def __init__(
-        self,
-        message: str = "",
-        *,
-        code: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.details = details
+# The shared drawing defaults follow the generator's contact and enclosure rules.
+assert _VIA_DROP_SIZE_UM == CONTACT_SIZE_UM
+assert _VIA_LANDING_SIZE_UM == CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
 
 
 def load_generator_report_arg(
@@ -768,29 +684,6 @@ def _explicit_placement_clearance_warnings(
     return clearance_warnings, abutment_notes
 
 
-# Tolerance (um) for comparing a block's declared ``bbox_um`` against its own
-# real, stream-read ``kdb.Cell.dbbox()`` in
-# :func:`_declared_bbox_overlap_warnings` below -- large enough to absorb dbu
-# quantization noise between an analytically-computed declared bbox and the
-# same geometry's dbu-rounded drawn extent (dbu is typically 0.001um, so
-# quantization alone can differ by up to half a dbu step), far too small to
-# ever mask a real "declared bbox undershoots the block's own guard ring/seal
-# ring" discrepancy (#1679), which is always at least tens of nm.
-_BBOX_REALITY_TOLERANCE_UM = 1e-4
-
-
-def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
-    """Whether ``outer`` fully contains ``inner`` (within
-    :data:`_BBOX_REALITY_TOLERANCE_UM`)."""
-    tol = _BBOX_REALITY_TOLERANCE_UM
-    return (
-        inner["x0"] >= outer["x0"] - tol
-        and inner["y0"] >= outer["y0"] - tol
-        and inner["x1"] <= outer["x1"] + tol
-        and inner["y1"] <= outer["y1"] + tol
-    )
-
-
 def _block_real_placed_bbox_um(
     block_id: str, block: dict[str, Any], offset_um: dict[str, float]
 ) -> dict[str, float] | None:
@@ -799,11 +692,8 @@ def _block_real_placed_bbox_um(
     declared ``bbox_um`` already is -- or ``None`` when it cannot be read
     (bad ``gds_path``/``cell_name``, or an empty cell).
 
-    Never raises: this is an advisory cross-check (#1679), and a block whose
-    stream genuinely cannot be read fails identically -- loudly, as a
-    :class:`GenComposeError` -- later in :func:`compose` regardless (when its
-    geometry is actually copied into the composed output), so silently
-    skipping the advisory here for that block costs nothing.
+    An unreadable stream has no measurement. Compose reports the underlying
+    read error when copying the source geometry.
     """
     try:
         real_bbox_um = read_cell_bbox_um(
@@ -889,11 +779,27 @@ def _read_all_block_layers_geometry(
     return geometry
 
 
+def _measure_placed_bboxes(
+    order: list[str],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    measured = {}
+    for block_id in order:
+        box = _block_real_placed_bbox_um(
+            block_id, blocks[block_id], offsets_um[block_id]
+        )
+        if box is not None:
+            measured[block_id] = box
+    return measured
+
+
 def _declared_bbox_overlap_warnings(
     order: list[str],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
     placed_bboxes_um: dict[str, dict[str, float]],
+    real_placed_bbox_um: dict[str, dict[str, float]] | None = None,
 ) -> list[str]:
     """Real per-layer geometry overlap advisory for a block whose declared
     ``bbox_um`` understates its own real drawn extent (#1679).
@@ -928,19 +834,16 @@ def _declared_bbox_overlap_warnings(
 
     Never raises and never blocks composition, matching every other check in
     this module's "geometry is advisory" philosophy.
+
+    Compose shares its measured boxes with the optional strict check.
     """
     warnings: list[str] = []
-    real_placed_bbox: dict[str, dict[str, float]] = {}
-    for block_id in order:
-        real_bbox = _block_real_placed_bbox_um(
-            block_id, blocks[block_id], offsets_um[block_id]
-        )
-        if real_bbox is not None:
-            real_placed_bbox[block_id] = real_bbox
+    if real_placed_bbox_um is None:
+        real_placed_bbox_um = _measure_placed_bboxes(order, blocks, offsets_um)
 
     leaky_ids = [
         block_id
-        for block_id, real_bbox in real_placed_bbox.items()
+        for block_id, real_bbox in real_placed_bbox_um.items()
         if not _bbox_contains(placed_bboxes_um[block_id], real_bbox)
     ]
     if not leaky_ids:
@@ -957,7 +860,7 @@ def _declared_bbox_overlap_warnings(
 
     reported_pairs: set[frozenset[str]] = set()
     for leaky_id in leaky_ids:
-        leaky_real_bbox = real_placed_bbox[leaky_id]
+        leaky_real_bbox = real_placed_bbox_um[leaky_id]
         for other_id in order:
             if other_id == leaky_id:
                 continue
@@ -1070,29 +973,6 @@ def _orient_bbox_um(bbox_um: dict[str, float], orientation: str) -> dict[str, fl
         "x1": max(x0, x1),
         "y1": max(y0, y1),
     }
-
-
-def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
-    """One ``ports[]`` entry, transformed by a block's own ``orientation``
-    (#1166): its ``x_um``/``y_um`` (if both are usable numbers -- mirrors
-    :func:`_port_has_geometry`'s own tolerance for a port that reports none)
-    via :func:`_apply_orientation_um`, and its ``direction_deg`` (if present)
-    via :data:`_ORIENTATION_DIRECTION_MAP`. Every other field (``name``,
-    ``width_um``, ``layer``, ...) is copied unchanged -- orientation moves a
-    port's *position*, it never changes its *identity* or contact size.
-    """
-    oriented = dict(port)
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if is_finite_number(x_um) and is_finite_number(y_um):
-        oriented["x_um"], oriented["y_um"] = _apply_orientation_um(
-            float(x_um), float(y_um), orientation
-        )
-    direction_deg = port.get("direction_deg")
-    if is_int(direction_deg):
-        oriented["direction_deg"] = _ORIENTATION_DIRECTION_MAP[orientation].get(
-            direction_deg, direction_deg
-        )
-    return oriented
 
 
 def _block_cell_name_source(block: dict[str, Any]) -> str:
@@ -1318,6 +1198,7 @@ def _merge_label_ports(
     block_id: str,
     parsed_cell: dict[str, Any],
     pdk_variant: str | None,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
     its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
@@ -1337,7 +1218,12 @@ def _merge_label_ports(
             "declared in both ports[] and ports_from_labels -- ambiguous"
         )
     derived, reports, warnings = derive_label_ports(
-        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+        block_id,
+        parsed_cell["gds_path"],
+        parsed_cell["cell_name"],
+        spec,
+        pdk_variant,
+        pad_override_um,
     )
     return declared + derived, reports, warnings
 
@@ -1346,6 +1232,7 @@ def _parse_blocks(
     raw_blocks: Any,
     request_dir: str | None = None,
     pdk_variant: str | None = None,
+    pad_override_um: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1397,7 +1284,7 @@ def _parse_blocks(
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
             ports, derived_reports, derived_warnings = _merge_label_ports(
-                block_id, parsed_cell, pdk_variant
+                block_id, parsed_cell, pdk_variant, pad_override_um
             )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
@@ -2509,26 +2396,6 @@ def _check_pin_vs_connectivity(
     return True
 
 
-def _port_has_geometry(port: Any) -> bool:
-    """Whether ``port`` carries the ``{x_um, y_um, layer{layer, datatype}}``
-    geometry a ``pins[]`` label needs to be placed. A block report that omits
-    a port's position/layer cannot be labelled -- reported as a partial-success
-    note rather than crashing (#210)."""
-    if not isinstance(port, dict):
-        return False
-    # is_finite_number also refuses NaN/+-inf and an int too large for a float
-    # (10**400), which every caller would otherwise hit as an uncaught
-    # OverflowError/ValueError in its position arithmetic (#6539).
-    if not (is_finite_number(port.get("x_um")) and is_finite_number(port.get("y_um"))):
-        return False
-    layer = port.get("layer")
-    return (
-        isinstance(layer, dict)
-        and isinstance(layer.get("layer"), int)
-        and isinstance(layer.get("datatype"), int)
-    )
-
-
 def _plan_pin_label(
     entry: dict[str, Any],
     port: Any,
@@ -2927,34 +2794,6 @@ def _snap_port_to_grid(
     return new_port
 
 
-def _nearest_grid_point_within(
-    composed: float, grid: float, limit: float | None
-) -> float | None:
-    """The grid point nearest ``composed`` that lies within ``limit`` of it
-    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
-    steps = composed / grid
-    base = math.floor(steps + 0.5 + 1e-9)
-    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
-    for cand in candidates:
-        value = cand * grid
-        if limit is None or abs(value - composed) <= limit + 1e-9:
-            return value
-    return None
-
-
-def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
-    """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
-    numeric position (the same "nothing to check" case the rest of the
-    landing-connectivity path tolerates rather than fails). ``bool`` is
-    rejected explicitly because it is a subclass of ``int``."""
-    x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_finite_number(x_um):
-        return None
-    if not is_finite_number(y_um):
-        return None
-    return float(x_um), float(y_um)
-
-
 def _pin_landed_on_block(
     pin: dict[str, Any],
     blocks: dict[str, dict[str, Any]],
@@ -3136,8 +2975,36 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
+    routing = request.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise GenComposeError("request.routing must be a JSON object")
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    landing_pad_override_um = None
+    raw_minimal_ladder = routing.get("minimal_ladder")
+    if request.get("connectivity") and routing:
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
+        if raw_minimal_ladder is True and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
     blocks = _parse_blocks(
-        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+        request.get("blocks"),
+        request_dir or os.getcwd(),
+        pdk_info["variant"],
+        landing_pad_override_um,
     )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
@@ -3145,16 +3012,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
     promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
 
-    routing = request.get("routing") or {}
-    if not isinstance(routing, dict):
-        raise GenComposeError("request.routing must be a JSON object")
-
     options = request.get("options") or {}
     if not isinstance(options, dict):
         raise GenComposeError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
     boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
+    check_placement = options.get("check_placement", False)
+    if not isinstance(check_placement, bool):
+        raise GenComposeError("request.options.check_placement must be a boolean")
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -3211,21 +3077,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         warnings.extend(clearance_warnings)
         notes.extend(abutment_notes)
 
-    # #1679: every check above (and every placement strategy's own math)
-    # trusts a block's *declared* bbox_um -- accurate for a `klt gen` block,
-    # but a `generator_report` block's bbox_um is taken verbatim
-    # (_parse_blocks) and never cross-checked against its own stream. A
-    # block whose real drawn geometry (e.g. a guard/seal ring) extends past
-    # its declared bbox can silently overlap a neighbour placed just outside
-    # the *declared* box -- a `klt drc`-clean same-layer merge that only
-    # surfaces later via `klt extract`'s merged_net_labels diagnostic.
-    # Real-geometry-based, so (unlike the declared-bbox check above) it
-    # applies to every strategy -- "row"/"array" place from the same
-    # unreliable declared bbox_um and are no less exposed; "array" is a
-    # no-op here in practice (exactly one blocks[] entry, so no pairwise
-    # comparison is possible).
+    # The placement gate and the advisory share one measurement for each source.
+    if check_placement:
+        local_boxes = _measure_placed_bboxes(
+            order, blocks, {name: {"x": 0.0, "y": 0.0} for name in order}
+        )
+        real_placed_bboxes_um = check_composed_footprints(
+            order,
+            bboxes_um,
+            local_boxes,
+            offsets_um,
+            target_bbox_um,
+            spacing_um if strategy == "row" else None,
+        )
+    else:
+        real_placed_bboxes_um = _measure_placed_bboxes(order, blocks, offsets_um)
+
     warnings.extend(
-        _declared_bbox_overlap_warnings(order, blocks, offsets_um, placed_bboxes_um)
+        _declared_bbox_overlap_warnings(
+            order, blocks, offsets_um, placed_bboxes_um, real_placed_bboxes_um
+        )
     )
 
     # --- Routing (phase 2) --------------------------------------------------
@@ -3254,13 +3125,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
-    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
-    landing_pad_override_um = None
     # routing.minimal_ladder (issue #6058): False keeps every pad at today's
     # sizing; True sizes a ladder's intermediate hop pads at their own
     # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
     # sizes). The two fields select competing pad-sizing policies and are
-    # rejected together below.
+    # rejected together before label-derived landings are searched.
     minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
@@ -3309,31 +3178,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
-        landing_pad_override_um = _parse_landing_pad_override(
-            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
-        )
-        raw_minimal_ladder = routing.get("minimal_ladder")
         if raw_minimal_ladder is not None:
             if not isinstance(raw_minimal_ladder, bool):
                 raise GenComposeError(
                     "request.routing.minimal_ladder must be a boolean when given"
                 )
             minimal_ladder = raw_minimal_ladder
-        if minimal_ladder and landing_pad_override_um is not None:
-            # Issue #6058: the two fields are competing pad-sizing policies
-            # -- the override replaces the fixed baseline for *every* pad,
-            # the mode drops the baseline from *intermediate* pads only --
-            # so honouring both would silently pick one per hop. Name both
-            # fields and let the caller choose.
-            raise GenComposeError(
-                "request.routing.minimal_ladder and "
-                "request.routing.landing_pad_size_um select two different "
-                "pad-sizing policies and cannot be combined -- "
-                "minimal_ladder sizes a ladder's intermediate hop pads at "
-                "their own per-pair enclosure/area floors while keeping "
-                "the terminal pads, landing_pad_size_um replaces the fixed "
-                "baseline for every pad; set one or the other"
-            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
@@ -3810,6 +3660,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             *,
             candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
+            _net_pin_blocks: frozenset[str] = frozenset(
+                {block for block, _port in net_pin_set}
+            ),
+            _net_label: str = net_label,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
         ) -> RouteConflict | None:
@@ -3856,8 +3710,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pad.
 
             Intermediate and far pads are checked on their own physical layers.
-            An area overlap or a shared edge can connect distinct nets through
-            one pad even when their backbones lie on different metals.
+            Area, edge or corner contact can short a pad to another route or
+            a block hosting no pin of this net, even on a different backbone layer.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -3880,22 +3734,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             Automatic climbs and GF180 9K/11K top-metal landings also
             check intermediate and far pads for spacing.
 
-            A literal positive-area overlap is still always rejected first
-            (mirrors check 4's "positive area only, not a mere edge touch"
-            rule: a ``kdb.Region`` boolean AND between two backbones already
-            yields an empty region for a mere edge touch). For the primary
-            entry, when the two regions do *not* overlap but sit closer
-            together than the resolved deck's own same-layer ``"space"``
-            rule for ``layer`` (:func:`_min_spacing_um_for_layer`), one side
-            is grown by that threshold (``kdb.Region.sized`` -- the standard
-            "distance < d" Minkowski-sum test, symmetric regardless of which
-            side grows) before the same intersection test -- catching the
-            class of violation issue #1386 reported (`nets[].legs[].routed:
-            true` legs that still failed `klt drc`'s
-            `li1.space.1`/`met1.space.1`) that the overlap-only version of
-            this check could not see. A layer with no known ``"space"`` rule
-            keeps the overlap-only test (#6961: verdict is a ``RouteConflict``).
-            """
+            Reject intersections and conductive contacts before checking the
+            deck's spacing rule. A via-drop leg also needs room between its
+            landing pad and its own backbone on the primary route layer."""
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None
             if candidate_width_um is None:
@@ -3938,38 +3779,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     if message is not None:
                         return RouteConflict(message, other_net)  # #6961
 
-            # Own-block pad self-notch check (#1520): everything above
-            # compares this leg's drawn footprint against a *different*
-            # net's already-accepted geometry. Nothing yet checks a
-            # via-drop's landing pad or a stub-widen box -- both drawn
-            # independent of routing.width_um, at a fixed size sized from
-            # the PDK's own contact-enclosure convention -- against the
-            # *same* block's own other drawn shapes on the pad's own layer.
-            # A pad legitimately lands on (merges with) the wire at its own
-            # declared port; that touch is never a violation. But when that
-            # port was hand-declared on a pre-existing `blocks[].cell`
-            # stream's own internal wire (the only way to declare a port on
-            # a cell no `klt` verb generated -- see the module docstring's
-            # "blocks[].cell" note), the pad can still land close enough to
-            # a *different* part of that same wire (e.g. a perpendicular leg
-            # near a corner the port sits close to) to violate the resolved
-            # deck's own same-layer spacing rule -- a real `klt drc` finding
-            # even though both shapes are the same electrical node, since a
-            # rule-deck space check is net-agnostic.
-            # :func:`_pad_self_notch_violation_um` catches exactly this via
-            # ``kdb.Region.notch_check`` (a same-*polygon* self-space check),
-            # which the overlap/inflate comparisons above cannot see -- the
-            # pad and the wire it lands on merge into one polygon, so there
-            # is no *other* shape here to intersect against.
-            #
-            # The box collection lives in :func:`_landing_and_widen_pad_boxes`
-            # (issue #5803: shared with the pad-vs-pitch message path).
+            # A pad can merge with its port wire and leave a notch against
+            # another part of the same wire. Check that spacing first (#1520).
+            drawing_dbu = _drawing_dbu()
             pad_boxes = _landing_and_widen_pad_boxes(
                 via_drops,
                 stub_widen,
                 layer,
                 side_for_pair,
-                _drawing_dbu(),
+                drawing_dbu,
             )
 
             for pad_layer, block_id, box, drop in pad_boxes:
@@ -3978,7 +3796,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
                 pad_geometry = _own_block_layer_geometry(
-                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                    block_id, pad_layer, drawing_dbu if drop is not None else None
                 )
                 if pad_geometry is None:
                     continue
@@ -4000,6 +3818,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "sits close to; move the declared port further along "
                         "its own wire, away from the corner)"
                     )
+
+            contact_reason = _pad_other_block_contact_reason(
+                pad_boxes,
+                _net_label,
+                sorted(
+                    block_id for block_id in blocks if block_id not in _net_pin_blocks
+                ),
+                _own_block_layer_geometry,
+                drawing_dbu,
+            )
+            if contact_reason is not None:
+                return RouteConflict(contact_reason)
 
             # Own-block approach spacing check (#1904): everything above is
             # either a route-vs-route comparison or a *pad*-sized one. Nothing
@@ -4077,11 +3907,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return own_via_cut_clearance_reason(
+            cut_conflict = own_via_cut_clearance_reason(
                 via_drops,
                 pdk_info["variant"],
                 _min_spacing_um_for_layer,
                 _own_block_layer_geometry,
+            )
+            if cut_conflict is not None or not via_drops:
+                return cut_conflict
+            return leg_pad_notch_conflict(
+                layer_regions[layer], layer, own_spacing, _drawing_dbu()
             )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs

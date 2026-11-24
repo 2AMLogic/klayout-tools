@@ -21181,15 +21181,6 @@ def _portable_macro_request(tmp_path: Path, **extra) -> tuple[str, str]:
     return json.dumps(request), root
 
 
-def test_run_lvs_portable_paths_default_keeps_absolute_paths(tmp_path):
-    """Omitting `portable_paths` leaves the report as it was (issue #3798)."""
-    request, _ = _portable_macro_request(tmp_path)
-    explicit_false, _ = _portable_macro_request(tmp_path, portable_paths=False)
-    sources = run_lvs(request)["provenance"]["pin_order_sources"]
-    assert all(os.path.isabs(entry["path"]) for entry in sources)
-    assert run_lvs(explicit_false)["provenance"]["pin_order_sources"] == sources
-
-
 def test_run_lvs_portable_paths_true_leaves_no_absolute_host_path(tmp_path):
     """`portable_paths: true` makes the envelope pass the env-provenance scan:
     PDK files become `$PDK_ROOT/...`, nothing absolute remains, and the

@@ -13,6 +13,7 @@ import glob
 import os
 from typing import Any
 
+from .gen_base import GenError
 from .gen_cap_vpp import _cap_vpp_array_describe, _inspect_gds
 from .gen_spec import _GeneratorSpec
 
@@ -20,8 +21,6 @@ _NAME = "pdk_cell"
 
 
 def _gds_path(params: dict[str, Any], pdk_info: dict[str, Any]) -> str:
-    from .gen import GenError
-
     library = params["library"]
     libs_ref = pdk_info.get("assets", {}).get("libs_ref")
     if not libs_ref or not os.path.isdir(libs_ref):
@@ -59,8 +58,6 @@ def _cell_table(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, A
 
 
 def _pdk_cell_validate(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
     if not params["library"]:
         raise GenError(f"generator '{_NAME}': params.library is required")
     if not params["pdk_cell"]:
@@ -81,8 +78,6 @@ def _pdk_cell_layer_params(
 
 def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
     """Return the named cell's info, rejecting unknown names / overlapping pitch."""
-    from .gen import GenError
-
     table = _cell_table(params, pdk_info)
     entry = table.get(params["pdk_cell"])
     if entry is None:

@@ -412,6 +412,56 @@ def test_via_array_one_by_one_adds_no_port_array(tmp_path):
     assert "via_array" not in blocks["m"]["ports"]["A"]
 
 
+def _routed_access_request(gds_a, gds_b, pdk_root, array, output):
+    access = {**ACCESS, "via_array": array}
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "m",
+                "cell": {
+                    "gds_path": gds_a,
+                    "cell_name": "macro",
+                    "ports_from_labels": _spec(["A"], access),
+                },
+            },
+            {
+                "id": "n",
+                "cell": {
+                    "gds_path": gds_b,
+                    "cell_name": "macro",
+                    "bbox_um": {"x0": 0.0, "y0": -0.5, "x1": 10.0, "y1": 1.0},
+                    "ports": [
+                        {
+                            "name": "C",
+                            "x_um": 0.3,
+                            "y_um": 0.3,
+                            "layer": {"layer": 68, "datatype": 20},
+                            "direction_deg": 180,
+                        }
+                    ],
+                },
+            },
+        ],
+        "placement": {
+            "strategy": "row",
+            "order": ["m", "n"],
+            "spacing_um": 3.0,
+        },
+        "connectivity": [
+            {
+                "net": "N",
+                "pins": [
+                    {"block": "m", "port": "A"},
+                    {"block": "n", "port": "C"},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal3", "width_um": 0.28},
+        "options": {"output": str(output)},
+    }
+
+
 def test_via_array_cuts_are_drawn_on_the_landing(tmp_path, pdk_root):
     a_dir = tmp_path / "a"
     b_dir = tmp_path / "b"
@@ -425,55 +475,7 @@ def test_via_array_cuts_are_drawn_on_the_landing(tmp_path, pdk_root):
     )
 
     def run(array, output):
-        access = {**ACCESS, "via_array": array}
-        return compose(
-            {
-                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-                "blocks": [
-                    {
-                        "id": "m",
-                        "cell": {
-                            "gds_path": gds_a,
-                            "cell_name": "macro",
-                            "ports_from_labels": _spec(["A"], access),
-                        },
-                    },
-                    {
-                        "id": "n",
-                        "cell": {
-                            "gds_path": gds_b,
-                            "cell_name": "macro",
-                            "bbox_um": {"x0": 0.0, "y0": -0.5, "x1": 10.0, "y1": 1.0},
-                            "ports": [
-                                {
-                                    "name": "C",
-                                    "x_um": 0.3,
-                                    "y_um": 0.3,
-                                    "layer": {"layer": 68, "datatype": 20},
-                                    "direction_deg": 180,
-                                }
-                            ],
-                        },
-                    },
-                ],
-                "placement": {
-                    "strategy": "row",
-                    "order": ["m", "n"],
-                    "spacing_um": 3.0,
-                },
-                "connectivity": [
-                    {
-                        "net": "N",
-                        "pins": [
-                            {"block": "m", "port": "A"},
-                            {"block": "n", "port": "C"},
-                        ],
-                    }
-                ],
-                "routing": {"layer_role": "metal3", "width_um": 0.28},
-                "options": {"output": str(output)},
-            }
-        )
+        return compose(_routed_access_request(gds_a, gds_b, pdk_root, array, output))
 
     def cuts(output):
         layout = kdb.Layout()
