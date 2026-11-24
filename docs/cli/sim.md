@@ -2503,6 +2503,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `analysis.op_check` | 0.9.2 |
 | `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
+| `analysis_steps[].measurements[].on_unreached` | unreleased |
 | `measurements[].search` | unreleased |
 | `measurements[].limits.exclusive_min / exclusive_max` | unreleased |
 | `options.transient_noise_seed` | unreleased |
@@ -5241,6 +5242,14 @@ data instead:
   measurement results graded `not_reached`, kept apart from `errored` (which
   counts corners). The key is **absent** unless some measurement declared
   `on_unreached`.
+
+For a measurement inside an analysis step, batch and remote preflight check
+the worker capability `step_on_unreached`. A published release through 0.9.2
+predates it. For a 0.9.3 development image, the commit count alone cannot
+establish support. The worker replays one completed step through its installed
+grader, with a positive control and a missed target, before starting the solver.
+Batch collection reports the observed capability. When the observation is
+unavailable, it reports `unknown`. Use an image that includes the step policy.
 
 The classification is deliberately narrow: it applies only when ngspice
 logged the reason `out of interval` together with `failed!` for that card

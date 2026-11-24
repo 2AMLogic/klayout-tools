@@ -105,6 +105,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     _batch_common,
     _provenance,
+    _warn,
     remote_transport,
     sim_batch_image,
     sim_batch_observer,
@@ -844,7 +845,7 @@ def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
             "anyway; see docs/cli/sim.md)",
             code=BATCH_RUNNER_MISMATCH_CODE,
         )
-    print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {message}; submitting anyway")
 
 
 def _feature_diagnostic(
@@ -909,7 +910,7 @@ def _enforce_published_runner_features(
             code=BATCH_RUNNER_FEATURE_CODE,
         )
     if assessment["check"] != "enforce":
-        print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
+        _warn.warn(f"klt sim: warning: {message}; submitting anyway")
         return _feature_diagnostic(
             missing, versions, assessment["client_klt_version"], "manifest"
         )
@@ -1057,7 +1058,7 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             'request.batch.job_ceiling_check to "warn" to submit anyway)',
             code=BATCH_JOB_CEILING_CODE,
         )
-    print(f"klt sim: warning: {warning}", file=sys.stderr)
+    _warn.warn(f"klt sim: warning: {warning}")
 
 
 # --------------------------------------------------------------------------- #
@@ -2067,13 +2068,10 @@ def _read_worker_environment(
 
 
 def _runner_feature_report(
-    request: dict[str, Any] | None, runner: str | None
+    request: dict[str, Any] | None, runner: str | None, step_probe: object = None
 ) -> dict[str, Any] | None:
-    """The ``runner_request_features`` block, or ``None`` if nothing is required.
-
-    ``decks`` (issue #4109) is judged by :func:`_runner_supports_decks`; the
-    rest are plain min-version entries in :data:`_RUNNER_REQUEST_FEATURES`.
-    ``missing`` is ``None`` (status ``unknown``) when the runner is unknown.
+    """Summarize requested capabilities from release floors and worker observations.
+    Missing evidence yields unknown. Decks use their own version check.
     """
     features = _request_features(request) if request else []
     uses_decks = bool(request and request.get("decks"))
@@ -2082,7 +2080,7 @@ def _runner_feature_report(
     if not features:
         return None
     registry = [name for name in features if name != "decks"]
-    missing = _missing_runner_features(registry, runner) if registry else []
+    missing = _missing_runner_features(registry, runner, step_probe) if registry else []
     if uses_decks:
         decks_ok = _runner_supports_decks(runner) if runner else None
         if decks_ok is None:
@@ -2123,6 +2121,7 @@ def _read_runner_identity(
     """
     client = _provenance._klt_version()
     runner: str | None = None
+    step_probe = None
     if local_dir is not None:
         try:
             with open(
@@ -2133,6 +2132,7 @@ def _read_runner_identity(
             value = document.get("runner_klt_version")
             if isinstance(value, str) and value.strip():
                 runner = value.strip()
+                step_probe = document.get("step_on_unreached")
         except (OSError, ValueError, AttributeError):
             runner = None
     runner_release = _runner_gate_release(runner) if runner is not None else None
@@ -2157,7 +2157,7 @@ def _read_runner_identity(
         "client_klt_version": client,
         "runner_compatibility": status,
     }
-    report = _runner_feature_report(request, runner)
+    report = _runner_feature_report(request, runner, step_probe)
     if report is not None:
         fields["runner_request_features"] = report
         missing = report["missing"]
@@ -2631,10 +2631,7 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             handle.write("\n")
         os.replace(tmp_path, path)
     except OSError as exc:
-        print(
-            f"klt sim: warning: could not write batch receipt {path}: {exc}",
-            file=sys.stderr,
-        )
+        _warn.warn(f"klt sim: warning: could not write batch receipt {path}: {exc}")
         try:
             os.unlink(tmp_path)
         except OSError:
