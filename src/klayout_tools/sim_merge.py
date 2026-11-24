@@ -215,6 +215,20 @@ def _report_corner_ids(report: dict[str, Any], path: str) -> list[str]:
             f"{path}: a Monte Carlo report cannot be merged -- sample seeds and "
             "per-sample statistics depend on the whole sample sequence"
         )
+    derived = [
+        m["name"]
+        for m in report.get("measurements") or []
+        if isinstance(m, dict) and isinstance(m.get("derive"), dict)
+    ]
+    if derived:
+        # Issue #7184: the merge re-rolls per-corner measurements only; a
+        # cross-corner `derive` entry would roll up over no corner and read
+        # as a pass. Re-deriving it across shards is #7225's work.
+        raise MergeError(
+            f"{path}: a report with a cross-corner derive measurement {derived} "
+            "cannot be merged -- a reduced group needs every corner of its grid "
+            "in one request"
+        )
     return [c["corner_id"] for c in corners]
 
 

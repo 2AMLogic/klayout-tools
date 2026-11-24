@@ -353,14 +353,16 @@ def multicycle_session_fields(
     script_tag: str,
     has_def: bool,
 ) -> dict[str, Any]:
-    """The multicycle corner fields of one finished with-run (issue #6921):
-    ``{"multicycle_paths": [...]}``, the per-entry with/without measurement
-    (the "without" baseline keeps every other entry applied) -- ``{}`` for
-    a request without entries."""
-    if multicycle is None:
+    """Measurements and the total engine sessions used by this corner.
+
+    The with-run plus one comparison per entry contribute to the count.
+    A corner without entries adds no fields to the existing response.
+    """
+    if not multicycle:
         return {}
     return {
         "multicycle_paths": multicycle_corner_field(
             stdout, multicycle, lines, output_dir, script_tag, has_def
-        )
+        ),
+        "multicycle_engine_sessions": 1 + len(multicycle),
     }

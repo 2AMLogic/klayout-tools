@@ -35,6 +35,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers import asap7_drc_fixtures as fx
+from helpers.asap7_shipped_cells import expected_deviations, place_between_neighbours
 from klayout_tools.cli import main
 from klayout_tools.decks.asap7_rules import (
     DECK_PATH,
@@ -254,6 +255,56 @@ def test_shipped_cell_deviations_are_exact_and_documented():
             f"| {d.rationale} | {d.handling} |"
         )
         assert row in section, row
+
+
+def _fold_source_cell(source_cell: str) -> str:
+    """The fold drc.md states for matching a ``source_cell`` against the
+    retained-deviation list: drop a trailing ``$VAR<n>``, then the
+    ``_ASAP7_75t_<VT>`` suffix."""
+    base = re.sub(r"\$VAR\d+$", "", source_cell)
+    return re.sub(r"_ASAP7_75t_(?:R|L|SL)$", "", base)
+
+
+def test_docs_state_the_var_variant_fold_rule():
+    """A placed block can carry ``<cell>_ASAP7_75t_<VT>$VAR<n>`` layout variants
+    of a retained-deviation cell (#7716). drc.md must say, in both places a
+    reader recognises the deviations, that a variant folds into its base name
+    before matching, and must state what the shipped-cell gate covers."""
+    blocks = _docs_asap7_section().split("\n\n")
+
+    def block(prefix: str) -> str:
+        found = [b for b in blocks if b.startswith(prefix)]
+        assert len(found) == 1, (prefix, len(found))
+        return found[0]
+
+    for prefix in (
+        "**The pinned library is not fully clean against this deck.**",
+        "**Retained deviations.**",
+    ):
+        text = " ".join(block(prefix).split())
+        assert "$VAR<n>" in text, prefix
+        assert "fold" in text, prefix
+    # The rule itself, with the source_cell it applies to and a worked example.
+    first = " ".join(
+        block("**The pinned library is not fully clean against this deck.**").split()
+    )
+    assert "`source_cell`" in first
+    assert "BUFx4_ASAP7_75t_R$VAR1" in first
+    # The gate-coverage statement is a measurement, not an assumption.
+    coverage = " ".join(block("**Gate coverage, measured.**").split())
+    assert "212 cells" in coverage and "never places a `$VAR` variant" in coverage
+    # The documented fold, applied literally: a multi-digit variant of a listed
+    # cell is classified, a variant of an unlisted cell stays unclassified.
+    for name, expected in (
+        ("BUFx4_ASAP7_75t_R$VAR1", "BUFx4"),
+        ("BUFx4_ASAP7_75t_SL$VAR12", "BUFx4"),
+        ("ICGx4DC_ASAP7_75t_L$VAR3", "ICGx4DC"),
+        ("BUFx4_ASAP7_75t_R", "BUFx4"),
+    ):
+        folded = _fold_source_cell(name)
+        assert folded == expected and folded in SHIPPED_CELL_DEVIATIONS, name
+    assert _fold_source_cell("INVx1_ASAP7_75t_R$VAR1") == "INVx1"
+    assert "INVx1" not in SHIPPED_CELL_DEVIATIONS
 
 
 def test_density_disposition_is_documented_without_thresholds():
@@ -704,57 +755,6 @@ def _shipped_gds(lib: str, suffix: str) -> Path:
     return gds
 
 
-def _place_between_neighbours(
-    gds: Path, neighbour: str, out: Path, exclude: frozenset[str] = frozenset()
-) -> list[str]:
-    """Place every shipped cell not named in ``exclude`` abutted between two
-    copies of ``neighbour`` (row cells such as FILLERxp5 or
-    TAPCELL_WITH_FILLER carry 54 nm select/well slivers that are only legal
-    abutted), one sandwich per 8 um slot. Returns the placed cell names in
-    slot order. The source GDS is only read; ``out`` is the new layout."""
-    src = kdb.Layout()
-    src.read(str(gds))
-    out_layout = kdb.Layout()
-    out_layout.dbu = src.dbu
-    top = out_layout.create_cell("TOP")
-    names = sorted(c.name for c in src.top_cells() if c.name not in exclude)
-    copies: dict[str, kdb.Cell] = {}
-    boundary = src.layer(100, 0)
-
-    def cell(name: str) -> kdb.Cell:
-        if name not in copies:
-            copies[name] = out_layout.create_cell(name)
-            copies[name].copy_tree(src.cell(name))
-        return copies[name]
-
-    def width(name: str) -> int:
-        return kdb.Region(src.cell(name).begin_shapes_rec(boundary)).bbox().width()
-
-    pitch = int(round(8.0 / src.dbu))
-    for i, name in enumerate(names):
-        x, y = (i % 12) * pitch, (i // 12) * pitch
-        for placed, dx in (
-            (neighbour, 0),
-            (name, width(neighbour)),
-            (neighbour, width(neighbour) + width(name)),
-        ):
-            top.insert(
-                kdb.CellInstArray(
-                    cell(placed).cell_index(), kdb.Trans(kdb.Point(x + dx, y))
-                )
-            )
-    out_layout.write(str(out))
-    return names
-
-
-def _expected_deviations(suffix: str) -> dict[str, set[str]]:
-    expected: dict[str, set[str]] = defaultdict(set)
-    for d in SHIPPED_CELL_DEVIATION_RECORDS:
-        if suffix in d.libraries:
-            expected[d.cell].add(d.rule)
-    return dict(expected)
-
-
 @_needs_asap7
 @_needs_klayout
 @pytest.mark.parametrize(("lib", "suffix"), _LIBRARIES)
@@ -763,7 +763,7 @@ def test_shipped_cells_clean_apart_from_documented_deviations(tmp_path, lib, suf
     implemented rule category reported."""
     gds = _shipped_gds(lib, suffix)
     out = tmp_path / f"cells_{suffix}.gds"
-    names = _place_between_neighbours(gds, f"INVx1_ASAP7_75t_{suffix}", out)
+    names = place_between_neighbours(gds, f"INVx1_ASAP7_75t_{suffix}", out)
     report = run_drc_klayout_engine(str(out), str(DECK_PATH))
     pitch_dbu = 8.0 / report["dbu_um"]
     found: dict[str, set[str]] = defaultdict(set)
@@ -772,7 +772,7 @@ def test_shipped_cells_clean_apart_from_documented_deviations(tmp_path, lib, suf
             v["bbox"]["left"] // pitch_dbu
         )
         found[names[slot].removesuffix(f"_ASAP7_75t_{suffix}")].add(v["rule"])
-    assert dict(found) == _expected_deviations(suffix)
+    assert dict(found) == expected_deviations(suffix)
     assert set(report["coverage"]["rule_categories"]) == set(RULE_IDS)
 
 
@@ -790,12 +790,12 @@ def test_shipped_cells_without_documented_deviations_run_clean_via_cli(
     src.read(str(gds))
     all_cells = {c.name for c in src.top_cells()}
     excluded = frozenset(
-        f"{cell}_ASAP7_75t_{suffix}" for cell in _expected_deviations(suffix)
+        f"{cell}_ASAP7_75t_{suffix}" for cell in expected_deviations(suffix)
     )
     # Every exclusion names a cell the library ships; nothing else is left out.
     assert excluded <= all_cells
     out = tmp_path / f"cells_{suffix}_clean.gds"
-    placed = _place_between_neighbours(
+    placed = place_between_neighbours(
         gds, f"INVx1_ASAP7_75t_{suffix}", out, exclude=excluded
     )
     assert set(placed) == all_cells - excluded
@@ -869,7 +869,7 @@ def test_opt_in_grid_rules_are_declared_apart_from_the_default_ids():
     for var in OPT_IN_DECK_VARS:
         assert f"${var} = nil unless defined? ${var}" in text
     # The default contract is untouched: nothing opt-in leaked into RULES.
-    assert len(RULE_IDS) == 268
+    assert len(RULE_IDS) == 272
 
 
 def test_docs_list_opt_in_grid_rules_and_vars():

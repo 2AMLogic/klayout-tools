@@ -45,14 +45,12 @@ whose message starts with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
-from .sim_raw import parse_ascii_rawfile
 
 #: Reason tokens a failed ``eye`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -373,31 +371,22 @@ def extract_corner_eyes(
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EyeOutcome:
     body = spec["eye"]
     name = spec["name"]
-    if not os.path.isfile(raw_path):
-        return EyeOutcome(
-            code="eye_vector_missing",
-            error=(
-                f"measurement '{name}': its signal ({body['signal']!r}) did "
-                "not resolve against this transient's saved vectors (no "
-                "rawfile was written) -- check the node/branch name"
-            ),
-        )
-    try:
-        waveform = parse_ascii_rawfile(raw_path)
-    except (SimError, ValueError) as exc:
-        return EyeOutcome(
-            code="eye_vector_missing",
-            error=f"measurement '{name}': could not read its eye rawfile: {exc}",
-        )
-    points = waveform["points"]
-    if len(waveform["variables"]) < 2 or not points:
-        return EyeOutcome(
-            code="eye_vector_missing",
-            error=f"measurement '{name}': its signal yielded no samples",
-        )
+    columns, error = sim_measurement_kind.read_real_columns(
+        raw_path,
+        name=name,
+        columns=2,
+        missing_error=(
+            f"measurement '{name}': its signal ({body['signal']!r}) did "
+            "not resolve against this transient's saved vectors (no "
+            "rawfile was written) -- check the node/branch name"
+        ),
+        empty_error=(f"measurement '{name}': its signal yielded no samples"),
+        rawfile_label="eye rawfile",
+    )
+    if columns is None:
+        return EyeOutcome(code="eye_vector_missing", error=error)
     outcome = compute_eye(
-        [point[0] for point in points],
-        [point[1] for point in points],
+        *columns,
         ui=float(_seconds(name, body, "ui") or 0.0),
         uis=body["uis"],
         start=_seconds(name, body, "from") or 0.0,

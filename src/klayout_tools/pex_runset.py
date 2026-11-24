@@ -123,14 +123,18 @@ def refuse_unsupported(
     *,
     device_only_leg: bool,
     tie_nets: Sequence[tuple[str, str]] | None,
+    resistance_network: bool = False,
 ) -> None:
     """Refuse, by name, the ``klt pex`` options only a parasitic-annotated
     extraction can serve and ``run_extract``'s own refusal table never sees --
     they are not ``run_extract`` parameters: ``--device-only-leg`` (the
     runset leg *is* already the parasitic-free one) and ``--tie-net`` (it ties
     nets the curated deck reports as unbiased PMOS bodies, which this engine
-    never computes). Silence would be worse than refusal: a caller who
-    believes either is in force would read the report as if it were.
+    never computes), plus ``--resistance-network`` (issue #6899): both runset
+    shapes re-emit lumped per-net networks, so a reduced terminal network
+    the curated extraction wrote would be silently dropped. Silence would be
+    worse than refusal: a caller who believes any of these is in force
+    would read the report as if it were.
     """
     if runset is None:
         return
@@ -139,6 +143,7 @@ def refuse_unsupported(
         for flag, given in (
             ("--device-only-leg", device_only_leg),
             ("--tie-net", tie_nets),
+            ("--resistance-network", resistance_network),
         )
         if given
     ]
@@ -244,6 +249,7 @@ def run_extract_leg(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_network: bool = False,
     resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
@@ -338,6 +344,9 @@ def run_extract_leg(
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
         resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=resistance_graph,
+        # Issue #6899: the reduced-network emission (the runset shapes are
+        # refused by name in `refuse_unsupported` before reaching here).
+        emit_resistance_network=resistance_network,
         parasitic_variants=parasitic_variants,
         substrate_tie_ohms=substrate_tie_ohms,
         mom_rlc_net=mom_rlc_net,
