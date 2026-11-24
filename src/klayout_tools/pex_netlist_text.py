@@ -16,7 +16,7 @@ import os
 import re
 
 from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
-from ._spice_tokens import split_spice_tokens
+from ._spice_tokens import spice_nodes, split_spice_tokens
 from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import DEVICE_MODEL_CARD_PREFIXES
 
@@ -52,10 +52,13 @@ def _logical_cards(text: str) -> list[str]:
     )
 
 
-def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
+def _subckt_interfaces(
+    netlist_text: str, *, file_scope_only: bool = False
+) -> dict[str, tuple[str, list[str]]]:
     """``{lowercased subckt name: (name as written, [pin names])}`` for every
     ``.subckt`` header in ``netlist_text``, in file order.
 
+    With ``file_scope_only``, nested definitions are private to their parent.
     Pins stop at the first ``name=value`` token (or a ``params:`` keyword) --
     a `.subckt` header's trailing default-parameter assignments are not part
     of its terminal list. Lowercased keys because ngspice itself is
@@ -64,18 +67,25 @@ def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
     often does not.
     """
     interfaces: dict[str, tuple[str, list[str]]] = {}
+    depth = 0
     for line in _logical_lines(netlist_text):
+        if _ENDS_RE.match(line):
+            depth = max(0, depth - 1)
+            continue
         match = _SUBCKT_RE.match(line)
         if not match:
             continue
-        tokens = match.group("body").split()
+        depth += 1
+        if file_scope_only and depth > 1:
+            continue
+        tokens = split_spice_tokens(match.group("body"))
         name = tokens[0]
         pins: list[str] = []
         for token in tokens[1:]:
             if "=" in token or token.lower() in ("params:", "param:"):
                 break
             pins.append(token)
-        interfaces.setdefault(name.lower(), (name, pins))
+        interfaces.setdefault(name.lower(), (name, spice_nodes(pins)))
     return interfaces
 
 

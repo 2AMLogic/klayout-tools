@@ -3182,6 +3182,19 @@ output file untouched. If the running version contains `+unknown`, the check
 passes with `"unverifiable": true`. A pinned value containing `+unknown` is
 compared literally when the running build is known.
 
+To advance a literal pin deliberately, run
+`klt signoff --attest 9 --inventory INV --update-tool-pin -o ENVELOPE`.
+A passing re-attestation changes only the JSON string at `pins.tools.klt`
+and records `{"tool":"klt","from":"<old>","to":"<new>"}` in
+`provenance.tool_pin_bump`. A failed check leaves the inventory and any
+existing envelope intact. An already current pin follows ordinary attestation
+and generates no bump record. A subsequent `--check` validates the updated
+inventory and envelope. The historical bump record is excluded from drift.
+
+The flag requires an identifiable running build and one literal klt pin.
+For a reference-form pin, edit its named owner file. Combining the flag with
+another item, `--check`, or `--repin` is a usage error (exit 2).
+
 When upgrading an inventory that already pins klt, update the pin to the
 build you will use and regenerate its committed envelope to include the new
 check. The other tool versions and the PDK name and revision are checked for
@@ -4332,6 +4345,12 @@ Two mechanisms close that gap, both driven by the same content hash:
    `path` and `reviewed_by` (`signoff_runset.PINNED_RUNSETS`), so a block can
    check its runset is pinned before running `klt lvs --engine
    klayout-runset`.
+
+   The additive `attestable_items` object maps each item supported by
+   `--attest` to its primary input flag and emitted envelope kind. For example,
+   `"2": {"input_flag": "--input", "envelope_kind": "generic"}` describes the
+   layout stream producer. Items 1, 8, 9 and 10 take `--inventory`. Read
+   `klt signoff --describe-grader --format json` to discover the current set.
 
    A further additive field (issue #2865), `"not_applicable_items": {"6":
    ["digital"]}`, maps each item that accepts a recorded `not_applicable`
