@@ -1,0 +1,116 @@
+{
+  "abc_constr": {
+    "driving_cell": "sky130_fd_sc_hd__buf_1",
+    "load_ff": 5.0,
+    "source": "builtin"
+  },
+  "area_um2": 2951.5808,
+  "arithmetic": null,
+  "baseline": null,
+  "blackbox_modules": [],
+  "cell_exclusions": {
+    "effective": [
+      "sky130_fd_sc_hd__lpflow_*",
+      "sky130_fd_sc_hd__probe*"
+    ],
+    "engine_supports_dont_use": true,
+    "library_defaults": [
+      "sky130_fd_sc_hd__lpflow_*",
+      "sky130_fd_sc_hd__probe*"
+    ],
+    "mode": "additive",
+    "requested": [],
+    "validated": null
+  },
+  "cells_without_area": null,
+  "clock_targets": {
+    "clocks": [],
+    "delay_target_basis": "none",
+    "delay_target_ps": null,
+    "per_clock_enforced": false
+  },
+  "defines": {},
+  "engine": "yosys",
+  "engine_version": "0.67+post",
+  "equivalence": null,
+  "hdl_toplevel": "gcd",
+  "instance_count": 335,
+  "instance_counts_by_type": {
+    "sky130_fd_sc_hd__a211o_1": 1,
+    "sky130_fd_sc_hd__dfrtp_1": 50,
+    "sky130_fd_sc_hd__xor2_1": 6
+  },
+  "leakage_by_type_nw": null,
+  "leakage_power_nw": null,
+  "macro_instance_count": 0,
+  "macro_instance_counts_by_type": {},
+  "macros": [],
+  "memory_mapping": {
+    "modules": [],
+    "reason": null,
+    "script_path": {
+      "path": ".klt/synthesize/golden/gcd_memory_evidence.ys",
+      "scope": "repo"
+    },
+    "status": "none_detected"
+  },
+  "netlist_path": {
+    "path": ".klt/synthesize/golden/gcd_synth.v",
+    "scope": "repo"
+  },
+  "netlist_sha256": "2db377d5d69dbc45a5635e7d29ad51e0dc62345a21a46f0f31f7a07a1fa923db",
+  "netlist_sha256_banner_normalised": "2db377d5d69dbc45a5635e7d29ad51e0dc62345a21a46f0f31f7a07a1fa923db",
+  "parameters": {},
+  "provenance": {
+    "defines": {},
+    "parameters": {}
+  },
+  "restructuring": null,
+  "run_id": "golden",
+  "run_script_path": {
+    "path": ".klt/synthesize/golden/synth_gcd.run.ys",
+    "scope": "repo"
+  },
+  "schema_version": 2,
+  "script_path": {
+    "path": ".klt/synthesize/golden/synth_gcd.ys",
+    "scope": "repo"
+  },
+  "sequential_area_um2": 1251.2,
+  "sta": null,
+  "sta_unavailable_reason": "fixture",
+  "status": "ok",
+  "structural": {
+    "comb_loops": 0,
+    "expected_latches": 0,
+    "has_critical": false,
+    "latches": 0,
+    "multi_driven": 0,
+    "unexpected_latches": 0
+  },
+  "timing": {
+    "critical_path_ps": 2485.93,
+    "delay_target_ps": null,
+    "regions": [
+      {
+        "critical_path_ps": 2485.93,
+        "module": null
+      }
+    ],
+    "source": "abc_stime",
+    "wire_load": null
+  },
+  "warnings": {
+    "by_category": {
+      "other": 1
+    },
+    "representatives": [
+      {
+        "category": "other",
+        "count": 1,
+        "text": "checkpoint warning"
+      }
+    ],
+    "total": 1
+  }
+}
