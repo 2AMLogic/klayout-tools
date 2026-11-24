@@ -14,6 +14,7 @@ from typing import Any
 
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
+from ...signoff_base import ATTESTATION_INPUT_FLAGS
 from ...signoff_require_build import add_require_grading_ruleset_argument
 from .. import signoff_cmd
 from .._doc_paths import RawDescriptionDocHelpFormatter
@@ -224,7 +225,7 @@ def add_signoff_parser(
         "--attest",
         metavar="ITEM",
         type=int,
-        choices=[1, 2, 8, 9, 10],
+        choices=sorted(ATTESTATION_INPUT_FLAGS),
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
             "(Design sources), 8 (Characterization report), 9 (Testbenches "
