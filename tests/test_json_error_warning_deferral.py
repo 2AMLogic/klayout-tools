@@ -25,6 +25,7 @@ from klayout_tools import (
     sim_batch,
     sim_batch_features,
     sim_batch_warn,
+    sim_transient_noise,
 )
 from klayout_tools import sim_environment_report as sim_env_report
 from klayout_tools._devices import _warn_device_body_missed_role
@@ -52,9 +53,13 @@ def _fire_sim_worker_cap_notice(tmp_path, monkeypatch) -> None:
 
 def _fire_sim_unseeded_noise(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        sim, "_unseeded_noise_report", lambda *a, **k: {"unseeded_sources": []}
+        sim_transient_noise,
+        "_unseeded_noise_report",
+        lambda *a, **k: {"unseeded_sources": []},
     )
-    sim._with_unseeded_noise({}, "netlist.cir", request={}, repo_root=None)
+    sim_transient_noise.with_unseeded_noise(
+        {}, "netlist.cir", request={}, repo_root=None
+    )
 
 
 def _fire_sim_batch_receipt(tmp_path, monkeypatch) -> None:
@@ -151,7 +156,7 @@ EXPECTED = {
         f"{sim.MAX_WORKERS_ENV}=2 cap; clamping the local-parallel worker "
         "pool to 2."
     ),
-    "sim_unseeded_noise": f"warning: {sim._UNSEEDED_NOISE_NOTE}",
+    "sim_unseeded_noise": f"warning: {sim_transient_noise._UNSEEDED_NOISE_NOTE}",
     "sim_batch_receipt": "klt sim: warning: could not write batch receipt ",
     "sim_serial_bound": (
         "klt sim: warning: request.batch.max_units_per_job 4 leaves jobs of 10"
