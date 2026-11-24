@@ -49,6 +49,7 @@ def plan_batch_job(
         job_ceiling = _assess_job_ceiling(
             unit_count=unit_count, per_unit_timeout_s=timeout_s, config=config
         )
+        job_ceiling["image_profile"] = config.image_profile or "sim"
         return _apply_job_split(job_ceiling, config)
 
 

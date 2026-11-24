@@ -806,7 +806,7 @@ def _run_batch(
             pdk=(request.get("models") or {}).get("pdk"),
             version_check=config.runner_version_check,
         )
-        environment: dict[str, Any] = {"provider": "aws-batch-fleet", "job_id": job_id}
+        environment = sim_batch._batch_job_environment(config, job_id)
         try:
             sim_batch.submit_job(config, job_id, spec)
             sim_batch.launch_job(config, job_id)

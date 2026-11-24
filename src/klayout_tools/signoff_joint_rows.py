@@ -326,28 +326,38 @@ def static_joint_members(
     envelopes: Mapping[str, Mapping[str, Any] | None],
 ) -> dict[str, Any]:
     """The spec-row table's static projection of one joint row:
-    ``{"covered": bool, "members": [...]}`` -- the same per-member shortfall
-    :func:`evaluate_joint_rows` grades, computed without re-running any
-    command, so a command-backed or uncited member (and a Monte Carlo one)
-    reads ``missing_points: null`` / ``missing_probe: null`` rather than a
-    guessed verdict. ``covered`` is this projection's own reduce of the
-    readable evidence; the item axis remains the verdict of record."""
+    ``{"covered": bool | None, "members": [...]}`` -- the same per-member
+    shortfall :func:`evaluate_joint_rows` grades, computed without re-running
+    any command, so a command-backed or uncited member (and a Monte Carlo
+    one) reads ``missing_points: null`` / ``missing_probe: null`` rather than
+    a guessed verdict.
+
+    ``covered`` is tri-state (issue #7701), the same convention as the
+    per-member fields: ``False`` when any *readable* member falls short
+    (definitely not covered, whatever an unreadable member would show);
+    ``None`` when none does but at least one member is unevaluable from the
+    report alone (unknown -- the item axis may still prove it, e.g. a
+    command-backed member that ran `klt sim`); ``True`` only when every
+    member is readable and clean. The item axis remains the verdict of
+    record."""
     entries: list[dict[str, Any]] = []
-    covered = True
+    shortfall = False
+    unevaluable = False
     for name in joint["members"]:
         envelope = envelopes.get(name)
         if envelope is None or has_mc_corners(envelope):
             entries.append(
                 {"member": name, "missing_points": None, "missing_probe": None}
             )
-            covered = False
+            unevaluable = True
             continue
         missing, probe = member_shortfall(envelope, joint, row_id)
         if missing or probe:
-            covered = False
+            shortfall = True
         entries.append(
             {"member": name, "missing_points": missing, "missing_probe": probe}
         )
+    covered: bool | None = False if shortfall else (None if unevaluable else True)
     return {"covered": covered, "members": entries}
 
 
@@ -371,10 +381,16 @@ def attribute_joint_rows(
 
 def joint_table_detail(record: Mapping[str, Any]) -> str:
     """The ``--format text`` summary line for one joint record: how many
-    members the row spans and whether the projection found them covered."""
+    members the row spans and whether the projection found them covered, fell
+    short, or could not be evaluated from the report alone (``covered:
+    null``, issue #7701 -- "unknown", never worded as a shortfall)."""
     block = record.get("joint") or {}
     members = block.get("members") or []
-    state = "covered" if block.get("covered") else "shortfall"
+    covered = block.get("covered")
+    if covered is None and members:
+        state = "not evaluable from the report alone"
+    else:
+        state = "covered" if covered else "shortfall"
     return f"{len(members)} member(s), {state}"
 
 

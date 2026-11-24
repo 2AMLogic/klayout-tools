@@ -47,6 +47,7 @@ from .pex_net_correspondence import (
     correspondence,
     preferred_renames,
 )
+from .pex_runset import PexExtractOptions
 
 #: The leg header line the merged writer replaces when it attaches cards.
 _HEADER_NO_PARASITICS = (
@@ -303,31 +304,9 @@ def merged_runset_extract(
     *,
     layout_path: str,
     output: str | None,
-    top: str | None,
     runset: Any,
     deck_name: str,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-    label_layers: Mapping[str, tuple[int, int] | None] | None,
-    device_models: Mapping[str, str] | None,
-    deck_options: Mapping[str, str] | None,
-    declared_pins: frozenset[str] | None,
-    rename_declared_pins: bool,
-    tie_declared_pins: bool,
-    critical_nets: Sequence[str] | None,
-    critical_net_patterns: Sequence[str] | None,
-    critical_net_all: bool,
-    critical_net_excludes: Sequence[str] | None,
-    distributed_rc: bool,
-    resistance_graph: bool,
-    resistance_graph_r_cut_ohm: float | None,
-    resistance_graph_caps: Mapping[str, int] | None,
-    parasitic_variants: Sequence[str] | None,
-    substrate_tie_ohms: float | None,
-    mom_rlc_net: str | None,
-    mom_rlc_resistance_ohm: float | None,
-    mom_rlc_capacitance_ff: float | None,
-    mom_rlc_inductance_nh: float | None,
+    options: PexExtractOptions,
 ) -> dict[str, Any]:
     """``klt pex --engine klayout-runset --deck <curated>`` (issue #6606):
     run the runset leg exactly as the parasitic-free route does, run a
@@ -343,32 +322,34 @@ def merged_runset_extract(
     from . import extract_runset
     from .extract_preflight import require_declared_set_for_rename
 
-    require_declared_set_for_rename(rename_declared_pins, declared_pins, None)
+    require_declared_set_for_rename(
+        options.rename_declared_pins, options.declared_pins, None
+    )
     extract_runset.refuse_unsupported(
         {
-            "pdk_variant": pdk_variant,
-            "pdk_root": pdk_root,
-            "deck_options": deck_options,
-            "tie_declared_pins": tie_declared_pins,
-            "critical_nets": critical_nets,
-            "critical_net_patterns": critical_net_patterns,
-            "critical_net_all": critical_net_all,
-            "critical_net_excludes": critical_net_excludes,
-            "distributed_rc": distributed_rc,
-            "resistance_graph": resistance_graph,
-            "resistance_graph_r_cut_ohm": resistance_graph_r_cut_ohm,
-            "resistance_graph_caps": resistance_graph_caps,
-            "parasitic_variants": parasitic_variants,
-            "substrate_tie_ohms": substrate_tie_ohms,
-            "mom_net": mom_rlc_net,
-            "mom_rlc_resistance_ohm": mom_rlc_resistance_ohm,
-            "mom_rlc_capacitance_ff": mom_rlc_capacitance_ff,
-            "mom_rlc_inductance_nh": mom_rlc_inductance_nh,
+            "pdk_variant": options.pdk_variant,
+            "pdk_root": options.pdk_root,
+            "deck_options": options.deck_options,
+            "tie_declared_pins": options.tie_declared_pins,
+            "critical_nets": options.critical_nets,
+            "critical_net_patterns": options.critical_net_patterns,
+            "critical_net_all": options.critical_net_all,
+            "critical_net_excludes": options.critical_net_excludes,
+            "distributed_rc": options.distributed_rc,
+            "resistance_graph": options.resistance_graph,
+            "resistance_graph_r_cut_ohm": options.resistance_graph_r_cut_ohm,
+            "resistance_graph_caps": options.resistance_graph_caps,
+            "parasitic_variants": options.parasitic_variants,
+            "substrate_tie_ohms": options.substrate_tie_ohms,
+            "mom_net": options.mom_rlc_net,
+            "mom_rlc_resistance_ohm": options.mom_rlc_resistance_ohm,
+            "mom_rlc_capacitance_ff": options.mom_rlc_capacitance_ff,
+            "mom_rlc_inductance_nh": options.mom_rlc_inductance_nh,
         }
     )
 
     source = preflight_layout(
-        layout_path, deck_name, top=top, label_layers=label_layers
+        layout_path, deck_name, top=options.top, label_layers=options.label_layers
     )
     target, _ = resolve_netlist_target(layout_path, output, False)
     with _staged_netlist(target) as staged:
@@ -377,9 +358,9 @@ def merged_runset_extract(
             layout_path,
             deck_file=runset.deck_file,
             output=str(staged),
-            top=top,
+            top=options.top,
             deck_vars=runset.deck_vars,
-            device_models=device_models,
+            device_models=options.device_models,
             device_params=runset.device_params,
             runset_timeout_s=runset.runset_timeout,
             lvsdb_out=lvsdb_out,
@@ -396,9 +377,9 @@ def merged_runset_extract(
             top=str(report["top"]),
             parasitics=True,
             probes=probes,
-            label_layers=label_layers,
-            declared_pins=declared_pins,
-            rename_declared_pins=rename_declared_pins,
+            label_layers=options.label_layers,
+            declared_pins=options.declared_pins,
+            rename_declared_pins=options.rename_declared_pins,
             no_netlist=True,
         )
 
@@ -414,10 +395,15 @@ def merged_runset_extract(
             corr["runset_node_renames"] = report.pop("runset_node_renames")
         runset_nets = [entry["name"] for entry in report["nets"]]
         renames = None
-        if declared_pins is not None:
+        if options.declared_pins is not None:
             report["rename_declared_pins"] = curated["rename_declared_pins"]
             renames = bind_declared_ports(
-                staged, declared_pins, curated["nets"], corr, report, runset_nets
+                staged,
+                options.declared_pins,
+                curated["nets"],
+                corr,
+                report,
+                runset_nets,
             )
         corr["attached_card_count"] = merge_parasitics(
             str(staged),
