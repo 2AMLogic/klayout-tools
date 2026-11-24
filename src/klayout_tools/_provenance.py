@@ -927,8 +927,9 @@ def build_provenance(
     the resolved ``klayout_version`` differs from
     :func:`klayout_tools.build_identity.klayout_version_expected` (the
     version this ``klayout-tools`` build/commit was tested against), else
-    ``False``. Passed by ``klt drc``/``klt lvs`` only -- see
-    ``docs/design/klayout-engine-version-pin.md`` for why those two verbs and
+    ``False``. Passed by ``klt drc``/``klt lvs`` and by ``klt extract``'s
+    default in-process engine (issue #7824) -- see
+    ``docs/design/klayout-engine-version-pin.md`` for why those verbs and
     not every ``build_provenance`` caller. A ``True`` result also prints a
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
@@ -967,7 +968,8 @@ def build_provenance(
         # Build-time-recorded only -- deliberately *not* the live-checkout
         # `git` fallback of `build_identity.klayout_version_expected()`
         # (issue #1490): it is fine as a one-shot cost for `klt version`,
-        # but every `klt drc`/`klt lvs` report would gain a subprocess call
+        # but every `klt drc`/`klt lvs`/`klt extract` report would gain a
+        # subprocess call
         # on a dev/editable install -- and no `uv tool install ... @<sha>`
         # install (the case this field exists for) is ever editable. With
         # no build-time record the field reports `False`, matching

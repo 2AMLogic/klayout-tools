@@ -819,6 +819,51 @@ regardless of which verb (or how many process boundaries) placed it. See
 and [`docs/cli/lvs.md`](lvs.md) → "Mixed sky130_fd_sc_hd + analog-macro
 netlist" for the same artifact's DRC/LVS findings.
 
+### Engine-version drift: `provenance.klayout_version_mismatch` (issue #7824)
+
+The default engine's report opts into the same engine-drift comparison
+`klt drc`/`klt lvs` carry (issue #1490): `provenance.klayout_version_mismatch`
+is `true` when the resolved `klayout` engine differs from
+`klayout_version_expected` — the version this `klayout-tools` build/commit
+was tested against, from `klt version --format json` — else `false` (always
+a plain boolean; an unresolvable expected version renders as `false`, "no
+*confirmed* mismatch"). A `true` result also prints a one-line warning to
+stderr naming both versions and the install remedy for the tested engine,
+so a caller regenerating committed evidence sees the drift at run time.
+Extraction is exactly the case this matters for: the measured device
+parameters (`w_um`, `as_um2`, …) and parasitic R/C in the written netlist
+are first-class KLayout engine outputs, so a drifted engine can change the
+extraction result even though the pin, `klt --version` and the layout input
+are all unchanged.
+
+`--engine klayout-runset` reports do not carry the flag: that engine is the
+standalone `klayout` application, which `--with klayout==` does not pin
+(pinning it is out of scope for #7824).
+
+Replaying a committed extract report needs the **recorded** engine, not the
+tested one — the two are distinct choices even for the same release. Worked
+example (the 0.8.0 artifact from #7824's verification): a report whose
+`provenance` records `klt_version: 0.8.0` and `klayout_version: 0.30.13`
+replays under the engine that wrote its bytes, even though that release was
+tested with `0.30.12`:
+
+```bash
+# recorded: re-run under the engine that wrote the report
+uvx --from "klayout-tools==0.8.0" --with "klayout==0.30.13" klt extract \
+  <layout.gds> --deck sky130 --format json
+
+# expected: *new* evidence under the engine this build was tested against --
+# take the version from `klt version --format json`'s `klayout_version_expected`
+uvx --from "klayout-tools==0.8.0" --with "klayout==0.30.12" klt extract \
+  <layout.gds> --deck sky130 --format json
+```
+
+See [`version.md`](version.md) → "Pinning the KLayout engine version" for
+both pinning cases and their edge cases (`klayout_version: null`,
+`reinstall_spec: null`), and
+[`../json-contract.md`](../json-contract.md) → "Pinning the KLayout engine
+version" for the shared contract.
+
 ## Deviation from the spike
 
 The spike's proposed invocation is flag-only (`klt extract <file> --deck
