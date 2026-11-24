@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .extract_resistance_graph_caps import effective_resistance_graph_caps
+from .pex_errors import PexError
 
 
 def _reject_resistance_graph_with_distributed_rc(
@@ -23,8 +24,6 @@ def _reject_resistance_graph_with_distributed_rc(
 ) -> None:
     """Issue #4037: the ladder keeps the legacy per-level resistance."""
     if resistance_graph and distributed_rc:
-        from .pex import PexError  # lazy: `pex` imports this module
-
         raise PexError(
             "--resistance-graph cannot be combined with --distributed-rc: the "
             "ladder keeps the legacy per-level resistance, so a critical net "
