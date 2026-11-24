@@ -37,6 +37,7 @@ from klayout_tools import _batch_collect, sim_batch
 from klayout_tools import netlist as netlist_module
 from klayout_tools import netlist_batch as nb
 from klayout_tools.cli import main, netlist_cmd
+from klayout_tools.sim_batch_image import read_batch_runner_images
 
 RUNNER_TREE = "/tmp/tmp.Runner01"
 
@@ -945,38 +946,37 @@ def test_rewrite_leaves_paths_outside_the_runner_tree_alone():
     ]
 
 
-def test_manifest_published_runner_mismatch_is_refused_before_upload(
+def test_published_runner_mismatch_is_refused_before_upload(
     repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
 ):
-    """Issue #2851: `klt netlist`'s batch path resolves its config through
-    the same `sim_batch._resolve_batch_config`, so a runner version the AMI
-    manifest already publishes as incompatible is refused before any upload,
-    with the same code the runner-side gate uses."""
-    manifest = tmp_path / "ami-manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "images": [
-                    {
-                        "pdk": "sky130A",
-                        "region": "us-east-1",
-                        "ami_id": "ami-0123456789abcdef0",
-                        "pdk_snapshot": "sky130A-2026.10.01",
-                        "ngspice_version": "46",
-                        "built_at": "2026-10-01T00:00:00Z",
-                        "klt_version": "0.1.0",
-                        "klt_ref": "v0.1.0",
-                    }
-                ],
-            }
+    """Netlist checks the live fleet pointer before uploading a schematic."""
+    pointer_reads = []
+
+    def read_object(argv, timeout):
+        assert argv[argv.index("--key") + 1] == "images/eda-batch-runner/current.json"
+        pointer_reads.append(argv)
+        Path(argv[-1]).write_text(
+            json.dumps(
+                {
+                    "schema": "eda-batch-image/1",
+                    "region": "us-east-1",
+                    "ami_id": "ami-0123456789abcdef0",
+                    "tools": {"klt_build": "0.1.0"},
+                    "pdk": {"variants": "sky130A"},
+                }
+            )
         )
+        return fake_completed()
+
+    monkeypatch.setattr(
+        sim_batch.sim_batch_image, "read_batch_runner_images", read_batch_runner_images
     )
-    monkeypatch.setenv("KLT_AMI_MANIFEST", str(manifest))
+    monkeypatch.setattr(sim_batch, "_run_subprocess", read_object)
     code, error = _run_failing(repo, tmp_path, capsys)
     assert code == 1
     assert error["code"] == sim_batch.BATCH_RUNNER_MISMATCH_CODE
     assert "0.1.0" in error["message"]
+    assert len(pointer_reads) == 1
     assert fake.calls == []
     assert no_local_xschem == []
 

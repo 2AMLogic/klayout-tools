@@ -1,11 +1,13 @@
 name: CI
 
-# Green/red gate for every PR and every push to main: ruff lint + pytest.
+# Run ruff lint and pytest on PRs, merge groups, and pushes to main.
 # Everything here is headless — the KLayout Python module (`klayout.db` / `pya`)
 # is used in batch mode only; nothing requires the KLayout GUI.
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
@@ -13,10 +15,11 @@ permissions:
   contents: read
 
 # PRs: one group per PR number; a newer push cancels the superseded run.
+# Each merge-group head SHA gets an independent run.
 # main: one shared group (github.ref) that never cancels a started run; the
 # default single pending slot still lets a newer merge replace a waiting run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # uv caches (issue #2559): every `astral-sh/setup-uv` step below RESTORES on any
@@ -134,7 +137,8 @@ jobs:
         # Comparison revision (see also fetch-depth: 0 on this job's
         # checkout): PRs use the merge-base with their ACTUAL target
         # branch -- the pull_request checkout is GitHub's merge result, so
-        # concurrent main changes are represented; pushes to main use the
+        # concurrent main changes are represented. Merge groups use the
+        # base SHA the combined tree was built on. Pushes to main use the
         # push's before SHA, which covers multi-commit pushes where a
         # merge-base with main itself would compare the push against
         # itself. A missing ref fails the step with fetch instructions
@@ -144,12 +148,16 @@ jobs:
         # that tree's measured content.
         env:
           PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags origin \
               "refs/heads/${PR_BASE_BRANCH}:refs/remotes/origin/${PR_BASE_BRANCH}"
             compare_rev="$(git merge-base HEAD "refs/remotes/origin/${PR_BASE_BRANCH}")"
+          elif [ "$GITHUB_EVENT_NAME" = "merge_group" ]; then
+            compare_rev="${MERGE_GROUP_BASE_SHA:?missing merge-group base SHA}"
+            git fetch --no-tags origin "$compare_rev"
           else
             if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
               echo "::error::push event has no usable 'before' SHA ('$PUSH_BEFORE'); cannot determine the comparison revision" >&2
@@ -178,6 +186,16 @@ jobs:
         # seeded legacy exceptions in import-boundaries.json. Never imports
         # klayout_tools. GATES -- do not add continue-on-error.
         run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
+
+      - name: Changelog fragment shape
+        # scripts/check_changelog_fragments.py (issue #7619): every pending
+        # changelog.d/*.md fragment must be a `- ` bullet carrying a `#<issue>`
+        # reference, the format changelog.d/README.md documents.
+        # scripts/release_prep.py concatenates fragments verbatim, so without
+        # this gate a bare paragraph or an unreferenced bullet would land in
+        # CHANGELOG.md untraceable. Stdlib-only; reads just changelog.d/. GATES
+        # -- do not add continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_changelog_fragments.py
 
       - name: Canary manifest matches the forge
         # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
@@ -221,6 +239,16 @@ jobs:
         run: |
           git ls-files 'examples/**/*.json' \
             | xargs -r uv run --frozen --extra dev klt env-provenance lint-envelope
+
+      - name: Check prepared release notes
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.base_ref == github.event.repository.default_branch &&
+          startsWith(github.head_ref, 'release/v')
+        env:
+          RELEASE_BRANCH: ${{ github.head_ref }}
+        run: python3 -I scripts/release_prep.py refresh --version "${RELEASE_BRANCH#release/v}" --check
 
   native:
     name: ${{ matrix.job_name }}
@@ -923,21 +951,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Full history so the diff below can compare against the PR base
-          # / pre-push commit -- the default shallow (depth-1) checkout
-          # only has the tip commit.
+          # The diff needs the PR base, merge-group base, or pre-push commit.
           fetch-depth: 0
 
       - name: Check for site/** changes
         id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-          else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.sha }}"
-          fi
           # Fall back to "changed" if BASE is unavailable/unknown (e.g. a
           # force-pushed branch's `before` predates this shallow-turned-full
           # clone's history) rather than silently skipping the job.

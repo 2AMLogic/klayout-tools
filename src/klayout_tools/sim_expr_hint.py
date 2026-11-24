@@ -1,10 +1,11 @@
-"""Off-host ``expr`` runner-staleness hint (issue #4097).
+"""ngspice expression diagnostics and off-host runner-staleness hints.
 
 Split out of ``sim.py`` to keep its file-size ratchet honest.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .sim_adapt import OFFHOST_BACKENDS
@@ -119,3 +120,39 @@ def attach_expr_runner_hint(
             "measurements": silent,
         }
     )
+
+
+_REPLACEMENTS = {
+    "sum": "mean(x)*length(x)",
+    "sgn": "(x gt 0) - (x lt 0)",
+    "max": "vecmax(x) (max() takes two arguments)",
+    "min": "vecmin(x) (min() takes two arguments)",
+}
+# Each opening bracket or parenthesis introduces its own comma scope.
+_CALL_TOKENS = re.compile(
+    r'''(?<![\w.])(?P<function>sum|sgn|max|min)\s*\(|[()[\],]|"(?:\\.|[^"\\])*"''',
+    re.IGNORECASE,
+)
+
+
+def unsupported_function_hint(expr: str) -> str:
+    """Recommend a vector reduction only for a one-argument max or min."""
+    found: set[str] = set()
+    scopes: list[tuple[str, int]] = []
+    for token in _CALL_TOKENS.finditer(expr):
+        name = (token["function"] or "").lower()
+        symbol = token[0]
+        if name in {"sum", "sgn"}:
+            found.add(name)
+        if name or symbol in {"(", "["}:
+            scopes.append((name, token.end()))
+        elif symbol == "," and scopes:
+            scopes[-1] = ("", 0)
+        elif symbol in {")", "]"} and scopes:
+            function, start = scopes.pop()
+            if function in {"max", "min"} and expr[start : token.start()].strip():
+                found.add(function)
+    hints = [
+        f"{name}() -> {fix}" for name, fix in _REPLACEMENTS.items() if name in found
+    ]
+    return " -- ngspice has no such function; use: " + "; ".join(hints) if hints else ""

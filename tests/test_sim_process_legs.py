@@ -47,6 +47,13 @@ def test_non_finite_and_absent_ignored():
         _corner("ss", None, status="absent"),
     ]
     assert sim_process_legs.process_leg_check(corners) is None
+    # An int too large for a float is not a finite JSON number either.
+    assert (
+        sim_process_legs.process_leg_check(
+            [_corner("tt", 10**400), _corner("ss", 10**400)]
+        )
+        is None
+    )
 
 
 def test_mc_samples_group_by_index():

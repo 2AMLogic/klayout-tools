@@ -1,1 +1,1 @@
-Grade measurement limits against each simulation corner’s supply with `{"frac_of": "vdd", "fraction": 0.9}` and report the numeric bounds in `limits_resolved`.
+- Grade measurement limits against each simulation corner’s supply with `{"frac_of": "vdd", "fraction": 0.9}` and report the numeric bounds in `limits_resolved` (#7370).

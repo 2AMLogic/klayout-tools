@@ -45,6 +45,7 @@ from ._provenance import content_hash
 from .signoff_artifact import report_artifact_unavailable
 from .signoff_base import SignoffError, _read_json_source
 from .signoff_disclosed_evidence import _lookup_evidence
+from .signoff_malformed_coverage import power_delivery_part_refusal
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,
@@ -171,18 +172,12 @@ from .signoff_unmet_reasons import (
 #:   **unavailable** rather than answered. Still ``"unmet"`` -- an
 #:   unavailable half is not a proven one -- but distinct from the plain
 #:   :data:`~klayout_tools.signoff._REASON_CHECK_FAILED` a failing LVS
-#:   citation renders when the ERC
-#:   half proves nothing either (issue #2495). The distinction is what the
-#:   item's own scope note asks for: ``net_correspondence`` lists only
-#:   *matched* nets, so the supply-pairing predicate
-#:   (:func:`_lvs_reference_carries_supplies`) is destroyed by **any**
-#:   mismatch -- including a device-parameter delta or a signal-net
-#:   reconnection that cannot make or break a supply connection. Without this
-#:   reason, "this block's rails are proven continuous and tied; its compare
-#:   has one disclosed, supply-irrelevant defect" and "this block cited no
-#:   supply evidence at all" render identically. Fix: the LVS defect (item 4
-#:   is blocked on it too) -- never the ERC spec, which already asked and
-#:   answered.
+#:   citation renders when the ERC half proves nothing either (issue #2495):
+#:   ``net_correspondence`` lists only *matched* nets, so the
+#:   supply-pairing predicate is destroyed by **any** mismatch (see
+#:   :func:`_failed_lvs_verdict` for the full distinction). Fix: the LVS
+#:   defect (item 4 is blocked on it too) -- never the ERC spec, which
+#:   already asked and answered.
 _REASON_NO_PDN = "no_pdn"
 _REASON_NO_TAPCELL_MASTER = "no_tapcell_master"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
@@ -1063,49 +1058,54 @@ def _failed_lvs_verdict(
 ) -> tuple[str, dict[str, Any]]:
     """The ``(reason, detail)`` T1 item 11 reports for a cited LVS report
     that did not pass on its own terms
-    (:func:`~klayout_tools.signoff._check_passed`), given the
-    ERC half's already-resolved ``supply_spec`` (issue #2495).
-
-    A failing LVS citation can never carry item 11 to ``"met"`` -- both
-    branches' LVS half rests on the same compare, and an unavailable half is
-    not a proven one. What this decides is *which* ``"unmet"`` the report
-    states, because the two states behind it call for opposite actions:
+    (:func:`~klayout_tools.signoff._check_passed`), given the ERC half's
+    already-resolved ``supply_spec`` (issue #2495). A failing LVS citation
+    can never carry item 11 to ``"met"``; this decides *which* ``"unmet"``:
 
     - ``supply_spec is None`` -- the ERC half proved nothing about power
-      delivery either (no supply declared, no computed tie, or a supply-side
-      finding), so nothing here is established at all. Plain
-      :data:`~klayout_tools.signoff._REASON_CHECK_FAILED`, exactly as before
-      this split existed.
+      delivery either (no supply declared, no computed tie, or a
+      supply-side finding), so nothing here is established at all. Plain
+      :data:`~klayout_tools.signoff._REASON_CHECK_FAILED`, exactly as
+      before this split existed.
     - a resolved ``supply_spec`` -- the ERC half *is* complete: every
       declared supply resolved to its declared island count, every declared
-      tie was computed and found, and no supply-side finding was reported.
-      Only the LVS half is unavailable, which
-      :data:`_REASON_LVS_DID_NOT_PASS` says and ``check_failed`` cannot.
+      tie was computed and found, no supply-side finding. Only the LVS half
+      is unavailable, which :data:`_REASON_LVS_DID_NOT_PASS` says and
+      ``check_failed`` cannot.
 
     The distinction matters because item 11's analog branch reads its LVS
     half out of ``net_correspondence``, which lists only *matched* nets
-    (``_build_net_correspondence`` in ``lvs_mismatch.py``) -- so the
+    (``_build_net_correspondence`` in ``lvs_mismatch.py``): the
     supply-pairing predicate is destroyed by **any** mismatch, including a
-    restated device parameter or a moved signal-net connection that cannot
-    make or break a supply connection. Collapsing that into the same
-    ``check_failed`` a block with zero supply evidence renders would read as
-    "power delivery unverified" when the actual state is "power delivery
-    verified structurally; the item's second half is unavailable for an
-    unrelated reason".
+    restated device parameter that cannot make or break a supply
+    connection, and collapsing that into the ``check_failed`` a block with
+    zero supply evidence renders would read "power delivery unverified"
+    when the actual state is "rails proven; the second half unavailable for
+    an unrelated reason".
 
-    The detail keeps the LVS part's declared-critical-metric blockers (issue
-    #2094) either way -- they are the reader's pointer to *why* the report
-    did not pass -- and, for the distinct reason, adds a ``power_delivery``
-    block naming what the ERC half actually proved (its supply nets) beside
-    the two verdict tokens that made the LVS half unavailable, so the claim
-    the reason makes stays falsifiable against the cited artifacts.
+    The detail keeps the LVS part's declared-critical-metric blockers
+    (issue #2094) either way, and for the distinct reason adds a
+    ``power_delivery`` block naming what the ERC half proved beside the
+    verdict tokens, so the claim stays falsifiable against the artifacts.
+    Issue #6903: a failing report carrying the pinned IHP runset's
+    mirrored-``inductor2`` terminal-order limitation instead renders that
+    named reason (both branches), its details under
+    ``detail.inductor_terminal_order``.
     """
     from .signoff import _critical_metric_detail
+    from .signoff_runset import (
+        REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
+        mirrored_inductor_limitation,
+    )
 
     detail = _critical_metric_detail(envelope)
+    limit = mirrored_inductor_limitation(envelope)
+    named = REASON_RUNSET_INDUCTOR_TERMINAL_ORDER if limit is not None else None
+    if limit is not None:
+        detail["inductor_terminal_order"] = limit.get("details") or {}
     if supply_spec is None:
-        return _REASON_CHECK_FAILED, detail
-    return _REASON_LVS_DID_NOT_PASS, {
+        return named or _REASON_CHECK_FAILED, detail
+    return named or _REASON_LVS_DID_NOT_PASS, {
         **detail,
         "power_delivery": {
             "supply_nets": list(supply_spec["supply_nets"]),
@@ -1648,17 +1648,14 @@ def _grade_power_delivery(
       ``erc.unlabelled_conductor`` and blocks the item, and a met citation
       states the negative it now rests on in
       ``power_delivery.supply_unlabelled_islands``
-      (:func:`_erc_supply_unlabelled_islands`) rather than leaving it
-      implicit in a clean island count that could not have seen it. Issue
-      #2623: a spec can declare (and get checked) the one well class it
-      *can* express while disclosing a further class as inexpressible or
-      tool-limited (``ties_disclosure.undeclared_classes``, issue #2541) --
-      this does not change the verdict (the declared, checked tie already
-      carries item 11 to ``"met"`` on its own merits), but a met citation
-      names the disclosed class too, in
-      ``power_delivery.disclosed_undeclared_tie_classes``
-      (:func:`_erc_disclosed_undeclared_tie_classes`), present only when the
-      cited run actually disclosed one;
+      (:func:`_erc_supply_unlabelled_islands`). Issue #2623: a spec can
+      declare (and get checked) the one well class it *can* express while
+      disclosing a further class as inexpressible or tool-limited
+      (``ties_disclosure.undeclared_classes``, issue #2541) -- this does not
+      change the verdict (the declared, checked tie already carries item 11
+      to ``"met"`` on its own merits), but a met citation names the
+      disclosed class too, in ``power_delivery.disclosed_undeclared_tie_classes``
+      (:func:`_erc_disclosed_undeclared_tie_classes`);
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`~klayout_tools.signoff._check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
@@ -1792,13 +1789,17 @@ def _grade_power_delivery(
     if port_reason is not None:
         return "unmet", port_reason, parts_citation, {"power_ports": power_ports_block}
 
+    # Earlier electrical failures take precedence over malformed coverage (#5643).
+    refusal = power_delivery_part_refusal(by_kind, _citation)
+    if refusal is not None:
+        coverage_reason, coverage_detail = refusal
+        return "unmet", coverage_reason, parts_citation, coverage_detail
+
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
     # `exit_status` -- signoff_cmd.py's text rendering, the fleet roll-up's
-    # `drc_coverage` reduction) by leading with the ERC part, the one
-    # artifact both columns of item 11 always cite; `parts` carries every
-    # cited artifact in full, so nothing a reader needs is only reachable
-    # through the leading part.
+    # `drc_coverage` reduction) by leading with the ERC part; `parts` carries
+    # every cited artifact in full.
     citation = _citation(erc)
     citation["parts"] = [
         _citation(by_kind[kind], runset_rehash_unverifiable=rehash_unverifiable)
@@ -1820,45 +1821,43 @@ def _grade_power_delivery(
         ).get("status"),
         # Issue #2234: which of the cited run's `erc.missing_tie` checks
         # rested on a caller assertion (`ties[].tap_boxes`) rather than on
-        # PDK-marker narrowing -- `[]` for a purely marker-derived (or
-        # pre-#2234) run. See `erc_ties_checked_by_assertion`.
+        # PDK-marker narrowing -- `[]` for a marker-derived run. See
+        # `erc_ties_checked_by_assertion`.
         "ties_checked_by_assertion": erc_ties_checked_by_assertion(erc["envelope"]),
         # Issue #2255: which of them rested on a caller-asserted *well*
         # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
         # than on a drawn well/tub layer -- the native-substrate case, `[]`
-        # for every drawn-well (or pre-#2255) run. A separate list from the
-        # tap-side one above because it is a separate, weaker claim; see
-        # `_erc_ties_checked_by_well_assertion`.
+        # for every drawn-well run. A separate, weaker claim than the
+        # tap-side one above; see `_erc_ties_checked_by_well_assertion`.
         "ties_checked_by_well_assertion": _erc_ties_checked_by_well_assertion(
             erc["envelope"]
         ),
         # Issue #2524: the severed-rail negative, per declared supply that
         # owns its roles -- `{name: unlabelled_islands}`, all zero for a met
         # item (a non-zero one is `erc.unlabelled_conductor`, which
-        # `_erc_supply_findings` already blocks on). `{}` when no supply
-        # declared `nets[].roles`, which is the honest "not measured" rather
-        # than a fabricated clean. See `_erc_supply_unlabelled_islands`.
+        # `_erc_supply_findings` already blocks on); `{}` when no supply
+        # declared `nets[].roles` -- the honest "not measured". See
+        # `_erc_supply_unlabelled_islands`.
         "supply_unlabelled_islands": _erc_supply_unlabelled_islands(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
     add_substrate_continuity(citation["power_delivery"], erc["envelope"])  # #5346
     # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
-    # declared and checked -- this is the `tie_count > 0` path, already
-    # `"met"` on those merits -- plus one or more further classes disclosed
-    # as inexpressible/tool-limited via `ties_disclosure.undeclared_classes`,
-    # issue #2541) previously left that disclosure legible only one layer
-    # down, in the cited `klt erc` envelope. Additive only -- present only
-    # when the cited run actually disclosed a named class, so a run that
-    # disclosed nothing renders this citation exactly as it always has; see
+    # declared and checked -- the `tie_count > 0` path, already `"met"` on
+    # those merits -- plus further classes disclosed as inexpressible or
+    # tool-limited via `ties_disclosure.undeclared_classes`, issue #2541)
+    # previously left that disclosure legible only one layer down, in the
+    # cited `klt erc` envelope. Additive only; see
     # `_erc_disclosed_undeclared_tie_classes`.
     disclosed_undeclared_tie_classes = _erc_disclosed_undeclared_tie_classes(
         erc["envelope"]
     )
-    if disclosed_undeclared_tie_classes:
-        citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
-            disclosed_undeclared_tie_classes
-        )
+    citation["power_delivery"].update(
+        {"disclosed_undeclared_tie_classes": disclosed_undeclared_tie_classes}
+        if disclosed_undeclared_tie_classes
+        else {}
+    )
     # Issue #4199: present only when the cited P&R response states the
     # library is tapless, so a `null` tapcell_master reads as by-design.
     citation["power_delivery"].update(_par_tapless_field(par))

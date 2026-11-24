@@ -1,4 +1,4 @@
-"""``klt signoff`` command: four modes sharing one verb.
+"""``klt signoff`` command: six modes sharing one verb.
 
 1. **Envelope aggregation** (the original mode, issue #309): combine
    ``klt drc``/``klt lvs``/``klt extract``/``klt sim`` JSON envelope files
@@ -25,11 +25,21 @@
    emit the artifact-anchored generic envelope ``--manifest`` binds (see
    :mod:`..signoff_attest`). With ``--check COMMITTED`` it re-attests and
    diffs instead, writing nothing; exit ``0`` only when the committed
-   envelope still reproduces and still passes, ``3`` otherwise.
+   envelope still reproduces and still passes, ``3`` otherwise. Its CLI
+   dispatch and text renderers live in :mod:`.signoff_attest_cmd` (moved
+   out of this module for the per-file size ratchet).
+
+6. **Compare two saved reports** (``--diff-reports OLD NEW``, issue #6850):
+   diff the checklist surfaces of two previously committed tier reports --
+   the source doc + content hash and each row's ``title``/``text``/
+   ``notes``, matched by ``(tier, id, partition)`` -- reading nothing but
+   the two files. Read-only: no manifest, no evidence, no grading, and a
+   completed comparison exits ``0`` whether or not anything moved. See
+   :mod:`..signoff_report_diff` and :mod:`.signoff_diff_cmd`.
 
 The modes are mutually exclusive: ``--manifest``/``--fleet``/
-``--describe-grader``/``--attest`` each replace the positional ``<file>...``
-arguments and each other.
+``--describe-grader``/``--attest``/``--diff-reports`` each replace the
+positional ``<file>...`` arguments and each other.
 
 ``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
 modes, not a fifth mode: it re-grades the same manifest and, instead of
@@ -89,12 +99,15 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
         cannot fail once argument validation passes). Under ``--check``:
         ``status: "match"`` -- the committed report still reproduces
         (``doc_drift: true`` does not change this: a reworded checklist is
-        reported, not failed on).
+        reported, not failed on). ``--diff-reports`` mode: any completed
+        comparison, movement included -- the movement is the answer.
     1 - failed to run (missing/unreadable/malformed input file, an envelope
         with an unrecognized shape, or an invalid manifest/fleet manifest,
         or -- under ``--check`` -- a missing/unparseable committed report or
-        one the requested mode could not have produced) -- returned by
-        ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        one the requested mode could not have produced, or -- under
+        ``--diff-reports`` -- an unreadable report, a non-tier report, or an
+        ambiguous duplicate row key) -- returned by ``emit_error`` as
+        ``output.ERROR_EXIT_CODE``
     3 - envelope-aggregation mode: ran successfully, provenance was
         consistent, but at least one check failed. Tier-report mode: ran
         successfully, but at least one T1 item is ``"unmet"``
@@ -129,15 +142,7 @@ from ..signoff import (
     describe_grader,
 )
 from ..signoff_artifact import artifact_resolution
-from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
-from ..signoff_attest_build import attach_build_drift, build_drift_line
-from ..signoff_attest_carry import compute_attestation as _compute_attestation
-from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
-from ..signoff_attest_carry import skip_lines
-from ..signoff_attest_input import input_line, with_entry
-from ..signoff_attest_live import attach_live_fields
-from ..signoff_attest_text import attestation_check_line as _attestation_check_line
-from ..signoff_attest_text import check_label, note_lines
+from ..signoff_corner_box import print_corner_box
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
 from ..signoff_details import _pex_citation_lines
@@ -149,14 +154,16 @@ from ..signoff_generator_batch import (
 )
 from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
 from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
-from ..signoff_output import non_attest_problem, write_output_or_message
+from ..signoff_output import write_output_or_message
 from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
+from .signoff_attest_cmd import maybe_run_attest, tool_pin_usage_error
+from .signoff_diff_cmd import run_diff_reports
 from .signoff_flags import (
-    artifact_manifest_problem,
     describe_grader_problem,
     mode_flag_problem,
+    pre_dispatch_problem,
 )
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
@@ -166,8 +173,10 @@ from .signoff_tier_text import (
     _print_composed_from,
     _print_justified_gaps,
     _print_not_applicable,
+    _print_partition_boundary,
     _print_structural_rows,
     input_verified_statement,
+    print_upstream_source,
 )
 from .signoff_tier_text import (
     status_marker as _status_marker,
@@ -189,9 +198,13 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 
 
 def run(args: argparse.Namespace) -> int:
+    if (pin_error := tool_pin_usage_error(args)) is not None:
+        return pin_error
+    if getattr(args, "diff_reports", None) is not None:
+        return run_diff_reports(args)
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
-    problem = artifact_manifest_problem(args, manifest_source, fleet_source)
+    problem = pre_dispatch_problem(args, manifest_source, fleet_source)
     if problem:
         return emit_error("signoff", problem, args.format)
     if getattr(args, "repin", False):
@@ -199,7 +212,7 @@ def run(args: argparse.Namespace) -> int:
         # combination rather than quietly running the attestation (issue
         # #5527): a flag that writes to a manifest must never be ignored.
         return run_repin(args, manifest_source)
-    attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
+    attest_result = maybe_run_attest(args, manifest_source, fleet_source)
     if attest_result is not None:
         return attest_result
     if getattr(args, "describe_grader", False):
@@ -216,26 +229,6 @@ def run(args: argparse.Namespace) -> int:
     return _run_envelope_aggregation(args)
 
 
-def _maybe_run_attest(
-    args: argparse.Namespace,
-    manifest_source: str | None,
-    fleet_source: str | None,
-) -> int | None:
-    """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
-
-    Returns the exit code when the invocation is an ``--attest`` one (run it)
-    or a flag misuse (refuse it: the non-``--attest`` pairings that make no
-    sense, per :func:`~.signoff_output.non_attest_problem`), and ``None``
-    otherwise so ``run`` can fall through to the other modes.
-    """
-    if getattr(args, "attest", None) is not None:
-        return _run_attest(args, manifest_source, fleet_source)
-    problem = non_attest_problem(args, manifest_source, fleet_source)
-    if problem:
-        return emit_error("signoff", problem, args.format)
-    return None
-
-
 def _run_describe_grader(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -247,121 +240,6 @@ def _run_describe_grader(
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
-
-
-def _attest_flag_problem(
-    args: argparse.Namespace, inventory: str | None, stream: list[str] | None
-) -> str | None:
-    """The refusal message for an invalid ``--attest`` flag combination, else
-    ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
-    declared checks; items 1, 8, 9 and 10 take ``--inventory``."""
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        if not stream:
-            return (
-                "--attest 2 requires --input <stream> (the committed GDS/OASIS "
-                "layout stream; see docs/cli/signoff.md)"
-            )
-        return None
-    attrs = ("generator", "regenerated_hash", "hash_kind")
-    if stream or any(getattr(args, attr, None) is not None for attr in attrs):
-        return (
-            "--input/--generator/--regenerated-hash/--hash-kind only apply "
-            f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
-            "--inventory)"
-        )
-    if not inventory:
-        return (
-            "--attest requires --inventory <file> (the versioned attestation "
-            "inventory; see docs/cli/signoff.md)"
-        )
-    return None
-
-
-def _run_attest(
-    args: argparse.Namespace,
-    manifest_source: str | None,
-    fleet_source: str | None,
-) -> int:
-    """``--attest ITEM --inventory FILE [-o OUT] [--check COMMITTED]`` (issue
-    #2844) -- see :mod:`..signoff_attest`.
-
-    Generate mode prints the envelope (``--format json``) and, when it
-    passes, writes it to ``--output`` only if its bytes changed; a failing
-    attestation exits ``3`` and writes nothing, so a committed passing
-    envelope is never silently replaced by a failing one. ``--check`` writes
-    nothing ever and exits ``0`` only when the committed envelope still
-    reproduces *and* still passes."""
-    if (
-        args.files
-        or manifest_source
-        or fleet_source
-        or getattr(args, "describe_grader", False)
-        or getattr(args, "tiers_doc", None)
-    ):
-        return emit_error(
-            "signoff",
-            "--attest cannot be combined with <file> arguments, --manifest, "
-            "--fleet, --describe-grader, or --tiers-doc",
-            args.format,
-        )
-    inventory = getattr(args, "inventory", None)
-    stream = getattr(args, "attest_input", None)
-    problem = _attest_flag_problem(args, inventory, stream)
-    if problem is not None:
-        return emit_error("signoff", problem, args.format)
-    committed = getattr(args, "check", None)
-    output = getattr(args, "output", None)
-    problem = _skip_local_only_problem(args)
-    if problem is not None:
-        return emit_error("signoff", problem, args.format)
-    try:
-        result = _compute_attestation(args, inventory, stream, committed)
-    except SignoffError as exc:
-        return emit_error("signoff", str(exc), args.format)
-
-    if committed is not None:
-        attach_live_fields(result.get("fresh") or {}, hints=False)
-        attach_build_drift(result, committed, args.require_build_match)
-        emit_success(result, args.format, _print_attestation_check_text)
-        ok = result["status"] == "match" and result["fresh_status"] == "pass"
-        return EXIT_PASS if ok else EXIT_FAIL
-
-    if result["status"] == "pass" and output:
-        try:
-            envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
-            write_attestation(envelope, output)
-        except OSError as exc:
-            return emit_error(
-                "signoff", f"could not write --output '{output}': {exc}", args.format
-            )
-    attach_live_fields(result)
-    emit_success(with_entry(result, output), args.format, _print_attestation_text)
-    return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
-
-
-def _print_attestation_text(result: dict) -> None:
-    print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
-    attestation = result["attestation"]
-    print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
-    print(input_line(result, STREAM_ATTESTABLE_ITEM))
-    print()
-    for check in attestation["checks"]:
-        print(_attestation_check_line(check))
-    for line in skip_lines(result, check_label):
-        print(line)
-
-
-def _print_attestation_check_text(result: dict) -> None:
-    render_rerun_drift(result)
-    print(f"fresh_status: {result['fresh_status']}")
-    print(build_drift_line(result))
-    for line in note_lines(result):
-        print(line)
-    failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
-    for check in failed:
-        print(_attestation_check_line(check))
-    for line in skip_lines(result, check_label):
-        print(line)
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
@@ -708,30 +586,6 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> N
     )
 
 
-def _print_partition_boundary(result: dict) -> None:
-    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
-    #2278) under the `block:`/`kind:` header, or nothing when it declared
-    none.
-
-    Printed **once per declared partition**, not on each of that partition's
-    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
-    beside the citation they qualify), the boundary is one constant statement
-    per partition, and restating it eleven times would bury the checklist it
-    qualifies. The JSON carries it per row as well, where a consumer
-    filtering `.items[]` needs each row to be self-contained.
-
-    Absent entirely when nothing was declared -- "no statement" must not read
-    as "the partitions were defined" -- exactly as an undeclared boundary is
-    absent from the JSON rather than rendered `null`.
-    """
-    boundary = result.get("partition_boundary") or {}
-    if not boundary:
-        return
-    print("partition boundary:")
-    for partition, text in boundary.items():
-        print(f"  {partition}: {text}")
-
-
 def _print_foundry_cell_exceptions(citation: dict) -> None:
     for exception in citation.get("foundry_cell_exceptions") or []:
         rules = ", ".join(
@@ -780,6 +634,7 @@ def _print_coverage_undisclosed(item: dict) -> None:
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
+    print_upstream_source(result, "upstream source")
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
     print(
@@ -807,12 +662,8 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
-        # Issue #2176: a row this build has no grading rules for at all --
-        # an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
-        # lists. Shown for every such row, met/unmet and cited/uncited
-        # alike, because the failure this prevents is a row that *looks*
-        # exactly like a graded one; absent for every item of the shipped
-        # doc, which renders exactly as before.
+        # Issue #2176: mark rows introduced by a different tiers doc whose
+        # grading rules this build does not implement.
         if item.get("graded_by_build") is False:
             print(
                 f"        {palette.red}not graded by this build{palette.reset} "
@@ -827,6 +678,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         _print_justified_gaps(item)
         _print_structural_rows(item)
         _print_group_coverage(item)
+        print_corner_box(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)
@@ -922,6 +774,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
             f"{_composed_suffix(block)}"
         )
+        print_upstream_source(block, "        upstream")
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render
         # what that count is short of. `source_doc` is the roll-up's one

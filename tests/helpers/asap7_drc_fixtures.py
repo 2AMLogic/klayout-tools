@@ -1259,10 +1259,10 @@ def _remote_m2(gap: float, *, far_via: bool = True) -> list[Shape]:
     there. ``far_via`` False omits the V1 under the LISD side's M2 end."""
     shapes: list[Shape] = [
         box("V0", 0, 0, 18, 18),
-        box("M1", -60, 0, 18, 18),
+        box("M1", -62, 0, 18, 18),
         box("V1", -60, 0, -42, 18),
         box("V0", 21 + gap, 82, 39 + gap, 100),
-        box("M1", 21 + gap, 82, 120 + gap, 100),
+        box("M1", 21 + gap, 82, 122 + gap, 100),
         box("M2", -60, 0, -42, 100),
         box("M2", -60, 82, 120 + gap, 100),
     ]
@@ -1353,10 +1353,10 @@ def _row_links(
     if m2:
         return [
             box("V0", 99, low, 117, low + 18),
-            box("M1", 99, low, 117, low + 28),
+            box("M1", 99, low - 2, 117, low + 28),
             box("V1", 99, low, 117, low + 18),
             box("V0", 207, low, 225, low + 18),
-            box("M1", 207, low, 225, low + 28),
+            box("M1", 207, low - 2, 225, low + 28),
             box("V1", 207, low, 225, low + 18),
             box("M2", 99, low, 225, low + 18),
         ]
@@ -1659,6 +1659,8 @@ def _stack(
 
 
 def _via_cases() -> list[Case]:
+    from helpers import asap7_drc_enclosure_fixtures as enclosure
+
     c: list[Case] = []
     for via in _VIA_METALS:
         c += [
@@ -1667,39 +1669,22 @@ def _via_cases() -> list[Case]:
         ]
         # Partly off the upper metal: the via sticks out 1 nm across it. An
         # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
+        # Where it sticks out the metal does not enclose it, so the metal's
+        # "(5 & 5) | (5 & 0)" end-cap rule fires as well.
         off = (
             _stack(via, via_y0=-1)
             if via == "V3"
             else _stack(via, upper=(-50, 1, 68, 19))
         )
+        end_cap = () if via == "V3" else (enclosure.END_CAP_RULES[via],)
         c += [
             _fail(f"{via}.AUX.1", _stack(via, upper=None)),
             _fail(f"{via}.AUX.1", _stack(via, lower=None)),
-            _fail(f"{via}.AUX.1", off),
+            _fail(f"{via}.AUX.1", off, also=end_cap),
             _pass(f"{via}.AUX.1", _stack(via)),
         ]
 
-    # "At least two opposite sides": the enclosing metal is a 26 nm bar
-    # (4 nm past the via on both sides across it, short of every threshold)
-    # that extends `e0` / `e1` past the via at its two ends -- top/bottom
-    # for a vertical bar, left/right for a horizontal one. The 26 nm width
-    # keeps the bar above the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
-    # The other metal keeps its long default bar.
-    def capped(
-        via: str, which: str, e0: float, e1: float, vertical: bool
-    ) -> list[Shape]:
-        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
-        return _stack(via, **{which: bar})
-
-    for rule, via, which, e in (
-        ("V2.M2.EN.1", "V2", "lower", 5),
-        ("V3.M3.EN.1", "V3", "lower", 5),
-    ):
-        for vertical in (True, False):
-            c.append(_fail(rule, capped(via, which, e - D, e - D, vertical)))
-            c.append(_pass(rule, capped(via, which, e, e, vertical)))
-        # Short at one end only is still short on that pair.
-        c.append(_fail(rule, capped(via, which, e, e - D, True)))
+    c += enclosure.two_side_cases()
 
     # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
     # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
@@ -1716,7 +1701,7 @@ def _via_cases() -> list[Case]:
         _pass("V3.M4.EN.2", m4_capped(11, 15)),
         _pass("V3.M4.EN.2", m4_capped(15, 11)),
     ]
-    return c
+    return [*c, *enclosure.end_cap_cases()]
 
 
 def _transpose(shapes: Iterable[Shape]) -> list[Shape]:

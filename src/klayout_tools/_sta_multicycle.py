@@ -49,7 +49,7 @@ MULTICYCLE_KEYS = ("from", "through", "to", "setup", "hold")
 #: The bounded selector alphabet: letters, digits, ``_ . / [ ]`` plus the
 #: two wildcards ``*`` and ``?``. ``[``/``]`` are literal (bus names), so a
 #: selector can never be a Tcl character class.
-_SELECTOR_CHARS = frozenset(
+SELECTOR_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./[]*?"
 )
 
@@ -94,7 +94,7 @@ def _mcp_tag(index: int) -> str:
 def _validate_selector(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise PostRouteStaError(f"{field} must be a non-empty selector string")
-    bad = sorted(set(value) - _SELECTOR_CHARS)
+    bad = sorted(set(value) - SELECTOR_CHARS)
     if bad:
         raise PostRouteStaError(
             f"{field} is a malformed selector ({value!r}: disallowed "

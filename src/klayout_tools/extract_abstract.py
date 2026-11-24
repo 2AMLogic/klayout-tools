@@ -1473,20 +1473,14 @@ def _probe_single_abstract_pin_point(
     point: kdb.Point,
     role: str | None,
     probe_layers: list[tuple[str, kdb.Region]],
-) -> kdb.Net | None:
-    """The extracted net at exactly one candidate ``point``, via
-    ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
+) -> tuple[kdb.Net | None, bool]:
+    """Probe one access point and return its net and declared-conductor hit flag.
 
-    ``role`` names the conductor **this point** was read off -- the layer its
-    own label was drawn on, or the ``deck.metals`` level a
-    :func:`_local_pin_candidate_points` fragment was discovered on. It is a
-    property of the point, not of the pin (issue #2142): a hard macro
-    routinely labels one declared pin on several conductors, and probing all
-    of that pin's points against one cell-wide role is what sent the
-    off-role points into the cross-layer fallback below. That layer is
-    probed first and its answer is authoritative. ``None`` (the LEF
-    fallback, whose LEF layer name is not translated to a GDS layer) has no
-    declared layer to be authoritative about.
+    Each point carries its own label or fragment layer (#2142). A macro can
+    label the same pin on several layers. Probe the declared layer first.
+    A hit there returns ``(net, True)`` and supplies landing evidence for
+    :meth:`AbstractPinJoins.record` (#7561). A LEF point has no translated
+    GDS layer. A cross-layer hit returns ``(net, False)``.
 
     **The cross-layer fallback never reaches ``nwell``/``tap``** unless one
     of them *is* this point's own ``role`` (a ``deck.well_label`` pin) --
@@ -1501,28 +1495,22 @@ def _probe_single_abstract_pin_point(
     reports as a per-instance "no conductor found at its resolved access
     point" warning rather than silently shorting the pin into a rail.
 
-    Returns ``None`` when no eligible conductor carries geometry at that
-    point at all.
-
-    This is the single-candidate core :func:`_probe_abstract_pin_net` calls
-    once per access-point candidate for a pin (issue #1181) -- kept separate
-    so that per-point probing logic and the multi-point "pick the best
-    result" policy stay independently readable.
+    If every eligible layer misses, return ``(None, False)``.
+    :func:`_probe_abstract_pin_net` ranks hits across the pin's points (#1181).
     """
     if role is not None:
         for name, region in probe_layers:
             if name == role:
                 net = l2n.probe_net(region, point)
                 if net is not None:
-                    return net
-                break
+                    return net, True
     for name, region in probe_layers:
         if name in _BODY_IDENTITY_PROBE_ROLES and name != role:
             continue
         net = l2n.probe_net(region, point)
         if net is not None:
-            return net
-    return None
+            return net, False
+    return None, False
 
 
 def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
@@ -1638,6 +1626,10 @@ def _probe_abstract_pin_net(
     lands on no conductor anywhere" case the caller already reports as a
     per-instance warning.
 
+    :meth:`AbstractPinJoins.record` retains declared-layer hits for the group.
+    Joining an anonymous routed net to a differently named net requires a
+    declared-layer hit on each side (#7561).
+
     **``points`` order is pin-access provenance, and the tiebreak leans on
     that** (issue #1366). :func:`_resolve_abstract_cell_pins` always lists a
     pin's *primary*, declared access point(s) first -- its own drawn text
@@ -1659,13 +1651,16 @@ def _probe_abstract_pin_net(
     full derivation of both reported impossible bindings.
     """
     candidates: dict[int, kdb.Net] = {}
+    landed: set[int] = set()
     for point, role in points:
-        net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
+        net, declared = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
         if net is not None:
             candidates.setdefault(net.cluster_id, net)
+            if declared:
+                landed.add(net.cluster_id)
     winner = max(candidates.values(), key=_abstract_pin_net_score, default=None)
     if winner is not None:
-        joins.record(instance, pin, winner, candidates)
+        joins.record(instance, pin, winner, candidates, landed)
     return winner
 
 
@@ -1722,7 +1717,7 @@ def _wire_abstract_cells(
     global_net_ports_by_cell: dict[int, int] | None = None,
     lef_layer_roles: dict[str, str] | None = None,
     def_probes: dict[str, list[tuple[int, kdb.Point]]] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[kdb.Net]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
     ``abstracted_cells[]`` field alongside any ``warnings`` this pass itself
@@ -1781,11 +1776,9 @@ def _wire_abstract_cells(
     returned ``warnings`` alongside the per-instance geometric-miss entries
     above.
 
-    Instance/subckt naming is deterministic: cell types are visited in
-    ``instances``'s own order (already sorted by
-    :func:`_collect_abstract_instances`); each occurrence is named
-    ``"<cell type>_<n>"`` (0-based, per cell type), sanitized for SPICE via
-    :func:`_sanitize_instance_name`.
+    Instance names follow the deterministic placement order in ``instances``.
+    The third result identifies generated open nets by identity, so top-pin
+    reconciliation can keep them internal even when a user label has the same name.
 
     ``local_candidates_by_cell`` (issue #1183) is ``{<cell index>:
     <_local_pin_candidate_points() result>}`` for every matched cell type,
@@ -1823,6 +1816,7 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    unresolved: list[kdb.Net] = []
     joins = AbstractPinJoins()
     wired: list[tuple[kdb.SubCircuit, dict[str, int]]] = []
     # Count LEF-merged substrate-role pins even when a verbose report is disabled.
@@ -1908,6 +1902,7 @@ def _wire_abstract_cells(
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
+                    unresolved.append(net)
                     warnings.append(
                         f"--abstract-cells instance '{instance_name}' (cell "
                         f"'{cell.name}') pin '{pin_name}': no conductor found "
@@ -1939,4 +1934,4 @@ def _wire_abstract_cells(
         )
     )
     report.sort(key=lambda entry: entry["cell"])
-    return report, warnings
+    return report, warnings, unresolved

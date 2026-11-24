@@ -1325,6 +1325,13 @@ pattern are affected, and everything else in the same layout — routing
 metal, vias, fill, unmatched devices — extracts exactly as it does today,
 in the same run.
 
+A terminal drawn on poly can connect through abutting leaf instances. The
+extractor preserves the exact poly component that carries an in-cell pin text
+when it touches another terminal, parent poly, or a contact. This conductor is
+used only for connectivity. A gap between polygons keeps the two nets separate.
+With `--top-cell-pins`, the generated name of a genuinely unconnected abstract
+pin stays internal. Its instance connection and warning remain in the output.
+
 **Pin resolution**, once per *distinct* matched cell type (cached across
 every occurrence of that type):
 
@@ -3390,6 +3397,15 @@ is not a terminal, as in the runset). `params` are the gate region's `area_um2`
 `A` and `P` as `klt extract`. `klt deck devices --deck gf180mcu` lists the
 twelve classes (`kind: "mos_capacitor"`).
 
+With a resolved GF180 PDK, extraction writes the eight plain and `_b`
+classes as calls to their bias-dependent PDK subcircuits. The gate is the
+first pin and the strapped source/drain is the second. For example, the
+0.8 × 2.0 µm gate above emits
+`X$1 G SD cap_nmos_03v3_b c_length=2U c_width=0.8U`. The four `_dn`
+classes have no dedicated PDK subcircuit and keep their fixed-value `C`
+cards. Extraction without a selected PDK also writes fixed-value cards.
+In both cases the report's `c_f` is the nominal area-based capacitance.
+
 Approximations versus the runset: an island overlapping any `moscap_exclude`
 marker (resistor, ESD, SAB, `RES_MK`, `DIODE_MK`, `DRC_BJT`, native, `efuse_mk`,
 `plfuse`, `mvsd`/`mvpsd`, LDMOS, Schottky; the runset's `lvs_source` is not
@@ -4627,9 +4643,9 @@ the `nets[]` schema table above) close this gap:
 
 - `net_id` is that net's own `cluster_id` — unique per net *object*, so N
   identically-named `nets[]` entries are still N distinct dictionary keys.
-- `pin_index` is that net's exact 0-based position in the written `.SUBCKT`
-  header (`null` for a non-pin net) — resolving a specific port index
-  straight back to a `nets[]` entry, positionally.
+- `pin_index` gives the net's zero-based position in KLayout's original
+  `.SUBCKT` port order, or `null` for an internal net. An explicit `--pins`
+  order can change the final top-level header after KLayout writes it.
 - `label_positions_um` reports every drawn label's own `(x_um, y_um)`
   position naming that net, so a caller with independent floorplan knowledge
   (a known pin location from `klt place-and-route`'s DEF, or its own
@@ -4672,8 +4688,8 @@ $ klt extract ring.gds --deck sky130 --format json
 }
 ```
 
-The written netlist's header (also unedited, same run) confirms `pin_index`
-matches the real `.SUBCKT` port order exactly:
+This run used the default pin order. The header contains the four ports in
+`pin_index` order.
 
 ```
 .SUBCKT TOP a|y a|y$1 a|y$2 a|y$3
@@ -6789,11 +6805,20 @@ klt extract routed.gds --deck sky130 --parasitics --spef routed.spef --format js
 **A format translation of already-computed data, not a new extraction
 pass** (`docs/design/post-route-sta-survey.md` §3.1/§4.1): every SPEF `*CAP`/
 `*RES` value is copied verbatim from `parasitics.nets[]` — the same
-star-topology model documented above, re-expressed as SPEF's `*D_NET`/
+star or distributed-ladder model documented above, re-expressed as SPEF's `*D_NET`/
 `*CONN`/`*CAP`/`*RES` block syntax instead of KLayout SPICE `R`/`C` device
 cards. Units are declared (`*C_UNIT 1 FF`, `*R_UNIT 1 OHM`) to match
 `parasitics`'s own units exactly, so no femtofarad/ohm conversion — and no
 conversion error — is introduced.
+
+With `--distributed-rc --critical-net <net>`, SPEF preserves the selected
+net's ladder: one `*RES` row per `segments[]` entry and one ground `*CAP`
+row per terminal node, using `terminals[].capacitance_ff`. The middle node
+(`pin_order`) reuses the net's primary SPEF node; other nodes use fresh
+`<net>:<N>` identifiers. Ground capacitance is distributed across the nodes
+instead of concentrated at the hub; the `*D_NET` total stays the same.
+Coupling capacitance still attaches at the middle node. Lumped nets keep
+their existing star/Gamma-shunt output. This changes no JSON report fields.
 
 **Net-name correlation by default; optional device-terminal correlation via
 `--def-net-connections` (issue #948, extended by #961).** Each `*D_NET`
@@ -9111,10 +9136,10 @@ scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
 | `device_count` | integer | Number of device terminals connected to this net.                             |
 | `net_id`       | integer | Additive field (issue #1540). The net's KLayout `cluster_id` — unique across every net *object* in this circuit, unlike `name` (see "Net-name collisions from internally-repeated sub-cells" below). The same identity `parasitics.nets[].net_id` already reports for the identical "several distinct nets share one label" shape (issue #765/#811). |
 | `structural_id` | string \| `null` | Additive field (issue #5735). This net's numbering-independent structural handle: the `$anon<...>` token the net's own sorted `<device>.<terminal>` attachment list derives — the exact identity `netlist_normalized_sha256` (issue #3407) and `klt extract --check <report> --rerun` already rewrite every anonymous `\$N` spelling to, now also emitted per net so a testbench probing an unlabeled internal node can pin its `meas`/`let` card to a token that survives a re-extraction. Two extractions of one GDS that differ only in anonymous-net numbering report the **same** value for a corresponding net; a genuine connectivity change reports a **different** one — exactly the equivalence `netlist_normalized_sha256` is defined by, and no stronger promise: the token is built from device *instance* names, which are themselves KLayout-synthesized `$<n>` spellings whose cross-build stability is asserted empirically, not contracted (see "Anonymous net numbering" above). `null` exactly when the net has no derivable structural identity: a **named** net (its `name` is the label a consumer already joins on; the "Net-name collisions" caveat below is why no unique per-net identity is minted for it) or an anonymous net with **zero** device terminals (nothing to disambiguate by — real floating geometry or a synthesized ground/substrate net). A consumer holding an older report maps an anonymous net to the current one by joining the two reports on `structural_id` directly — no `devices[]` re-derivation per re-extraction. `--check --rerun` strips the field alongside `net_id` before diffing — not because it is unstable (it is **content** class, per this table) but for backward compatibility: a report committed before the field existed lacks the key, so stripping is what keeps those reports from drifting against fresh ones and keeps `netlist_normalized_sha256` byte-identical. Present on top-level `nets[]` entries only; `parasitics.nets[]` is a different array and does not carry the field. |
-| `pin_index`    | integer \| `null` | Additive field (issue #1540). This net's 0-based position in the written `.SUBCKT`/instance-line port order (`Circuit.each_pin()`, the same sequence `NetlistSpiceWriter` iterates) when `pin` is `true`; `null` when it is not a promoted pin. Lets a caller resolve a specific `.SUBCKT` port index straight back to a `nets[]` entry, positionally, with no separate `klt lvs` run against a reference schematic. |
+| `pin_index`    | integer \| `null` | Additive field (issue #1540). Zero-based position of the promoted pin in `Circuit.each_pin()`, the order KLayout's `NetlistSpiceWriter` uses. An explicit `--pins` order can change the final top-level `.SUBCKT` header. Internal nets have `null`. |
 | `label_positions_um` | array\<object\> | Additive field (issue #1540). Every drawn text-label shape naming this net, `[{"text": str, "x_um": number, "y_um": number}, ...]`, sorted by `(text, x_um, y_um)`; `[]` for a net with no drawn label. `(x_um, y_um)` is each label's anchor point in the top cell's own local coordinate frame — the mechanism a caller with independent floorplan knowledge (e.g. a known physical pin location from `klt place-and-route`'s DEF, or its own generator's placement record) uses to positively identify *which* of several identically-named entries it means, without guessing from `name` alone. |
 
-`nets` is sorted by `name` for deterministic, diff-clean output — `net_id`/`pin_index` are what let a caller recover the unsorted, positional `.SUBCKT` order this sort otherwise discards. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
+`nets` is sorted by `name` for deterministic output. Use `net_id` to identify a circuit net and `pin_index` to recover KLayout's original port order. If `--pins` supplies an explicit order, read the written top-level `.SUBCKT` header for its final port positions. See "Net-name collisions from internally-repeated sub-cells" below for the worked example these three fields exist for.
 
 ### Field classes: content, bookkeeping, tool metadata (issue #1559)
 

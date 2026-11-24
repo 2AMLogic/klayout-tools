@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._digest import normalize_sha256
+
 
 def _worker_simulators(remote: Any) -> list[dict[str, Any] | None]:
     """One entry per member of ``environment.remote``: its
@@ -36,13 +38,15 @@ def worker_ngspice_binary(remote: Any) -> str | None:
     return next(iter(paths)) if len(paths) == 1 else None
 
 
-def _worker_banner(remote: Any) -> tuple[str | None, list[str]]:
+def _worker_banner(
+    simulators: list[dict[str, Any] | None],
+) -> tuple[str | None, list[str]]:
     """``(agreed_banner, explaining_probe_codes)``: the ``version_banner``
     every member reported (same agreement rule as
     :func:`worker_ngspice_binary`), plus probe codes when it is missing."""
     banners: set[str | None] = set()
     probes: set[str] = set()
-    for simulator in _worker_simulators(remote):
+    for simulator in simulators:
         raw = simulator.get("version_banner") if simulator else None
         banner = raw.strip() if isinstance(raw, str) and raw.strip() else None
         banners.add(banner)
@@ -82,8 +86,8 @@ def apply_worker_engine_build(environment: dict[str, Any]) -> None:
     ``ngspice_binary``, which left this field behind.
 
     The banner is the one every member reported (:func:`_worker_banner`);
-    ``binary_sha256`` is always ``None`` (the worker capture records no digest
-    and the client's would describe the wrong machine). With no usable worker
+    the digest is available when every member captured the same binary hash.
+    Older captures can still provide a banner. With no usable worker
     banner it is ``None`` and ``probe``/``reason`` say why. Keyed on
     ``engine_build``'s presence (a deck-list report gains nothing) and value
     (``engine: "xyce"`` keeps a null build)."""
@@ -93,11 +97,37 @@ def apply_worker_engine_build(environment: dict[str, Any]) -> None:
     environment["client_engine_build"] = client_build
     if client_build is None:
         return
-    banner, codes = _worker_banner(environment.get("remote"))
+    simulators = _worker_simulators(environment.get("remote"))
+    digests = {
+        normalize_sha256(simulator.get("binary_sha256")) if simulator else None
+        for simulator in simulators
+    }
+    banner, codes = _worker_banner(simulators)
     probe, reason = ("ok", None) if banner else _no_worker_banner(codes)
+    if banner and len(digests - {None}) > 1:
+        probe, reason = (
+            "disagreement",
+            "the sharded members reported different binary digests",
+        )
     environment["engine_build"] = {
         "version_banner": banner,
-        "binary_sha256": None,
+        "binary_sha256": next(iter(digests)) if len(digests) == 1 else None,
         "probe": probe,
         "reason": reason,
     }
+
+
+def portable_batch_report(
+    report: dict[str, Any], *, enabled: bool, backend: str | None = None
+) -> dict[str, Any]:
+    """Omit the submitter's binary path only from an opted-in batch report."""
+    env = report.get("environment") or {}
+    if not enabled or "client_ngspice_binary" not in env:
+        return report
+    resolved = (env.get("backend") or {}).get("resolved")
+    transport = (env.get("remote") or {}).get("backend")
+    if (resolved or transport or backend) != "batch":
+        return report
+    portable_env = dict(env)
+    portable_env.pop("client_ngspice_binary")
+    return {**report, "environment": portable_env}

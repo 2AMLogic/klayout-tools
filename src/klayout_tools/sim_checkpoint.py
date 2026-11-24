@@ -10,8 +10,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from . import sim_analysis_overrides as _sao
+from . import sim_mismatch_scale
 from ._provenance import sha256_file
 from .sim_corner_point import CornerPoint
+from .sim_transient_noise import key_in_fingerprint
 
 DEFAULT_MC_SEED_SCOPE = "per_corner"
 DEFAULT_MC_SEED_MODE = "derived"
@@ -59,14 +61,17 @@ def _key_in_initial_conditions(
 def _key_in_mc_mismatch_scale(
     payload: dict[str, Any], corner_points: Sequence[CornerPoint]
 ) -> None:
-    """Issue #3942: corner IDs carry neither seeds nor the sigma scale, so a
-    resume under another ``monte_carlo.mismatch_scale`` would reuse samples
-    drawn at the old scale. Keyed in only when declared."""
+    """Issues #3942/#5486: corner IDs carry neither seeds nor the sigma scale,
+    so a resume under another ``monte_carlo.mismatch_scale`` would reuse
+    samples drawn at the old scale. Keyed in only when declared, as the
+    ``(param, value)`` cards actually written -- one for a switch family, one
+    per scanned sigma otherwise, so two sg13g2 runs differing only in the
+    scale key differently."""
     mc_scales = sorted(
         {
-            (point.mc_seed["mismatch_param"], point.mc_seed["mismatch_scale"])
+            card
             for point in corner_points
-            if point.mc_seed and "mismatch_scale" in point.mc_seed
+            for card in sim_mismatch_scale.seed_cards(point.mc_seed)
         }
     )
     if mc_scales:
@@ -108,6 +113,7 @@ def _checkpoint_fingerprint(
     save_vectors: tuple[str, ...] = (),
     complex_vectors: tuple[str, ...] = (),
     ngspice_options: dict[str, Any] | None = None,
+    transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
@@ -157,6 +163,7 @@ def _checkpoint_fingerprint(
         # checkpoint written under other options never applies. Only keyed
         # in when declared, leaving existing fingerprints untouched.
         payload["ngspice_options"] = ngspice_options
+    key_in_fingerprint(payload, transient_noise_seed)
     _key_in_mc_seed_options(payload, corner_points)
     _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:

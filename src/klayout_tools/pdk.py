@@ -686,7 +686,7 @@ def read_version(variant_dir: str) -> str | None:
     to before the fallbacks existed); (2) a ``.fetched-version`` marker
     (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
     directory or its parent is itself a git work tree root, ``git:<40-hex
-    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070);
+    HEAD>`` with ``-dirty`` for index or tracked-file changes (#3070, #7771);
     (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
@@ -741,7 +741,7 @@ def _git_version(variant_dir: str) -> str | None:
     head = _git_run(real, "rev-parse", "HEAD")
     if head is None or not _HEX40.match(head.strip()):
         return None
-    status = _git_run(real, "status", "--porcelain")
+    status = _git_run(real, "status", "--porcelain", "--untracked-files=no")
     dirty = "-dirty" if status and status.strip() else ""
     return f"git:{head.strip()}{dirty}"
 
@@ -770,10 +770,10 @@ def variant_dir_of(pdk: dict[str, Any]) -> str | None:
     return root
 
 
-def tree_of(path: str) -> str | None:
-    """Nearest ancestor directory of ``path`` that is a PDK variant tree
-    (open_pdks ``libs.tech`` or ASAP7 shape), or ``None``."""
-    current = os.path.dirname(os.path.realpath(path))
+def tree_of(path: str, *, follow_symlinks: bool = True) -> str | None:
+    """Nearest PDK variant tree on the physical or logical path, if present."""
+    absolute = os.path.realpath(path) if follow_symlinks else os.path.abspath(path)
+    current = os.path.dirname(absolute)
     while True:
         if (
             has_descriptor(current)

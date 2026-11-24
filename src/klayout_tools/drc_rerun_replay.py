@@ -21,6 +21,23 @@ from ._report_verify import get_path
 from .drc import DrcError, parse_rule_selectors
 
 
+def recorded_native_deck_vars(committed: dict[str, Any]) -> dict[str, str] | None:
+    """Restore the native script globals, leaving the launcher's paths to it."""
+    options = get_path(committed, ("provenance", "deck", "options"))
+    if options is None:
+        return None
+    if not isinstance(options, dict):
+        raise DrcError("provenance.deck.options must be a mapping of names to strings")
+    for name, value in options.items():
+        if name in {"input", "report"}:
+            raise DrcError(f"provenance.deck.options cannot override the {name} path")
+        if not name or name != name.strip() or "=" in name:
+            raise DrcError("provenance.deck.options contains an invalid variable name")
+        if not isinstance(value, str) or "\x00" in name or "\x00" in value:
+            raise DrcError("provenance.deck.options must contain string arguments")
+    return options
+
+
 def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
     """The ``--rules`` selectors a committed curated report was run with
     (issue #2768), or ``None`` for a full-deck report (no ``rule_selection``

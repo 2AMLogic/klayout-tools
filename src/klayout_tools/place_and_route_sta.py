@@ -12,28 +12,8 @@ stage orchestration stays in ``place_and_route.py``. This module owns Tcl
 generation, subprocess invocation and report parsing for these STA passes.
 Caller-supplied paths and corner names use the shared ``tcl_literal`` helper.
 
-Dependency surface is intentionally narrow and mostly one-directional, the
-same discipline ``gen_compose_routing.py`` documents for its own reverse
-dependency: this module's own already-shared helpers (``_run_openroad``/
-``_count_violations`` from ``_openroad_engine.py``, ``_tcl_net_list``/
-``_count_spef_nets_annotated`` from ``_paths.py``) are imported at module
-scope -- neither creates a cycle, since neither of those modules imports
-back from here or from ``place_and_route.py``. The handful of names that
-*are* still defined in ``place_and_route.py`` itself (``PlaceAndRouteError``,
-``_write_script``, ``_clock_lines``, ``_design_rule_constraint_lines``,
-``_design_rule_check_lines``, ``_metrics_report_lines``,
-``_violation_count_lines``, ``_read_metrics``, ``_engine_error_message``,
-``_EXTRACT_DECK_FOR_CELL_LIBRARY``, and the ``_SETUP_VIOLATIONS_*``/
-``_HOLD_VIOLATIONS_*``/``_MAX_TRANSITION_VIOLATIONS_*``/
-``_MAX_CAPACITANCE_VIOLATIONS_*``/``_MAX_TRANSITION_LIBRARY_VIOLATIONS_*``/
-``_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers,
-issue #2357) are imported *inside*
-the functions that use them, deferred rather than at module scope, because
-``place_and_route.py`` in turn imports this module's own public entry
-points back (module scope, no cycle -- this module never imports
-``place_and_route`` at its own module scope) purely to preserve
-``klayout_tools.place_and_route.<name>`` as a working import path for every
-name the test suite/callers used before this split.
+Tcl emitters come from the script module. The run-time hooks for engine
+errors and metrics are resolved from the orchestrator when a run needs them.
 """
 
 from __future__ import annotations
@@ -53,6 +33,36 @@ from ._openroad_engine import (
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 from ._sta_request_diag import SPEF_SKIP_DRIVER_ONLY
 from ._tcl import tcl_literal as _tcl_literal
+from .place_and_route_base import (
+    _HOLD_VIOLATIONS_BEGIN,
+    _HOLD_VIOLATIONS_END,
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+    _MAX_CAPACITANCE_VIOLATIONS_END,
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+    _MAX_TRANSITION_VIOLATIONS_BEGIN,
+    _MAX_TRANSITION_VIOLATIONS_END,
+    _SETUP_VIOLATIONS_BEGIN,
+    _SETUP_VIOLATIONS_END,
+    _SPEF_NET_CHECK_BEGIN,
+    _SPEF_NET_CHECK_END,
+    _SPEF_NET_CHECK_RE,
+    PlaceAndRouteError,
+    _require_extract_deck_for_cell_library,
+)
+from .place_and_route_library_limits import library_limit_fields, prepare_reports
+from .place_and_route_script import (
+    _clock_lines,
+    _design_rule_check_lines,
+    _design_rule_constraint_lines,
+    _io_delay_lines,
+    _metrics_report_lines,
+    _violation_count_lines,
+    _wire_rc_lines,
+    _write_script,
+)
 
 
 def _corner_sweep_script_lines(
@@ -170,17 +180,6 @@ def _corner_sweep_script_lines(
     design-rule verdict's own count changes -- only *when* the constraint
     line is emitted relative to the new library-only pass.
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-        _clock_lines,
-        _design_rule_check_lines,
-        _design_rule_constraint_lines,
-        _io_delay_lines,
-        _wire_rc_lines,
-    )
 
     lines = [f"read_db {_tcl_literal(checkpoint_in)}"]
     lines += [
@@ -303,15 +302,6 @@ def _spef_sta_script_lines(
       triplet written with an empty typ member -- OpenSTA's default -- would
       leave the *default* Icarus corner selecting nothing.
     """
-    from .place_and_route import (
-        _SPEF_NET_CHECK_BEGIN,
-        _SPEF_NET_CHECK_END,
-        _clock_lines,
-        _design_rule_constraint_lines,
-        _io_delay_lines,
-        _metrics_report_lines,
-        _violation_count_lines,
-    )
 
     lines = [
         f"read_db {_tcl_literal(checkpoint_in)}",
@@ -626,20 +616,7 @@ def _post_route_spef_metrics(
     :data:`~klayout_tools.place_and_route._CTS_BUFFER_CELLS` and its call
     sites).
     """
-    from .place_and_route import (
-        _HOLD_VIOLATIONS_BEGIN,
-        _HOLD_VIOLATIONS_END,
-        _SETUP_VIOLATIONS_BEGIN,
-        _SETUP_VIOLATIONS_END,
-        _SPEF_NET_CHECK_BEGIN,
-        _SPEF_NET_CHECK_END,
-        _SPEF_NET_CHECK_RE,
-        PlaceAndRouteError,
-        _engine_error_message,
-        _read_metrics,
-        _require_extract_deck_for_cell_library,
-        _write_script,
-    )
+    from .place_and_route import _engine_error_message, _read_metrics
 
     extract_deck = _require_extract_deck_for_cell_library(cell_library)
 
@@ -835,6 +812,7 @@ def _run_corner_sweep(
     int | None,
     int | None,
     int | None,
+    str | None,
 ]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -844,15 +822,15 @@ def _run_corner_sweep(
     Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners,
     max_transition_violation_count, max_capacitance_violation_count,
     max_transition_violation_count_vs_library,
-    max_capacitance_violation_count_vs_library)``. The first two, each
-    rounded to 5 decimal places (matching
+    max_capacitance_violation_count_vs_library, library_limit_report_path)``.
+    The first two, each rounded to 5 decimal places (matching
     :func:`~klayout_tools.place_and_route._extract_stage_metrics`'s own
     ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
     ``-metrics`` dump didn't populate the corresponding key, are issue #949's
     original aggregate fields -- unchanged by issue #1092, still sourced from
     this same combined, every-``corners``-loaded-at-once session's own
     unscoped ``report_worst_slack_metric -setup``/``-hold`` calls.
-    ``(None, None, [], None, None, None, None)`` when ``corners`` is empty --
+    ``(None, None, [], None, None, None, None, None)`` when ``corners`` is empty --
     either the "should not happen in practice" case the original #949
     docstring named (a resolved ``liberty_path`` implies at least one
     shipped ``.lib``), or issue #1092's own explicit
@@ -938,23 +916,11 @@ def _run_corner_sweep(
     sweep would undermine the very multi-corner evidence claim they exist
     to support (T1 checklist item 5, ``docs/design-evidence-tiers.md``).
     """
-    from .place_and_route import (
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-        _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_VIOLATIONS_END,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-        _MAX_TRANSITION_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_VIOLATIONS_END,
-        PlaceAndRouteError,
-        _engine_error_message,
-        _read_metrics,
-        _write_script,
-    )
+    from .place_and_route import _engine_error_message, _read_metrics
 
+    reports = prepare_reports(output_dir, hdl_toplevel)
     if not corners:
-        return None, None, [], None, None, None, None
+        return None, None, [], None, None, None, None, None
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -1021,15 +987,8 @@ def _run_corner_sweep(
     # Issue #2357: the library-only pass -- same stdout, distinct markers
     # (`_corner_sweep_script_lines` runs this pass *before* any caller-stated
     # constraint is applied to the session).
-    max_transition_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-    )
-    max_capacitance_violations_vs_library = _count_violations(
-        completed.stdout,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    library_limits = library_limit_fields(
+        completed.stdout, reports, corners[0]["name"] if len(corners) == 1 else None
     )
 
     if len(corners) == 1:
@@ -1049,12 +1008,7 @@ def _run_corner_sweep(
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
                 # Issue #2357: this corner's own library-only counterpart.
-                "max_transition_violation_count_vs_library": (
-                    max_transition_violations_vs_library
-                ),
-                "max_capacitance_violation_count_vs_library": (
-                    max_capacitance_violations_vs_library
-                ),
+                **library_limits,
             }
         ]
         return (
@@ -1063,8 +1017,9 @@ def _run_corner_sweep(
             corner_breakdown,
             max_transition_violations,
             max_capacitance_violations,
-            max_transition_violations_vs_library,
-            max_capacitance_violations_vs_library,
+            library_limits["max_transition_violation_count_vs_library"],
+            library_limits["max_capacitance_violation_count_vs_library"],
+            library_limits["library_limit_report_path"],
         )
 
     corner_breakdown = []
@@ -1147,16 +1102,7 @@ def _run_corner_sweep(
                 ),
                 # Issue #2357: this corner's own library-only counterpart,
                 # from the same single-corner invocation's stdout.
-                "max_transition_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
-                ),
-                "max_capacitance_violation_count_vs_library": _count_violations(
-                    corner_completed.stdout,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
-                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
-                ),
+                **library_limit_fields(corner_completed.stdout, reports, corner_name),
             }
         )
 
@@ -1166,6 +1112,7 @@ def _run_corner_sweep(
         corner_breakdown,
         max_transition_violations,
         max_capacitance_violations,
-        max_transition_violations_vs_library,
-        max_capacitance_violations_vs_library,
+        library_limits["max_transition_violation_count_vs_library"],
+        library_limits["max_capacitance_violation_count_vs_library"],
+        library_limits["library_limit_report_path"],
     )

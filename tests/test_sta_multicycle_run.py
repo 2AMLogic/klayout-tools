@@ -22,8 +22,8 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from test_post_route_sta import (
+    _LIVE_ONLY,
     _STA_METRICS,
-    _live_sky130_env,
     _setup_multi_corner_env,
     _setup_success_env,
     _setup_verilog_success_env,
@@ -99,6 +99,7 @@ def test_run_sta_script_emits_block_between_delays_and_reports(tmp_path, monkeyp
         monkeypatch, _mcp_stdout(5.46515, -0.53485, 2.29215)
     )
     report = run_sta(request_path)
+    assert report["multicycle_engine_sessions"] == len(scripts) == 2
     script = scripts[0]
     assert "set_multicycle_path 4 -setup" in script
     # after the clock/IO constraint seam, before every report command
@@ -135,7 +136,9 @@ def test_run_sta_writes_one_without_script_per_entry(tmp_path, monkeypatch):
     }
     scripts = _stub_openroad_multicycle(monkeypatch, blocks)
     report = run_sta(request_path)
-    assert len(scripts) == 3  # with-run + one without-run per entry
+    assert (
+        report["multicycle_engine_sessions"] == len(scripts) == 3
+    )  # with-run + one without-run per entry
     without0 = scripts[1]
     # entry 0's pair dropped, entry 1's kept -- the unambiguous baseline
     assert without0.count("set_multicycle_path") == 2
@@ -165,8 +168,15 @@ def test_run_sta_omitted_and_empty_leave_tcl_and_response_unchanged(
     empty = run_sta(empty_path)
 
     assert scripts_plain[0] == scripts_empty[0]
+    assert "request_sha256" not in plain["provenance"]
+    assert "request_sha256" not in empty["provenance"]
     assert "multicycle_paths" not in empty
-    assert set(plain) == set(empty)
+    assert "multicycle_engine_sessions" not in plain
+    assert "multicycle_engine_sessions" not in empty
+    # Every fresh invocation has its own log id, including the derived log paths.
+    assert json.dumps(plain).replace(plain["engine_log"]["invocation_id"], "<run>") == (
+        json.dumps(empty).replace(empty["engine_log"]["invocation_id"], "<run>")
+    )
 
 
 def test_run_sta_def_mode_script_also_carries_the_block(tmp_path, monkeypatch):
@@ -185,14 +195,19 @@ def test_run_sta_multi_corner_reports_each_corner(tmp_path, monkeypatch):
         monkeypatch,
         constraints=_multicycle_constraints(),
     )
-    _stub_openroad_multicycle(monkeypatch, _mcp_stdout(5.46515, -0.53485, 2.29215))
+    scripts = _stub_openroad_multicycle(
+        monkeypatch, _mcp_stdout(5.46515, -0.53485, 2.29215)
+    )
     report = run_sta(request_path)
     assert len(report["corners"]) == 2
+    assert len(scripts) == 4
     for corner in report["corners"]:
+        assert corner["multicycle_engine_sessions"] == 2
         (record,) = corner["multicycle_paths"]
         assert record["setup_slack_ns"] == {"with": 5.46515, "without": -0.53485}
     # per-corner only, never hoisted: each corner's session measured its own
     assert "multicycle_paths" not in report
+    assert "multicycle_engine_sessions" not in report
 
 
 def test_run_sta_resolution_error_is_request_error_naming_index(tmp_path, monkeypatch):
@@ -309,11 +324,7 @@ def _feedback_request(tmp_path, multicycle: bool, *, entry=_ENTRY) -> str:
     )
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 @pytest.mark.parametrize("entry", [_ENTRY, {**_ENTRY, "through": "u_mux/X"}])
 def test_live_engine_multicycle_feedback_four_periods(tmp_path, entry):
     """The #6908 release criterion on the pinned engine: the same-enable
@@ -358,11 +369,7 @@ def test_live_engine_multicycle_feedback_four_periods(tmp_path, entry):
     )
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_multicycle_resolution_errors(tmp_path):
     """Selector resolution on the linked netlist, live: an unclocked
     register and a matched-nothing selector are request errors naming the
@@ -401,11 +408,7 @@ def test_live_engine_multicycle_resolution_errors(tmp_path):
         assert fragment in str(excinfo.value)
 
 
-@pytest.mark.skipif(
-    _live_sky130_env() is None,
-    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
-    "KLT_SKIP_OPENROAD_TESTS unset",
-)
+@_LIVE_ONLY
 def test_live_engine_multicycle_def_linked_resolution(tmp_path):
     """The same engine-side resolution on a DEF-linked design (the
     curator's unverified item #3): a matched-nothing selector is a request

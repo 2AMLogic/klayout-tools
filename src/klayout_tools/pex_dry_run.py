@@ -51,6 +51,7 @@ from .extract_validate import validate_run_extract_args
 from .pex import (
     SCHEMA_VERSION,
     PexError,
+    _bound_testbenches,
     _check_dut_declares_a_circuit,
     _find_dut_include,
     _load_testbench_request,
@@ -224,12 +225,13 @@ def _extraction_preflight(
 
 def _resolve_testbenches(
     testbench_paths: Sequence[str],
+    timeout_s: float | None,
 ) -> tuple[list[str], list[str]]:
     """Validate schematic probes and resolve each testbench body and DUT."""
     body_paths: list[str] = []
     dut_paths: list[str] = []
     for testbench_path in testbench_paths:
-        request = _load_testbench_request(testbench_path)
+        request = _load_testbench_request(testbench_path, timeout_s)
         schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
@@ -277,6 +279,7 @@ def run_pex_dry_run(
     hosts: int | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -302,6 +305,7 @@ def run_pex_dry_run(
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
     flatten_schematic: bool = False,
+    schematic_top: str | None = None,
     device_only_leg: bool = False,
     extract_only: bool = False,
     submit_only: bool = False,
@@ -344,8 +348,10 @@ def run_pex_dry_run(
         testbench_paths,
         reference_netlist,
         measure_timeout_s,
+        timeout_s=timeout_s,
         extract_only=extract_only,
         flatten_schematic=flatten_schematic,
+        schematic_top=schematic_top,
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
@@ -354,7 +360,7 @@ def run_pex_dry_run(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    _body_paths, dut_paths = _resolve_testbenches(testbench_paths)
+    body_paths, dut_paths = _resolve_testbenches(testbench_paths, timeout_s)
     resolved_top = _extraction_preflight(
         layout_path,
         deck_name,
@@ -392,6 +398,8 @@ def run_pex_dry_run(
         extract_only, measured_reference_netlist, dut_paths
     )
 
+    _bound_testbenches(schematic_top, resolved_top, reference_netlist_path, body_paths)
+
     # Issue #4616/#4624/#5280: the shard flags the schematic leg would pass,
     # so the nested dry run expands exactly the unit list a real leg would.
     batch_shard = pex_async.batch_shard_flags(
@@ -400,6 +408,7 @@ def run_pex_dry_run(
         hosts=hosts,
         resume=resume,
         capacity_wait_s=capacity_wait_s,
+        timeout_s=timeout_s,
     )
 
     testbenches: list[dict[str, Any]] = []
@@ -432,6 +441,7 @@ def run_pex_dry_run(
         # version: every field below is additive (docs/json-contract.md).
         "schema_version": SCHEMA_VERSION,
         "dry_run": True,
+        **({"simulation_timeout_s": timeout_s} if timeout_s is not None else {}),
         "status": "valid",
         "layout": env_provenance.repo_relative_path(
             layout_path or None, repo_root=repo_root

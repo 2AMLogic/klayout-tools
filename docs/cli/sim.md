@@ -163,7 +163,9 @@ this document (and the code) win.
   compressed report is citable as manifest evidence with no decompressed
   second copy. Given together with `-o`, `--report-out` wins outright and
   no implicit `<outdir>/report.json` copy is written (see `--outdir`
-  above).
+  above). The report is staged as a sibling temporary file and renamed into
+  place, so the path's parent directory must be writable; a failed write
+  preserves the previous file.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -245,7 +247,7 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no *submit-side* probe of the launched
 instance, but the pin is not post-run-only either. `batch` first checks it
-*before submitting*: the AMI manifest publishes each image's
+*before submitting*: the batch image pointer publishes the runner's
 `ngspice_version`, and when **every** candidate image for the request's
 `models.pdk`/`batch.region` carries one the pin excludes, `klt sim` refuses
 with `engine_version_unmet` before any S3 write or launch (no job
@@ -358,8 +360,12 @@ are unchanged.
 same `engine_host` contract as `ngspice_binary`: `version_banner` is
 `environment.remote.worker_environment.simulator.version_banner` when that
 capture's `capture` is `"ok"` (a sharded run reports one only when every
-member captured the same banner), and `binary_sha256` is `null` — the worker
-capture records no digest. With no usable worker banner, `version_banner` is
+member captured the same banner). A batch worker also hashes the executable it
+selected. `binary_sha256` contains its lowercase SHA-256 when every member
+captured the same valid digest. Older captures, missing hashes and mixed
+digests yield `null`. When every member reports the same usable banner but two
+observed hashes differ, `probe` is `"disagreement"` and `reason` names the
+hash mismatch. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
@@ -373,6 +379,16 @@ present only on off-host reports. `worker_environment.engine_build_comparison`
 (below) compares the two for you. A `local` report is unchanged: there
 `engine_build` is the local probe and there is no `client_engine_build`.
 Deck-list (`decks[]`) reports carry neither field.
+
+#### Numeric reproducibility across hosts
+
+A matching ngspice major version, version banner, and PDK snapshot do not
+guarantee a fixed number of matching digits in `.meas` results. Even with
+the same request and model inputs, different builds, linked numerical
+libraries, and host floating-point behavior can change the values. Use the
+batch worker's binary hash to identify its executable. Set absolute or
+relative comparison tolerances appropriate to the measurement and the
+circuit's requirements.
 
 **ngspice's working directory, and `.spiceinit` compatibility mode (issue
 #2520).** Every `ngspice`/`Xyce` subprocess this command spawns — per
@@ -474,7 +490,8 @@ closure, including `.subckt` bodies) *declares* at least one
 {"engine": "ngspice",
  "sources": [{"name": "vn", "kind": "trnoise"}],
  "intrinsic_device_noise": false,
- "intrinsic_resistor_noise": false}
+ "intrinsic_resistor_noise": false,
+ "reproducibility_note": "..."}
 ```
 
 Names are lower-cased and sorted; "declared" is lexical (all-zero amplitudes
@@ -484,6 +501,18 @@ or with no transient, keep `environment` unchanged. Not claimed: the Xyce
 engine's behaviour has not been verified for this finding, so the field is
 never emitted for `engine: "xyce"`. See also "Monte Carlo sampling" below,
 whose `unseeded_sources` disclosure scans the same sources.
+
+The block always carries `reproducibility_note` (issue #5772) — on runs with
+**no** `monte_carlo` block too, where the MC-scoped `unseeded_sources_note`
+never reaches (that one is emitted only inside `environment.monte_carlo`,
+with its stderr warning, and both are unchanged). The note is keyed on the
+kinds actually found and states the measured replayability of each:
+`trnoise` is not replayable through any known seeding route (see the #3957
+section below); `trrandom` is replayable via a `.control` `setseed` command,
+pinned when the request declares `options.transient_noise_seed` (same
+section) and unpinned otherwise. A mixed netlist with a declared seed says
+both — the seed never makes a `trnoise` stream reproducible. When the
+request declares the seed, the block also echoes it as `seed`.
 
 #### How a per-unit seed reaches a transient-noise stream (measured, [#3957](https://github.com/2AMLogic/klayout-tools/issues/3957))
 
@@ -500,13 +529,54 @@ seed 2):
 | `.options seed=N` | 8.37e-04 | 8.28e-04 | 8.59e-04 |
 
 The same seed gave a different RMS in every route. **Caveat: n=1 pair per
-route, one ngspice build.** Not measured: `trrandom`, other ngspice builds,
-the batch fleet's build. So klt cannot promise independent, replayable
-per-seed streams for `trnoise`, and deck-list requests have no `seed` field:
-a seed written into a deck is just deck bytes (it keys `--resume`, see
-"Resuming a deck run"), not a statement that the stream replays. What the
-per-unit `rndseed` of Monte Carlo corner mode *does* cover is
-`agauss`/`gauss`/`random()` sampling only (see "Monte Carlo sampling").
+route, one ngspice build.** Measured 2026-11-15 on ngspice-47 (issue #5772):
+the `.options seed=` and `.spiceinit` routes still do not pin `trnoise`
+(three runs at a fixed `.options seed=42` gave three different point
+samples), and a `rndseed` control command does not exist in ngspice-47 —
+the real command name is `setseed`. So klt cannot promise independent,
+replayable per-seed streams for `trnoise`, and deck-list requests have no
+`seed` field: a seed written into a deck is just deck bytes (it keys
+`--resume`, see "Resuming a deck run"), not a statement that the stream
+replays. What the per-unit `rndseed` of Monte Carlo corner mode *does* cover
+is `agauss`/`gauss`/`random()` sampling only (see "Monte Carlo sampling").
+
+**`trrandom` IS replayable on ngspice-47 — but only via `setseed` first in
+`.control`.** Measured 2026-11-15 (issue #5772; deck `V1 n 0 dc 0
+trrandom(2 1u 0 1)` + `R1 n 0 1k`, `tran 1u 200u`, `.meas tran rm RMS v(n)`;
+same host, ngspice-47):
+
+| Route | `trnoise` (RMS V) | `trrandom` (RMS V) |
+| --- | --- | --- |
+| `setseed 1` first in `.control` (×3) | redraws (7.9e-04 … 8.3e-04) | **1.02848** every run |
+| `setseed 2` first in `.control` (×2) | redraws | **0.950224** every run |
+| `setseed 3` first in `.control` | — | 1.05017 |
+| same `setseed` via `.spiceinit` | redraws | redraws |
+| `set rndseed=42` (the variable) | redraws | redraws |
+
+`setseed` delivered through `options.ngspice_init` (which lands in the
+corner's `.spiceinit`) does **not** pin either kind — `.spiceinit` is
+sourced before the deck is parsed, too early for the generator. `set rndseed`
+(the variable) is accepted and pins nothing. Placement is what matters, and
+it is the one thing a request can now control:
+
+**`options.transient_noise_seed`** (issue #5772, integer from 1 through
+2147483647 inclusive; `engine:
+"ngspice"` only, refused for `"xyce"`): emits `setseed N` as the **first**
+command of every corner deck's `.control` block — ahead of the
+`alterparam`/`reset` prefix, the `save` card and every supply `alter`
+(measured 2026-11-16, ngspice-47, through a real `klt sim` run: the seed
+replays bit-identically across those prefix commands — RMS `1.02848` at
+`setseed 1` twice, `0.950224` at `setseed 2`, distinct per seed). It is
+echoed as `environment.transient_noise.seed`, and the block's
+`reproducibility_note` states the scope honestly: this pins **`trrandom`
+only** — it does **not** make `trnoise` reproducible (no known route does).
+Off-host backends re-read the option from the forwarded request document,
+and the collected report is checked: a runner that predates the field and
+silently dropped it fails the run by name rather than returning unpinned
+noise under a seed echo. When a Monte Carlo block is also declared, its
+`.options seed=` (file scope, evaluated during deck parse) keeps governing
+mismatch sampling; the later `.control` `setseed` governs the
+transient-noise stream. Not measured: the batch fleet's ngspice build.
 
 ### Measurement output precision (`measureprec` / `numdgt`)
 
@@ -535,6 +605,7 @@ Consequences:
   `0.6666778`, yet `(vout - 0.6666778) * 1e9` evaluates to `-22.59...`, not `0`.
 - Defaults are unchanged: with no `ngspice_init`, formatting is whatever the
   installed ngspice defaults to.
+- For a bounded transient interval, use [windowed transient expression reductions](#windowed-transient-expression-reductions).
 - `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
   `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
   transient value at a time, use a `.meas ... FIND ... AT=` card; to use a
@@ -723,26 +794,31 @@ immediately. A non-positive or non-integer `max_workers` is an application
 error (exit 1).
 
 **Threads per worker (issue [#2970](https://github.com/2AMLogic/klayout-tools/issues/2970)).**
-The `max_workers // 8` estimate above (`_ASSUMED_THREADS_PER_NGSPICE`) is kept:
-it sizes the *pool* for the cores one ngspice may use. Separately, whenever a
-`local-parallel` (hence `batch`) run has more than one worker in flight, each
-`ngspice` is started with `OMP_NUM_THREADS=1` in its process environment, so N
-workers do not each spawn a full OpenMP team and oversubscribe the host (on the
-fleet this was a measured ~270× per-unit slowdown, bit-identical `.meas`
-values). The environment variable is used rather than `options.ngspice_init`
-because an older runner silently drops the latter. `options.threads_per_worker`
-(positive integer; anything else is an application error, exit 1) overrides the
-default for `local` and `local-parallel` alike. A single worker with no
-override keeps the ambient environment. A netlist that itself runs
-`set num_threads=N` in a `.control` block still wins (it executes after the
-environment is read). `engine: "xyce"` is not given the variable. The value in
-force is reported as `environment.threads_per_worker` (absent when the ambient
-environment decided).
-The resolved count is also written as `set num_threads=N` into each corner's
-generated `.spiceinit` ([#3619](https://github.com/2AMLogic/klayout-tools/issues/3619)):
-on the batch fleet (ngspice-46) `OMP_NUM_THREADS` alone did not prevent
-oversubscription, while `set num_threads=1` did. An `options.ngspice_init` line
-is written after it and wins.
+When several workers share a host, klt gives each ngspice process `OMP_NUM_THREADS=1` and writes
+`set num_threads=1` to its corner's `.spiceinit`. A single worker inherits the
+ambient settings. Set `options.threads_per_worker` to a positive integer to
+override either default on `local` or `local-parallel`, including a batch
+worker. Invalid values return exit 1. A declared `options.ngspice_init` line
+runs after the generated pin, and the netlist's `.control` runs later still.
+`environment.threads_per_worker` records the count klt requested when it set
+one.
+
+With `engine: "xyce"`, klt still validates `options.threads_per_worker`.
+It leaves the process’s `OMP_NUM_THREADS` setting alone and writes no
+`set num_threads` pin. On `local` and `local-parallel`,
+`environment.threads_per_worker` reports the resolved option, including the
+default of 1 for multiple workers. Xyce receives neither control from klt.
+
+On the ngspice 46 fleet, oversubscription caused a reported ~270× per-unit
+slowdown with identical measurement values. The generated `.spiceinit` pin
+was added after an environment-only run still timed out. [Fleet verification](https://github.com/2AMLogic/klayout-tools/issues/3619)
+
+On the ngspice 47 fleet, a four-corner SKY130 ring test cleared `num_threads`
+with `options.ngspice_init: ["unset num_threads"]`. Each solver observed its
+requested OpenMP value. Changing it from 1 to 8 changed each corner's runtime
+by at most 2.1% on an eight-core worker running one corner at a time. All four
+ring frequencies matched. The internal OpenMP team size remains unmeasured.
+[Measurements and runner details](https://github.com/2AMLogic/klayout-tools/issues/3522#issuecomment-7111416078)
 
 **Useful on a workstation, harmful on a shared worker.** `local-parallel`
 trades CPU/memory for wall-clock time — fine on a dedicated development
@@ -920,11 +996,9 @@ baked image and which PDK snapshot produced this result, the same role
 `environment.models_lib_sha256` plays for `local`/`local-parallel`.
 `spin_up_s` is the measured wall-clock from provisioning start to the
 remote host being ready to accept the first corner (instance reaching
-`running` plus SSH becoming reachable) — `runtime_s`/`engine_version` remain
-the only fields that legitimately vary between a `local` and a `remote` run
-of the same request (see "Semantics and guarantees" below); given a matching
-`engine_version` and PDK snapshot hash, `.meas` measurements are expected to
-match bit-for-bit.
+`running` plus SSH becoming reachable). Comparing measurements across hosts
+requires a circuit-appropriate tolerance. See [Numeric reproducibility across
+hosts](#numeric-reproducibility-across-hosts).
 
 **Transport: SSH/SCP push-then-pull, no IAM instance profile on the
 guest.** `remote_launcher.select_instance_type()` sizes one instance for the
@@ -1048,7 +1122,10 @@ that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).
 **What `--resume` does with a retained shard map**
 ([#5775](https://github.com/2AMLogic/klayout-tools/issues/5775)). Before the
 outstanding units are dispatched, `--resume` **harvests** the map: each
-recorded shard's `status.json` is read once, a shard whose remote job is
+recorded shard's `status.json` is read (an unreadable read is re-read a
+small fixed number of times before it counts as `unknown`,
+[#7115](https://github.com/2AMLogic/klayout-tools/issues/7115)), a shard
+whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
 `resume: reused N checkpointed corner(s)` summary and never re-billed.
@@ -1058,7 +1135,11 @@ by dispatch observations. A job seen in both appears once. Shards the map record
 `submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
-grouping is unchanged is launched under its recorded job id instead). A map
+grouping is unchanged is launched under its recorded job id instead), and
+each such skip of a launched shard prints one stderr notice —
+`klt sim: notice: --resume did not harvest shard <i> (job <id>): <reason>`
+with the reason `status unreadable`, `remote state <state>`, or
+`shard grouping not recoverable`. A map
 written for a different request refuses with
 `error.code: "resume_fingerprint_mismatch"` rather than attaching stale
 results. `--attach <batch-shards.json> --collect-partial` remains the
@@ -1134,21 +1215,12 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 [2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
 [#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
 
-**A runner older than a request feature fails the job, not the submit.**
-The client has no per-feature runner capability signal: the AMI manifest
-publishes only the runner's `klt_version`/`klt_ref`, which
-`runner_version_check` compares by major.minor release. A request that uses
-a newer feature — e.g. a `corners.process[].sections[]` `{"lib","section"}`
-object (#2522) — is therefore not refused up front when the version check is
-`warn`, or the manifest has no entry to compare (`batch_runner_version_unknown`).
-The job then fails in seconds with `batch job <id> finished 'failed' without a
-usable report: job command exited 1`, followed by the engine-log tail or
-`engine log unavailable` (a submit-only credential cannot read `harness.log`).
-When that is the only evidence, suspect a runner that predates a feature the
-request uses, and keep `runner_version_check` at `enforce` (the default). A
-real pre-submit feature check needs a machine-readable runner capability
-field and is tracked with the `analysis_steps[]` equivalent in
-[#3249](https://github.com/2AMLogic/klayout-tools/issues/3249).
+Batch preflight compares features with known minimum runner versions when
+the image pointer supplies a klt build. For request fields with no
+registered minimum, validation still runs on the worker. If validation
+fails before the simulator writes a report, inspect the per-corner
+`batch_job_failed` diagnostic and the retrieved engine-log tail.
+
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -1157,10 +1229,10 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.jobs_prefix` | string | S3 key prefix jobs live under. Defaults to the fleet config's `BATCH_JOBS_PREFIX`, else `"jobs"`. |
 | `batch.region` | string | AWS region passed to both the `aws` CLI and `launch`. Defaults to `$KLT_BATCH_REGION`, else the fleet config's `BATCH_REGION`, else the `aws` CLI's own resolution. |
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
-| `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
-| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.poll_interval_s` | number ≥ 0 | How often `status.json` is re-read. Defaults to `30`; `0` is accepted. A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
+| `batch.poll_timeout_s` | number ≥ 0 | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s; `0` is accepted (give up on the first poll). On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). A negative, non-finite, non-numeric or `bool` value is rejected before any S3 write with `error.code: "batch_poll_knob_invalid"` ([#7543](https://github.com/2AMLogic/klayout-tools/issues/7543)). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`, which also harvests the retained shard map; for the non-blocking form, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
-| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
+| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the batch image pointer's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
@@ -1168,7 +1240,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 | `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
 
-### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
+### Asynchronous submit, status and cancel (`--submit-only`, `--job-status`, `--cancel`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073), [#4351](https://github.com/2AMLogic/klayout-tools/issues/4351))
 
 A blocking `klt sim --backend batch` run prints nothing until the fleet job
 ends. To hand a long run off instead:
@@ -1330,8 +1402,8 @@ backend" for the resolution order and the no-bucket error):
 
 | Field | Description |
 | ----- | ----------- |
-| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed` or `timeout` |
-| `terminal` | `true` for `done`/`failed`/`timeout` |
+| `state` | `pending` (no `status.json` yet — the instance has not booted; not an error), `running`, `interrupted`, `done`, `failed`, `timeout` or `cancelled` |
+| `terminal` | `true` for `done`/`failed`/`timeout`/`cancelled` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
 | `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
 | `never_started`, `unstarted_seconds`, `diagnostic` | Derived by `klt`, present only on a `pending` job (no `status.json`) whose `job.json` is older than 1800 s (`_BATCH_PROVISION_SLACK_S`): `never_started: true`, the `job.json` age in seconds, and the same "never started" message `--attach` prints. Additive; treat all three as optional ([#5332](https://github.com/2AMLogic/klayout-tools/issues/5332)) |
@@ -1343,6 +1415,39 @@ An unknown job id (no `job.json` under the prefix) is an error envelope with
 `error.code: "batch_job_not_found"`; a malformed id is
 `"batch_job_id_invalid"`. Reading an `interrupted` job re-launches nothing —
 2am's own `reconcile` does that.
+
+`--cancel JOB_ID` ([#4351](https://github.com/2AMLogic/klayout-tools/issues/4351))
+cancels one fleet job through 2am's `batch-fleet-provision.sh
+cancel <job-id> --apply` — the fleet-side primitive
+([2AMLogic/2am#6502](https://github.com/2AMLogic/2am/issues/6502)) that marks
+the job's `status.json` `cancelled`, writes its end record, and only then
+terminates its pending/running instances. That order is load-bearing:
+terminating first would read as `abandoned` to the fleet's `reconcile` and
+get the job re-launched, which is why `klt` never issues the AWS calls
+itself. The job's S3 prefix and partial results are left in place. Like
+`--job-status` it needs no request file; on success it exits `0` with:
+
+| Field | Description |
+| ----- | ----------- |
+| `schema_version` | `1` |
+| `job_id`, `state` | The cancelled job; `state` is `"cancelled"` |
+| `bucket`, `region`, `job_uri` | Where the job lived |
+| `warnings` | Additive: the fleet script's stderr lines (bucket redacted), only when it warned — e.g. an instance it could not terminate |
+
+A job with nothing live to terminate (already finished, already cancelled,
+or unknown to the fleet tag) fails with `error.code:
+"batch_cancel_nothing_to_cancel"`; any other script failure surfaces its
+bucket-redacted stderr. Before applying a cancellation, klt checks that
+the resolved bucket and jobs prefix match the provisioner's literal
+`BATCH_JOB_BUCKET` and `BATCH_JOBS_PREFIX` in the adjacent `batch-fleet.env`.
+If it cannot confirm the match, it exits before invoking the provisioner.
+`--cancel` conflicts (exit `2`) with `--dry-run`, `--submit-only`, `--wait-for-capacity`, `--attach`, `--job-status`, a
+non-`batch` `--backend`, and `--batch-set`. Cancelling a sharded
+`--submit-only` run takes one `--cancel` per shard job id (a shard-map form
+is future work). A cancelled job read with `--job-status` reports
+`terminal: true, known_state: true`; `--attach` or a blocking run on one
+fails fast with `error.code: "batch_job_cancelled"` instead of waiting on
+or collecting a job whose results will never come.
 
 **Progress and unit counts.** The fleet's `status.json` is written at state
 transitions only and carries no completed/total unit count; `outputs/` is
@@ -1586,6 +1691,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   or read its full report path from `requests[].report` in the completed
   aggregate envelope. When `-o` is relative, resolve these paths from the
   directory where the batch-set command ran.
+
+  A member refused with `not_launched` after it received a job ID also
+  records `requests[].expected_report`. This path may become readable after
+  a later collection. Before using it, match the file’s remote job ID or
+  fleet job IDs to that member’s `job_ids`. The original refusal keeps
+  `report: null`.
 - **Netlist identity.** For each corner batch job, collection compares the
   runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
   bytes, including rewritten include paths. A mismatch rejects the result
@@ -1671,6 +1782,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   a wait budget the pending wait is unbounded, as before.
 - **`--report-out`** writes the aggregate envelope to a file (also on a partial
   failure), in addition to stdout.
+- **`--portable-paths`** omits `environment.client_ngspice_binary` from
+  batch reports and preserves the worker binary and both build records.
+  In a batch set, resolve each non-null `requests[].report` from the
+  aggregate file's directory when using `--report-out`, including for the
+  copy on stdout. For stdout alone, use the directory containing
+  `set-manifest.json`. For example, `-o bundle/members --report-out
+  bundle/reports/set.json --portable-paths` records
+  `../members/amp/report.json` for a member named `amp.request.json`.
+  Moving the whole `bundle/` preserves this reference. Choose an aggregate
+  filename distinct from every member report.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
@@ -1830,15 +1951,15 @@ merged corner order. Merging N per-process reports therefore yields the report
 one request over the same grid would.
 
 Sibling requests may use different model libraries for the same netlist.
-Each shard must declare the same measurement names, units, limits and
-provenance, including `spec_row` and `case` whenever present. A disagreement
+Each shard must agree on the measurement names, units and limits, and on
+the `spec_row` and `case` declarations whenever present. A disagreement
 returns `inconsistent_shards` (exit 10). The merged measurement rollup carries
 those row and case labels and grades limits over every declared corner.
 
 You can cite the merged report for item 5 of a `klt signoff` manifest.
 List the intended rows on the citation. Passing tagged measurements with
-limits give those rows derived coverage. A manifest pin can verify the netlist when every shard records the same non-empty input
-digest. Mixed or missing shard hashes leave the pin unverifiable.
+limits give those rows derived coverage. A manifest pin can verify the
+netlist when every shard records the same non-empty input digest. Mixed or missing shard hashes leave the pin unverifiable.
 
 **Per-report fields become arrays**, aligned with `merge.shards[]`:
 `environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
@@ -1863,7 +1984,7 @@ stdout carries `{"schema_version": 1, "status": "refused", "refusal": {"code",
 | `7` | `unexpected_shard` | a report shares no corner with the plan |
 | `8` | `corner_mismatch` | a report overlaps the plan but is not exactly one shard's corners |
 | `9` | `request_mismatch` | a planned request file is unreadable or not the one the plan pinned |
-| `10` | `inconsistent_shards` | shards disagree on measurement names/units/limits, the simulated netlist or `schema_version` |
+| `10` | `inconsistent_shards` | shards disagree on measurement names, units, limits, `spec_row`, `case`, the simulated netlist or `schema_version` |
 
 When several classes apply the exit code is the first in the order `9, 8, 7, 6,
 5, 10`; the message lists every problem. Other exits: `1` could not run, with the usual error envelope on stderr
@@ -2236,10 +2357,12 @@ budget-skipped, orphaned, or aborted by the fail-fast probe
 (`timeout_budget_unreachable`).
 `complete` means `completed_units == total_units`. The existing
 `unlaunched_shards` and `resumable` fields describe the current dispatch.
-A sharded `--resume` that dispatches and harvests nothing, because every unit
-came from `checkpoint.json`, still reports the summary: `environment.remote`
-then holds only `run`, and `environment.models_lib_sha256_scope` reads
-`"client"` as on any other batch run, not `"local"`.
+When a sharded `--resume` restores every unit from `checkpoint.json`,
+`environment.remote` includes `run` and omits `fleet`. It includes
+[`models_lib_comparison`](#checkpoint-model-library-comparison) and, when the
+client lists per-section libraries, `corner_section_libs_comparison`. Both
+report `not_comparable` because this invocation harvested no worker identity.
+`environment.models_lib_sha256_scope` remains `"client"`.
 
 The client stores observations in `batch-run-history.json` under the artifact
 directory before replacing the shard map. It binds them to the checkpoint
@@ -2359,6 +2482,8 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
+| `measurements[].limits.exclusive_min / exclusive_max` | unreleased |
+| `options.transient_noise_seed` | unreleased |
 | `lossless supply_v corner_id spelling` | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
@@ -2493,12 +2618,12 @@ release segment:
 | `twoport` ([#3338](https://github.com/2AMLogic/klayout-tools/issues/3338)) | `analysis.kind` is `"twoport"` | `0.7.1` (**mandatory**, see below) |
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
-| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
-| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
-| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
+| `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the published batch image (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
@@ -2521,7 +2646,7 @@ for a runner that predates it (e.g. `0.7.0`), and `status` is `unsupported`,
 `supported`, or `unknown` (`missing: null`) when the runner version cannot be
 established. `runner_compatibility` itself stays a major.minor gate.
 
-- **Before launch**: when every image the AMI manifest publishes predates a
+- **Before launch**: when every image the batch image pointer publishes predates a
   feature the request uses, the request is refused once with
   `batch_runner_feature_unsupported` naming the feature and both versions.
   Nothing is uploaded or launched.
@@ -2552,21 +2677,21 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-When the AMI manifest has no candidate images, the client cannot verify
+When the batch image pointer is unavailable, the client cannot verify
 mandatory features before launch. A configured batch dry-run reports
 `batch_runner_request_feature_unverified` with the affected feature names.
 Submission prints the warning before upload and proceeds under either
 `enforce` or `warn`. The worker can then refuse an unsupported request after
 the instance launches.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518), `exclusive_bounds`, [#7645](https://github.com/2AMLogic/klayout-tools/issues/7645)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
 this entry is not relaxed by `runner_version_check: "warn"` and "unknown" is
 not tolerated on the runner side:
 
-- **Before launch**: if every image the AMI manifest publishes predates
+- **Before launch**: if every image the batch image pointer publishes predates
   `transfer`, the request is refused with `batch_runner_feature_unsupported`
   even under `warn`; nothing is uploaded or launched. A manifest with no
   `klt_version` for the image (or no manifest) defers to the runner.
@@ -2603,36 +2728,25 @@ client's submit-only credential cannot read `harness.log` itself). The change is
 additive -- only the message grows; no field is added or changed. A job whose
 envelope *was* recovered keeps its structured `runner_error` diagnostic.
 
-#### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
+<a id="pre-launch-check-from-the-ami-manifest-2851"></a>
 
-The runner-side preflight only runs once a Spot instance has booted. To catch
-a known mismatch before that, the client also checks the runner `klt` that
-the **AMI manifest** publishes. This is the same `remote-sim-ami-manifest.json`
-that `remote` resolves its AMI from, found by the same search order:
-`request.remote.ami_manifest` is not consulted here, so the order is
-`$KLT_AMI_MANIFEST`, then `~/.config/klt/remote-sim-ami-manifest.json`, then
-the packaged `data/` copy. See
-[`docs/schemas/remote-sim-ami-manifest.schema.json`](../schemas/remote-sim-ami-manifest.schema.json).
+#### Pre-launch check from the published batch image ([#6430](https://github.com/2AMLogic/klayout-tools/issues/6430))
 
-- **Source.** Each manifest entry may carry `klt_version` (the build string
-  the image's `klt --version` reports, without `klt `) and `klt_ref` (the git
-  ref it was installed from, for audit only).
-  `scripts/aws/build-remote-sim-ami.sh` publishes both for every new or
-  copied image. `klt_ref` is the pinned `--klt-ref` that the build installs
-  `klayout-tools` from, and `klt_version` is what that install reported on
-  the build instance. The script refuses to publish an image whose version
-  it could not read. `--emit-manifest-entry <ami_id> <klt_version>` prints
-  the entry a build would write, with no AWS call. Entries written before
-  #2851 have neither field, which means unknown. **Every rebake must
-  update the packaged `data/remote-sim-ami-manifest.json`** with the new
-  entry's `klt_version`/`klt_ref`; an entry without them leaves the
-  pre-submit check unable to fire, so a skewed client only fails after the
-  submit (runner-side exit 87).
-- **Which images.** For each `(pdk, region)` pair, the check uses the most
-  recently built entry, the same entry `resolve_ami()` would pick. Only the
-  request's `models.pdk` is considered (every PDK when it names none), and
-  only `batch.region` (every region when none is configured, because the
-  fleet chooses its own Spot pool).
+Once fleet configuration resolves, batch preflight makes one read of
+`images/eda-batch-runner/current.json` in the job bucket using the
+configured submit profile and region. This also applies to a configured
+dry run. All checks and shards share that snapshot. The 2am sim launch
+template publishes the `eda-batch-image/1` record, including its AMI ID
+and region. A separate image profile, such as `ihp-sg13cmos5l`, has its
+own runner and reports unknown here.
+
+- **Source.** `tools.klt_build` supplies the runner version, with
+  `tools.klt` as fallback. `tools.ngspice` supplies the engine version.
+  `pdk.variants` lists the installed variants. For sky130 and gf180mcu,
+  `open_pdks_commit` comes from the corresponding family field.
+  Unpublished ref and snapshot fields are null. The report includes the
+  requested PDK family or, for a request without a PDK, the families in
+  the published inventory.
 - **`--dry-run`.** `klt sim --backend batch --dry-run` runs this same
   pre-launch check (version mismatch, request-feature gaps, and the
   `engine_version` pin against the published images), so a request the
@@ -2705,27 +2819,14 @@ the packaged `data/` copy. See
   once, not once per shard.
 - **`warn`.** Prints the same message to stderr and submits as before. The
   runner-side preflight then runs in its `warn` mode.
-- **Unknown.** If no manifest is found, no image is published for the
-  request, any candidate is a legacy entry without `klt_version`, a version
-  is unreadable, or the candidates disagree, nothing is refused locally. The
-  request is submitted unchanged and the runner-side preflight above
-  decides, exactly as before #2851. No historical manifest entry becomes
-  unusable.
-- **PDK variant (#3251).** A manifest entry may publish `pdk_variants`, the
-  PDK variant directories its image ships (e.g. `["gf180mcuD"]`;
-  `build-remote-sim-ami.sh --pdk-variants`). The family-level check only maps
-  `gf180mcuC` to `gf180mcu`, so without this field an unshipped variant fails
-  on the runner as one `batch_job_failed` per corner. When **every** candidate
-  image (same selection as above) publishes `pdk_variants` and none lists the
-  request's `models.pdk`, the whole request is refused with a `SimError`
-  naming the variants the image carries, before any S3 write or launch. A
-  legacy entry without the field, an absent manifest, or a request without
-  `models.pdk` is unchanged.
-- <a name="gf180mcu-image-variants"></a>**Which gf180mcu variants an image ships.**
-  Find the `gf180mcu` entry matching the runner's region and AMI ID in the
-  [AMI manifest](../../data/remote-sim-ami-manifest.json). Its optional
-  `pdk_variants` array lists the installed variant directories. If the field
-  is absent, the inventory for that image is unknown.
+- **Unknown.** A missing or unreadable pointer, a malformed record, or a
+  different region yields `published_runner.status: "unknown"`. Submission
+  proceeds to the existing runner-side checks. A pointer whose klt
+  version cannot be parsed also yields an unknown version assessment.
+- <a name="gf180mcu-image-variants"></a>**PDK variants (#3251).** A valid
+  inventory lets preflight refuse a requested variant missing from that image
+  before uploading a job. For example, the gf180mcu family alone does not
+  identify which of its installed variants are available.
   AMI `ami-04591566329422a44` lacked a supported `gf180mcuC` install
   ([#4947](https://github.com/2AMLogic/klayout-tools/issues/4947)).
   Later deck probes found the model file under both `gf180mcuC` and
@@ -2733,17 +2834,11 @@ the packaged `data/` copy. See
   ([#6854](https://github.com/2AMLogic/klayout-tools/issues/6854)).
   If the image lacks the variant you need, you can use `--backend local`
   on a host where it is installed.
-- **Discovering the runner version before submit.** Read the manifest:
-  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref,
-  ngspice_version, pdk_snapshot}'
-  "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
-  For a given pair, the entry with the latest `built_at` is the one in use.
-- **Limit.** A manifest `klt_version` is publication metadata, not proof of
-  the bytes a job executes. The fleet's own launch configuration, not this
-  repository, decides which image boots. That is why a `match` or `unknown`
-  still goes through the runner-side preflight, and why
-  `environment.remote.runner_klt_version` (what the job actually ran) stays
-  the authoritative record.
+- **Inspecting the published identity.** Run `klt sim request.json --backend
+  batch --dry-run --format json` and inspect `published_runner.images`.
+  The running worker records its observed build in
+  `environment.remote.runner_klt_version`. A template rollback can leave
+  the published pointer stale.
 
 - **What the gate cannot see (`corners.params`, #3035).** The gate compares
   major.minor only, so a same-minor image built *before* a request field
@@ -2763,8 +2858,7 @@ the packaged `data/` copy. See
 minor from your client, either:
 
 1. **Rebuild or publish a runner image** of your client's minor. Run
-   `scripts/aws/build-remote-sim-ami.sh` with a matching `--klt-ref`, or have
-   the fleet image rebuilt. This is the supported fix.
+   the 2am sim image bake with the intended klt pin and publish the adopted image.
 2. **Submit from a client of the image's minor.** Released `klt 0.5.0` has
    no `batch` backend at all ("unsupported backend 'batch'"). So against a
    `0.5.x` image, no client can both submit and pass the gate. Option 1 is
@@ -2808,7 +2902,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | Field | Meaning |
 | --- | --- |
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, preflight observations are `null`. The worker's simulation report supplies `ngspice_init` and `threads_per_worker` independently. |
-| `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
+| `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). Regular ngspice batch captures include `binary_sha256` when the worker resolves the executable. It is a lowercase SHA-256 digest, or `null` if hashing failed. Older captures, unresolved executables, deck-list requests and Xyce requests omit the key. |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
@@ -2830,7 +2924,7 @@ the per-section corner libraries, which carry the identity when there is no
   own `klt sim` reported, i.e. the model card the worker actually loaded;
   `null` when absent or malformed (older runner, error envelope), so
   "unknown" is distinguishable from a value.
-- `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
+- <a id="checkpoint-model-library-comparison"></a>`models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
   `not_comparable` (with `reason`: `no_models_lib`, `runner_hash_unavailable`,
   `client_hash_unavailable` or `models_staged`) comparing it with the client's
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,
@@ -2961,6 +3055,26 @@ diagnostic then carries a hint naming it. A matching stamp does not prove model-
 simulator version) does not imply the same build: compare `version_banner`
 and `selected_path` for build identity (`engine_build_comparison` does this
 against the client's own `environment.client_engine_build`, issue #5566).
+
+A batch run that aborts with ngspice's `could not find a valid modelname`
+gets these facts inline (issue #5593): the surfaced
+`model_bin_range`/`ngspice_fatal` diagnostic still names the instance,
+model and sizing quoted in the engine log, but with a usable worker capture
+(`capture: "ok"`) its trailing advice no longer sends the reader to their
+own bin cards -- cards a local-pass/fleet-fail abort has typically already
+ruled out. It instead states the fleet's observed `pdk.variant` and
+`stamp_sha256` (plus the `SOURCES` revision token when parseable), the
+`pdk_stamp_comparison` status (and `reason` when `not_comparable`), and the
+lever that removes the divergence: set `options.stage_model_inputs: true`
+so the fleet executes the submitter's own model closure instead of the
+image's. A run that already staged its models is not told to stage again --
+the bin cards that failed to select a model are then the submitter's own,
+and the diagnostic says so, pointing at the
+`worker_environment.model_inputs` digests. Without a usable capture
+(legacy worker, `absent`/`malformed`, or a non-batch backend) the
+diagnostic keeps its pre-#5593 wording byte for byte. The diagnostic
+attributes; it does not certify -- a matching stamp still would not prove
+model-closure equality (#3071).
 
 Coverage: the `batch` backend only, single jobs and every sharded member
 (mixed worker identities stay individually visible; recovered failed-job
@@ -3146,7 +3260,11 @@ equivalent.
    (`models_pdk_root_host_path`), and since #5474 the submitter's stamp comes
    from the search-resolved install anyway, so no pinning is needed. The fatal
    ngspice line and its code (`model_bin_range`, `ngspice_fatal`, ...) are on
-   the errored unit's `diagnostics` even without `options.keep_artifacts`.
+   the errored unit's `diagnostics` even without `options.keep_artifacts` --
+   and since #5593, when the worker capture is usable, that same diagnostic
+   names the fleet's observed variant/stamp, the comparison status, and
+   `options.stage_model_inputs: true` as the remedy for exactly this
+   local-pass/fleet-fail model-selection abort.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and
@@ -3178,12 +3296,10 @@ equivalent.
 Only a reproducible difference from these steps justifies a simulator or
 model change; none is made on the strength of the original report.
 
-**Prerequisites live in 2am, not here.** The batch AMI bake, the job
-bucket's `provision --apply`, the `batch-runner-submit` access key, and the
-scheduled `reconcile` timer are all 2am-side operator steps. The backend and
-its tests need none of them (every AWS/launch call goes through an
-injectable command runner — no test in this repo touches AWS or the
-network), but a *live* run does.
+2am operates the batch AMI bake, job bucket, security group, submit role
+and scheduled reconciliation. A configured batch preflight uses the submit
+profile's existing GetObject access to read the published sim image identity.
+The test suite exercises this through an injected command runner.
 
 **Worked example: [`examples/sim-batch/`](../../examples/sim-batch/README.md).**
 The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
@@ -3347,8 +3463,8 @@ are accepted. `--resume` (`options.resume`) is **accepted** on
 `local`, `local-parallel` and `batch` with deck-specific semantics — see
 "Resuming a deck run" below — and refused on `remote`. `--submit-only` and
 `--attach <job_id>` apply to a deck list on the `batch` backend (one job, one
-job id; see "Asynchronous submit and status"); they cannot be combined with
-`--resume`.
+job id; see "Asynchronous submit, status and cancel"); they cannot be combined
+with `--resume`.
 
 ### Preservation and isolation
 
@@ -3528,7 +3644,7 @@ capability arrived mid-`0.7` line), so a deck-list batch submit has its own
 check, which `runner_version_check: "warn"` does **not** relax (the job could
 not run either way):
 
-- **Before submit** — if the AMI manifest publishes a `klt_version` for every
+- **Before submit** — if the batch image pointer publishes a `klt_version` for every
   image the request could boot and none of them knows `decks[]` (`0.7.0` or
   earlier, or `0.7.1.devN` with `N` < 307; `0.7.1` and later releases do),
   the request is refused with `error.code` `batch_runner_lacks_decks`: no S3
@@ -3740,7 +3856,7 @@ not just equivalent.
   exactly, for any `hosts` from `1` to `len(units)` (and beyond: a `hosts`
   greater than the unit count simply leaves the trailing shards empty).
   Per-sample Monte Carlo seeds are already absolute (`sample_index`-derived,
-  see "Monte Carlo sampling" above and #348), so slicing never changes any
+  see "Monte Carlo sampling" below and #348), so slicing never changes any
   unit's own value, only which shard runs it.
 - **Deterministic merge, any completion order.** Shards run concurrently —
   one shard is meant to be one host — and are reassembled by shard index
@@ -4572,7 +4688,7 @@ and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
 with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
 runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
-AMI manifest whose every image predates it is refused with
+image pointer whose runner predates it is refused with
 `batch_runner_feature_unsupported` before anything is uploaded or launched --
 and `--dry-run` reports the refusal -- rather than the grid running first and
 the echo check refusing the result afterward.
@@ -5455,6 +5571,37 @@ literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
 
+### Windowed transient expression reductions
+
+Use `measurements[].windowed` to reduce an expression over a time interval
+in an ngspice transient analysis. For example, this measures the minimum
+combined supply current between 3 and 17 microseconds and grades it in amps.
+
+```json
+{
+  "name": "isumpk",
+  "unit": "A",
+  "windowed": {"reduce": "min", "of": "i(vdd1)+i(vdd2)", "from": "3u", "to": "17u"},
+  "limits": {"min": -0.002, "max": 0}
+}
+```
+
+The supported reductions are `min`, `max`, `avg`, `rms`, and `pp`
+(peak-to-peak). Both bounds are required. Use seconds or SPICE literals and
+a start earlier than the end. Both bounds must fall within the transient analysis
+interval, including its endpoints. The expression must fit on one line and cannot
+contain quotes or braces. A windowed entry takes exactly one measurement form.
+Use it with a scalar transient analysis. Xyce and `analysis_steps[]` refuse it.
+
+The client expands this example to the card below before local execution or
+batch submission. ngspice applies its inclusive FROM/TO window to the solver
+grid. The reported last time point can differ by reduction. See the following
+section for the corresponding `par()` syntax in a hand-written card.
+
+```spice
+.meas tran isumpk MIN par('i(vdd1)+i(vdd2)') FROM=3u TO=17u
+```
+
 ### An expression in a `.meas` signal position must be wrapped in `par('...')`
 
 A `.meas` card's *signal* positions -- `WHEN`, `FIND`, `AVG`, `MAX`, `TRIG`,
@@ -5590,6 +5737,26 @@ arity`); use the replacement:
 | one-argument `max(x)` / `min(x)` | `vecmax(x)` / `vecmin(x)` (`max`/`min` take two arguments) |
 
 Spell comparisons `gt` / `lt` (see the runner-skew note on `<` / `>`).
+
+### Spread of three scalar measurements
+
+On local ngspice, three earlier scalar `expr` measurements named `a`, `b`,
+and `c` can feed another control-language expression:
+
+```json
+{"name": "spread", "expr": "max(max(a,b),c)-min(min(a,b),c)"}
+```
+
+When the inputs instead come from three preceding file-scope
+`.meas tran ...` cards, keep the calculation in the same scope:
+
+```json
+{"name": "spread", "spice": ".meas tran spread param='max(max(a,b),c)-min(min(a,b),c)'"}
+```
+
+Both forms yielded 4 for inputs of 2, 5, and 1 on local ngspice.
+The file-scope results are unavailable as sibling variables in the
+control-language `expr` on this path.
 
 ### Counting edges with `expr`
 
@@ -5913,7 +6080,22 @@ known runner/client version mismatch with `batch_runner_version_mismatch`
 under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
 version skew"); passing that check does not establish mechanism support.
 
-## Supply-relative measurement limits
+## Measurement limits
+
+Both bounds include equality by default. Use `"limits": {"max": 0.9,
+"exclusive_max": true}` to require a value below 0.9. Use `exclusive_min`
+to require a value above the lower bound. Each flag takes a boolean and
+applies independently to its numeric or supply-relative bound. Equality at
+a strict bound fails with zero margin. Coverage counts each applied bound
+once. These flags use the same spelling as `klt yield`.
+
+**Runner version.** Setting either flag to `true` requires the mandatory batch
+runner feature `exclusive_bounds` (first release segment `0.9.3`). A known
+older runner would accept equality, so the batch client refuses the request
+before launch even under `runner_version_check: "warn"`. A missing or false
+flag keeps the inclusive default and does not require this feature.
+
+### Supply-relative measurement limits
 
 Either `measurements[].limits.min` or `.max` can be a number or a fraction
 of a named supply. For example, `"limits": {"min": {"frac_of": "vdd",
@@ -8095,7 +8277,23 @@ them with the job
   To cite a PDK *revision* for a staged run (the worker's `pdk` block describes
   the image tree, `stamp_scope: "image"`), set `options.pdk_revision`; it is
   echoed as `environment.pdk_revision_asserted: {value, scope:
-  "caller-asserted"}` and never merged into `worker_environment.pdk`. The
+  "caller-asserted"}` and never merged into `worker_environment.pdk`. On the
+  `batch` backend, where the worker capture observes a stamp, the claim is
+  also **checked** (issue #5593): `environment.pdk_revision_comparison`
+  records `{status, worker_stamp}` — `match` when the asserted value equals
+  the worker's `stamp_sha256` or its `SOURCES` revision token
+  (`open_pdks <token>`), both compared case-insensitively (issue #6362) but
+  otherwise exactly, so an abbreviated revision such as a 7-character prefix
+  is not a match; `mismatch` (with a `warning`, and the
+  `worker_stamp` it differs from) when both are readable and neither matches,
+  `not_comparable` with `reason: worker_stamp_unavailable` otherwise. Under
+  sharding each `fleet[]` member is compared independently (`fleet[]` array
+  of per-job results; the top-level `status` is the worst). The field is
+  advisory: it never fails the run, and under `stamp_scope: "image"` the
+  observed stamp describes the image tree, not the staged files the revision
+  was asserted for — enforcement of a pin is a separate ask (#3462). A run
+  without a worker capture (the `remote` backend) adds no field.
+  The
   option is validated on every run (a non-string or empty value is an exit-1
   application error whatever the backend), but it only *reports* a revision
   for a run that actually staged model inputs off-host: on a run without
@@ -8130,15 +8328,12 @@ client uploaded, and the report lets you verify that:
   deliberately `not_comparable` with reason `models_staged`, because the
   runner's model card is then your staged copy, not the image's.
 
-To judge *before* a run whether an image carries the PDK build you need
-without staging, read the AMI manifest entry (`data/remote-sim-ami-manifest.json`):
-for sky130A/gf180mcu images built after
-[#6156](https://github.com/2AMLogic/klayout-tools/issues/6156), the optional
-`open_pdks_commit` is the 40-hex open_pdks commit the build pinned
-(`build-remote-sim-ami.sh`'s `PDK_VERSION`), alongside the date-label
-`pdk_snapshot`. It is absent on historical entries (unknown, never guessed)
-and on sg13g2 images, which have no single commit. It is publication
-metadata, not proof of the bytes a job executes; the digests above are.
+For a configured batch dry run, inspect
+`published_runner.images[].open_pdks_commit` for the published sky130 or
+gf180mcu build. The field is null when the bake omitted the pin. The
+`remote` backend publishes its own open_pdks pin in
+`data/remote-sim-ami-manifest.json`. The post-run digests above identify the
+actual model data used by a job.
 
 ## OSDI (Verilog-A) model preload
 
@@ -8560,8 +8755,12 @@ a corner grid. A stock ngspice without the module still produces the
     MOS/BJT families.
 
   To scale or switch off these mechanisms from the request rather than by
-  hand, use `monte_carlo.mismatch_scale` (sky130 and gf180mcu; see "Monte
-  Carlo sampling").
+  hand, use `monte_carlo.mismatch_scale` (sky130 and gf180mcu through their
+  global switch — verified linear in both vendored decks; sg13g2 MOS through
+  its libraries' own `_mm` sigma `.param`s, whose effect on the sampled
+  `stddev` is **not yet measured** against the real models
+  ([#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)) — see
+  "Monte Carlo sampling").
 
   For untested process corners or PDK variants not listed above, verify that
   the section (sky130-style) or the mismatch switch (gf180mcu-style) resolves in
@@ -8980,21 +9179,68 @@ values), *and* reduced to a per-measurement statistical verdict under
   scales the per-instance mismatch sigma by this factor (issue #3942), for
   a negative control (`2.5` = a known-bad variant at 2.5x nominal sigma) or
   a determinism control (`0` = per-instance mismatch exactly off). `klt`
-  writes one `.param <switch>=<scale>` into each sample's deck, after the
-  `.lib` and the netlist `.include` so it is the last definition and wins
-  over the model deck's own default: `mc_mm_switch` for sky130,
-  `sw_stat_mismatch` for gf180mcu (verified linear in both vendored decks;
-  the value *replaces* the switch, whose active value is `1`, so `1`
-  reproduces nominal sigma). Only those two families are supported — any
-  other PDK (e.g. `sg13g2`, whose mismatch is a section choice, not a
-  scalar) or a `models.pdk` that names none is an application error, never
-  a silently ignored field. Omitted, decks and responses are unchanged.
-  Echoed as `environment.monte_carlo.mismatch_scale` plus
-  `mismatch_param` (the switch applied), and per sample as
+  writes the `.param` card(s) that apply it into each sample's deck, after
+  the `.lib` and the netlist `.include` so they are the last definition and
+  win over the model deck's own defaults. Two PDK shapes are supported, and
+  a `models.pdk` resolving to neither (or naming none) is an application
+  error, never a silently ignored field:
+
+  - **A global multiplicative switch** — `mc_mm_switch` for sky130,
+    `sw_stat_mismatch` for gf180mcu (verified linear in both vendored
+    decks). One card; the value *replaces* the switch, whose active value
+    is `1`, so `1` reproduces nominal sigma. Echoed as
+    `environment.monte_carlo.mismatch_scale` plus `mismatch_param` (the
+    switch applied).
+  - **Per-sigma library `.param`s** — `sg13g2`, which has no global switch
+    (issue #5486). Its MOS mismatch magnitudes are plain `.param`s defined
+    by the libraries a `mos_<corner>_mismatch` section pulls in (e.g.
+    `sg13g2_lv_nmos_delvto_mm`), so `klt` reads **every** `.param
+    <name>_mm = <number>` reachable from the selected section(s) out of the
+    resolved libraries at request time — names and nominals are never
+    hardcoded in `klt`, so a PDK pin bump cannot leave a stale value
+    behind — and writes one `.param <name>=<nominal × scale>` card per
+    sigma. Echoed as `environment.monte_carlo.mismatch_scale` plus
+    `mismatch_params` (an object: parameter name → value written), so the
+    response names exactly what was changed. **The reach is MOS-only**:
+    only `mos_*_mismatch` sections are scanned, so sg13g2's resistor,
+    capacitor and HBT mismatch (separate corner files) are left at nominal
+    — if such a section is also selected and the netlist instantiates that
+    family, the report carries a
+    `mismatch_scale_unreached_family` warning (see "Failure
+    classification" below).
+    A sigma that merely *lives* in a scanned library is scaled: on
+    `cornerMOShv.lib`'s `mos_*_mismatch` sections that includes the two
+    `sg13g2_hv_svaricap_*_mm` geometry sigmas, and `mismatch_params` lists
+    them. Refused before any corner is dispatched when no selected section
+    is a `mos_*_mismatch` section, when the libraries cannot be read on the
+    submitting host, when they define no `_mm` sigma at all, when a
+    sigma they *do* define has a value that is not a plain numeric literal
+    (an expression such as `'0.5*2'`, or a reference to another parameter;
+    a scale-factor suffix like `4n` is read normally), or when the selected
+    section itself contains a one-argument `.lib <token>` line (#7671) —
+    ambiguous between a section name and an include, and reading it as a
+    section opener would end the scan mid-section. Those refusals
+    name the offending parameter or line and the file: leaving one sigma at
+    nominal while its siblings are scaled would be a *partially* scaled run,
+    and `mismatch_params` — which lists only what was written — would not
+    show the omission. Never a silently unscaled, or partially scaled, run.
+
+    **Not yet measured on real models.** Unlike the switch families above,
+    the effect of these cards on the sampled `stddev` of an ngspice run
+    against the vendored sg13g2 decks has not been measured — the deck
+    contents are verified (byte-level, in CI), the live sampled spread is
+    not. Treat an sg13g2 `mismatch_scale` `negative_control` as unproven
+    until [#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)
+    lands that measurement and replaces this paragraph with its result.
+
+  Omitted, decks and responses are unchanged. Echoed per sample as
   `corners[].monte_carlo.mismatch_scale`, only when declared. Scaling a
   family that `family_mismatch` reports `active: false` (gf180mcu
   resistors, capacitors) changes nothing for that family, and the report
   says so. Independently seed the control (`seed`) from the nominal run.
+  On `remote`/`batch` the resolved cards ride the pushed points, and a
+  runner too old to apply them refuses the job rather than running it
+  unscaled (`mismatch_params` is a mandatory runner feature).
 - **`monte_carlo.quantiles`** (array\<number\>, optional) — percentiles in
   `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]` (the
   median plus the symmetric tails). Duplicates are dropped; declaration
@@ -9047,7 +9293,7 @@ derived values are on that sample's `corners[]` entry, under
 `agauss`/`gauss`/`random()`-style draws only. ngspice's transient-noise
 sources (`trnoise()` / `trrandom()` on `V*`/`I*` sources) are not seeded by
 `.options seed=`; their generator defaults to the process id. Re-running the
-same request redraws their noise (see also
+same request without an explicit transient-noise seed redraws their noise (see also
 [#2490](https://github.com/2AMLogic/klayout-tools/issues/2490), per-engine-build
 reproducibility, and [#2937](https://github.com/2AMLogic/klayout-tools/issues/2937),
 the combined seed), and samples run in separate batch jobs or hosts can share
@@ -9057,7 +9303,11 @@ a noise stream. When the netlist (or its scanned `.include` closure, including
 and, if part of the closure could not be scanned,
 `unseeded_sources_not_scanned`; a warning is also printed to stderr. Requests
 without such sources keep their `environment.monte_carlo` shape unchanged.
-Seeding these sources per sample is not implemented. For what noise such a transient does and does not contain, see
+When `options.transient_noise_seed` is set, the note and stderr warning give
+the replay behavior for the source kinds listed. A `trrandom` source replays
+with that seed in each fresh corner process. A `trnoise` source redraws.
+The source list still includes both kinds because neither follows
+`monte_carlo.seed`. For the sources covered by a transient analysis, see
 "Transient noise coverage" under "Engine".
 
 **Seed scope (paired and split-stable draws).** By default
@@ -9065,7 +9315,7 @@ Seeding these sources per sample is not implemented. For what noise such a trans
 sample's seeds are keyed on the point's *position* in this request's expanded
 corner list, so sample *k* is a different die at every corner, a single-point
 request always uses position 0, and reordering axes or splitting a grid
-across requests changes the draws. Existing reports reproduce bit-for-bit.
+across requests changes the draws. The default preserves the previous seed sequence.
 Two opt-in scopes change only that key:
 
 | `seed_scope` | Seeds keyed on | Use it for |
@@ -9600,6 +9850,7 @@ block — the block is present only for a measurement that actually ran under
 | `quantiles`     | object              | One key per requested percentile, `p<percentile>` (`p5`, `p50`, `p2.5`, …), in `monte_carlo.quantiles` order. Values are linearly interpolated between order statistics (numpy's default / `statistics.quantiles(method="inclusive")`); `p0`/`p100` degenerate to `min`/`max`. Each value is `null` when `n == 0`. |
 | `sigma_window`  | object \| null      | The `mean ± k*stddev` limit-window check — `null` unless a `k_sigma` was declared *and* `mean`/`stddev` both exist. See below.        |
 | `by_corner`     | array\<object\>     | The same statistics recomputed per originating (pre-sampling) corner, in corner order, each with its own `corner_id`. One entry for the common single-corner request. |
+| `population_limits` | object \| null  | The declared dispersion bound (issue #6967) — present only when the measurement declared one. See below.                                                  |
 
 **The limit window.** With a `k_sigma` declared (run-wide on `monte_carlo`,
 or per measurement — the per-measurement value wins), `sigma_window` reports
@@ -9642,6 +9893,95 @@ responses are unchanged. `error` and `inconclusive` still outrank a window
 `fail`, and a corner with no window (`sigma_window: null`, e.g. no `k_sigma`
 declared) never fails the measurement. For a single-corner request both
 scopes agree.
+
+**Population limits.** `measurements[].population_limits` (issue #6967)
+bounds the **dispersion itself** — a bound on `k·σ` alone, independent of the
+mean and of per-sample `limits`:
+
+```json
+{ "name": "noise_sigma", "k_sigma": 3,
+  "population_limits": { "max_k_sigma": 0.004, "quantization_variance": 1.0e-6 } }
+```
+
+- **Statistic**: `S = k · σ_net` for each `by_corner[]` population, where `k`
+  is the measurement's resolved `k_sigma` (per-measurement override, else
+  `monte_carlo.k_sigma`) and
+  `σ_net = sqrt(max(σ² − quantization_variance, 0))`. The optional
+  `quantization_variance` (in measurement-unit², default `0`, so `σ_net = σ`)
+  is declared as a **variance**, not a step, so no distribution assumption is
+  baked into the tool — the caller already knows the number they trust; for a
+  uniformly binned/LSB-quantized `.meas` pass `step²/12`.
+- **Grading**: a corner passes iff `S <= max_k_sigma`; its margin is
+  `max_k_sigma − S`. A corner with `stddev: null` (`n < 2` trusted samples) is
+  not graded, and the pooled population is **never** graded (it is not a
+  distribution anyone sampled). For a single-corner request the one corner is
+  the whole population.
+- **Aggregation**: worst-first — the measurement fails if any graded corner
+  fails, and the worst corner (smallest margin, first in corner order on ties)
+  is named. `error` and `inconclusive` outrank a population `fail`, exactly as
+  they outrank a window `fail`. `window_scope` and per-sample `limits` keep
+  their meaning unchanged when a bound is declared alongside them.
+- **Output** (additive, present only when declared): the measurement's
+  `monte_carlo` block carries a `population_limits` object —
+  `{statistic: "k_sigma", k, max[, quantization_variance], status, margin,
+  worst_corner, by_corner: [{corner_id, value, margin, status}]}` — where
+  `status`/`margin`/`worst_corner` are `null` when no corner could be graded,
+  and each ungraded corner's `value`/`margin`/`status` are `null`.
+- Declaring the bound requires `request.monte_carlo` and a resolvable
+  `k_sigma` (per-measurement or run-wide); anything else — a non-object, a
+  missing/negative/non-numeric `max_k_sigma`, a bad `quantization_variance`,
+  an unknown key — is a `SimError` naming the field, raised before any corner
+  is dispatched.
+
+### Noise sigma from binary decisions at two stimuli
+
+Use `monte_carlo.probit_sigma` when a specification bounds noise inferred from
+two binary decision measurements across the PVT grid. The two source
+measurements may be unbounded. This example uses stimuli of −1 and +1 mV.
+
+```json
+{
+  "netlist": "comparator.spice",
+  "analysis": {"kind": "tran", "args": "0.1n 2n"},
+  "corners": {"temperature_c": [27, 85]},
+  "measurements": [
+    {"name": "lo", "spice": ".meas tran lo FIND v(decision_lo) AT=1n"},
+    {"name": "hi", "spice": ".meas tran hi FIND v(decision_hi) AT=1n"}
+  ],
+  "monte_carlo": {
+    "n": 10, "seed": 37, "vary": "mismatch",
+    "probit_sigma": {
+      "name": "noise_sigma", "spec_row": "noise", "unit": "mV",
+      "sources": [
+        {"measurement": "lo", "stimulus": -1},
+        {"measurement": "hi", "stimulus": 1}
+      ],
+      "grid": "mean", "limits": {"max": 2.5}
+    }
+  }
+}
+```
+
+For each requested corner, the fit divides the stimulus difference by the
+difference between the inverse standard-normal CDFs of the two fractions
+of high decisions. With high counts of 1/10 and 9/10 at 27 °C, the corner
+sigma is 0.780304 mV. Counts of 4/10 and 6/10 at 85 °C give 3.947154 mV.
+
+| `grid` | Reported value and source | Verdict at 2.5 mV |
+| --- | --- | --- |
+| `mean` | 2.363729 mV, source `grid`. Each corner has equal weight. | `pass`, exit 0 |
+| `worst` | 3.947154 mV, source `default/novdd/85C`. | `fail`, exit 3 |
+
+The derived entry in `measurements[]` has `statistic: "probit_sigma"` and
+records the bound, unit, spec row and per-corner trusted counts, fractions and
+sigma. It has no matching observation in `corners[].measurements[]`. Yield
+analysis draws samples from the two source measurements. The comparison uses the
+unrounded value and includes equality. Every draw must produce both trusted
+numeric decisions (0 or 1). Missing or distrusted data, saturated fractions,
+and flat or reversed slopes produce a null grid value. The affected corner
+carries a reason and the run is `inconclusive` (exit 4). A simulation error
+keeps its existing precedence. A passing item 5 citation can credit the tagged
+row as derived when this statistic is the request’s only bound.
 
 ## Model library resolution (via `klt pdk`)
 
@@ -9702,9 +10042,12 @@ substitution is **reported rather than discarded**:
 
 - **PDK revision stamps** (issue #3070): `provenance.pdk.version` is
   `SOURCES` text for open_pdks installs, `fetched:<marker>` for a
-  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a git checkout, else
-  `null`. When the resolved model library lives in a *different* variant tree
-  (a cross-variant symlink), `provenance.pdk.linked_trees` lists
+  `scripts/fetch-*.sh` tarball, `git:<40-hex>[-dirty]` for a Git checkout,
+  or `store:<version>` for a stamped PDK bundle. Otherwise it is `null`.
+  Git adds `-dirty` for staged changes or edits to tracked files. Copying an
+  untracked model into the checkout leaves the stamp unchanged until it is
+  added to the index. When the resolved model library lives in a *different*
+  variant tree (a cross-variant symlink), `provenance.pdk.linked_trees` lists
   `[{name, version}]` for it; the key is absent otherwise. See
   [`docs/json-contract.md`](../json-contract.md).
 
@@ -10014,7 +10357,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
 | `measurement_absent` | Issue #2925. An `optional: true` measurement produced no value (`severity: "info"`; the measurement is `status: "absent"` and the corner is not graded `error` for it). Selectable in `options.fail_on_diagnostic` to grade a corner `inconclusive` when absence should not be accepted. See "Optional measurements". |
 | `par_call_cap`     | Issue #4084. ngspice aborts a file at its 99-calls-per-file `par()` limit (`ERROR: More than 99 function calls to par()`); every measurement then reports only `produced no value`. Emitted as an `error` classified from the log, and as a `warning` before ngspice runs when the emitted deck holds more than 99 `par(` calls. Workaround: expose the current as a node voltage through a 1 ohm CCVS and `FIND v(node)`, or capture the sweep with `options.waveforms`. |
-| `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
+| `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" above for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `save_all_supersedes` | Issue #5622. The generated `save all` supersedes a restricting `.save` card in the netlist body while `options.waveforms` is on, so `waveform.raw` holds every node rather than the body's restricted set; a card whose only argument is `all`, or a bare `.save`, restricted nothing and does not warn. Request-level (not per-corner), always `severity: "warning"`; emitted in `--dry-run` too. See "Warning when `save all` supersedes a body `.save`" above. |
@@ -10031,16 +10374,17 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `ngspice_model_selection_init_hint` | Warning on a local, remote, or batch ngspice model-selection abort with no request-declared init lines. Appears in report diagnostics for corners or in the affected raw deck unit. Gives the request setting for a library-specific compatibility mode. |
 | `batch_ngspice_init_unverified` | Report-level warning. Corner-mode batch workers lack simulator acknowledgement for explicit `options.ngspice_init`. See the per-job request identities in `diagnostics[].jobs`. |
-| `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
+| `batch_runner_request_feature_unverified` | Report-level warning. The batch image identity is unavailable for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): a missing off-host expression value on an older or unidentified runner. `measurements` lists the affected names. |
 | `expr_no_value` | Report-level warning for missing off-host expression values when every identified runner supports expressions. Includes client and worker versions, affected names, and the first matching corner diagnostic for a step or top-level derived measurement. The warning appears in the report’s top-level `diagnostics[]`. Selecting `expr_no_value` in `options.fail_on_diagnostic` leaves corner verdicts unchanged. |
+| `mismatch_scale_unreached_family` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5486](https://github.com/2AMLogic/klayout-tools/issues/5486)): `monte_carlo.mismatch_scale` on a scanned family (sg13g2) scales only the MOS mismatch sigmas, and the run also selected a `*_mismatch` section for another device family the netlist instantiates — `families`/`sections` name them. Their magnitudes are unscaled, so the run is not a clean control for them; select that family's plain (non-`_mismatch`) section via `corners.process` to switch it off instead. Absent for a switch family (sky130, gf180mcu) and when only `mos_*_mismatch` sections are selected. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
 | `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`, `threads_per_worker`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
-| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"` for a retry; `severity: "info"` (`not retried: ...`) when the option was set but the unit's error class is not a nonconvergence failure. Informational, it never changes the unit's status. See "Retrying a non-converged unit" below. |
+| `convergence_retry` | The record of an opt-in retry (`options.retry_on_convergence_error`, issue #2973): the unit's first attempt ended in a `nonconvergence` error, so it was re-run with tighter solver options. The message names the `.options` card used and whether the retry recovered. `severity: "warning"` for a retry; `severity: "info"` (`not retried: ...`) when the option was set but the unit's error class is not a nonconvergence failure. Informational, it never changes the unit's status. See "Retrying a non-converged unit" above. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 | `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |
@@ -10798,7 +11142,7 @@ the *response* echoes back.
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
-| `monte_carlo.mismatch_scale` | number        | Optional; finite, `>= 0`. Scales per-instance mismatch sigma (`0` = off) via the PDK family's switch (sky130, gf180mcu only). Echoed in `environment.monte_carlo` with `mismatch_param`. See "Monte Carlo sampling" above. |
+| `monte_carlo.mismatch_scale` | number        | Optional; finite, `>= 0`. Scales per-instance mismatch sigma (`0` = off): via the PDK family's switch (sky130, gf180mcu — echoed with `mismatch_param`), or, for sg13g2, via one `.param` per MOS mismatch-sigma read from the selected `mos_*_mismatch` section's libraries (MOS-only reach — echoed with `mismatch_params`; the sg13g2 cards' effect on sampled `stddev` is not yet measured against the real models, [#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)). Any other family is an application error. See "Monte Carlo sampling" above. |
 | `monte_carlo.seed_scope` | string            | Optional; `"per_corner"` (default), `"shared"` or `"point"`. Selects what keys each sample's seeds. See "Seed scope" above.                                        |
 | `monte_carlo.seed_mode`  | string            | Optional; `"derived"` (default) or `"sequential"` (`rndseed = seed + sample_index`). See "Seed mode" above.                                                        |
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
@@ -10806,30 +11150,31 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | Each entry requires a `name` (stable response key) and **exactly one measurement form**. Declaring two or more forms, or none, is an application error (exit 1). See [Measurements that are not `.meas` cards](#measurements-that-are-not-meas-cards-measurementsexpr) and the form-specific sections that follow for accepted forms and their fields. Optional fields include `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see [Optional measurements](#optional-measurements-measurementsoptional)), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached)). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see [Measurement templates over a case list](#measurement-templates-over-a-case-list-optionsmeasurement_cases-issue-5731). |
+| `measurements[]`         | array\<object\>   | Each entry requires a `name` (stable response key) and **exactly one measurement form**. Declaring two or more forms, or none, is an application error (exit 1). See [Measurements that are not `.meas` cards](#measurements-that-are-not-meas-cards-measurementsexpr) and the form-specific sections that follow for accepted forms and their fields. Optional fields include `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see [Optional measurements](#optional-measurements-measurementsoptional)), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), `population_limits` (issue #6967 — `{max_k_sigma, [quantization_variance]}`, a bound on each `by_corner[]` population's `k·σ` dispersion with worst-corner aggregation; requires `monte_carlo` and a resolvable `k_sigma`; see [Population limits](#monte-carlo-statistics) under "Monte Carlo statistics"), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached)). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see [Measurement templates over a case list](#measurement-templates-over-a-case-list-optionsmeasurement_cases-issue-5731). |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
 | `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag, and capped by the host's `KLT_SIM_MAX_WORKERS` when set (a larger value is clamped, not refused). |
-| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. See "Threads per worker" under "Execution backends". |
+| `options.threads_per_worker` | integer       | OpenMP threads each ngspice worker may use (`OMP_NUM_THREADS`). Positive integer. Defaults to `1` when more than one worker runs concurrently, otherwise the ambient environment. `engine: "ngspice"` only; validated but accepted-and-ignored for `"xyce"` (neither `OMP_NUM_THREADS` nor the `.spiceinit` pin is applied). See "Threads per worker" under "Execution backends". |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
 | `options.osdi_preload`   | array\<string or {pdk_relative}\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true` — except runner-resolved entries (literal `$PDK_ROOT/<rel>` or under `models.pdk_root`, issue #3819), which are forwarded unchecked — and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
-| `options.pdk_revision`   | string            | Issue #5325. Caller-asserted PDK revision/stamp for a run with `options.stage_model_inputs` on an off-host backend; echoed as `environment.pdk_revision_asserted` (`{value, scope: "caller-asserted"}`), separate from the worker-observed `worker_environment.pdk`. The value is **validated on every run** — a non-string, empty or whitespace-only value is an application error (exit 1) whatever the backend and whether or not staging is on — but it is only *echoed* by a run that actually stages model inputs off-host; on any other run (staging off, or a `local`/`local-parallel` backend) a valid value is **accepted and ignored**, exactly as `options.stage_model_inputs` itself is a no-op on-host, and the report carries no `pdk_revision_asserted` field. Unset: no field. |
+| `options.pdk_revision`   | string            | Issue #5325. Caller-asserted PDK revision/stamp for a run with `options.stage_model_inputs` on an off-host backend; echoed as `environment.pdk_revision_asserted` (`{value, scope: "caller-asserted"}`), separate from the worker-observed `worker_environment.pdk`. The value is **validated on every run** — a non-string, empty or whitespace-only value is an application error (exit 1) whatever the backend and whether or not staging is on — but it is only *echoed* by a run that actually stages model inputs off-host; on any other run (staging off, or a `local`/`local-parallel` backend) a valid value is **accepted and ignored**, exactly as `options.stage_model_inputs` itself is a no-op on-host, and the report carries no `pdk_revision_asserted` field. Unset: no field. Issue #5593: on the `batch` backend, a declared value additionally yields the advisory `environment.pdk_revision_comparison` (see "Staging the request's model inputs" below) whenever a worker stamp is readable — matched by `stamp_sha256` or the `SOURCES` revision token, `mismatch` otherwise, `not_comparable` without a readable stamp; it never changes the run's outcome. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
 | `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`, and the transient tolerances `chgtol`, `trtol` — issue #7007) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.nodeset`        | array\<object\>  | Issue #3036. Initial-guess rules `[{"match": {process?, temperature_c?, supply_v?, params?}, "values": {node: volts}}]` selected per retained corner point and rendered as file-scope `.nodeset v(node)=volts` cards after the netlist `.include`; echoed as `nodeset` on each hinted corner report. Overlapping rules, a rule matching no retained point, an unsupported node spelling or a non-finite value are application errors (exit 1) before any run; an unknown node fails its corner with an `error` diagnostic; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `nodeset_unsupported_worker`. Unset or `[]`: no change. See "Initial-guess hints: `options.nodeset`" above. |
+| `options.transient_noise_seed` | integer, 1 through 2147483647 inclusive | Issue #5772. Pins the `trrandom` stream of a transient-noise run: the value is emitted as `setseed N`, the **first** command of every corner deck's `.control` block (the measured placement — `.spiceinit` and `.options seed=` do not reach the generator), and echoed as `environment.transient_noise.seed`. It makes **`trrandom` measurements replayable** (bit-identical at the same seed, distinct per seed); it does **not** make `trnoise` reproducible — no known ngspice route pins that generator, and `environment.transient_noise`'s `reproducibility_note` (present on every qualifying run, with or without a `monte_carlo` block) says so per kind found. Zero, negative values and values above 2147483647 are refused before simulation. Refused for `engine: "xyce"`; an off-host runner that predates the field fails the collected report by name rather than returning unpinned noise. Unset: no `setseed` card, decks byte-identical. See "How a per-unit seed reaches a transient-noise stream" above. |
 | `options.initial_conditions` | array\<object\> | Issue #3881. Transient start states, same `[{match, values}]` rules as `options.nodeset`, rendered as file-scope `.ic v(node)=volts` cards plus `uic` on the `tran` command; echoed as `initial_conditions` on each affected corner report. Requires a single `tran` analysis; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `initial_conditions_unsupported_worker`. Unset or `[]`: no change. See "Transient start states" above. |
 | `options.measurement_cases` | array\<string\> | Issue #5731. Case scopes for templated `measurements[]` entries: every `{case}` occurrence in a templated entry's `name`/`spice`/`expr` is substituted with each scope in turn, expanding it into one ordinary measurement per case, each result carrying a `case` provenance field. Non-empty, unique strings matching `[A-Za-z0-9_]+`; a placeholder in any other field, a case list with no templated entry, a placeholder with no case list, and templated entries combined with `analysis_steps[]` are all request errors (exit 1) naming the offending field. Resolved client-side before dispatch — the forwarded document carries only the expanded plain measurements, so a `remote`/`batch` runner needs no new capability. Unset: no change. See "Measurement templates over a case list" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
-| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist), `"extracted"` (post-layout, from `klt extract`), or `"gate-level"` (a netlist assembled from a structural post-synthesis/post-route netlist plus a timing library — event-driven primitives with Liberty-derived delays; issue #5638). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
+| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist), `"extracted"` (post-layout, from `klt extract`), or `"gate-level"` (a netlist assembled from a structural post-synthesis/post-route netlist plus a timing library — event-driven primitives with Liberty-derived delays; issue #5638). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" above. |
 | `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
 ### Response
@@ -10950,12 +11295,12 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `inconclusive`  | integer         | Issues #2492/#2493. Corners graded `"inconclusive"` — because `options.fail_on_diagnostic` named a code the corner emitted, or because a measurement fell outside its declared plausibility bound. **One count for both reasons** (they are one status; see "One status, two reasons" above): always present, `0` for a request that declares neither, so `passed + failed + errored + inconclusive == corner_count` always holds and a consumer scanning only the original three cannot silently miscount. A nonzero value makes the aggregate `status` `"inconclusive"` (exit `4`) unless some corner also errored. The per-reason breakdown is in `diagnostic_counts.by_code` (`inconclusive` vs. `implausible_solution`). |
-| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted, as are the `inconclusive`/`implausible_solution` grading markers (issues #2492/#2493), which is how the two reasons for an `inconclusive` corner stay distinguishable. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
+| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted, as are the `inconclusive`/`implausible_solution` grading markers (issues #2492/#2493), which is how the two reasons for an `inconclusive` corner stay distinguishable. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" above for the `code`/`severity` vocabulary. |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
-| `environment`   | object          | Reproducibility block: engine name/version, `engine_host` (issue #3110 — `"local"` or `"worker"`; for off-host runs `ngspice_binary` and `engine_build` are the worker's observed path and build or `null`, and the submitter's are `client_ngspice_binary` and `client_engine_build` (issue #5566); see "Which machine ran it" above), `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256 plus `netlist_sha256_scope` (issue #5569 — `"staged"` when the digest was captured before this run dispatched any work, `"client-at-collection"` for `--attach` or a collection-only batch `--resume`; see "Netlist digest scope" below), and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `staged_model_inputs` (issue #2668 — only when `options.stage_model_inputs` staged model files for an off-host backend: one `{name, field, kind, sha256, source_sha256, rewritten[, transform]}` per file the worker received; `pdk_revision_asserted` (issue #5325 — `{value, scope: "caller-asserted"}`, only with `options.pdk_revision`); `models_lib_sha256_scope` (`"client"` off-host, `"local"` otherwise) qualifies `models_lib_sha256`; see "Staging the request's model inputs" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `seed_scope`/`seed_mode`/`quantiles`/`k_sigma`/`mismatch_scale`+`mismatch_param` when declared, `family_mismatch` when `vary` includes `"mismatch"`, and `unseeded_sources`/`unseeded_sources_note`/`unseeded_sources_not_scanned` when the netlist declares `trnoise`/`trrandom` sources the seed does not govern (issue #2963) — see "Monte Carlo sampling" above), `transient_noise` (`{engine, sources[{name, kind}], intrinsic_device_noise, intrinsic_resistor_noise}` plus `sources_not_scanned` when part of the include closure was unscannable, only when an ngspice transient's netlist declares `trnoise`/`trrandom` sources, issue #2985 — see "Transient noise coverage" above), `device_multiplier` (issues #5779/#6684 — the device-multiplier lint's `findings` for instance cards of the netlist and its scanned `.include` closure (warning-only, never a failing exit; a closure-file finding carries `file`), plus `note` when the netlist's own instances name a subcircuit absent from the scanned closure and `unevaluated` for their non-numeric `m=`/`mult=` values, and `not_scanned` when part of the closure was unscannable; only when there is something to disclose — see "Device multiplier warnings" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
+| `environment`   | object          | Reproducibility block: engine name/version, `engine_host` (issue #3110 — `"local"` or `"worker"`; for off-host runs `ngspice_binary` and `engine_build` are the worker's observed path and build or `null`, and the submitter's are `client_ngspice_binary` and `client_engine_build` (issue #5566); see "Which machine ran it" above), `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256 plus `netlist_sha256_scope` (issue #5569 — `"staged"` when the digest was captured before this run dispatched any work, `"client-at-collection"` for `--attach` or a collection-only batch `--resume`; see "Netlist digest scope" below), and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `staged_model_inputs` (issue #2668 — only when `options.stage_model_inputs` staged model files for an off-host backend: one `{name, field, kind, sha256, source_sha256, rewritten[, transform]}` per file the worker received; `pdk_revision_asserted` (issue #5325 — `{value, scope: "caller-asserted"}`, only with `options.pdk_revision`), plus `pdk_revision_comparison` (issue #5593 — the advisory result of checking that value against each worker-observed stamp on the `batch` backend: `{status, worker_stamp}` with `match`/`mismatch`/`not_comparable` semantics, per-`fleet[]` under sharding; never fails the run); `models_lib_sha256_scope` (`"client"` off-host, `"local"` otherwise) qualifies `models_lib_sha256`; see "Staging the request's model inputs" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `seed_scope`/`seed_mode`/`quantiles`/`k_sigma`/`mismatch_scale` (with `mismatch_param` for a switch family, or `mismatch_params` — name -> value written — for a scanned one, issue #5486) when declared, `family_mismatch` when `vary` includes `"mismatch"`, and `unseeded_sources`/`unseeded_sources_note`/`unseeded_sources_not_scanned` when the netlist declares `trnoise`/`trrandom` sources the seed does not govern (issue #2963) — see "Monte Carlo sampling" above), `transient_noise` (`{engine, sources[{name, kind}], intrinsic_device_noise, intrinsic_resistor_noise, reproducibility_note}` (issue #5772 — the note states, per kind found, what is and is not replayable; present on every qualifying run, with or without a `monte_carlo` block) plus `seed` (issue #5772 — the effective `options.transient_noise_seed`, echoed when declared) and `sources_not_scanned` when part of the include closure was unscannable, only when an ngspice transient's netlist declares `trnoise`/`trrandom` sources, issue #2985 — see "Transient noise coverage" above), `device_multiplier` (issues #5779/#6684 — the device-multiplier lint's `findings` for instance cards of the netlist and its scanned `.include` closure (warning-only, never a failing exit; a closure-file finding carries `file`), plus `note` when the netlist's own instances name a subcircuit absent from the scanned closure and `unevaluated` for their non-numeric `m=`/`mult=` values, and `not_scanned` when part of the closure was unscannable; only when there is something to disclose — see "Device multiplier warnings" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` (equal by construction since issue #5569: both cite the same pre-dispatch capture, so a mid-run file edit cannot make them disagree) so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` when an `optional` measurement had no value at every corner — issue #2925 — and `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). **For a measurement with no `limits`, `worst_case` is not an extreme** (every margin is `null`, so it names the first non-absent corner); use `min`/`max`. Additive (issue #5221): every entry carries `min` and `max`, each `{corner_id, value}` over the corners with a **finite** numeric value (absent/errored corners skipped, as are booleans, NaN and +/-infinity -- issue #5580; ties resolve to the first corner in expansion order), or `null` when no corner has one. `klt sim-merge` output carries them too (shared rollup). Additive/optional (issue #2482): the same `step`/`derived_from` provenance fields as the per-corner entries, for an `analysis_steps[]` request. Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. Additive/optional (issue #5731): the same `case` provenance field as the per-corner entries, for a measurement expanded from a `{case}` template (`options.measurement_cases`). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
+| `measurements`  | array\<object\> | The optional grid-statistic entry carries `statistic: "probit_sigma"` and has no per-draw observation (see “Noise sigma from binary decisions at two stimuli”). For sampled measurements, the rollup across corners carries `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` when an `optional` measurement had no value at every corner — issue #2925 — and `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). **For a measurement with no `limits`, `worst_case` is not an extreme** (every margin is `null`, so it names the first non-absent corner); use `min`/`max`. Additive (issue #5221): every entry carries `min` and `max`, each `{corner_id, value}` over the corners with a **finite** numeric value (absent/errored corners skipped, as are booleans, NaN and +/-infinity -- issue #5580; ties resolve to the first corner in expansion order), or `null` when no corner has one. `klt sim-merge` output carries them too (shared rollup). Additive/optional (issue #2482): the same `step`/`derived_from` provenance fields as the per-corner entries, for an `analysis_steps[]` request. Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. Additive/optional (issue #5731): the same `case` provenance field as the per-corner entries, for a measurement expanded from a `{case}` template (`options.measurement_cases`). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
 
@@ -11015,10 +11360,17 @@ corner-sweep rollup fields above are declared.
 The [common v1 coverage contract](../coverage-contract.md) reports actual
 corner/measurement work alongside the existing `corners_simulated`,
 `measurements_declared`, `measurements_with_limits` and
-`unrecognized_limit_keys` fields. Those counters retain their original
-meanings (`corners_simulated == corner_count`, including errored attempts);
-common `checked` counts actual applied min/max bounds or deliberate
-characterization observations.
+`unrecognized_limit_keys` fields. `corners_simulated == corner_count` includes
+errored attempts. A declared `probit_sigma` adds one to both measurement
+counters and contributes one grid-wide bound. Coverage lists an evaluated bound in
+`checked` and an undefined fit in `skipped` as `undefined_grid_statistic`.
+Other checked work includes applied per-corner bounds and deliberate observations.
+
+Each corner contributes to exactly one of `passed`, `failed`, `errored` and
+`inconclusive`. Their sum equals `corner_count` even when a population bound
+changes the report verdict. An inconclusive simulation uses exit 4, following
+the `klt lvs` convention for results that cannot establish a verdict. See the
+[JSON contract](../json-contract.md).
 
 An empty corner matrix (`empty_corner_matrix`), no requested measurements,
 unavailable measurement values, null bounds, and unrecognized limit keys

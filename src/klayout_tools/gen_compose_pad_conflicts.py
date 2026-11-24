@@ -40,6 +40,32 @@ from collections.abc import Callable
 from typing import Any
 
 from .gen_compose_base import _VIA_LANDING_SIZE_UM, _drop_array_extra_um
+from .gen_compose_pad_ports import PortLocations, contacted_port
+from .gen_compose_plane_change import RouteConflict
+
+
+def leg_pad_notch_conflict(
+    region: Any,
+    layer: tuple[int, int] | None,
+    spacing: tuple[float, str] | None,
+    dbu: float,
+) -> RouteConflict | None:
+    """Check the primary layer's drawn pad and backbone on the output grid."""
+    if spacing is None:
+        return None
+    required_um, rule = spacing
+    spacing_dbu = round(required_um / dbu)
+    if spacing_dbu <= 0:
+        return None
+    gaps = region.merged().notch_check(spacing_dbu)
+    if gaps.is_empty():
+        return None
+    closest_um = min(pair.distance() for pair in gaps) * dbu
+    return RouteConflict(
+        f"this leg's landing pad and backbone form a {closest_um:.4g}um notch "
+        f"on layer {layer}. '{rule}' requires at least {required_um:.4g}um "
+        "of spacing. Move the turn farther from the landing pad."
+    )
 
 
 def _pad_is_intermediate(
@@ -371,7 +397,8 @@ def _terminal_pitch_um(
 def _pad_other_block_contact_reason(
     pad_boxes: list[Any],
     net_label: str,
-    other_block_ids: list[str],
+    block_ids: list[str],
+    endpoints: dict[str, PortLocations],
     geometry_for: Callable[[str, tuple[int, int], float | None], dict[str, Any] | None],
     drawing_dbu: float,
 ) -> str | None:
@@ -399,25 +426,11 @@ def _pad_other_block_contact_reason(
     stays a plain `klt drc` finding on the composed GDS, the same honest
     backstop the #1913 intermediate entries leave in place.
 
-    Own-block and same-net landings are excluded by construction: the pad's
-    own block (and every block hosting one of this net's pins) is absent
-    from ``other_block_ids`` -- a pad merging with the wire at its own
-    declared port is the intended landing (#1520), never a violation.
-
-    The request's geometry reader caches each block, layer and grid. Match
-    the own-block notch check's grid for each box: the writer's grid for
-    via landings and the source layout's grid for stub-widen boxes.
-
-    This is the *other-block* half of a pair. Its same-block sibling, the
-    #1520 notch check (:func:`.gen_compose_routing._pad_self_notch_violation_um`),
-    exists because a port hand-declared on a pre-existing ``blocks[].cell``
-    stream's own internal wire -- the only way to declare a port on a cell no
-    ``klt`` verb generated -- lets a pad land close enough to a *different*
-    part of that same wire (e.g. a perpendicular leg near a corner the port
-    sits close to) to break the deck's same-layer spacing rule, though both
-    shapes are one electrical node. ``kdb.Region.notch_check`` sees it
-    because the pad and the wire merge into one polygon; the overlap and
-    inflate comparisons in ``_leg_conflict`` have no second shape to test.
+    On an endpoint block, a pad is allowed to join its own terminal. Reject
+    contact with a different component when another logical net has a declared
+    port on that same-layer polygon. Unlabelled components on an endpoint do
+    not establish ownership. Bystanders retain the whole-block contact check.
+    The separate #1520 self-notch check still checks spacing on the same wire.
 
     Returns the rejection wording naming the pad, the block and the net --
     carrying a ``_CLIMBABLE_REASON_MARKERS`` fragment so the #6920 plane
@@ -428,7 +441,10 @@ def _pad_other_block_contact_reason(
 
     for pad_layer, _own_block_id, box, drop in pad_boxes:
         scale = drawing_dbu if drop is not None else None
-        for other_block in other_block_ids:
+        for other_block in block_ids:
+            endpoint = endpoints.get(other_block)
+            if endpoint is not None and pad_layer not in endpoint:
+                continue
             geometry = geometry_for(other_block, pad_layer, scale)
             if geometry is None:
                 continue
@@ -441,6 +457,16 @@ def _pad_other_block_contact_reason(
                     int(round(box[3] / dbu)),
                 )
             )
+            if endpoint is not None:
+                hit = geometry["region"].interacting(pad_region)
+                port = contacted_port(hit, dbu, endpoint[pad_layer])
+                if port is None:
+                    continue
+                return (
+                    f"pad on layer {pad_layer} of net '{net_label}' "
+                    f"touches foreign port '{other_block}.{port}' on its endpoint "
+                    "block. Move the pad or route on a different plane."
+                )
             if pad_region.interacting(geometry["region"]).is_empty():
                 continue
             return (

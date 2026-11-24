@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 267 --format json
+#       --expect-rule-categories 271 --format json
 #
 # or directly:
 #
@@ -39,7 +39,8 @@
 #
 # SCOPE. Phase 1 covers FEOL (Tables 3.1.1-3.8.1) and the MOL layers LISD,
 # LIG (Tables 3.9.1-3.10.3) and V0 width/connectivity (Tables 3.11.1-2).
-# Phase 2 (#2810) adds the BEOL stack: V0.LIG.A.1 (Table 3.11.2), M1-M3
+# Phase 2 (#2810) adds the BEOL stack: V0.LIG.A.1 (Table 3.11.2),
+# V0.M1.EN.1 (Table 3.11.1), M1-M3
 # (Table 3.12.1), V1-V3 (Table 3.13.1), M4-M7 (Tables 3.14.1-3.14.2,
 # 3.16.1-3.16.2), V4-V7 (Tables 3.15.1, 3.17.1), M8-M9 (Tables
 # 3.18.1-3.18.2) and V8-V9 (Table 3.19.1), and applies
@@ -189,6 +190,30 @@ def two_side_enclosure_violation(via, metal, d)
   short_h = via.interacting(vert(metal).enclosing(vert(via), d, projection).second_edges)
   short_v = via.interacting(horz(metal).enclosing(horz(via), d, projection).second_edges)
   short_h & short_v
+end
+
+# V1.M1.EN.1 requires one complete side to clear 5 nm and its opposite
+# to clear 2 nm. Edge fragments from two notches on the same side still
+# have the same direction, so they cannot stand in for opposite sides.
+def insufficient_enclosure_axis(via, short_edges, long_edges, angle)
+  edges = long_edges.with_angle(angle)
+  forward = edges.select { |e| e.p2.x > e.p1.x || e.p2.y > e.p1.y }
+  backward = edges.select { |e| e.p2.x < e.p1.x || e.p2.y < e.p1.y }
+  via.interacting(short_edges.with_angle(angle)) +
+    (via.interacting(forward) & via.interacting(backward))
+end
+
+# "(5 & 5) | (5 & 0)" needs one complete side to clear 5 nm and its
+# opposite to be covered by the metal: 0 nm (flush) or more, since the DRM
+# states both bounds with ">=". The enclosing check reports only via edges
+# the metal covers, so a via edge outside the metal is found separately, as
+# an edge part neither inside the metal nor on its boundary.
+def missing_end_cap_violation(via, metal)
+  landing = via.interacting(metal)
+  uncovered = landing.edges - inside_or_on(landing.edges, metal)
+  short_5 = metal.enclosing(via, 5.nm, projection).second_edges
+  insufficient_enclosure_axis(landing, uncovered, short_5, 0) &
+    insufficient_enclosure_axis(landing, uncovered, short_5, 90)
 end
 
 # Area thresholds are given in nm^2; KLayout areas are in um^2.
@@ -599,6 +624,11 @@ v0.width(18.nm).output("V0.W.1", "Table 3.11.1: min V0 width 18 nm (approximated
 v0_lig = v0.interacting(lig).not_inside(lisd)
 (v0_lig & lig).with_area(nil, nm2(288))
   .output("V0.LIG.A.1", "Table 3.11.2: min area of overlap V0 (interacting with LIG, not inside LISD) and LIG 288 nm^2")
+# V0.M1.EN.1 ("(5 & 5) | (5 & 0)"): M1 end-caps V0 with 5 nm at one of two
+# opposite ends and with 5 nm or 0 nm at the other; either axis and either
+# order qualifies. A V0 with no M1 at all is V0.AUX.1's.
+missing_end_cap_violation(v0, m1)
+  .output("V0.M1.EN.1", "Table 3.11.1: M1 enclosure of V0 on opposite sides at least 5 nm, and 5 nm or 0 nm")
 
 # --------------------------------------------------------------------------
 # Table 3.12.1 -- M1-M3
@@ -647,14 +677,23 @@ end
 end
 # Enclosure "on at least two opposite sides" (5 nm by the lower metal for V2
 # and V3 -- note 2 states V3.M3.EN.1 by reference to V2.M2.EN.1 -- and 11 nm
-# by M4 for V3). V1.M1.EN.1 ("5 & 2") and V(x).M(x+1).EN.2 ("(5 & 5) |
-# (5 & 0)") are per-side rules and are not checked yet (asap7_rules.py).
+# by M4 for V3). V1 by M1 has different minimums on the two sides.
+v1_short_2 = m1.enclosing(v1, 2.nm, projection).second_edges
+v1_short_5 = m1.enclosing(v1, 5.nm, projection).second_edges
+(insufficient_enclosure_axis(v1, v1_short_2, v1_short_5, 0) &
+ insufficient_enclosure_axis(v1, v1_short_2, v1_short_5, 90))
+  .output("V1.M1.EN.1", "Table 3.13.1: M1 enclosure of V1 on opposite sides at least 5 nm and 2 nm")
 two_side_enclosure_violation(v2, m2, 5.nm)
   .output("V2.M2.EN.1", "Table 3.13.1: min enclosure of V2 by M2 on at least two opposite sides 5 nm")
 two_side_enclosure_violation(v3, m3, 5.nm)
   .output("V3.M3.EN.1", "Table 3.13.1: min enclosure of V3 by M3 on at least two opposite sides 5 nm (note 2)")
 two_side_enclosure_violation(v3, m4, 11.nm)
   .output("V3.M4.EN.2", "Table 3.13.1: min enclosure of V3 by M4 on at least two opposite sides 11 nm")
+# The upper metal's end-cap "(5 & 5) | (5 & 0)" (V2.M3.EN.2 by section 3.13).
+missing_end_cap_violation(v1, m2)
+  .output("V1.M2.EN.2", "Table 3.13.1: M2 enclosure of V1 on opposite sides at least 5 nm, and 5 nm or 0 nm")
+missing_end_cap_violation(v2, m3)
+  .output("V2.M3.EN.2", "Table 3.13.1: M3 enclosure of V2 on opposite sides at least 5 nm, and 5 nm or 0 nm")
 
 # --------------------------------------------------------------------------
 # Tables 3.14.1-3.14.2 / 3.16.1-3.16.2 -- M4-M7

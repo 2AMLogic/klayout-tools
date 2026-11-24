@@ -469,6 +469,7 @@ envelope — see [`docs/json-contract.md`](../json-contract.md)).
 | `klt_sdf_dut_wrapper.v` | The generated transparent pass-through wrapper the DUT is nested under, on `options.sdf` runs only — works around Icarus's inability to resolve a bare top-level-port `INTERCONNECT` entry against a module elaborated as its own `-s` root (issue #1056). Kept alongside `klt_sdf_annotate.v` for the same reason. |
 | `klt_sdf_safe.sdf` / `klt_sdf_deferred_bus_ports.sdf` | Written only when the input SDF contains an `INTERCONNECT` entry touching a bit-selected top-level *vector* port (e.g. `y[0]`) — works around a second Icarus `INTERCONNECT`-resolution failure where such an entry can poison a same-net sibling entry annotated in the same `$sdf_annotate` call (issue #1619). `klt_sdf_safe.sdf` is the input SDF with every such entry removed (annotated first); `klt_sdf_deferred_bus_ports.sdf` holds only the removed entries (annotated second, via a later `$sdf_annotate` call in `klt_sdf_annotate.v`). Absent when the input SDF has no vector-port-touching `INTERCONNECT` entry, which is unchanged from before this issue. |
 | `klt_sdf_renamed.sdf` / `klt_sdf_renamed_sources/<n>/<file>` | Written only when the input SDF names an instance whose escaped identifier contains a hierarchy divider (a flattened `generate` array's `\g[0].sub.u1`; issue #2897). The SDF copy and a copy of each request source declaring such an instance, with each one renamed to a plain identifier; `environment.sdf.renamed` lists the renames. The caller's own files are untouched. |
+| `klt_sdf_output_concat_sources/<n>/<file>` | Written only when the SDF carries a nonzero `INTERCONNECT` onto a bit of a top-level output port the netlist drives through separate per-bit assigns (issue #7534). A copy of each request source declaring such a port, with those assigns replaced by the equivalent whole-vector `assign y = {bN,…,b0};`; `environment.sdf.output_assign_rewritten` lists `{port, bits, file}` per rewritten port. The caller's own files are untouched, and shapes the rewrite cannot prove equivalent are never copied (the #6937 refusal fires instead). |
 | `sim_build_icarus/<hdl_toplevel>.fst` (Icarus) or `dump.vcd` (Verilator) | The waveform trace, on `options.trace: true` runs only (Epic #1585 Phase 3, issue #1845) — location and format are cocotb's own per-engine convention, not a request choice: Icarus writes into `sim_build_icarus/`, Verilator writes directly into `.klt/functional-verification/`. Echoed by path/format/size in the response's `trace` field. Copy its `path` and `format` into a [wave-build request](wave.md) to query it. |
 
 ## Coverage
@@ -988,10 +989,13 @@ failure:
   any corner, not just the one `options.sdf.corner` selected.
 - When an output is connected by separate bit assignments such as
   `assign y[0] = b0;`, an arc with any nonzero rise, fall, min, typ or max
-  value is rejected before the simulator build. The error identifies the
-  driver and the destination bit. This applies to ANSI and non-ANSI headers.
-  Direct cell-to-port connections and a whole-vector assignment such as
-  `assign y = {b1,b0};` retain their output delays (#6937).
+  value is first rewritten to the annotatable whole-vector spelling (see the
+  next paragraph, #7534) whenever klt can prove the rewrite equivalent; the
+  shapes it cannot prove equivalent are still rejected before the simulator
+  build. The error identifies the driver and the destination bit. This
+  applies to ANSI and non-ANSI headers. Direct cell-to-port connections and a
+  whole-vector assignment such as `assign y = {b1,b0};` retain their output
+  delays (#6937).
 - Only `INTERCONNECT` entries are eligible; an `IOPATH` or any other delay
   entry is never dropped, however its endpoints are spelled.
 
@@ -1006,12 +1010,39 @@ generated `$sdf_annotate` shim names; `environment.sdf.file` still reports
 the caller's own SDF path, unchanged, as its `{path, scope, sha256}`
 envelope (#5784).
 
+**Separately assigned output bits with nonzero arcs are rewritten to the
+whole-vector concat in a build-dir copy, and disclosed** (issue #7534). The
+per-bit spelling above is exactly what a P&R netlist writer emits
+(`wire b0, b1; assign y[0] = b0; assign y[1] = b1;`), and #6937's own
+verified corrections show the equivalent whole-vector
+`assign y = {b1,b0};` annotates those arcs fully under Icarus 13.0. When
+the SDF carries at least one nonzero `INTERCONNECT` onto a bit of such a
+port, klt therefore hands the simulator a build-dir copy of the netlist
+(`.klt/functional-verification/klt_sdf_output_concat_sources/<n>/<file>`)
+with those assigns replaced by the one concat assign (MSB first, bit order
+from the declared `[N:0]` range) and reports it as an additive
+`environment.sdf.output_assign_rewritten` list of `{port, bits, file}`
+entries — the file as its `{path, scope, sha256}` envelope. The caller's
+netlist and SDF stay byte-identical, no `dropped` class is recorded and
+`partial` stays `false`: no timing is discarded, only respelled. The
+rewrite fires only for a port klt can prove equivalent — every bit `0..N`
+of a plain `[N:0]` range assigned exactly once, each right-hand side a
+bare scalar identifier, and no other statement in the module driving or
+reading any bit (an instance port connection `.x(y[i])` counts as a
+driver). Everything else — a bit not assigned, assigned twice, or
+cell-driven, a non-identifier right-hand side, a range other than
+`[N:0]`, a top module not found — keeps the typed pre-build refusal above.
+An all-zero run is untouched: the rewrite applies only to a port with at
+least one nonzero arc onto one of its bits, so the
+`zero_delay_alias_port_interconnect` drop and `partial: true` behaviour of
+#2285 is byte-identical to before.
+
 **A zero-delay `INTERCONNECT` onto a physical-only instance is dropped before
 annotation, and counted** (issue #2363). A router inserts an antenna-effect
 diode on a pin whose net violates the antenna rules; the diode is a
 *physical-only* cell — its Verilog model has no `specify` block and no output
-pin at all — so it appears in the post-route netlist and SDF but can carry no
-timing:
+pin. The diode appears in the post-route netlist and SDF with no cell timing
+of its own:
 
 ```verilog
 sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
@@ -1024,9 +1055,9 @@ sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
 That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 (issue #1619 — a bit-selected top-level port as the entry's *source*), so
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
-alias-map normalization above resolves it, and it costs one `SDF ERROR:
-<file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0, re-measured with one-variable-per-case controls in issue #5705: the
+alias-map normalization above resolves the rejection of a non-survivor
+(`SDF ERROR: <file>:<line>: Could not find intermodpath!`). Icarus 13.0 was
+measured live with one-variable-per-case controls in issue #5705: the
 deciding variable is the port bit's net's **physical fanout**, not the
 `INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
 interconnect modpath per bit-selected top-level port net, for the
@@ -1056,10 +1087,9 @@ when its instance is the net's last-declared load; the drop does not rest on
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*
-  rvalue it carries is zero. A **non**-zero-delay entry onto the identical
-  physical-only pin (including one that is zero at `min`/`typ` but not at
-  `max`) is left in place, fails to annotate, and still fails the run with
-  exit 1.
+  rvalue it carries is zero. An entry with a non-zero delay at any corner
+  stays in the SDF. If it targets a non-survivor, it still fails the
+  diagnostic gate with exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
   ordinary `specify`-bearing standard cell — the general shape (b) case,
   which on a fanout-above-1 port-bit net fails whenever it is not the
@@ -1360,7 +1390,7 @@ the run and identify the affected cell arcs in `arcs`.
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
-| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a physical-only instance was removed before annotation. Icarus can annotate only the last-declared load on the port bit's net. Zero delay at every corner makes the removal timing-neutral even when the physical-only instance is that load. |
 | `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
 | `zero_delay_internal_bus_net_interconnect` | SDF-text normalization (issue #6075) | An `INTERCONNECT` entry running across a bit-select of an **internal** wire — both endpoints ordinary instance pins whose parsed netlist connections resolve to the same bit-select of a wire that is not a top-level port — carrying zero delay at every corner, was removed before annotation. Measured live on Icarus 13.0: Icarus inserts **no** intermodpath for *every* entry on such a net (0-of-N at any fanout, unlike a port bit's last-declared-survivor rule), and the entry text is byte-identical to an entry on a scalar net that annotates cleanly, so the decision is made from the same gate-level parse the run already compiles, not from the SDF text. A non-zero entry on the identical net is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
@@ -1911,7 +1941,7 @@ finding in a serialized report.
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes`. Copy `path` and `format` into the [wave-build request](wave.md). `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
 | `provenance` | object | The shared [`provenance`](../json-contract.md) block (issue #5550): `klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`, with `pdk` and `deck` always `null` (this verb resolves neither). `input.content_hash` digests the RTL `request.sources` as resolved **before** the SDF/initial-state shims, escaped-divider renames, and scoped-define wrappers are substituted, under the `source` role and the same content-only combined scheme `klt synthesize`/`klt equiv` use — so the digest is byte-identical for the same RTL contents under a different checkout path or `-o` directory, excludes the cocotb testbench, the SDF file, `options.initial_state.netlist`, and every generated wrapper written into `output_dir`, and a `klt signoff` manifest can bind an FV citation to the very sources a cited synthesis run checked. A run whose sources cannot all be hashed records `content_hash: null`, never a crash. An `options.from_synthesize` run records `input: null` instead: its design input is the synthesized netlist, already pinned by the `from_synthesize.netlist_sha256` block. |
 | `from_synthesize` | object | Additive (issue #5684); present only when `options.from_synthesize` was used: the report and netlist `{path, scope}` envelopes, the verified `netlist_sha256`, and the `hash_check` entry (`{field, expected, actual, match}`, always `match: true` here — a mismatch is exit 1 before any build). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first non-empty line of the version probe — `--version`, or `-V` for `iverilog`, e.g. `Icarus Verilog version 13.0 (stable) (v13_0)` — `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `plusargs` (issue #6906; additive) — `testbench.plusargs` as given (`[]` when absent; the same echo the Verilog-bench path reports), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist` as its `{path, scope, sha256}` envelope (#5784), `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file` as its `{path, scope, sha256}` envelope (#5784), `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` whenever `dropped` is nonempty. `dropped` maps each counted class to `{count, reason}` and includes `arcs` for classes that record affected cell arcs, including `iopath_cond_expression` (issue #5296). The `sdf` object also carries `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See [SDF back-annotation](#sdf-back-annotation-optionssdf) for the class list and report shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first non-empty line of the version probe — `--version`, or `-V` for `iverilog`, e.g. `Icarus Verilog version 13.0 (stable) (v13_0)` — `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `plusargs` (issue #6906; additive) — `testbench.plusargs` as given (`[]` when absent; the same echo the Verilog-bench path reports), plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist` as its `{path, scope, sha256}` envelope (#5784), `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file` as its `{path, scope, sha256}` envelope (#5784), `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` whenever `dropped` is nonempty. `dropped` maps each counted class to `{count, reason}` and includes `arcs` for classes that record affected cell arcs, including `iopath_cond_expression` (issue #5296). The `sdf` object also carries `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation — and `output_assign_rewritten` (issue #7534, additive, present only when non-empty) — `[{port, bits, file}]` per top-level output port whose separate per-bit assigns were replaced by the whole-vector concat in a build-dir copy, `bits` counting the folded bits and `file` the copy's `{path, scope, sha256}` envelope; it never sets `partial` and adds no `dropped` class (no timing is discarded). See [SDF back-annotation](#sdf-back-annotation-optionssdf) for the class list and report shape. |
 
 In cocotb failure messages, an absolute RTL input filename such as
 `/work/chip/rtl/gcd.v:17` appears as `rtl/gcd.v:17` when the request is in

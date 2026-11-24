@@ -81,6 +81,52 @@ def resolve(value: Any, field: str, supply_v: dict[str, Any] | None) -> float:
     return float(value["fraction"]) * float(supply[match])
 
 
+EXCLUSIVE_FLAGS = ("exclusive_min", "exclusive_max")
+
+
+def coverage_bounds(limits: Any) -> dict[str, Any]:
+    """Return the limits that can own a coverage row, including unknown keys."""
+    if not isinstance(limits, dict):
+        return {}
+    return {key: value for key, value in limits.items() if key not in EXCLUSIVE_FLAGS}
+
+
+def _has_exclusive_bounds(spec: dict[str, Any]) -> bool:
+    limits = spec.get("limits")
+    return isinstance(limits, dict) and any(
+        limits.get(key) is True for key in EXCLUSIVE_FLAGS
+    )
+
+
+def request_uses_exclusive_bounds(request: dict[str, Any]) -> bool:
+    scopes = [request, *(request.get("analysis_steps") or [])]
+    return any(
+        _has_exclusive_bounds(spec)
+        for scope in scopes
+        if isinstance(scope, dict)
+        for spec in scope.get("measurements") or []
+        if isinstance(spec, dict)
+    )
+
+
+def _validate_exclusive_bounds(spec: dict[str, Any]) -> None:
+    limits = spec.get("limits")
+    if not isinstance(limits, dict):
+        return
+    for flag in EXCLUSIVE_FLAGS:
+        if flag not in limits:
+            continue
+        field = f"measurement '{spec['name']}': limits.{flag}"
+        if not isinstance(limits[flag], bool):
+            raise SimError(f"{field} must be a boolean")
+        side = flag.removeprefix("exclusive_")
+        bound = limits.get(side)
+        if limits[flag] and not (is_finite_number(bound) or is_supply_relative(bound)):
+            raise SimError(
+                f"{field} requires a finite number or supply-relative limits.{side}"
+            )
+
+
 def _relative_bounds(spec: dict[str, Any]) -> dict[str, Any]:
     limits = spec.get("limits")
     if not isinstance(limits, dict):
@@ -95,6 +141,7 @@ def validate_limits(
 ) -> None:
     """Validate bounds across the full sweep before a worker can start."""
     for spec in specs:
+        _validate_exclusive_bounds(spec)
         for key, value in _relative_bounds(spec).items():
             field = f"measurement '{spec['name']}': limits.{key}"
             if spec.get("k_sigma") is not None or (mc or {}).get("k_sigma") is not None:
