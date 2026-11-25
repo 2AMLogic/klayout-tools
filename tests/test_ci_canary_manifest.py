@@ -50,6 +50,7 @@ def checkout(tmp_path):
         ("merge_group", "blocks/canaries.json", True),
         ("push", "README.md", True),
         ("schedule", "README.md", True),
+        ("workflow_dispatch", "README.md", True),
     ],
 )
 def test_inventory_gate(checkout, event, path, must_check):
@@ -75,15 +76,26 @@ def test_inventory_gate(checkout, event, path, must_check):
     assert _run_gate(checkout, event, base, head) == (must_check, int(must_check))
 
 
+def test_scheduled_and_manual_inventory_share_a_read_only_job():
+    workflow = _workflow("canary-manifest.yml")
+    assert workflow[True]["schedule"] == [{"cron": "43 5 * * *"}]
+    assert "workflow_dispatch" in workflow[True]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "canary-manifest-${{ github.ref }}",
+        "cancel-in-progress": True,
+    }
+
+
 def test_unavailable_diff_falls_back_to_live_check(checkout):
     head = _git(checkout, "rev-parse", "HEAD")
     assert _run_gate(checkout, "pull_request", "0" * 40, head) == (True, 1)
 
 
 def _run_gate(checkout, event, base, head):
-    if event == "schedule":
+    if event in {"schedule", "workflow_dispatch"}:
         workflow = _workflow("canary-manifest.yml")
-        assert workflow[True]["schedule"]  # PyYAML reads the Actions key "on" as True.
+        assert event in workflow[True]  # PyYAML reads the Actions key "on" as True.
         job = workflow["jobs"]["inventory"]
     else:
         job = _workflow("ci.yml")["jobs"]["lint"]

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Check the live inventory on main and the schedule. For proposed changes, an
-# unavailable diff falls through to the live check just like a relevant diff.
+# An unavailable diff falls through to the live check just like a relevant diff.
 set -eu
 
 case "$GITHUB_EVENT_NAME" in
@@ -9,6 +8,9 @@ case "$GITHUB_EVENT_NAME" in
         git diff --quiet "$CANARY_BASE_SHA...$CANARY_HEAD_SHA" -- \
           blocks/canaries.json scripts/ingest-canary.py scripts/ci-canary-manifest.sh \
           .github/workflows/canary-manifest.yml; then
+      # Operator-approved exception to CI principles 6 and 11 (#7876). Unrelated
+      # PRs and merge groups still run the deterministic manifest tests. Main CI
+      # and the daily inventory workflow provide the live coverage under rule 10.
       echo "Canary inventory inputs are unchanged. Skipping the live forge check."
       exit 0
     fi
