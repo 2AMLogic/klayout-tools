@@ -19,7 +19,7 @@ from .netlist_normalize_scan import defined_subckt_names, quote_spice_includes
 
 _SUBCKT_RE = re.compile(r"^(\s*\.(?:subckt|ends)\s+)(\S+)", re.I)
 _QUOTED_INCLUDE_RE = re.compile(
-    r"""^(\s*\.(?:include|inc)\s+)(['"])([^'"]+)\2(\s*)$""", re.IGNORECASE
+    r"""^(\s*\.(?:include|inc)\s+)("[^"]+"|'[^']+')\s*$""", re.IGNORECASE
 )
 
 
@@ -136,10 +136,10 @@ def resolve_relative_includes(text: str, base_dir: str) -> str:
         ending = line[len(stripped) :]
         match = _QUOTED_INCLUDE_RE.match(stripped)
         if match is not None:
-            target = match.group(3)
-            if target and not os.path.isabs(target) and target[0] not in ("$", "~"):
+            quoted = match.group(2)
+            quote, target = quoted[0], quoted[1:-1]
+            if not os.path.isabs(target) and target[0] not in ("$", "~"):
                 resolved = os.path.normpath(os.path.join(base_dir, target))
-                quote = match.group(2)
                 if quote not in resolved:
                     line = f"{match.group(1)}{quote}{resolved}{quote}{ending}"
                     changed = True
