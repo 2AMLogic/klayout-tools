@@ -438,8 +438,11 @@ that failed to run is an application error (exit 1): no database written, or
 a non-zero exit whose database is unreadable or has no cross-reference.
 `status` is `match` only when every circuit pair is `Match`/`MatchWithWarning`;
 unmatched devices, nets, pins and circuits become `mismatches[]` entries using
-the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
-`pin.unmatched`, `topology`). A `pin.unmatched` entry whose pin pair the
+categories including `device.unmatched`, `device.property`, `device.connectivity`,
+`net.unmatched`, `pin.unmatched` and `topology`. When a paired device mismatch
+has identical primary parameter values on both sides, `device.connectivity`
+reports the terminal mismatch. Both parameter dictionaries appear in `details`.
+A `pin.unmatched` entry whose pin pair the
 runset's own compare graded `Match`/`MatchWithWarning` — a reference pin with
 no layout counterpart, i.e. an *unlabelled* layout pin, the shape a runset
 global like IHP sg13g2's `ignore_top_ports_mismatch` exists to accept — is
