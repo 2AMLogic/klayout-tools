@@ -1133,6 +1133,7 @@
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",
         "klayout_tools.sim_noise_mechanism",
+        "klayout_tools.sim_noise_spectrum",
         "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",

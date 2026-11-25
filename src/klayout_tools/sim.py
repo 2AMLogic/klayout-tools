@@ -123,6 +123,7 @@ from . import (
     sim_mismatch_scale,
     sim_noise,
     sim_noise_mechanism,
+    sim_noise_spectrum,
     sim_op_args,
     sim_passes,
     sim_portable,
@@ -7586,6 +7587,17 @@ def _run_corner(
                             "message": f"could not parse waveform rawfile: {exc}",
                         }
                     )
+                # Issue #7866: a `noise` corner's per-frequency spectrum, a
+                # sibling of the (totals-only) waveform artifact above.
+                artifacts.update(
+                    sim_noise_spectrum.persist(
+                        analysis,
+                        raw_path,
+                        waveform_max_bytes,
+                        waveform_decimate,
+                        diagnostics,
+                    )
+                )
             # Issue #3052: the engine has exited and its log is parsed, so the
             # persisted deck/log can now be rewritten to stable tokens.
             diagnostics.extend(
@@ -8512,6 +8524,7 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        lines.extend(sim_noise_spectrum.control_lines(analysis, raw_path))  # #7866
         if analysis["kind"] == "ac" and not measurements_spec:
             # An aborted sweep has no frequency vector to count (#7293).
             lines.extend(["if length(frequency) > 0", "display frequency", "end"])
@@ -10347,26 +10360,11 @@ def _rollup_measurements(
 
 # --------------------------------------------------------------------------- #
 # Waveform artifact (rawfile -> JSON)
-# The reader/writer moved to `sim_raw.py` (issue #6752); only the noise-mode
-# classifier of a parsed waveform stays here.
+# The reader/writer moved to `sim_raw.py` (issue #6752), the noise-mode
+# classifier of a parsed waveform to `sim_noise.py` (issue #7866).
 # --------------------------------------------------------------------------- #
 
-
-def noise_representation(waveform: dict[str, Any]) -> str:
-    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
-    (issue #3006).
-
-    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
-    records which mode produced it: the integrated plot is named
-    ``Integrated Noise`` with ``voltage``/``current`` variables, or
-    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
-    """
-    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
-        return "power"
-    for var in waveform.get("variables", []):
-        if str(var.get("type", "")).endswith("^2"):
-            return "power"
-    return "amplitude"
+noise_representation = sim_noise.noise_representation
 
 
 # --------------------------------------------------------------------------- #

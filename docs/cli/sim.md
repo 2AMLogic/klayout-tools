@@ -3294,6 +3294,14 @@ per-corner waveform JSON exactly as it would after `--backend local`.
 `options.waveforms` is refused for `analysis_steps[]` sequences on every
 backend. Regression: `test_run_sim_batch_returns_per_corner_waveform_artifacts`.
 
+For a `noise` analysis, `artifacts.waveform` holds only the integrated plot
+(`onoise_total`/`inoise_total`, one point). The per-frequency spectrum -- what
+you need to re-derive band integrals or fit slopes offline -- comes home beside
+it as `artifacts.waveform_spectrum` (`waveform_spectrum.raw.json`), under the
+same two options and with the same local path rewriting. An older runner image
+omits it silently rather than being refused; see "Noise spectrum:
+`artifacts.waveform_spectrum`" for how to tell.
+
 ### gf180 local-versus-batch troubleshooting checklist
 
 A gf180mcuD netlist was reported to simulate locally but fail on the fleet
@@ -5166,7 +5174,12 @@ conversion is skipped and the corner carries a `severity: "warning"`,
 remedies. The raw file stays at `artifacts.raw`, `artifacts.waveform` is
 `null`, and every measurement is graded as usual — the warning does not change
 `status`. Ways to shrink a waveform: `options.save_vectors`, a larger `tstep` /
-`tmax`, a shorter `tstop`. Validated before any corner launches; honored by
+`tmax`, a shorter `tstop`.
+On a `noise` corner the guard applies to `waveform_spectrum.raw` as well, judged
+separately from `waveform.raw` (the integrated plot is tiny, the spectrum is not):
+an oversized spectrum leaves `artifacts.waveform_spectrum` `null` and the
+integrated `artifacts.waveform` intact. Shrink it with a coarser noise sweep or by
+dropping the `pts_per_summary` argument. Validated before any corner launches; honored by
 every backend (remote/batch workers re-read it from the request document).
 
 ### Waveform decimation: `options.waveform_decimate` (issue #5112)
@@ -5494,7 +5507,10 @@ analysis with at least one `expr` measurement, `klt sim` therefore emits
 resolve by **bare name** (e.g. `onoise_spectrum[10]`, `onoise_total`); the
 `noise1.` prefix also still works. The aliases come after any rawfile `write`,
 so `options.waveforms` output is unchanged, and decks for other analysis kinds
-are byte-identical.
+are byte-identical. With `options.waveforms` the spectrum plot is also dumped to
+its own `waveform_spectrum.raw` (and reported as `artifacts.waveform_spectrum`);
+that dump restores the current plot, so the `expr` lets below still see the
+totals -- see "Noise spectrum: `artifacts.waveform_spectrum`".
 
 Inside `analysis_steps`, `$curplot` after a `noise` step is likewise the
 totals plot, so a step-scoped `expr` sees `onoise_total`/`inoise_total` only.
@@ -5526,6 +5542,67 @@ grade `pass`. A `noise` corner whose rawfile was parsed carries
 `noise_representation` (`"amplitude"` or `"power"`, see the report fields
 table) so callers can check mechanically. To pin amplitude regardless of the
 environment, set `options.ngspice_init: ["unset sqrnoise"]`.
+
+### Noise spectrum: `artifacts.waveform_spectrum` (issue #7866)
+
+`waveform.raw` / `waveform.raw.json` hold ngspice's *current* plot, and after a
+`noise` analysis that is the integrated one (`Integrated Noise`:
+`v(onoise_total)`, `v(inoise_total)`, one point). The per-frequency spectrum
+(`Noise Spectral Density Curves`: `frequency`, `inoise_spectrum`,
+`onoise_spectrum`, one point per swept frequency) is a different plot. A `noise`
+corner run with `options.waveforms: true` **and** `options.keep_artifacts: true`
+therefore also writes it, as a sibling file next to the main waveform:
+
+| File | Plot | Reported as |
+|---|---|---|
+| `waveform.raw` / `waveform.raw.json` | `Integrated Noise` (unchanged) | `artifacts.raw` / `artifacts.waveform` |
+| `waveform_spectrum.raw` / `waveform_spectrum.raw.json` | `Noise Spectral Density Curves` | `artifacts.waveform_spectrum` (the `.json` path) |
+
+`waveform_spectrum.raw.json` has the same shape as `waveform.raw.json`
+(`plotname`, `variables`, `points`) and honors `options.waveform_decimate`
+(first and last point always kept) and `options.waveform_max_bytes`. Its
+`points` count is the number of swept frequencies, i.e. the first
+`No. of Data Rows` line in `ngspice.log`. With the trailing `pts_per_summary`
+argument on `analysis.args` the plot also carries the per-contributor
+`onoise_<device>_<generator>` vectors, and they are exported too.
+`waveform.raw`, `waveform.raw.json` and `noise_representation` are byte-identical
+to what the same request produced before this artifact existed.
+
+```json
+{ "analysis": {"kind": "noise", "args": "v(out) V1 dec 20 10 1e7"},
+  "options": {"waveforms": true, "keep_artifacts": true} }
+```
+
+- **Presence.** `artifacts.waveform_spectrum` is present only on a `noise` corner
+  whose rawfile was kept; it is absent for every other analysis kind and without
+  `waveforms`/`keep_artifacts`. It is `null` when the spectrum was not
+  produced -- over `options.waveform_max_bytes` (a `waveform_too_large` warning
+  naming `waveform_spectrum.raw`), unparseable, or never written (an `unknown`
+  warning). These are warnings only; `status` and the measurements are
+  unaffected.
+- **Precision.** ngspice's ASCII rawfile prints 16 significant digits
+  (`1.287480723394335e-08`); the JSON carries exactly those values. That is the
+  printed precision, not a bit-exact double (17 digits would be needed).
+- **Decks.** The deck gains `set __klt_nzw_plot = $curplot` / `setplot noise1` /
+  `write .../waveform_spectrum.raw` / `setplot $__klt_nzw_plot` right after the
+  main `write` -- the plot is restored, so `expr`, `noise` and `noise.mechanism`
+  measurements on the same request resolve as before. Decks for other analysis
+  kinds, and for `noise` without `options.waveforms`, are byte-identical.
+- **Batch.** The file is written into the corner directory on the job
+  instance and comes home with the rest of `outputs/artifacts/`, so
+  `artifacts.waveform_spectrum` points at a local copy (see "Post-processing
+  waveforms from a batch run locally"). It is **not** a runner-gated request
+  feature: the only request-visible trigger is `waveforms` on a `noise`
+  analysis, and gating on that would also refuse batch requests that set it
+  today and only need the integrated plot (`runner_version_check` defaults to
+  `"enforce"`). A runner image that predates this feature therefore accepts the
+  request and simply writes no spectrum -- check that
+  `artifacts.waveform_spectrum` is a path (absent or `null` means there is none)
+  and, when it is absent from a `noise` corner, compare
+  `environment.remote.runner_klt_version` against a release that has the feature.
+
+Not covered: choosing which plots or vectors to export, `noise` plots inside
+`analysis_steps[]` (their plot names are per step), and Xyce.
 
 ### `expr` cannot read `.meas` results
 
@@ -10562,7 +10639,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
 | `save_all_supersedes` | Issue #5622. The generated `save all` supersedes a restricting `.save` card in the netlist body while `options.waveforms` is on, so `waveform.raw` holds every node rather than the body's restricted set; a card whose only argument is `all`, or a bare `.save`, restricted nothing and does not warn. Request-level (not per-corner), always `severity: "warning"`; emitted in `--dry-run` too. See "Warning when `save all` supersedes a body `.save`" above. |
-| `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
+| `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). On a `noise` corner the same code also fires, naming `waveform_spectrum.raw`, when the spectrum rawfile alone is over the cap (issue #7866; `artifacts.waveform_spectrum` is then `null`). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
 | `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. A `tian` measurement naming that pass reports `[tian_pass_missing]` (issue #3160). |
 | `op_metastable` | `analysis.op_check` (issue #5077): a declared node of an `op` solution sits within `band * supply` of mid-rail, so the engine may have converged onto the unstable solution of a bistable circuit. `severity: "warning"` — grade unchanged unless listed in `options.fail_on_diagnostic`. See "Detecting a metastable operating point" above. |
 | `noise_mechanism_incomplete` | A `noise.mechanism` share decomposition failed its completeness assertion (issue #5553): the per-contributor leaf power-sum disagrees with the plot's `onoise_spectrum` by more than `1e-3` relative, or unclassified generator families (gate leakage, junction shot noise) carry power. `severity: "warning"` — the value is still reported as a sound **lower bound** on the requested share; grade unchanged unless listed in `options.fail_on_diagnostic`. See "Per-mechanism shares (`noise.mechanism`)" above. |
@@ -11553,7 +11630,7 @@ corner-sweep rollup fields above are declared.
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` for an `optional` measurement with no value — issue #2925, `value`/`margin` `null`, info diagnostic `measurement_absent` — and `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #5731): a measurement expanded from a `{case}` template (`options.measurement_cases`) carries `case` (its scope string) on every result entry; absent for every request that declares neither the option nor a placeholder. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #2947): an entry declared with `cycle_mean` carries `value` = the cycle-aligned mean and a `cycle_mean` object `{t_start, t_end, cycles_used}` (see "Cycle-aligned mean" above); absent on every other entry and when no mean was computed. Additive/optional (issue #3033): an entry declared with `energy` carries `value` = the net energy (J) and an `energy` object `{net, gross, recovered, charge, from, to}` (see "Source energy over a transient window" above); absent on every other entry and when nothing was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning"\|"info", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. `waveform_too_large` (issue #3211) and `noise_mechanism_incomplete` (issue #5553) are also always warnings. `dc_homotopy_recovery` records a completed DC stepping method at `"info"` severity. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
-| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #5622): `raw_bytes` (integer, the rawfile's size in bytes) is present only when a rawfile was kept. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
+| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #5622): `raw_bytes` (integer, the rawfile's size in bytes) is present only when a rawfile was kept. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. Additive/optional (issue #7866): `waveform_spectrum` (path to `waveform_spectrum.raw.json`, the per-frequency `Noise Spectral Density Curves` plot) on a `noise` corner whose rawfile was kept (`options.waveforms` + `options.keep_artifacts`); `null` when it was not produced, absent for every other corner -- see "Noise spectrum: `artifacts.waveform_spectrum`". |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` (plus `seed_scope`/`seed_mode`/`mismatch_scale` when the request declared them) — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 
 ### `coverage`
