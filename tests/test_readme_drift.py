@@ -19,14 +19,14 @@ a verb lands, which is usually between releases). So the README may attribute
 the version to the release and the count to `main` -- never the count to the
 release.
 
-The release claim may lag by PATCH releases (issue #5005). Patch releases are
+The README carries NO literal release version (issue #5005). Patch releases are
 automatic and the fleet publisher's bump commit changes exactly
-`pyproject.toml` and `CHANGELOG.md`, so the README cannot ride along: in that
-commit the CHANGELOG heading already says X.Y.(Z+1) while the README still says
-X.Y.Z (and the commit must stay green or the tag job never tags it). A minor
-or major release is deliberate and updates the README with it, so the claim must
-stay inside the newest release's X.Y line -- which is what catches the original
-drift (README "v0.5.0" while `main` was at v0.9.1).
+`pyproject.toml` and `CHANGELOG.md`, so a version typed into the README is stale
+the moment a patch release lands -- and no lag tolerance fixes that: any bound
+still permits a stale claim after the next publication. The live PyPI badge and
+project link carry the version instead, and a literal "vX.Y.Z is on PyPI" /
+"PyPI X.Y.Z" claim fails here, which is also what keeps the original #5419
+drift ("v0.5.0" while `main` was at v0.9.1) from coming back.
 """
 
 from __future__ import annotations
@@ -42,7 +42,8 @@ README = REPO_ROOT / "README.md"
 EXAMPLES = REPO_ROOT / "examples"
 EXAMPLES_INDEX = EXAMPLES / "README.md"
 
-# The two release-version claim shapes the README makes, and nothing wider:
+# The two release-version claim shapes the README used to make, and nothing
+# wider (it now makes neither; see the module docstring):
 # the version token must be adjacent to "PyPI". Other version strings in
 # README.md are not release claims and must not be matched -- the
 # `klt-yield-native` wheel's own 0.1.0, the "0.9.1 and later" compatibility
@@ -62,17 +63,6 @@ def _site_data() -> dict:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.build_data()
-
-
-def _xyz(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in version.split("."))
-
-
-def release_claim_is_current(claimed: str, newest: str) -> bool:
-    """True when a README release claim is acceptable against the newest
-    CHANGELOG release: same X.Y line, never ahead of it (patch lag only)."""
-    c, n = _xyz(claimed), _xyz(newest)
-    return c[:2] == n[:2] and c[2] <= n[2]
 
 
 def _entry_marker(name: str) -> str:
@@ -98,44 +88,45 @@ def _example_dirs() -> list[str]:
     )
 
 
-def test_readme_release_version_matches_site_data():
-    version = _site_data()["release"]["version"]
+def test_readme_states_no_literal_release_version():
     text = README.read_text(encoding="utf-8")
-    claims: set[str] = set()
     for label, pattern in VERSION_PATTERNS.items():
-        found = pattern.findall(text)
-        # Non-vacuity: a reworded README that drops the claim entirely must
-        # fail here rather than pass with nothing left to check.
-        assert found, (
-            f"README.md no longer makes a {label} release claim; update "
-            f"VERSION_PATTERNS in {Path(__file__).name} if the wording moved "
-            f"on purpose, so the guard keeps checking something"
+        found = sorted(set(pattern.findall(text)))
+        assert not found, (
+            f"README.md makes a literal {label} release claim {found}: the "
+            f"publisher's two-file bump commit cannot update it, so it goes "
+            f"stale at the next automatic patch release. Drop the number and "
+            f"let the PyPI badge and link carry the version (see this "
+            f"module's docstring)"
         )
-        stale = sorted(
-            v for v in set(found) if not release_claim_is_current(v, version)
-        )
-        assert not stale, (
-            f"README.md's {label} claim says {stale}, outside the newest "
-            f"CHANGELOG release's X.Y line (release.version {version!r}); "
-            f"update the README's release claim (patch lag within the line is "
-            f"allowed, see this module's docstring)"
-        )
-        claims.update(found)
-    assert len(claims) == 1, (
-        f"README.md's release claims disagree with each other: {sorted(claims)}"
+
+
+def test_readme_points_at_the_live_pypi_release():
+    """Non-vacuity for the test above: the README must still say where the
+    current version lives, so removing the number cannot leave it saying nothing."""
+    text = README.read_text(encoding="utf-8")
+    assert "img.shields.io/pypi/v/klayout-tools" in text, "the live PyPI badge is gone"
+    assert "](https://pypi.org/project/klayout-tools/)" in text, (
+        "README.md no longer links the PyPI project"
     )
 
 
-def test_release_claim_tolerates_the_two_file_bump_commit_only():
-    """The publisher's bump commit rewrites only pyproject.toml and
-    CHANGELOG.md, so it lands with the heading one patch ahead of the README."""
-    assert release_claim_is_current("0.9.3", "0.9.3")
-    assert release_claim_is_current("0.9.2", "0.9.3")  # the bump commit itself
-    assert release_claim_is_current("0.9.0", "0.9.12")  # later patch releases
-    assert not release_claim_is_current("0.9.4", "0.9.3")  # ahead of the changelog
-    assert not release_claim_is_current("0.8.9", "0.9.3")  # missed a minor
-    assert not release_claim_is_current("0.5.0", "0.9.1")  # the #5419 drift
-    assert not release_claim_is_current("0.9.2", "1.0.0")  # missed a major
+def test_version_patterns_still_catch_a_literal_release_claim():
+    """Positive control: the ban above is not vacuous."""
+    for label, pattern, claim in (
+        (
+            '"vX.Y.Z is on PyPI"',
+            VERSION_PATTERNS['"vX.Y.Z is on PyPI"'],
+            "v0.9.2 is on PyPI",
+        ),
+        (
+            '"PyPI X.Y.Z"',
+            VERSION_PATTERNS['"PyPI X.Y.Z"'],
+            "The latest release is PyPI 0.9.2;",
+        ),
+        ('"PyPI X.Y.Z"', VERSION_PATTERNS['"PyPI X.Y.Z"'], "released as PyPI v1.0.0"),
+    ):
+        assert pattern.findall(claim), (label, claim)
 
 
 def test_readme_verb_count_matches_site_data():

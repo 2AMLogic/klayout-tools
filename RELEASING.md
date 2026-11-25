@@ -77,7 +77,14 @@ Three jobs (Loom's model, `rjwalters/loom`
    the newest and that `publish.yml` has never run on, and **dispatches only**
    (no re-tag, no native-extras gate, never an older tag a newer release has
    passed); a run list it cannot read fails red instead of reading as
-   "released".
+   "released". The job's checkout keeps its Git credentials
+   (`persist-credentials: true`): `GH_TOKEN` authenticates `gh`, not `git`, so
+   without them the tag push itself would fail on the first real release.
+   Any red end of the job other than the native gate (which reports itself)
+   -- a dispatch that fails after the tag push, a failed publish-run lookup
+   during recovery, a failed push -- is reported by its last step into the
+   same single tracking issue (`Automated release blocked: ...`), naming the
+   failed step, the run URL, and whether the tag was already pushed.
 
 `tests/test_release_workflow_identity.py` pins the security-relevant shape of
 this workflow (only the publish job mints the OIDC token, no fallback push,
@@ -86,7 +93,8 @@ commit from re-triggering the workflow), with mutation controls; mirror of
 Loom's `test-version-bump-workflow-identity.sh`.
 `tests/test_release_workflow_tag_job.py` guards the tag job and runs its own
 steps against a stub `gh` and a local origin, including the stranded-tag
-recovery above.
+recovery above; `tests/test_release_workflow_tag_report.py` runs the failure
+report the same way.
 
 ### Generated files are not in the bump commit
 
@@ -112,13 +120,14 @@ files that used to ride along in the release commit moved into the build:
   committed; a `CHANGELOG.md`/`pyproject.toml` change redeploys the site, so
   the release badge tracks the newest heading. CI's `site/` job generates it
   before `tsc -b`; the Python drift tests call the generator in-process.
-- **`README.md`'s release claim** ("PyPI X.Y.Z"): the bump commit cannot carry
-  it, so in that commit the new `CHANGELOG.md` heading is one patch ahead of
-  the README. `tests/test_readme_drift.py` therefore lets the claim lag by
-  patch releases inside the newest release's `X.Y` line (the bump commit must
-  stay green or nothing is tagged); a minor or major release updates the
-  README with it, and a claim from an older `X.Y` line, or ahead of the
-  changelog, fails.
+- **`README.md`'s release version**: not stated. The bump commit changes
+  only `pyproject.toml` and `CHANGELOG.md`, so a version typed into the README
+  would be stale the moment an automatic patch release lands, and no lag
+  tolerance prevents that (any bound still permits a stale claim after the next
+  publication). The live PyPI badge and project link carry the version.
+  `tests/test_readme_drift.py` fails on a literal "vX.Y.Z is on PyPI" /
+  "PyPI X.Y.Z" claim (which also keeps the #5419 drift from returning), and
+  still checks the README's verb count against the CLI registry.
 
 ### Changelog fragments and release notes
 
@@ -217,9 +226,13 @@ recorded automatically at build time.
   ruleset bypass above.
 - **A red `CI` on the bump commit:** nothing is tagged; fix forward, and the
   next green commit carrying the same `base-version` is tagged instead.
-- **A tag with no publish run** (the `tag` job's dispatch step failed): re-run
-  the failed `Release` run. The tag job dispatches `publish.yml` on the
-  existing tag without re-tagging (see the `tag` job above).
+- **A tag with no publish run** (the `tag` job's dispatch step failed): the
+  job files or refreshes the `Automated release blocked: tag job failed`
+  issue with the run URL; re-run the failed `Release` run. The tag job
+  dispatches `publish.yml` on the existing tag without re-tagging (see the
+  `tag` job above).
+- **The tag push itself failed:** the same issue says no tag was left; check
+  `git ls-remote --tags origin vX.Y.Z`, then re-run the failed job.
 - **A failed publish after the tag:** run `publish.yml` via "Run workflow" on
   the existing `vX.Y.Z` tag; do not re-tag.
 

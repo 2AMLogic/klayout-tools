@@ -409,14 +409,21 @@ jobs:
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        id: checkout
         with:
           # The tag lands on the CI-tested commit, read via $HEAD_SHA below
           # (never github.sha: in a workflow_run run that is main's CURRENT
           # tip, not the tested one). Full history + tags: ancestry checks.
           fetch-depth: 0
-          persist-credentials: false
+          # This job pushes a tag with plain `git push`, and `false` strips
+          # the only Git credential the job has (GH_TOKEN below authenticates
+          # `gh`, not `git`): the first real release would fail at the push.
+          # Persisting widens nothing -- GH_TOKEN is already job-level env, so
+          # every step here can read the same token.
+          persist-credentials: true
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        id: uv
         with:
           version: "latest"
 
@@ -429,6 +436,10 @@ jobs:
           # must just dispatch publish.yml (recovery, below).
           echo "version=" >>"$GITHUB_OUTPUT"
           echo "tag_exists=false" >>"$GITHUB_OUTPUT"
+          # candidate: the release being considered, set before anything below
+          # can fail, so a failure report can name it (`version` stays empty
+          # until this job has decided to act).
+          echo "candidate=" >>"$GITHUB_OUTPUT"
 
           # Still on main? (A reverted/rewritten commit's late CI run is not
           # released; non-fast-forward is ruleset-blocked, but check anyway.)
@@ -438,6 +449,7 @@ jobs:
 
           version="$(git show "$HEAD_SHA":pyproject.toml | grep -E '^base-version' | head -1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
           tag="v$version"
+          echo "candidate=$version" >>"$GITHUB_OUTPUT"
           newest="$(git tag --sort=-v:refname --list 'v*' | head -1)"
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             # Usually "already released". The one state that is not: an earlier
@@ -492,35 +504,91 @@ jobs:
         if: steps.native.outputs.ok == 'false'
         run: |
           set -euo pipefail
-          title="Automated release blocked: klt-*-native pin not published"
+          # One tracking issue for every way this job can block a release: the
+          # lookup matches the shared prefix (the failed-job report below uses
+          # the same one), so whichever failure comes second refreshes the
+          # issue the first one filed instead of opening another.
+          prefix="Automated release blocked:"
+          title="$prefix klt-*-native pin not published"
           body="$(printf 'The tag job refused to tag v%s (no tag, no publish).\n\nRun: %s/%s/actions/runs/%s\n\n```\n%s\n```\n\nPublish the pin (docs/releasing-native.md), then re-run the Release workflow; this issue is refreshed in place, not re-filed.' \
             "${{ steps.resolve.outputs.version }}" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(tail -n 40 "$RUNNER_TEMP/native.log")")"
-          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-            --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"${prefix%:}\" in:title" \
+            --json number,title --jq "[.[] | select(.title | startswith(\"$prefix\"))][0].number // empty")"
           if [ -n "$num" ]; then
-            gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+            gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           fi
           exit 1
 
       - name: Tag the green commit and dispatch publish
+        id: tag
         if: steps.native.outputs.ok == 'true' || steps.resolve.outputs.tag_exists == 'true'
         env:
           TAG_EXISTS: ${{ steps.resolve.outputs.tag_exists }}
         run: |
           set -euo pipefail
           v="v${{ steps.resolve.outputs.version }}"
+          # tag_pushed is written the moment the remote has the tag, so a
+          # failure report can tell "tagged, publish not dispatched" from "the
+          # push failed" even though this step then exits non-zero.
           if [ "$TAG_EXISTS" = "true" ]; then
             # Recovery (see the resolve step): the tag is already pushed and
             # publish.yml never ran on it; dispatch only, never re-tag.
             echo "$v is already tagged; dispatching publish only."
+            echo "tag_pushed=true" >>"$GITHUB_OUTPUT"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "$v" -m "Release ${v#v}" "$HEAD_SHA"
             git push origin "refs/tags/$v"
+            echo "tag_pushed=true" >>"$GITHUB_OUTPUT"
           fi
           # GITHUB_TOKEN tag pushes do not trigger publish.yml's `push: tags`;
           # workflow_dispatch on the tag ref does, and builds from the tag.
           gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$v"
+
+      # Every other red end of this job -- chiefly a publish dispatch that fails
+      # AFTER the tag is pushed, a publish-run lookup that fails while recovering
+      # one, or a failed tag push -- would otherwise just go red and strand the
+      # release until someone reads Actions. The native gate reports itself
+      # above (and exits 1), so it is excluded here: no second, generic report
+      # overwriting its pin-specific one. Same single tracking issue.
+      - name: Report a failed tag job (single tracking issue)
+        if: failure() && steps.native.outputs.ok != 'false'
+        env:
+          CANDIDATE: ${{ steps.resolve.outputs.candidate }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          UV_OUTCOME: ${{ steps.uv.outcome }}
+          RESOLVE_OUTCOME: ${{ steps.resolve.outcome }}
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
+          TAG_OUTCOME: ${{ steps.tag.outcome }}
+          TAG_PUSHED: ${{ steps.tag.outputs.tag_pushed }}
+        run: |
+          set -euo pipefail
+          prefix="Automated release blocked:"
+          title="$prefix tag job failed"
+          release="${CANDIDATE:+v$CANDIDATE}"
+          release="${release:-an unresolved release}"
+          failed="an unknown step"
+          [ "$TAG_OUTCOME" = failure ] && failed="Tag the green commit and dispatch publish"
+          [ "$NATIVE_OUTCOME" = failure ] && failed="Gate on native extras"
+          [ "$RESOLVE_OUTCOME" = failure ] && failed="Resolve the release this green commit carries"
+          [ "$UV_OUTCOME" = failure ] && failed="Set up uv"
+          [ "$CHECKOUT_OUTCOME" = failure ] && failed="Check out the repository"
+          if [ "$TAG_OUTCOME" != failure ]; then
+            state="This run pushed no tag."
+          elif [ "$TAG_PUSHED" = true ]; then
+            state="The tag $release is already pushed, but publish.yml was not dispatched on it. Re-running the failed job dispatches publish only; it never re-tags."
+          else
+            state="The tag push did not complete, so this run left no tag. Check \`git ls-remote --tags origin $release\`; re-running the failed job retries the tag and then the dispatch."
+          fi
+          body="$(printf 'The tag job failed at step "%s" for %s.\n\n%s\n\nRun: %s/%s/actions/runs/%s\n\nFix the cause, then re-run the failed job of that run; this issue is refreshed in place, not re-filed.' \
+            "$failed" "$release" "$state" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          num="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"${prefix%:}\" in:title" \
+            --json number,title --jq "[.[] | select(.title | startswith(\"$prefix\"))][0].number // empty")"
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
