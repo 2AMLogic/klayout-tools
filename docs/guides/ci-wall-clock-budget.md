@@ -114,7 +114,6 @@ Per job, in seconds (`n` = observations on the job's current runner):
 | Native engines (Rust) — static timing | ubuntu-24.04 | 45 | 52 | 64 | 89 | 150 |
 | Native engines (Rust) — yield statistics | blacksmith-4vcpu | 205 | 24 | 36 | 84 | 120 |
 | Native engines (Rust) — waveform build/query | ubuntu-24.04 | 45 | 22 | 35 | 62 | 120 |
-| Native engines (Rust) — congestion pre-check | blacksmith-4vcpu | 205 | 20 | 30 | 102 | 120 |
 | Native engines (Rust) — technology mapping | ubuntu-24.04 | 45 | 19 | 30 | 36 | 120 |
 | klt verify Action smoke test | ubuntu-24.04 | 45 | 25 | 27 | 31 | 120 |
 | Tests (numpy cross-check) | ubuntu-latest | 272 | 17 | 20 | 32 | 120 |

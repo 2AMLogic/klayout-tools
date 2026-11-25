@@ -2,7 +2,7 @@
 """Content fingerprint of a native crate's Rust sources (issue #1889).
 
 CI's native-engine jobs install each pyo3 extension (`klt_mom_native`,
-`klt_congestion_native`, `klt_yield_native`, `klt_statime_native`) with
+`klt_yield_native`, `klt_statime_native`) with
 `uv sync`, then run that crate's Python tier against it. uv revalidates a
 cached *directory* dependency against the source dir's `pyproject.toml`, not
 against its Rust sources -- and `native/<crate>/pyproject.toml` is usually

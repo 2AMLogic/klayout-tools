@@ -1,0 +1,8 @@
+{
+  "solve_mode": "thermal",
+  "mesh": {"path": "bar.msh", "length_unit_m": 0.001},
+  "thermal": {
+    "regions": [{"physical_group": "bar", "conductivity_w_m_k": 40, "source_w_m3": 4e8}],
+    "fixed_temperatures": [{"surface": "left", "temperature_k": 300}, {"surface": "right", "temperature_k": 300}]
+  }
+}

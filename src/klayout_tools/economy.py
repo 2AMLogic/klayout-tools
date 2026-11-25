@@ -54,17 +54,7 @@ acceptance criteria:
 - **Budget check and reference deltas** (``budget_um2``/``reference_area_um2``
   request parameters) -- absent from the placeholder entirely.
 
-## Why not `congestion.py`'s native grid machinery
-
-The issue's own text suggests "the whitespace grid can share [congestion.py's]
-machinery" -- but ``congestion.py``'s Rust extension estimates *routing
-demand* from a net list (RUDY/RSMT family), which requires DEF placement +
-connectivity data this command does not have (it takes a bare GDS/OASIS
-stream, not a DEF). What *is* shared is the idiom -- a grid of cells each
-reporting one scalar metric -- re-implemented here in pure
-``klayout.db`` region math (:func:`_whitespace_grid`), matching this
-module's already-lighter dependency footprint (no native extension required
-to run ``klt economy`` at all).
+The whitespace grid uses ``klayout.db`` region math directly on GDS/OASIS geometry.
 """
 
 from __future__ import annotations

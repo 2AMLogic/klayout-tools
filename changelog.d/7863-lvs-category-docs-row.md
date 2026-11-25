@@ -1,0 +1,1 @@
+- Document `device.connectivity` in the LVS response field table and check its category list against the emitted category constants (#7863).

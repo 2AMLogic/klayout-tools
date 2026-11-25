@@ -4,9 +4,8 @@
 corners -- one record per group of the remaining axes -- and
 :func:`attach_coverage` turns those records into per-group checked-work
 identities. The form itself (request validation, the axis coordinates, the
-per-corner spec split) is :mod:`klayout_tools.sim_derive`; ``sim`` imports
-that module at load time, so this one reaches ``sim`` lazily for the shared
-grading rule.
+per-corner spec split) is :mod:`klayout_tools.sim_derive`. Derived values
+use the same scalar grading rules as per-corner measurements.
 """
 
 from __future__ import annotations
@@ -18,6 +17,14 @@ from .coverage import work_id
 from .sim_corner_point import _format_number, _format_param_value, _format_supply_value
 from .sim_derive import EXPECTED_KEY, axis_value, fields, is_derive
 from .sim_errors import SimError
+from .sim_measurement_grading import (
+    _ABSENT_STATUS,
+    _INCONCLUSIVE_STATUS,
+    _RECOGNISED_LIMIT_KEYS,
+    IMPLAUSIBLE_DIAGNOSTIC_CODE,
+    NOT_REACHED_STATUS,
+    _grade_measurement_value,
+)
 
 #: Why a group was not graded (its ``reason``); a graded group carries ``null``.
 REASON_MISSING_AXIS_POINTS = "missing_axis_points"
@@ -28,13 +35,6 @@ REASON_SOURCE_INCONCLUSIVE = "source_inconclusive"
 REASON_IMPLAUSIBLE_VALUE = "implausible_value"
 
 Point = tuple[dict[str, Any], Any]  # (corner report, its position on the axis)
-
-
-def _sim():
-    """:mod:`klayout_tools.sim` -- imported lazily; it imports ``sim_derive``."""
-    from . import sim
-
-    return sim
 
 
 def rollup_fields(
@@ -109,7 +109,7 @@ def _reduce_group(
         inconclusive = reason == REASON_SOURCE_INCONCLUSIVE
         return {
             **record,
-            "status": _sim()._INCONCLUSIVE_STATUS if inconclusive else "error",
+            "status": _INCONCLUSIVE_STATUS if inconclusive else "error",
             "reason": reason,
         }
     value, reason = _reduce(body, points)
@@ -117,10 +117,10 @@ def _reduce_group(
         return {**record, "reason": reason}
     if not is_finite_number(value):
         return {**record, "reason": REASON_NUMERIC_RANGE}
-    status, margin, diagnostics = _sim()._grade_measurement_value(spec, value)
+    status, margin, diagnostics = _grade_measurement_value(spec, value)
     if margin is not None and not is_finite_number(margin):
         return {**record, "reason": REASON_NUMERIC_RANGE}
-    if status == _sim()._INCONCLUSIVE_STATUS:
+    if status == _INCONCLUSIVE_STATUS:
         return {
             **record,
             "status": status,
@@ -136,8 +136,7 @@ def _untrusted(points: list[Point], source: str) -> str | None:
     unreached, absent or non-finite source value (``source_unavailable``),
     else a corner or source graded ``inconclusive`` (``source_inconclusive``);
     ``None`` when every input is trusted. An error outranks an inconclusive."""
-    sim = _sim()
-    unavailable = ("error", sim.NOT_REACHED_STATUS, sim._ABSENT_STATUS)
+    unavailable = ("error", NOT_REACHED_STATUS, _ABSENT_STATUS)
     inconclusive = False
     for corner, _ in points:
         measurement = _source(corner, source)
@@ -148,7 +147,7 @@ def _untrusted(points: list[Point], source: str) -> str | None:
             or not is_finite_number(measurement.get("value"))
         ):
             return REASON_SOURCE_UNAVAILABLE
-        inconclusive = inconclusive or sim._INCONCLUSIVE_STATUS in (
+        inconclusive = inconclusive or _INCONCLUSIVE_STATUS in (
             corner.get("status"),
             measurement.get("status"),
         )
@@ -239,7 +238,7 @@ def _summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     status = next(
         (
             token
-            for token in ("error", _sim()._INCONCLUSIVE_STATUS, "fail")
+            for token in ("error", _INCONCLUSIVE_STATUS, "fail")
             if token in statuses
         ),
         "pass",
@@ -354,16 +353,15 @@ def _group_coverage(
 
 
 def _bound_skip_reason(key: str, value: Any, group: dict[str, Any]) -> str | None:
-    sim = _sim()
-    if key not in sim._RECOGNISED_LIMIT_KEYS:
+    if key not in _RECOGNISED_LIMIT_KEYS:
         return "unrecognized_limit_key"
     if value is None:
         return "missing_limit_value"
     if group["status"] == "error":
         return "unavailable_measurement"
-    if group["status"] == sim._INCONCLUSIVE_STATUS:
+    if group["status"] == _INCONCLUSIVE_STATUS:
         return (
-            sim.IMPLAUSIBLE_DIAGNOSTIC_CODE
+            IMPLAUSIBLE_DIAGNOSTIC_CODE
             if group["reason"] == REASON_IMPLAUSIBLE_VALUE
             else REASON_SOURCE_INCONCLUSIVE
         )

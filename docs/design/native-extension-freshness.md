@@ -8,7 +8,7 @@ the self-hosted runners' persistent uv cache.
 
 ## The failure mode
 
-Every pyo3 crate under `native/` (`mom`, `congestion`, `yield`, `statime`) is
+Every pyo3 crate under `native/` (`mom`, `yield`, `statime`) is
 a **non-editable directory dependency** resolved through the root
 `pyproject.toml`'s `[tool.uv.sources]`, pinned at `0.1.0` and never
 version-bumped:

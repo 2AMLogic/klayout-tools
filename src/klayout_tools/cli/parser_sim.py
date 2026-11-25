@@ -15,12 +15,7 @@ def add_sim_parser(
     _add_pdk_args: Callable[..., Any],
     _add_format_arg: Callable[..., Any],
 ) -> None:
-    """Register the ``sim`` verb for headless SPICE PVT corner sweeps.
-
-    Runs a SPICE process/voltage/temperature corner matrix declared by a
-    request JSON file via `ngspice -b`, one subprocess per corner. See
-    docs/cli/sim.md for the request/response contract.
-    """
+    """Register the sim verb for headless SPICE corner sweeps."""
     sim_parser = subparsers.add_parser(
         "sim",
         help="run a headless SPICE PVT corner matrix (ngspice)",
@@ -100,9 +95,7 @@ def add_sim_parser(
     )
     sim_parser.add_argument(
         "--job-status",
-        dest="job_status",
         metavar="JOB_ID",
-        default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
             "state `pending` before the instance writes one) and exit. "
@@ -115,10 +108,19 @@ def add_sim_parser(
         ),
     )
     sim_parser.add_argument(
-        "--cancel",
-        dest="cancel",
-        metavar="JOB_ID",
+        "--require-pdk-match",
+        action="store_true",
         default=None,
+        help="require the batch worker's PDK revision stamp to match",
+    )
+    sim_parser.add_argument(
+        "--list-jobs",
+        action="store_true",
+        help="list active fleet instances by job and show available capacity",
+    )
+    sim_parser.add_argument(
+        "--cancel",
+        metavar="JOB_ID",
         help=(
             "cancel one batch job by id through 2am's "
             "batch-fleet-provision.sh cancel --apply: its pending/running "

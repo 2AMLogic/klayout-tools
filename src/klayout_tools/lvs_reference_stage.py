@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 from . import lvs as _lvs
 from .lvs_coverage import _implausible_dimensions
 from .lvs_flatten import root_selected_circuit
+from .lvs_gate_level_preparation import _GateLevelPreparation, _prepare_reference_stage
 from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
 
@@ -58,12 +59,19 @@ def _read_reference_stage(
     gate_level_port_alias_warnings: list[dict[str, Any]],
     power_only_pruning_warnings: list[dict[str, Any]],
     combine_per_circuit_warnings: list[dict[str, Any]],
+    preparation: _GateLevelPreparation | None = None,
 ) -> _ReferenceStage:
     """Read the reference netlist and apply its pre-compare conversions
 
     (issue #5158, stage 2 of the `run_lvs` split): path/form validation,
     pin-order resolution, the read, gate-level alias/prune, per-circuit
     combine and optional flatten. The warning lists are appended to in place.
+
+    ``preparation`` (issue #7822) is what :func:`_prepare_reference_stage`
+    returned before extraction started -- the gate-level reference already
+    converted, with its pin-order resolution, port aliases and case folds.
+    Given, this stage reuses all of it (never re-resolving or re-converting)
+    so the two calls together do exactly the work one unprepared call did.
     """
     reference_netlist_path = _lvs._require_path(
         reference_spec, "netlist", "reference", request_dir
@@ -110,57 +118,21 @@ def _read_reference_stage(
             "device-class/model name to the reference net its implicit bulk "
             "terminal carries"
         )
-    # Issue #1622: resolved here rather than inside `_read_reference_netlist`
-    # so the *same* mapping serves both consumers with one read of each
-    # pin-order source -- the conversion's own `pin_order_lookup` and, below,
-    # the power-pin universe `_prune_power_only_circuits` needs.
-    reference_pin_orders: dict[str, list[str]] | None = None
-    # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
-    # internally to read the library's pin-order source -- reused here (not
-    # re-resolved) purely so `provenance.pdk` can record it below, matching
-    # `klt extract`/`klt sta`/`klt place-and-route`. Stays `None` for every
-    # other `reference.form`, which resolves no PDK at all.
-    reference_pdk_info: dict[str, Any] | None = None
-    # Issue #2693: one record per pin-order file actually read -- a
-    # macro-backed design resolves pin orders from several libraries (the
-    # standard cells plus each macro's own one-file-per-macro library), so
-    # `provenance.pdk` alone no longer says where a cell's pin order came
-    # from. Empty for every other `reference.form`, which reads none.
-    reference_pin_order_sources: list[dict[str, Any]] = []
-    # Issue #2693: `reference.library`/`reference.pin_order_files` are
-    # validated inside the resolver (both are specific to this one form, and
-    # "neither was given" is its own error there), so this branch stays a
-    # single call.
-    # Issue #4353: the resolved files are also echoed (`reference_conversion`)
-    # so `--rerun` is independent of the original request directory.
+    binding = preparation or _prepare_reference_stage(reference_spec, request_dir, opts)
+    reference_pin_orders = reference_pdk_info = converted_text = None
     reference_pin_order_files: list[str] = []
-    if reference_form == "gate-level-verilog":
-        reference_pin_order_files = _lvs._resolve_reference_pin_order_files(
-            reference_spec, request_dir
-        )
-        resolved_pin_orders = _lvs._resolve_gate_level_pin_orders(
-            reference_spec.get("library"),
-            reference_spec.get("pdk"),
-            reference_spec.get("pdk_root"),
-            pin_order_files=reference_pin_order_files,
-        )
-        reference_pin_orders = resolved_pin_orders.pin_orders
-        reference_pdk_info = resolved_pin_orders.pdk_info
-        reference_pin_order_sources = resolved_pin_orders.sources
-    # Issue #1907: populated by the `form: "subckt-call"` conversion with every
-    # resistor/capacitor device class it wrote the literal `0` placeholder
-    # value onto -- consumed by `_apply_reference_placeholder_values` below,
-    # empty for every other reference form.
+    reference_pin_order_sources: list[dict[str, Any]] = []
     reference_placeholder_classes: dict[str, str] = {}
-    # Issue #2021: populated by `_read_reference_netlist` only for
-    # `form="gate-level-verilog"` -- `{<module name>: {<port>: <canonical
-    # net>}}` for every declared port whose only Verilog-level connection is
-    # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
-    # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
-    # Issue #4815: fold records from the gate-level conversion's
-    # case-insensitive pin binding, disclosed as warnings below.
     reference_gate_level_case_folds: list[dict[str, str]] = []
+    if binding is not None:
+        reference_pin_orders = binding.pin_orders
+        reference_pdk_info = binding.pdk_info
+        converted_text = binding.converted_text
+        reference_pin_order_files = binding.pin_order_files
+        reference_pin_order_sources = binding.sources
+        reference_gate_level_port_aliases = binding.port_aliases
+        reference_gate_level_case_folds = binding.case_folds
     # Issue #2136: the library-derived power-pin universe plus the layout
     # nets those pins land on, used below to mark a `net_correspondence[]`
     # entry that pairs a layout supply net with a reference net that is not
@@ -187,6 +159,7 @@ def _read_reference_stage(
         ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         gate_level_port_case_folds=reference_gate_level_case_folds,
+        gate_level_converted=converted_text,
         finfet=opts.finfet_layout,
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,

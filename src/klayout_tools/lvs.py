@@ -262,8 +262,15 @@ from .lvs_gate_level import (
     _supply_pin_universe,  # noqa: F401
 )
 from .lvs_gate_level_convert import (
-    _convert_gate_level_reference,
+    _convert_gate_level_reference as _convert_gate_level_reference,
+)
+from .lvs_gate_level_convert import (
     _gate_level_port_case_fold_warnings,
+)
+from .lvs_gate_level_preparation import (
+    _convert_reference_text,
+    _prepare_reference_stage,
+    _read_reference_text,
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
@@ -335,8 +342,12 @@ from .netlist_normalize_scan import recovery_subckt_names
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
 from .verilog_netlist import (
-    VerilogNetlistError,
-    collect_gate_level_port_aliases,
+    VerilogNetlistError as VerilogNetlistError,
+)
+from .verilog_netlist import (
+    collect_gate_level_port_aliases as collect_gate_level_port_aliases,
+)
+from .verilog_netlist import (
     parse_subckt_pin_orders,
 )
 
@@ -1243,6 +1254,9 @@ def run_lvs(
     from .lvs_layout_stage import _resolve_layout_stage
     from .lvs_passive_pairing import curated_pairing
 
+    # Validate the gate-level reference before starting layout extraction.
+    reference_preparation = _prepare_reference_stage(reference_spec, request_dir, opts)
+
     layout_coverage: dict[str, Any] = {}
     layout_stage = _resolve_layout_stage(
         layout_spec, reference_spec, request_dir, opts, progress, layout_coverage
@@ -1277,6 +1291,7 @@ def run_lvs(
         gate_level_port_alias_warnings,
         power_only_pruning_warnings,
         combine_per_circuit_warnings,
+        preparation=reference_preparation,
     )
     anchor_top_level_pins = ref_stage.anchor_top_level_pins
     power_connectivity = ref_stage.power_connectivity
@@ -1737,6 +1752,7 @@ def run_lvs(
         reference_pin_order_sources=ref_stage.reference_pin_order_sources,
         reference_pin_order_files=ref_stage.reference_pin_order_files,
         reference_netlist_path=ref_stage.reference_netlist_path,
+        prepared_reference=reference_preparation,
         extracted_netlist_path=extracted_netlist_path,
         equivalent_pins_applied=equivalent_pins_applied,
         constant_bindings=constant_bindings,
@@ -3139,6 +3155,7 @@ def _read_reference_netlist(
     pdk_root: str | None = None,
     pin_order_files: Sequence[str] | None = None,
     pin_orders: dict[str, list[str]] | None = None,
+    gate_level_converted: str | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
     gate_level_port_case_folds: list[dict[str, str]] | None = None,
@@ -3222,6 +3239,8 @@ def _read_reference_netlist(
     resolves it internally exactly as before, and the value is ignored for
     every form but ``"gate-level-verilog"``.
 
+    A prepared gate-level reference carries the converted SPICE and bindings.
+
     Note: on genuinely malformed input, ``NetlistSpiceReader`` does not raise
     -- it prints a ``"Warning: Line ignored..."`` diagnostic (to the
     process's real stdout, a pre-existing KLayout engine behaviour this
@@ -3238,17 +3257,7 @@ def _read_reference_netlist(
         detect_subckt_call_devices,
     )
 
-    try:
-        # `errors="replace"` so a non-SPICE binary reference (a mis-pointed
-        # path) never crashes the detection scan on a decode error -- it flows
-        # through to `NetlistSpiceReader`, which tolerates garbage and yields
-        # an empty netlist that surfaces as the "no top circuit" LvsError, the
-        # pre-existing behaviour this hook preserves.
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError as exc:
-        raise LvsError(f"could not read reference netlist '{path}': {exc}") from exc
-
+    text = _read_reference_text(path, prepared=gate_level_converted)
     text, read_path, tmp_path = _quote_includes_for_read(text, path, form)
     # Issue #1876: the recovery scan below runs over whichever text is
     # actually handed to `NetlistSpiceReader` -- the original file for the
@@ -3258,6 +3267,7 @@ def _read_reference_netlist(
     # principle, if a caller's own upstream tooling produced one that does.
     read_text = text
 
+    converted: str | None = None
     if form == "subckt-call":
         try:
             conversion = convert_reference_netlist(
@@ -3276,45 +3286,21 @@ def _read_reference_netlist(
         converted = conversion.text
         if placeholder_value_classes is not None:
             placeholder_value_classes.update(conversion.placeholder_value_classes)
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".spice", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(converted)
-            tmp_path = tmp.name
-        read_path = tmp_path
-        read_text = converted
     elif form == "gate-level-verilog":
-        if pin_orders is None:
-            pin_orders = _resolve_gate_level_pin_orders(
-                library, pdk_variant, pdk_root, pin_order_files=pin_order_files
-            ).pin_orders
-        try:
-            converted = _convert_gate_level_reference(
-                text, pin_orders, finfet, gate_level_port_case_folds
+        converted = gate_level_converted
+        if converted is None:
+            if pin_orders is None:
+                pin_orders = _resolve_gate_level_pin_orders(
+                    library, pdk_variant, pdk_root, pin_order_files=pin_order_files
+                ).pin_orders
+            converted = _convert_reference_text(
+                path,
+                text,
+                pin_orders,
+                finfet,
+                gate_level_port_case_folds,
+                gate_level_port_aliases,
             )
-        except VerilogNetlistError as exc:
-            raise LvsError(
-                f"could not convert gate-level-verilog reference netlist "
-                f"'{path}' to plain-element form: {exc}"
-            ) from exc
-        if gate_level_port_aliases is not None:
-            # Issue #2021: re-parses the same `text` `convert_gate_level_
-            # verilog` just parsed successfully -- cheap (a single flat
-            # module) and pure, kept as a separate entry point so the SPICE
-            # conversion's own return type stays untouched (see
-            # `collect_gate_level_port_aliases`'s docstring).
-            gate_level_port_aliases.update(collect_gate_level_port_aliases(text))
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".spice", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(converted)
-            tmp_path = tmp.name
-        read_path = tmp_path
-        read_text = converted
     else:
         offending = detect_subckt_call_devices(text)
         if offending:
@@ -3329,6 +3315,17 @@ def _read_reference_netlist(
                 "the plain-element form (M-card) before comparing -- see "
                 'docs/cli/lvs.md, "Netlist form".'
             )
+
+    if converted is not None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".spice", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(converted)
+            tmp_path = tmp.name
+        read_path = tmp_path
+        read_text = converted
 
     netlist = kdb.Netlist()
     recovered_capacitor_classes = parse_capacitor_class_comments(read_text)

@@ -103,8 +103,7 @@ def convert_diode_card(
         _format_um2,
         _parse_um,
         _reject_multiplicity,
-        _require_both,
-        _resolve_geometry_dimension,
+        _resolve_call_geometry,
     )
 
     if len(nodes) != 2:
@@ -114,27 +113,11 @@ def convert_diode_card(
             f"({' '.join(nodes) or '<none>'})"
         )
     _reject_multiplicity(instance, subckt_name, params)
-    has_length_param = lookup.length_param is not None and lookup.length_param in params
-    has_width_param = lookup.width_param is not None and lookup.width_param in params
-    if has_length_param or has_width_param:
-        l_um = _resolve_geometry_dimension(
-            instance,
-            lookup.length_param,
-            params,
-            has_length_param,
-            lookup.fixed_length_um,
-            geometry_style=geometry_style,
-        )
-        w_um = _resolve_geometry_dimension(
-            instance,
-            lookup.width_param,
-            params,
-            has_width_param,
-            lookup.fixed_width_um,
-            geometry_style=geometry_style,
-        )
-        _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
-        assert l_um is not None and w_um is not None  # _require_both raised otherwise
+    resolved = _resolve_call_geometry(
+        instance, subckt_name, lookup, params, geometry_style=geometry_style
+    )
+    if resolved is not None:
+        l_um, w_um = resolved
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
         return (

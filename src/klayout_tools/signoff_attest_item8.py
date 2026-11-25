@@ -43,7 +43,7 @@ from . import signoff_attest_gaprows as gaprows
 from ._jsonnum import is_finite_number, is_number
 from .signoff import _classify, _classify_failure_reason
 from .signoff_attest_pins import json_node
-from .signoff_base import SignoffError, _read_envelope
+from .signoff_base import AttestationError, SignoffError, _read_envelope
 from .signoff_drc_crosscheck import crosscheck_project
 
 #: Item 8's accepted inventory keys (``signoff_attest._ITEM_KEYS[8]``).
@@ -428,13 +428,6 @@ def metric_checks(
     return checks
 
 
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
-
-
 def validated_uncited_rows(
     inventory: Mapping[str, Any],
     spec_rows: Sequence[str],
@@ -452,11 +445,11 @@ def validated_uncited_rows(
     for entry in rows:
         row = entry["row"]
         if row not in declared:
-            raise _error(
+            raise AttestationError(
                 f"'uncited_rows' names row '{row}', which 'spec_rows' does not declare"
             )
         if citations.get(row):
-            raise _error(
+            raise AttestationError(
                 f"'uncited_rows' names row '{row}', which 'citations' cites -- a "
                 "declared gap must not coexist with evidence"
             )

@@ -34,14 +34,7 @@ from .signoff_attest_item9_depends_on import (
     dependency_present_checks,
     validated_depends_on,
 )
-
-
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
-
+from .signoff_base import AttestationError
 
 #: Item 9's accepted inventory keys (``signoff_attest._ITEM_KEYS[9]``).
 ITEM9_KEYS = frozenset({"testbenches", "cold_start", "pins", "unbenched_rows"})
@@ -68,7 +61,7 @@ def documented_spec(
     if "documented_argv" not in raw:
         return {}
     if not accepted:
-        raise _error(
+        raise AttestationError(
             f"'{field}.documented_argv' is only accepted on an item 9 "
             "cold_start -- it records the invocation that reproduces a bench "
             "the declared argv only validates"
@@ -79,7 +72,7 @@ def documented_spec(
         or not argv
         or not all(isinstance(arg, str) and arg for arg in argv)
     ):
-        raise _error(
+        raise AttestationError(
             f"'{field}.documented_argv' must be a non-empty list of non-empty strings"
         )
     return {"documented_argv": list(argv)}
@@ -168,7 +161,7 @@ def _cold_start_specs(
     if not isinstance(raw, list):
         return [command_spec(raw, field, root, documented_argv=True)]
     if not raw:
-        raise _error(
+        raise AttestationError(
             f"'{field}' is an empty list -- declare at least one named cold "
             "start (a list of {name, argv, ...} objects)"
         )
@@ -177,14 +170,14 @@ def _cold_start_specs(
     for index, member in enumerate(raw):
         member_field = f"{field}[{index}]"
         if not isinstance(member, Mapping):
-            raise _error(
+            raise AttestationError(
                 f"'{member_field}' must be an object with a 'name' and an 'argv' list"
             )
         name = member.get("name")
         if not isinstance(name, str) or not name:
-            raise _error(f"'{member_field}.name' must be a non-empty string")
+            raise AttestationError(f"'{member_field}.name' must be a non-empty string")
         if name in names:
-            raise _error(
+            raise AttestationError(
                 f"cold start name '{name}' is declared more than once in '{field}'"
             )
         names.add(name)
@@ -210,14 +203,14 @@ def _validated_sources(
     named by several benches -- dedup with attribution happens in
     :func:`validate_into`."""
     if not isinstance(sources, list) or not sources:
-        raise _error(
+        raise AttestationError(
             f"'{field}.sources' must be a non-empty list of repo-relative paths"
         )
     normalized: list[str] = []
     for member in sources:
         path = normalize_path(member, f"{field}.sources", root)
         if path in normalized:
-            raise _error(f"'{field}.sources' lists '{path}' more than once")
+            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
         normalized.append(path)
     return normalized
 
@@ -276,15 +269,15 @@ def split_testbenches(
         field = f"testbenches[{index}]"
         unknown = sorted(set(entry) - {"path", "cold_start", "depends_on", "sources"})
         if unknown:
-            raise _error(
+            raise AttestationError(
                 f"'{field}' has unknown field(s): {', '.join(unknown)} "
                 "(accepted: cold_start, depends_on, path, sources)"
             )
         if "path" not in entry:
-            raise _error(f"'{field}' must declare 'path'")
+            raise AttestationError(f"'{field}' must declare 'path'")
         path = normalize_path(entry["path"], "testbenches", root)
         if path in bench_paths:
-            raise _error(
+            raise AttestationError(
                 f"path '{path}' is listed more than once in 'testbenches' -- "
                 "each inventoried file must appear exactly once; to run several "
                 "cold starts over one file, declare them as a list of named "
@@ -314,7 +307,7 @@ def _source_benches(
             source_benches.setdefault(source, []).append(bench)
     for source in source_benches:
         if source in benches:
-            raise _error(
+            raise AttestationError(
                 f"'{source}' is declared both as a testbench and as a source "
                 "-- its bytes are already pinned as the testbench; list it "
                 "once, as a testbench, not also as another bench's source"
@@ -354,7 +347,7 @@ def validate_into(
         path for path in benches if "cold_start" not in bench_records.get(path, {})
     ]
     if missing:
-        raise _error(
+        raise AttestationError(
             "item 9 inventory must declare 'cold_start' -- the invocation "
             "that reproduces the claimed measurements from a clean checkout "
             "(top-level, or on every testbench entry; no cold_start for: "

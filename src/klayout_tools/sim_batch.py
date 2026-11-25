@@ -109,11 +109,11 @@ from . import (
     remote_transport,
     sim_batch_image,
     sim_batch_observer,
+    sim_batch_pdk,
     sim_batch_receipt,
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
-from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
     _signal_handlers_install,
     _signal_handlers_restore,
@@ -135,12 +135,15 @@ from .sim_batch_hints import (
     with_runner_hints,
 )
 from .sim_batch_log import read_collected_log
+from .sim_batch_pdk import _client_pdk_stamp as _client_pdk_stamp
+from .sim_batch_pdk import _compare_pdk_stamps as _compare_pdk_stamps
 from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
     _resume_attach_config,
     _resume_or_submit_one_job,
     _try_reattach_shard,
 )
+from .sim_batch_version_remedy import older_client_remedy
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
@@ -760,8 +763,10 @@ def dry_run_runner_check(
 def _assess_published_runner(
     request: dict[str, Any], config: BatchConfig
 ) -> dict[str, Any]:
-    """Compare the published sim image's klt major.minor with the client.
-    Unavailable metadata leaves the runner-side preflight authoritative."""
+    """Compare the published sim image's klt major.minor with the client,
+    appending the #7857 pinned-client remedy when the client is the older
+    side. Unavailable metadata leaves the runner-side preflight
+    authoritative."""
     client = _provenance._klt_version()
     assessment: dict[str, Any] = {
         "status": "unknown",
@@ -776,10 +781,7 @@ def _assess_published_runner(
     client_release = _runner_gate_release(client)
     if not images or client_release is None:
         return assessment
-    releases = [
-        _runner_gate_release(image["klt_version"]) if image["klt_version"] else None
-        for image in images
-    ]
+    releases = [_runner_gate_release(image["klt_version"] or "") for image in images]
     if any(release is None for release in releases):
         return assessment
     if any(release == client_release for release in releases):
@@ -796,7 +798,7 @@ def _assess_published_runner(
         f"the batch image pointer publishes the fleet runner image as {published}, "
         f"but the submitting client is klt {client}; their major.minor "
         "releases differ, so the runner-side version gate would reject the job"
-    )
+    ) + older_client_remedy(client_release, releases)
     return assessment
 
 
@@ -1784,53 +1786,6 @@ def _batch_environment(
     }
 
 
-def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
-    else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
-    readable. The root is ``models.pdk_root``, else ``$PDK_ROOT``, else the install
-    the PDK search order resolves -- the one ``provenance.pdk`` names (#5474), so a
-    host that pins neither still gets a comparison rather than
-    ``client_stamp_unavailable`` (``models.pdk_root`` is refused for batch)."""
-    models = (request or {}).get("models") or {}
-    root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
-    return client_pdk_stamp(models.get("pdk"), root)
-
-
-def _compare_pdk_stamps(
-    worker_pdk: dict[str, Any], client: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Compare worker and client PDK stamps -- only when both provide the
-    same variant under the same stamp scheme. Anything else is
-    ``not_comparable``, never a proven mismatch. A match is not model-closure
-    equality (see docs/cli/sim.md)."""
-    worker_ok = (
-        worker_pdk.get("variant")
-        and worker_pdk.get("stamp_scheme")
-        and worker_pdk.get("stamp_sha256")
-    )
-    # Issue #3946: say *why* a pair is not comparable (a closed vocabulary,
-    # documented in docs/cli/sim.md) so a reader can tell the submitter's own
-    # configuration from a runner-side gap without opening the raw capture.
-    if not worker_ok:
-        return {"status": "not_comparable", "reason": "worker_stamp_unavailable"}
-    if client is None:
-        return {"status": "not_comparable", "reason": "client_stamp_unavailable"}
-    if client.get("variant") != worker_pdk.get("variant"):
-        return {"status": "not_comparable", "reason": "variant_differs"}
-    if client.get("stamp_scheme") != worker_pdk.get("stamp_scheme"):
-        return {"status": "not_comparable", "reason": "scheme_differs"}
-    if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
-        return {"status": "match"}
-    return {
-        "status": "mismatch",
-        "warning": (
-            f"the worker's PDK revision stamp for {worker_pdk['variant']} differs "
-            "from the one the submitter resolved locally; results may differ "
-            "from a local run (a matching stamp would not prove identical models)"
-        ),
-    }
-
-
 def _compare_staged_model_inputs(
     client_inputs: Any,
     worker_inputs: Any,
@@ -1918,7 +1873,12 @@ def attach_staged_model_comparison(
             continue
         pdk = worker_env.get("pdk")
         if isinstance(pdk, dict) and pdk.get("models_staged") is True:
-            worker_env["pdk_stamp_comparison"] = _compare_staged_model_inputs(
+            key = (
+                "staged_model_comparison"
+                if (worker_env.get("pdk_stamp_comparison") or {}).get("required")
+                else "pdk_stamp_comparison"
+            )
+            worker_env[key] = _compare_staged_model_inputs(
                 staged_model_inputs, worker_env.get("model_inputs"), client_stamp
             )
 
@@ -2013,7 +1973,9 @@ def _read_worker_environment(
             "variant": _bounded_str(pdk_in.get("variant")),
             "root": _bounded_str(pdk_in.get("root")),
             "stamp_scheme": _bounded_str(pdk_in.get("stamp_scheme"), 40),
-            "stamp_sha256": _bounded_str(pdk_in.get("stamp_sha256"), 64),
+            "stamp_sha256": _bounded_str(
+                sim_batch_pdk.observed_stamp(pdk_in.get("stamp_sha256"), request), 64
+            ),
             "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
             "models_staged": pdk_in.get("models_staged") is True,
             # Issue #4020: ``stamp_*`` always describes the worker image's
@@ -2046,7 +2008,10 @@ def _read_worker_environment(
             "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
-                pdk, _client_pdk_stamp(request)
+                pdk,
+                _client_pdk_stamp(request),
+                sim_batch_pdk.pdk_expectation(request),
+                ((request or {}).get("models") or {}).get("pdk"),
             ),
         }
     except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
@@ -2171,6 +2136,7 @@ def _read_job_identity(
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
+    sim_batch_pdk.mark_required(worker_environment, request)
     worker_environment["ngspice_init"] = runner_ngspice_init(report)
     worker_environment["threads_per_worker"] = runner_threads_per_worker(report)
     return {
@@ -3183,6 +3149,19 @@ def _poll_and_collect(
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
             )
+    worker = identity["worker_environment"]
+    comparison = worker["pdk_stamp_comparison"]
+    if comparison.get("required") and comparison["status"] != "match":
+        code = (
+            "pdk_stamp_mismatch"
+            if comparison["status"] == "mismatch"
+            else "pdk_stamp_not_comparable"
+        )
+        message = sim_batch_pdk.failure_message(worker, _client_pdk_stamp(request))
+        corners = [
+            _unrun_corner_report(point, measurements_spec, code, message=message)
+            for point in corner_points
+        ]
     engine_version = (report.get("environment") or {}).get("engine_version")
     return corners, engine_version, environment
 

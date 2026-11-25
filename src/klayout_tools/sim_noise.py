@@ -404,3 +404,23 @@ def alias_lines(
     if not expr_specs or analysis.get("kind") != "noise":
         return []
     return [f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS]
+
+
+def noise_representation(waveform: dict[str, Any]) -> str:
+    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
+    (issue #3006).
+
+    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
+    records which mode produced it: the integrated plot is named
+    ``Integrated Noise`` with ``voltage``/``current`` variables, or
+    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
+
+    Moved here from :mod:`klayout_tools.sim` (issue #7866) to keep that module
+    inside its size ratchet; ``sim.noise_representation`` is the same function.
+    """
+    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
+        return "power"
+    for var in waveform.get("variables", []):
+        if str(var.get("type", "")).endswith("^2"):
+            return "power"
+    return "amplitude"

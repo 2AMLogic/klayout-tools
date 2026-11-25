@@ -425,7 +425,7 @@
         },
         {
           "name": "em",
-          "summary": "field-solver wrapper (geode-fem quasi-static capacitance)",
+          "summary": "Geode capacitance, steady heat and Joule self-heating",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/em.md"
         }
       ]
