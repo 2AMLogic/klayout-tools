@@ -1,5 +1,15 @@
 # FLUTE/RUDY-family congestion pre-check: correlation study results
 
+## Retirement in November 2026
+
+The operator retired the estimator and measurement harness in #7710. The fleet never used the score to skip a route. The original study follows below. Its paths and commands refer to the revision that contains the implementation. [Archived estimator](https://github.com/2AMLogic/klayout-tools/tree/9fdbd4f810863017f6a92412aaf943d046ede5be/native/congestion) · [Python reader](https://github.com/2AMLogic/klayout-tools/blob/9fdbd4f810863017f6a92412aaf943d046ede5be/src/klayout_tools/congestion.py) · [Measurement harness](https://github.com/2AMLogic/klayout-tools/blob/9fdbd4f810863017f6a92412aaf943d046ede5be/scripts/research/flute_congestion_correlation.py) · [Operator decision](https://github.com/2AMLogic/klayout-tools/issues/7710#issuecomment-7157383394)
+
+Five more saved placements routed with zero detailed-route violations. The default 0.8 threshold would have rejected the clean ASAP7 counter at 4.268. Using its declared M2 track pitches brought its score below 0.42. A Nangate45 GCD placement scored 0.5342 for both a clean route and an upstream DRC control with 34 violations. On an external ISPD18 placement the reader missed all 11 nets when the optional `+ USE SIGNAL` was omitted. OpenROAD read all 11 nets under either spelling. [Measurements and fixture links](https://github.com/2AMLogic/klayout-tools/issues/7710#issuecomment-7156635875)
+
+Across 111 merged PRs the dedicated CI job used 99 minutes 16 seconds of runner time, with a median of 54 seconds per job. Another CI job finished later on every PR. [Hosted CI measurements](https://github.com/2AMLogic/klayout-tools/issues/7710#issuecomment-7142687293)
+
+## Original study
+
 Issue #785, Epic #700 Phase 1 Section 3.6 of
 [`place-and-route-improvements-survey.md`](place-and-route-improvements-survey.md).
 This document is the acceptance criteria's own required output: a
