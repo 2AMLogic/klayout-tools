@@ -3587,19 +3587,19 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `GATE.AUX.2` | Table 3.4.1 | no distance bound, but a topological condition (a GATE column split into separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE polygons may overlap sideways to share a column, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `ACTIVE.AUX.3` | Table 3.5.2 | no distance bound, but a topological condition (a slot cut into a vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' nor its size, so the predicate needs that reading ratified before it is enforced | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
-| `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V0.S.1` | Table 3.11.1 | On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly nested projections, the choice between 18 and 27 nm is unverified. | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | At T-shaped M1 landings a 25 nm corner gap can face two flush ends on one axis and two 5 nm caps on the other. The 30 and 23 nm bounds give different results. | #3147 |
 | `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
 | `V0.LIG.EN.4` | Table 3.11.2 | V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT and SLVT library has 1,413 selected V0 wholly inside LIG. Figure 3.11.2(a) shows V0 protruding beyond LIG. Of the 6,312 selected cuts per library, 4,899 protrude by exactly 1 nm on both sides. The 1,413 fully covered cuts occupy 208 of 212 cell masters and have no LISD overlap. They include 18 nm square V0 centered in 22 nm square LIG. The rule needs clarification for V0 wholly inside LIG. | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | V0 edges parallel to the LIG length must clear LIG. In each pinned library, 4,899 selected cuts touch horizontal LIG only on their vertical V0 edges. A square LIG has no unique length axis. Rotating the square-LIG fixture by 90° preserves the 360 nm² overlap and exchanges which pair of V0 edges touches LIG. | #3147 |
 | `V0.M1.AUX.3` | Table 3.11.2 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. 5,395 V0 cut sites in each pinned library fit horizontal M1 and would fail a vertical-only width check. | #3147 |
-| `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V1.S.1` | Table 3.13.1 | On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly nested projections, the choice between 18 and 27 nm is unverified. | #3147 |
 | `V1.S.2`, `V1.S.3`, `V1.S.4` | Table 3.13.1 | In the pinned routed slice every close pair passes with the sole axis that carries a full 5 nm strip on at least one end of each cut, but each fixed-axis reading flags one family whole: 2,357 of 2,357 V1 pairs on the vertical ends and 1,104 of 1,104 V2 pairs on the horizontal ends, and each pinned library's six close V1 pairs behave the same. The DRM fixes no M2 or M3 routing direction and Fig. 3.13.1 shows straight landings only, so a junction's two candidate facing ends have no ratified choice | #3147 |
 | `V1.M2.AUX.2` | Table 3.13.1 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. All 389 V1 cut sites in each pinned library span horizontal rectangular M2. This sample supplies no direction for square M2 landings. | #3147 |
-| `V2.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V2.S.1` | Table 3.13.1 | On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly nested projections, the choice between 18 and 27 nm is unverified. | #3147 |
 | `V2.S.2`, `V2.S.3`, `V2.S.4` | Table 3.13.1 | In the pinned routed slice every close pair passes with the sole axis that carries a full 5 nm strip on at least one end of each cut, but each fixed-axis reading flags one family whole: 2,357 of 2,357 V1 pairs on the vertical ends and 1,104 of 1,104 V2 pairs on the horizontal ends, and each pinned library's six close V1 pairs behave the same. The DRM fixes no M2 or M3 routing direction and Fig. 3.13.1 shows straight landings only, so a junction's two candidate facing ends have no ratified choice | #3147 |
 | `V2.M3.AUX.2` | Table 3.13.1 | a 24 × 18 nm via in a 24 nm square fits only one assumed track direction. The three pinned libraries contain no V2 cut sites to constrain the interpretation on M3. | #3147 |
-| `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V3.S.1` | Table 3.13.1 | On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly nested projections, the choice between 18 and 27 nm is unverified. | #3147 |
 | `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | The pinned routed slice holds no V3 pair closer than 59.09 nm, and every one of its 4,347 cuts carries the 11 nm M4 strip V3.M4.EN.2 demands on both horizontal ends, so geometry that satisfies EN.2 and the exact width V3.M4.AUX.2 always presents two capped horizontal facing ends and only the 23 nm bound can apply: each 27/30 nm case coincides with an EN.2 violation, and an arm across the track breaks AUX.2, so no available geometry exercises the choice the table leaves open | #3147 |
 | `M4.W.4` | Table 3.14.1 | 'spans an even number of minimum-width tracks' is, for the AUX.1 grid the deck enforces, the same condition as W.3's even multiple of the minimum width, which the deck already reports; a separate check would add no violations at the default 0 nm offset | #3155 |
 | `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, parallel run length); the deck has no per-shape track assignment, and the DRM leaves 'adjacent' and the track pitch undefined (Fig. 3.14.2 shows only min-width tracks at 2 x W.1 pitch), so any reading would be a guess | #3155 |
@@ -3620,6 +3620,36 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+
+### V0–V3 spacing on parallel tracks
+
+Tables 3.11.1 and 3.13.1 require 18 nm on the same upper-metal track. On
+parallel tracks they require 18 nm for fully or partially aligned cuts and
+27 nm for unaligned cuts. Section 1.2.2, note 10 defines those terms by
+Figure 1.2.6. The following straight-track controls use the along-track
+interval `[0, 18]` nm for the first cut. [ASAP7 DRM, pp. 5, 8, 42 and 49](https://github.com/The-OpenROAD-Project/asap7_pdk_r1p7/blob/58d72c9d291e186a77468586ab0c43d8a21eda6a/docs/asap7_drm_201207a.pdf)
+
+| Second cut (nm) | Alignment in Figure 1.2.6 | Required clearance |
+| --- | --- | --- |
+| `[0, 18]` | Both ends coincide, as in (a) | 18 nm |
+| `[0, 24]` | One end coincides, as in (b) | 18 nm |
+| `[5, 23]` | The projections overlap by 13 nm and both ends are shifted, as in (c) | 27 nm |
+| `[−2, 22]` | The shorter projection fits strictly inside the longer one. Neither end coincides. | 27 nm if a corresponding end must coincide, 18 nm if covering the shorter projection suffices |
+
+The endpoint and containment readings agree on all five examples in Figure 1.2.6.
+They disagree at 22 nm clearance on straight M1–M3 wires in either orientation,
+and at 24 nm clearance on horizontal, 24 nm wide M4 wires at 48 nm pitch.
+The public DAC26 KLayout deck reports 0, 1 and 0 S.1 markers at clearances
+of 18, 22 and 27 nm for the fully aligned, shifted and strictly nested controls
+on vertical M2 and horizontal M3. The ASU Calibre reference result for the
+strictly nested pair is unknown. [DAC26 KLayout deck](https://github.com/ASU-VDA-Lab/DAC26_DRC_Benchmark/blob/4b150766a049238ed4ac512914a71b6008df436f/testcase/asap7/asap7.lydrc#L695-L720) · [ASU Calibre deck distribution](https://asap.asu.edu/download)
+
+Counting distinct rectangular cut sites before track assignment, the routed
+UCIe slice has 15,481 V0, 93,410 V1, 1,508 V2 and zero V3 pairs at Euclidean
+edge distance ≤27 nm. Each pinned RVT, LVT and SLVT library has 1,737 V0,
+seven V1 and zero V2 or V3 pairs across its 212 individual masters. No pair
+in either corpus has strictly nested projections on either axis and a
+clearance from 18 nm inclusive to 27 nm exclusive on the other axis.
 
 ### V0 corner spacing at M1 ends
 

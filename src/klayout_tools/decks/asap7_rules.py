@@ -536,8 +536,8 @@ _ACTIVE_NOTCH = (
     "enforced"
 )
 _TRACK = (
-    "classified by routing track (same / parallel / aligned tracks); the deck "
-    "has no routing-direction or track assignment"
+    "On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly "
+    "nested projections, the choice between 18 and 27 nm is unverified."
 )
 _EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
 _SADP_TRACK = (
