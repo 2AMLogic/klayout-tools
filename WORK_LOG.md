@@ -8,6 +8,26 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-25
 
+- **PR #7870**: docs(drc): clarify ASAP7 track spacing for aligned and shifted vias
+- **PR #7878**: Document device.connectivity in the canonical LVS category table
+- **PR #7862**: Name the pinned-client uvx remedy in older-client batch runner refusals
+- **PR #7877**: Run the live canary inventory check on relevant changes, main and a daily schedule
+- **PR #7873**: feat: export a noise run's per-frequency spectrum as artifacts.waveform_spectrum
+- **PR #7867**: fix(sim): name changed options when attaching a shard map
+- **PR #7875**: Register the public GF180 antifuse and eFuse OTP canaries
+- **PR #7858**: fix(lvs): identify runset device terminal mismatches
+- **PR #7868**: Register two new public GF180 canaries in the CI manifest
+- **PR #7851**: Record measured ASAP7 V1-V3 corner-spacing dispositions
+- **PR #7854**: Run and verify pinned GF180 corpus shards on the Spot fleet
+- **Issue #3147** (closed): ASAP7 DRC deck: resolve remaining V0–V3 spacing, enclosure and track-dependent rules
+- **Issue #7863** (closed): docs(lvs): add device.connectivity to the canonical mismatches[].category list
+- **Issue #7857** (closed): batch: no way to run a grid from a client pinned to an older minor once the fleet image moves on
+- **Issue #7876** (closed): CI: scope live canary inventory checks while retaining deterministic PR coverage
+- **Issue #7866** (closed): klt sim: options.waveforms on a noise analysis exports only the integrated-noise plot, not the per-frequency spectrum
+- **Issue #7861** (closed): klt sim deck-list `--attach <shard map>`: a `--max-workers` given at submit is now part of the request digest, and the mismatch hint does not name it
+- **Issue #7874** (closed): CI: two more public GF180 canaries are missing from the manifest on main
+- **Issue #7856** (closed): klt lvs klayout-runset: connectivity-mismatched device pairs with equal parameters are reported as device.property
+- **Issue #7865** (closed): Restore the CI canary manifest check for two new public GF180 repositories
 - **PR #7844**: Honor deck-list worker counts on local and staged executors
 - **PR #3531**: feat: gate batch sim on the worker's PDK stamp via --require-pdk-match
 - **Issue #7842** (closed): Honor options.max_workers in local-parallel deck-list requests and staged batch workers
