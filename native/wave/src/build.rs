@@ -277,37 +277,27 @@ pub fn run(request_path: &Path) -> Result<Response, BuildError> {
         }
     }
 
-    let (
+    let options = BuildOptions {
+        store_path: &store_path,
+        allow_list: req.signals.as_deref(),
+        clock_signal: req.clock.as_ref().map(|c| c.signal.as_str()),
+        clock_edge,
+        reset_signal: req.reset.as_ref().map(|r| r.signal.as_str()),
+        reset_active_low,
+    };
+    let BuildSummary {
         signal_count,
         value_change_count,
-        timescale_unit,
-        timescale_value,
+        timescale,
         min_tick,
         max_tick,
         ticks_to_ns,
         clock_period_ticks,
         anchor_tick,
-        _reset_release_tick,
-    ) = if format == "vcd" {
-        build_from_vcd(
-            &trace_path,
-            &store_path,
-            req.signals.as_deref(),
-            req.clock.as_ref().map(|c| c.signal.as_str()),
-            clock_edge,
-            req.reset.as_ref().map(|r| r.signal.as_str()),
-            reset_active_low,
-        )?
+    } = if format == "vcd" {
+        build_from_vcd(&trace_path, &options)?
     } else {
-        build_from_fst(
-            &trace_path,
-            &store_path,
-            req.signals.as_deref(),
-            req.clock.as_ref().map(|c| c.signal.as_str()),
-            clock_edge,
-            req.reset.as_ref().map(|r| r.signal.as_str()),
-            reset_active_low,
-        )?
+        build_from_fst(&trace_path, &options)?
     };
 
     let store_meta = fs::metadata(&store_path).map_err(|e| {
@@ -324,9 +314,7 @@ pub fn run(request_path: &Path) -> Result<Response, BuildError> {
     // was actually observed in this trace), or the clock's own first
     // edge otherwise (no reset declared, or one declared but never
     // observed releasing -- a benign degrade, not an error; see
-    // docs/cli/wave.md's "Cycle-0 anchoring" section). Computed by
-    // `build_from_vcd`/`build_from_fst` via `resolve_anchor` below, using
-    // `ClockTracker::first_edge_at_or_after`.
+    // docs/cli/wave.md's "Cycle-0 anchoring" section).
     let clock_resp = req.clock.as_ref().map(|c| ClockResp {
         signal: c.signal.clone(),
         edge: match clock_edge {
@@ -366,10 +354,7 @@ pub fn run(request_path: &Path) -> Result<Response, BuildError> {
         },
         clock: clock_resp,
         reset: reset_resp,
-        timescale: TimescaleResp {
-            unit: timescale_unit,
-            value: timescale_value,
-        },
+        timescale,
         time_range: TimeRangeResp {
             from: TimePoint {
                 time_ns: min_tick.map(|t| t as f64 * ticks_to_ns).unwrap_or(0.0),
@@ -394,30 +379,30 @@ pub fn run(request_path: &Path) -> Result<Response, BuildError> {
     })
 }
 
-#[allow(clippy::type_complexity)]
+struct BuildOptions<'a> {
+    store_path: &'a Path,
+    allow_list: Option<&'a [String]>,
+    clock_signal: Option<&'a str>,
+    clock_edge: Edge,
+    reset_signal: Option<&'a str>,
+    reset_active_low: bool,
+}
+
+struct BuildSummary {
+    signal_count: usize,
+    value_change_count: u64,
+    timescale: TimescaleResp,
+    min_tick: Option<u64>,
+    max_tick: Option<u64>,
+    ticks_to_ns: f64,
+    clock_period_ticks: Option<u64>,
+    anchor_tick: Option<u64>,
+}
+
 fn build_from_vcd(
     trace_path: &Path,
-    store_path: &Path,
-    allow_list: Option<&[String]>,
-    clock_signal: Option<&str>,
-    clock_edge: Edge,
-    reset_signal: Option<&str>,
-    reset_active_low: bool,
-) -> Result<
-    (
-        usize,
-        u64,
-        String,
-        i64,
-        Option<u64>,
-        Option<u64>,
-        f64,
-        Option<u64>,
-        Option<u64>,
-        Option<u64>,
-    ),
-    BuildError,
-> {
+    options: &BuildOptions<'_>,
+) -> Result<BuildSummary, BuildError> {
     let file = File::open(trace_path).map_err(|e| {
         (
             1,
@@ -426,226 +411,131 @@ fn build_from_vcd(
     })?;
     let mut reader = BufReader::new(file);
     let (header, summary) = build_vcd::parse_header(&mut reader).map_err(|e| (1, e))?;
-
-    if header.signals.is_empty() {
-        return Err((
-            1,
-            "input VCD declares no signals -- refusing to build an unqueryable store".to_string(),
-        ));
-    }
-
-    let filtered = build_vcd::filter_signals(&header.signals, allow_list);
-    if let Some(list) = allow_list {
-        if filtered.len() != list.len() {
-            return Err((
-                1,
-                "request.signals names a signal not declared in the trace".to_string(),
-            ));
-        }
-    }
-    if filtered.is_empty() {
-        return Err((1, "no signals to index after filtering".to_string()));
-    }
-
-    let clock_id = resolve_signal_id(
-        clock_signal,
-        &filtered,
-        |s| s.name.as_str(),
-        |s| s.id.as_str(),
-    )?;
-    let reset_id = resolve_signal_id(
-        reset_signal,
-        &filtered,
-        |s| s.name.as_str(),
-        |s| s.id.as_str(),
-    )?;
-
-    let decls: Vec<DeclSignal> = filtered
-        .iter()
-        .map(|s| {
-            let is_real = s.var_type == "real" || s.var_type == "realtime";
-            DeclSignal {
-                id: s.id.as_str(),
-                full_name: s.name.as_str(),
-                width: s.width,
-                var_type: s.var_type.as_str(),
-                is_real,
-            }
-        })
-        .collect();
-
-    let timescale_exponent = crate::fst_convert::timescale_to_exponent(&summary.timescale_str);
-    let mut store = StoreWriter::create(
-        store_path,
-        &decls,
-        timescale_exponent,
-        summary.ticks_to_ns,
-        clock_id.as_deref(),
-        clock_edge,
-        reset_id.as_deref(),
-        reset_active_low,
-    )
-    .map_err(|e| (1, e))?;
-
-    let watched_ids: FxHashSet<String> = filtered.iter().map(|s| s.id.clone()).collect();
-    build_vcd::stream_body(&mut reader, &watched_ids, &mut store);
-
-    let signal_count = store.signal_count();
-    let value_change_count = store.value_change_count();
-    let (min_tick, max_tick) = store.time_range_ticks();
-    let clock_period_ticks = store.clock_tracker().period_ticks();
-    let reset_release_tick = store.reset_tracker().release_tick();
-    let anchor = resolve_anchor(store.clock_tracker(), reset_release_tick);
-    store.finish().map_err(|e| (1, e))?;
-    crate::verify::verify_store(store_path, max_tick).map_err(|e| (1, e))?;
-
-    let (unit, value) = timescale_from_exponent(timescale_exponent);
-    Ok((
-        signal_count,
-        value_change_count,
-        unit.to_string(),
-        value,
-        min_tick,
-        max_tick,
-        summary.ticks_to_ns,
-        clock_period_ticks,
-        anchor,
-        reset_release_tick,
-    ))
+    let signals = header.signals.iter().map(|s| DeclSignal {
+        id: &s.id,
+        full_name: &s.name,
+        width: s.width,
+        var_type: &s.var_type,
+        is_real: matches!(s.var_type.as_str(), "real" | "realtime"),
+    });
+    let exponent = crate::fst_convert::timescale_to_exponent(&summary.timescale_str);
+    let (mut store, watched) =
+        prepare_store(options, "VCD", signals, exponent, summary.ticks_to_ns)?;
+    build_vcd::stream_body(&mut reader, &watched, &mut store);
+    finish_store(store, options.store_path, exponent, summary.ticks_to_ns)
 }
 
-#[allow(clippy::type_complexity)]
 fn build_from_fst(
     trace_path: &Path,
-    store_path: &Path,
-    allow_list: Option<&[String]>,
-    clock_signal: Option<&str>,
-    clock_edge: Edge,
-    reset_signal: Option<&str>,
-    reset_active_low: bool,
-) -> Result<
-    (
-        usize,
-        u64,
-        String,
-        i64,
-        Option<u64>,
-        Option<u64>,
-        f64,
-        Option<u64>,
-        Option<u64>,
-        Option<u64>,
-    ),
-    BuildError,
-> {
+    options: &BuildOptions<'_>,
+) -> Result<BuildSummary, BuildError> {
     let mut source = build_fst::open(trace_path).map_err(|e| (1, e))?;
-    if source.signals.is_empty() {
+    let signals = source.signals.iter().map(|s| DeclSignal {
+        id: &s.id,
+        full_name: &s.full_name,
+        width: s.width,
+        var_type: build_fst::var_type_string(s.var_type),
+        is_real: s.is_real,
+    });
+    let exponent = source.timescale_exponent;
+    let ticks_to_ns = source.ticks_to_ns;
+    let (mut store, watched) = prepare_store(options, "FST", signals, exponent, ticks_to_ns)?;
+    build_fst::stream_body(&mut source, &watched, &mut store).map_err(|e| (1, e))?;
+    finish_store(store, options.store_path, exponent, ticks_to_ns)
+}
+
+fn prepare_store<'a>(
+    options: &BuildOptions<'_>,
+    format: &str,
+    signals: impl ExactSizeIterator<Item = DeclSignal<'a>>,
+    exponent: i8,
+    ticks_to_ns: f64,
+) -> Result<(StoreWriter, FxHashSet<String>), BuildError> {
+    if signals.len() == 0 {
         return Err((
             1,
-            "input FST declares no signals -- refusing to build an unqueryable store".to_string(),
+            format!("input {format} declares no signals -- refusing to build an unqueryable store"),
         ));
     }
-    let filtered = build_fst::filter_signals(&source.signals, allow_list);
-    if let Some(list) = allow_list {
-        if filtered.len() != list.len() {
-            return Err((
-                1,
-                "request.signals names a signal not declared in the trace".to_string(),
-            ));
+
+    // Preserve declaration order and aliases even when the allow-list is reordered.
+    let declared: Vec<_> = match options.allow_list {
+        Some(names) => {
+            let wanted: FxHashSet<&str> = names.iter().map(String::as_str).collect();
+            let selected: Vec<_> = signals.filter(|s| wanted.contains(s.full_name)).collect();
+            if selected.len() != names.len() {
+                return Err((
+                    1,
+                    "request.signals names a signal not declared in the trace".to_string(),
+                ));
+            }
+            selected
         }
-    }
-    if filtered.is_empty() {
+        None => signals.collect(),
+    };
+    if declared.is_empty() {
         return Err((1, "no signals to index after filtering".to_string()));
     }
 
-    let clock_id = resolve_signal_id(
-        clock_signal,
-        &filtered,
-        |s| s.full_name.as_str(),
-        |s| s.id.as_str(),
-    )?;
-    let reset_id = resolve_signal_id(
-        reset_signal,
-        &filtered,
-        |s| s.full_name.as_str(),
-        |s| s.id.as_str(),
-    )?;
-
-    let decls: Vec<DeclSignal> = filtered
-        .iter()
-        .map(|s| DeclSignal {
-            id: s.id.as_str(),
-            full_name: s.full_name.as_str(),
-            width: s.width,
-            var_type: build_fst::var_type_string(s.var_type),
-            is_real: s.is_real,
-        })
-        .collect();
-
-    let mut store = StoreWriter::create(
-        store_path,
-        &decls,
-        source.timescale_exponent,
-        source.ticks_to_ns,
-        clock_id.as_deref(),
-        clock_edge,
-        reset_id.as_deref(),
-        reset_active_low,
+    let clock_id = resolve_signal_id(options.clock_signal, &declared)?;
+    let reset_id = resolve_signal_id(options.reset_signal, &declared)?;
+    let store = StoreWriter::create(
+        options.store_path,
+        &declared,
+        exponent,
+        ticks_to_ns,
+        clock_id,
+        options.clock_edge,
+        reset_id,
+        options.reset_active_low,
     )
     .map_err(|e| (1, e))?;
+    let watched = declared.iter().map(|s| s.id.to_owned()).collect();
+    Ok((store, watched))
+}
 
-    let watched_ids: FxHashSet<String> = filtered.iter().map(|s| s.id.clone()).collect();
-    build_fst::stream_body(&mut source, &watched_ids, &mut store).map_err(|e| (1, e))?;
-
-    let signal_count = store.signal_count();
-    let value_change_count = store.value_change_count();
+fn finish_store(
+    store: StoreWriter,
+    store_path: &Path,
+    exponent: i8,
+    ticks_to_ns: f64,
+) -> Result<BuildSummary, BuildError> {
     let (min_tick, max_tick) = store.time_range_ticks();
-    let clock_period_ticks = store.clock_tracker().period_ticks();
-    let reset_release_tick = store.reset_tracker().release_tick();
-    let anchor = resolve_anchor(store.clock_tracker(), reset_release_tick);
-    let ticks_to_ns = source.ticks_to_ns;
-    let timescale_exponent = source.timescale_exponent;
-    store.finish().map_err(|e| (1, e))?;
-    crate::verify::verify_store(store_path, max_tick).map_err(|e| (1, e))?;
-
-    let (unit, value) = timescale_from_exponent(timescale_exponent);
-    Ok((
-        signal_count,
-        value_change_count,
-        unit.to_string(),
-        value,
+    let (unit, value) = timescale_from_exponent(exponent);
+    let clock = store.clock_tracker();
+    let anchor_tick = match store.reset_tracker().release_tick() {
+        Some(release) => clock.first_edge_at_or_after(release),
+        None => clock.first_edge_tick(),
+    };
+    let summary = BuildSummary {
+        signal_count: store.signal_count(),
+        value_change_count: store.value_change_count(),
+        timescale: TimescaleResp {
+            unit: unit.to_string(),
+            value,
+        },
         min_tick,
         max_tick,
         ticks_to_ns,
-        clock_period_ticks,
-        anchor,
-        reset_release_tick,
-    ))
+        clock_period_ticks: clock.period_ticks(),
+        anchor_tick,
+    };
+    store.finish().map_err(|e| (1, e))?;
+    crate::verify::verify_store(store_path, max_tick).map_err(|e| (1, e))?;
+    Ok(summary)
 }
 
-fn resolve_anchor(
-    clock: &crate::cycle::ClockTracker,
-    reset_release_tick: Option<u64>,
-) -> Option<u64> {
-    match reset_release_tick {
-        Some(release) => clock.first_edge_at_or_after(release),
-        None => clock.first_edge_tick(),
-    }
-}
-
-fn resolve_signal_id<T>(
+fn resolve_signal_id<'a>(
     wanted_name: Option<&str>,
-    declared: &[&T],
-    name_of: impl Fn(&T) -> &str,
-    id_of: impl Fn(&T) -> &str,
-) -> Result<Option<String>, BuildError> {
+    declared: &[DeclSignal<'a>],
+) -> Result<Option<&'a str>, BuildError> {
     let Some(name) = wanted_name else {
         return Ok(None);
     };
     declared
         .iter()
-        .find(|s| name_of(s) == name)
-        .map(|s| Some(id_of(s).to_string()))
+        .find(|s| s.full_name == name)
+        .map(|s| Some(s.id))
         .ok_or_else(|| {
             (
                 1,

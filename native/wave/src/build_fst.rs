@@ -128,22 +128,6 @@ pub fn open(path: &std::path::Path) -> Result<FstSource, String> {
     })
 }
 
-/// Filtered declared signals, preserving hierarchy declaration order.
-pub fn filter_signals<'a>(
-    all: &'a [FstSourceSignal],
-    allow_list: Option<&[String]>,
-) -> Vec<&'a FstSourceSignal> {
-    match allow_list {
-        None => all.iter().collect(),
-        Some(names) => {
-            let wanted: FxHashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-            all.iter()
-                .filter(|s| wanted.contains(s.full_name.as_str()))
-                .collect()
-        }
-    }
-}
-
 /// Stream every recorded value change for the (already handle-filtered)
 /// declared signals into `store`.
 pub fn stream_body(
