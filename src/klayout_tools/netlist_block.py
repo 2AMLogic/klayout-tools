@@ -12,50 +12,13 @@ import os
 import re
 from typing import Any
 
-#: xschem comments out the top sheet's own ``.subckt``/``.ends`` pair when it
-#: netlists it as a testbench (``**.subckt ...`` / ``**.ends``). Matches the
-#: first such line so it can be uncommented; the capture group is everything
-#: after the ``**`` (preserving the directive's own arguments verbatim).
-_BLOCK_SUBCKT_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.subckt\b.*)$", re.IGNORECASE | re.MULTILINE
-)
-#: xschem wraps a long top-sheet header onto commented continuation lines
-#: (``*+ ...``); once the header is uncommented they must become real SPICE
-#: ``+`` continuations or the port list is silently truncated (issue #3899).
-_BLOCK_CONTINUATION_COMMENT_RE = re.compile(r"^([ \t]*)\*{1,2}\+(.*)$")
-_BLOCK_ENDS_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.ends\b.*)$", re.IGNORECASE | re.MULTILINE
-)
+from .netlist_block_wrapper import uncomment_xschem_wrapper
 
 #: xschem always appends a trailing ``.end`` -- correct for a complete deck,
 #: wrong for an includable block (a second ``.end`` in the including
 #: testbench's own deck would terminate it early). Matches only when ``.end``
 #: is the last line of the file.
 _TRAILING_END_RE = re.compile(r"\n[ \t]*\.end[ \t]*\n?\Z", re.IGNORECASE)
-
-
-def _rejoin_header_continuations(text: str) -> str:
-    """Rewrite the commented ``*+``/``**+`` lines contiguous with the
-    just-uncommented ``.subckt`` header into real ``+`` continuations."""
-    lines = text.split("\n")
-    header = next(
-        (
-            i
-            for i, line in enumerate(lines)
-            if re.match(r"[ \t]*\.subckt\b", line, re.IGNORECASE)
-        ),
-        None,
-    )
-    if header is None:
-        return text
-    j = header + 1
-    while j < len(lines):
-        match = _BLOCK_CONTINUATION_COMMENT_RE.match(lines[j])
-        if not match:
-            break
-        lines[j] = f"{match.group(1)}+{match.group(2)}"
-        j += 1
-    return "\n".join(lines)
 
 
 _SUBCKT_HEADER_RE = re.compile(r"[ \t]*\.subckt\b", re.IGNORECASE)
@@ -457,16 +420,10 @@ def apply_block_mode(
     text = data.decode("utf-8", errors="replace")
 
     param_warning = None
-    text, n_subckt = _BLOCK_SUBCKT_COMMENT_RE.subn(r"\1\2", text, count=1)
-    if n_subckt:
-        text = _rejoin_header_continuations(text)
-        if schematic is not None:
-            text, param_warning = _append_subckt_params(text, schematic)
-    text, n_ends = _BLOCK_ENDS_COMMENT_RE.subn(r"\1\2", text, count=1)
+    text, _, subckt_uncommented, ends_uncommented = uncomment_xschem_wrapper(text)
+    if subckt_uncommented and schematic is not None:
+        text, param_warning = _append_subckt_params(text, schematic)
     text, n_end = _TRAILING_END_RE.subn("\n", text, count=1)
-
-    subckt_uncommented = n_subckt > 0
-    ends_uncommented = n_ends > 0
     trailing_end_removed = n_end > 0
 
     warning = None
