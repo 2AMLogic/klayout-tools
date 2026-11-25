@@ -1721,12 +1721,7 @@ def _install_batch_artifacts(
     client_netlist: str | None = None,
     job_id: str | None = None,
 ) -> None:
-    """Move the collected ``outputs/artifacts/`` tree into the caller's artifacts
-    directory and repoint every corner's ``artifacts.*`` path at it
-    (:func:`sim_remote._rewrite_remote_artifact_paths`; the remote root is read
-    off the reported paths). Issue #7905: ``client_netlist`` repoints the decks'
-    job-side netlist ``.include``; a corner with no returned engine log gets an
-    ``engine_log_not_retained`` note naming ``job_id``."""
+    """Install the kept worker files and localize their report and deck paths (#7905)."""
     kept = sim_batch_kept_artifacts
     source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(source):
@@ -1738,7 +1733,9 @@ def _install_batch_artifacts(
                 corners, remote_root=root, local_root=artifacts_dir
             )
             if client_netlist is not None:
-                kept.rewrite_job_input_includes(corners, client_netlist)
+                kept.rewrite_job_input_includes(
+                    corners, client_netlist, remote_root=root, local_root=artifacts_dir
+                )
     kept.note_unretained_logs(corners, job_id=job_id)
 
 

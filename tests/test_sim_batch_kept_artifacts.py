@@ -133,7 +133,7 @@ def test_install_rewrites_expanded_netlist_and_spiceinit_that_name_the_path(tmp_
     )
 
 
-def test_rewrite_leaves_tokens_retained_includes_and_foreign_decks_alone(tmp_path):
+def test_rewrite_leaves_tokens_missing_expansions_and_foreign_decks_alone(tmp_path):
     foreign = tmp_path / "other" / "corner.cir"
     foreign.parent.mkdir()
     foreign.write_text(_deck())  # another job's tree: not in `corners`
@@ -153,6 +153,35 @@ def test_rewrite_leaves_tokens_retained_includes_and_foreign_decks_alone(tmp_pat
     for name, text in decks.items():
         assert (tmp_path / f"{name}.cir").read_text() == text
     assert foreign.read_text() == _deck()
+
+
+def test_kept_input_with_spaces_is_one_spice_include_argument(tmp_path):
+    client = tmp_path / "a bench" / "divider.spice"
+    for old in (JOB_NETLIST, f'"{JOB_NETLIST}"', f"'{JOB_NETLIST}'"):
+        local = _install(
+            tmp_path,
+            [_corner()],
+            {"tt_27C/corner.cir": _deck(old)},
+            client_netlist=str(client),
+        )
+        quote = "'" if old.startswith("'") else '"'
+        assert (local / "tt_27C/corner.cir").read_text() == _deck(
+            f"{quote}{client}{quote}"
+        )
+
+
+def test_an_expanded_worker_deck_includes_its_installed_sibling(tmp_path):
+    remote = f"{REMOTE}/tt_27C/netlist.expanded.cir"
+    files = {
+        "tt_27C/corner.cir": _deck(remote),
+        "tt_27C/netlist.expanded.cir": "R1 a b 1k\n",
+    }
+    local = _install(
+        tmp_path, [_corner()], files, client_netlist=str(tmp_path / "original.cir")
+    )
+    expanded = local / "tt_27C/netlist.expanded.cir"
+    assert (local / "tt_27C/corner.cir").read_text() == _deck(str(expanded))
+    assert expanded.read_text() == files["tt_27C/netlist.expanded.cir"]
 
 
 def test_rewrite_tolerates_missing_decks_and_non_string_values(tmp_path):

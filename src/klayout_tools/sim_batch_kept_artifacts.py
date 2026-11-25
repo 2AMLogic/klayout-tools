@@ -60,19 +60,36 @@ def _read(path: str) -> str | None:
         return None
 
 
-def _job_netlist_path(deck_text: str) -> str | None:
+def _job_netlist_path(deck_text: str, expanded_path: str | None) -> str | None:
     """The job-side netlist path ``deck_text`` includes: the first absolute
     ``.include`` whose file is the staged netlist (``netlist.cir``). A token
     path (``$REQUEST_DIR/...`` from ``options.portable_artifacts``) is not
     absolute, so a portable record is left exactly as written."""
     for match in _INCLUDE_LINE.finditer(deck_text):
-        if posixpath.basename(match["path"]) == BATCH_NETLIST_FILENAME:
+        if (
+            match["path"] == expanded_path
+            or posixpath.basename(match["path"]) == BATCH_NETLIST_FILENAME
+        ):
             return match["path"]
     return None
 
 
+def _quote_target(target: str, original_quote: str) -> str:
+    """Preserve the source delimiter when possible and protect spaces and comments."""
+    if original_quote and original_quote not in target:
+        return f"{original_quote}{target}{original_quote}"
+    if not any(c.isspace() or c == ";" for c in target):
+        return target
+    quote = "'" if '"' in target else '"'
+    return f"{quote}{target}{quote}"
+
+
 def rewrite_job_input_includes(
-    corners: list[dict[str, Any]], client_netlist: str
+    corners: list[dict[str, Any]],
+    client_netlist: str,
+    *,
+    remote_root: str | None = None,
+    local_root: str | None = None,
 ) -> int:
     """Point each installed corner deck's job-side netlist ``.include`` at
     ``client_netlist``; return how many files were rewritten.
@@ -84,8 +101,8 @@ def rewrite_job_input_includes(
     through ``artifacts.deck``, which the install has already rewritten to its
     local copy, so another job's tree under the same artifacts directory is
     never touched. A corner with no deck, an unreadable deck, or no job-side
-    include (e.g. a deck that includes the retained ``netlist.expanded.cir``)
-    is skipped. Only the netlist include is rewritten: ``.lib`` lines still
+    include is skipped. A worker-side reference to the retained expanded deck
+    is localized to that corner’s installed sibling. Model-library directives still
     name the worker's PDK root.
     """
     client = os.path.abspath(client_netlist)
@@ -95,17 +112,33 @@ def rewrite_job_input_includes(
         if not isinstance(deck, str):
             continue
         deck_text = _read(deck)
-        job_path = None if deck_text is None else _job_netlist_path(deck_text)
+        if deck_text is None:
+            continue
+        folder = os.path.dirname(deck)
+        expanded = os.path.join(folder, "netlist.expanded.cir")
+        remote_expanded = None
+        if (
+            remote_root is not None
+            and local_root is not None
+            and os.path.isfile(expanded)
+        ):
+            remote_expanded = posixpath.join(
+                remote_root, os.path.relpath(expanded, local_root)
+            )
+        job_path = _job_netlist_path(deck_text, remote_expanded)
         if job_path is None:
             continue
-        # Not followed by more path characters, so `.../netlist.cir.bak` stays.
-        exact = re.compile(re.escape(job_path) + r"(?![\w./-])")
-        folder = os.path.dirname(deck)
+        target = os.path.abspath(expanded) if job_path == remote_expanded else client
+        exact = re.compile(
+            r"""(?P<quote>["']?)""" + re.escape(job_path) + r"(?P=quote)(?![\w./-])"
+        )
         for path in (deck, *(os.path.join(folder, n) for n in _SIBLING_FILES)):
             text = deck_text if path == deck else _read(path)
             if text is None:
                 continue
-            updated = exact.sub(lambda _match: client, text)
+            updated = exact.sub(
+                lambda match, target=target: _quote_target(target, match["quote"]), text
+            )
             if updated == text:
                 continue
             with open(

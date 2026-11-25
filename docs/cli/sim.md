@@ -3280,10 +3280,11 @@ the submitting host ([#7905](https://github.com/2AMLogic/klayout-tools/issues/79
   when they name it, to the netlist the run was submitted from (the file a
   `--backend local` deck includes), so the include resolves locally. Only the
   netlist include moves: `.lib` lines still name the worker's PDK root, so a
-  deck re-runs on a host whose PDK sits at the same path. A deck that
-  includes the retained `netlist.expanded.cir` instead, and an
-  `options.portable_artifacts` deck (`$REQUEST_DIR/netlist.cir`), are left
-  as written.
+  deck re-runs on a host whose PDK sits at the same path. When the worker
+  produced an expanded netlist, the deck points to the installed
+  `netlist.expanded.cir` beside it. Portable records keep their
+  `$REQUEST_DIR` and `$CORNER_DIR` tokens.
+
 - **A missing engine log is stated.** A corner whose log did not come back
   (`artifacts.log: null`, or a reported path that is not a file locally)
   carries one `info` diagnostic, `engine_log_not_retained`, with the
