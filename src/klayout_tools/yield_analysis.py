@@ -12,7 +12,7 @@ JSON-serialisable ``dict``) and never prints -- serialisation and
 human-readable formatting live in ``cli/yield_cmd.py``, matching every other
 ``klt`` verb.
 
-The Rust/Python split mirrors ``mom.py``/``congestion.py``: everything
+The Rust/Python split mirrors ``mom.py``: everything
 statistical (distribution fit, the exact and parametric estimators, their
 confidence intervals, Cp/Cpk, the sample-size verdict) runs in the
 ``klt_yield_native`` extension (``native/yield/``, this repo's third Rust

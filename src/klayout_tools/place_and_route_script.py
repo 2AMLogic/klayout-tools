@@ -1302,24 +1302,7 @@ def _stage_script_lines(
             write_verilog_call += f" -remove_cells {{{removed}}}"
         lines += [f"write_def {_tcl_literal(def_path)}", write_verilog_call]
     elif stage == "place":
-        # A placement-only DEF, written as a side artifact alongside the
-        # `write_db` checkpoint below. Originally added purely so an
-        # out-of-band caller -- the FLUTE/RUDY-family congestion pre-check
-        # (`klayout_tools.congestion`, issue #785, Epic #700 Phase 1 §3.6)
-        # -- could read real post-placement cell/pin geometry via
-        # `klayout.db`'s DEF parser (mirroring `_merge_def_to_gds`'s own use
-        # of it) without needing the far more expensive `route` stage to
-        # have run first; #785 deliberately kept this path internal-only
-        # (not part of the public request/response contract). Issue #1826
-        # reverses that scoping decision: `run_place_and_route` now surfaces
-        # this same deterministic path as `unrouted_def_path` whenever
-        # `target_stage` is `"place"` itself -- see that function's own
-        # comment for why -- so a caller can get a pre-route, SDC-driven
-        # `klt sta` result (via `klt sta`'s own `geometry_source` request
-        # field) without a full route. The path itself
-        # (`<output_dir>/<hdl_toplevel>.place.def`) is unchanged, so any
-        # out-of-band caller that already located it directly (as #785
-        # intended) keeps working unmodified.
+        # Expose the placed DEF as unrouted_def_path for pre-route STA (#1826).
         place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
         lines += [f"write_def {_tcl_literal(place_def_path)}"]  # issue #5708
 

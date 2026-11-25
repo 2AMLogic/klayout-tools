@@ -214,7 +214,6 @@
   "jobs": {
     "Lint (ruff)": 120,
     "Native engines (Rust)": 240,
-    "Native engines (Rust) — congestion pre-check": 120,
     "Native engines (Rust) — yield statistics": 120,
     "Native engines (Rust) — static timing": 150,
     "Native engines (Rust) — technology mapping": 120,
@@ -243,7 +242,6 @@
     "job_seconds_p90": {
       "Lint (ruff)": 16,
       "Native engines (Rust)": 91,
-      "Native engines (Rust) — congestion pre-check": 30,
       "Native engines (Rust) — yield statistics": 36,
       "Native engines (Rust) — static timing": 64,
       "Native engines (Rust) — technology mapping": 30,
@@ -261,7 +259,6 @@
     "job_seconds_max": {
       "Lint (ruff)": 26,
       "Native engines (Rust)": 136,
-      "Native engines (Rust) — congestion pre-check": 102,
       "Native engines (Rust) — yield statistics": 84,
       "Native engines (Rust) — static timing": 89,
       "Native engines (Rust) — technology mapping": 36,

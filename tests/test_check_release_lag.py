@@ -9,6 +9,11 @@ and no-tags cases are fully controlled. Two tests deliberately *do* point the
 script at this repo: one asserts the backstop is still parseable from the
 checked-in `RELEASING.md` (the anti-drift guarantee the script's threshold
 sourcing depends on), and one asserts the CI wiring stays advisory.
+
+The last-failed-run lookup (issue #6911) is exercised through a stub `gh`
+on PATH: a failed newest run is named with a link, a superseded or empty
+history is not, and unavailable history changes nothing about the local lag,
+the JSON shape, or the exit codes.
 """
 
 from __future__ import annotations
@@ -38,8 +43,15 @@ def _git(*args: str, cwd: Path) -> str:
 def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     if env is None:
         # Never inherit a real GITHUB_STEP_SUMMARY (these tests can themselves
-        # run inside GitHub Actions) -- only the test that asserts on it sets it.
-        env = {k: v for k, v in os.environ.items() if k != "GITHUB_STEP_SUMMARY"}
+        # run inside GitHub Actions) -- only the test that asserts on it sets
+        # it. Same for GH_TOKEN/GITHUB_TOKEN: with a real token the
+        # last-failed-run lookup (issue #6911) would hit the live API; only
+        # the tests that install a stub `gh` set one.
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("GITHUB_STEP_SUMMARY", "GH_TOKEN", "GITHUB_TOKEN")
+        }
     return subprocess.run([str(SCRIPT), *args], capture_output=True, text=True, env=env)
 
 
@@ -317,3 +329,162 @@ def test_script_never_mutates_the_repository() -> None:
     text = SCRIPT.read_text()
     for forbidden in MUTATING_GIT:
         assert forbidden not in text, f"{forbidden!r} has no place in a read-only check"
+
+
+# --------------------------------------------------------------------------
+# Last failed Release run (issue #6911): named with a link when Actions
+# history is available; omitted -- without touching the lag, the JSON shape,
+# or the exit codes -- when it is not.
+# --------------------------------------------------------------------------
+
+
+def _run_entry(run_id: int, conclusion: str, created: str) -> dict:
+    return {
+        "id": run_id,
+        "name": "Release",
+        "conclusion": conclusion,
+        "created_at": created,
+        "html_url": f"https://github.com/acme/widgets/actions/runs/{run_id}",
+        "display_title": "Scheduled release",
+    }
+
+
+def _history(*entries: dict) -> str:
+    return json.dumps({"total_count": len(entries), "workflow_runs": list(entries)})
+
+
+def _gh_env(dir_path: Path, runs_json: str, *, fail: bool = False) -> dict[str, str]:
+    """A stub `gh` first on PATH, answering the workflow-runs query.
+
+    The stub records its arguments (so tests can assert the query targeted
+    this repository's `release.yml`) and cats a fixture; ``fail`` simulates an
+    API error (history unavailable).
+    """
+    bin_dir = dir_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    fixture = dir_path / "runs.json"
+    fixture.write_text(runs_json)
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "$*" >> "$STUB_GH_LOG"\n'
+        'if [ -n "${STUB_GH_FAIL:-}" ]; then'
+        ' echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi\n'
+        'cat "$STUB_GH_JSON"\n'
+    )
+    (bin_dir / "gh").chmod(0o755)
+    env = dict(os.environ)
+    for var in ("GITHUB_STEP_SUMMARY", "GH_TOKEN", "GITHUB_TOKEN"):
+        env.pop(var, None)
+    env.update(
+        PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+        GITHUB_REPOSITORY="acme/workflow-runner",
+        GH_TOKEN="stub-token",
+        STUB_GH_LOG=str(dir_path / "gh.log"),
+        STUB_GH_JSON=str(fixture),
+        STUB_GH_FAIL="1" if fail else "",
+    )
+    return env
+
+
+def _lag_with_history(dir_path: Path, runs_json: str, *, fail: bool = False):
+    dir_path.mkdir(parents=True, exist_ok=True)
+    repo = _tagged_repo(dir_path, ahead=6, threshold=5)
+    _git("remote", "add", "origin", "https://github.com/acme/widgets.git", cwd=repo)
+    proc = _run(
+        "--repo",
+        str(repo),
+        "--ref",
+        "HEAD",
+        "--format",
+        "json",
+        env=_gh_env(dir_path, runs_json, fail=fail),
+    )
+    return json.loads(proc.stdout), proc.returncode, proc.stdout, proc.stderr
+
+
+def test_newest_failed_release_run_is_named_with_its_link(tmp_path: Path) -> None:
+    report, _code, _out, _err = _lag_with_history(
+        tmp_path,
+        _history(
+            _run_entry(101, "success", "2026-11-09T15:17:00Z"),
+            _run_entry(102, "failure", "2026-11-16T15:17:00Z"),  # newest, failed
+        ),
+    )
+    url = "https://github.com/acme/widgets/actions/runs/102"
+    assert report["last_failed_run"] == url
+    assert url in report["message"]
+    # The query targeted this repository's release.yml workflow.
+    assert (
+        "repos/acme/widgets/actions/workflows/release.yml/runs?status=failure"
+        in (tmp_path / "gh.log").read_text()
+    )
+
+
+def test_failed_run_is_still_named_after_a_success(tmp_path: Path) -> None:
+    report, _code, _out, _err = _lag_with_history(
+        tmp_path,
+        _history(
+            _run_entry(102, "failure", "2026-11-16T15:17:00Z"),
+            _run_entry(103, "success", "2026-11-23T15:17:00Z"),  # newest, ok
+        ),
+    )
+    assert (
+        report["last_failed_run"] == "https://github.com/acme/widgets/actions/runs/102"
+    )
+    assert report["last_failed_run"] in report["message"]
+
+
+def test_empty_actions_history_has_no_link(tmp_path: Path) -> None:
+    report, _code, _out, _err = _lag_with_history(tmp_path, _history())
+    assert report["last_failed_run"] is None
+    assert "actions/runs" not in report["message"]
+
+
+def test_unavailable_history_omits_the_link_and_keeps_it_out_of_the_report(
+    tmp_path: Path,
+) -> None:
+    # An API error is not a release fact: no link, no error text in the
+    # report, same exit code.
+    report, code, out, _err = _lag_with_history(
+        tmp_path,
+        _history(_run_entry(102, "failure", "2026-11-16T15:17:00Z")),
+        fail=True,
+    )
+    assert code == 1
+    assert report["last_failed_run"] is None
+    assert "HTTP 404" not in out
+
+    # Without a token configured, gh is never invoked at all.
+    env = _gh_env(
+        tmp_path / "notoken",
+        _history(_run_entry(102, "failure", "2026-11-16T15:17:00Z")),
+    )
+    env.pop("GH_TOKEN")
+    repo = _tagged_repo(tmp_path / "notoken", ahead=6, threshold=5)
+    proc = _run("--repo", str(repo), "--ref", "HEAD", "--format", "json", env=env)
+    assert json.loads(proc.stdout)["last_failed_run"] is None
+    assert not (tmp_path / "notoken" / "gh.log").exists()
+
+
+def test_the_lookup_never_changes_the_local_lag_or_exit_status(
+    tmp_path: Path,
+) -> None:
+    """Failed, superseded, empty, and unavailable history must all report the
+    same locally computed lag and the same exit status."""
+    cases = {
+        "failed": _history(_run_entry(102, "failure", "2026-11-16T15:17:00Z")),
+        "superseded": _history(
+            _run_entry(102, "failure", "2026-11-16T15:17:00Z"),
+            _run_entry(103, "success", "2026-11-23T15:17:00Z"),
+        ),
+        "empty": _history(),
+    }
+    results = set()
+    for name, history in cases.items():
+        report, code, _out, _err = _lag_with_history(tmp_path / name, history)
+        results.add((report["status"], report["commits_ahead"], code))
+    report, code, _out, _err = _lag_with_history(
+        tmp_path / "unavailable", cases["failed"], fail=True
+    )
+    results.add((report["status"], report["commits_ahead"], code))
+    assert results == {("release_due", 6, 1)}

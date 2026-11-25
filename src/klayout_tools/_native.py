@@ -1,17 +1,6 @@
 """Shared native-extension loader used across the ``klt`` verb modules.
 
-``yield_sensitivity.py``, ``yield_analysis.py``, ``congestion.py``,
-``mom.py``, and ``sta.py`` each defined their own near-identical
-``_load_native()`` -- a ``try: import klt_<x>_native / except ImportError:
-raise <X>Error(...)`` shape, differing only in the native module's name,
-the ``*Error`` class raised, the ``native/<x>/`` build directory, the
-alternate install command mentioned in the hint, and (for two of the five)
-a trailing docs link. ``_load_native_extension`` below factors that literal
-prefix out the same way ``_paths.py``'s ``_load_request_json`` /
-``_load_spec_json`` do for the request/spec-loading duplication -- each
-caller still owns its own ``_load_native()`` wrapper (so call sites and
-existing test mocks/patches targeting ``<module>._load_native`` do not need
-to change) and just forwards to this helper with its own parameters.
+Each caller supplies its extension name, error type and installation hints.
 """
 
 from __future__ import annotations

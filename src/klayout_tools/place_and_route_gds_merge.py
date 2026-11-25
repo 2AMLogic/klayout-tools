@@ -66,10 +66,7 @@ from .place_and_route_pin_conductor import (
 from .place_and_route_power_stack import repair_power_stack
 from .place_and_route_via_pad import trim_via_pads
 
-#: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
-#: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
-#: imported, matching this file's existing small-targeted-scan convention
-#: for DEF text, e.g. :func:`~klayout_tools.place_and_route_sta._def_pin_net_names`).
+#: Database units per micron in the input DEF.
 _DEF_UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;")
 #: ``DIEAREA ( x0 y0 ) ( x1 y1 ) ;`` -- DEF's ``DIEAREA`` is technically an
 #: arbitrary rectilinear polygon, but every point pair this regex captures
