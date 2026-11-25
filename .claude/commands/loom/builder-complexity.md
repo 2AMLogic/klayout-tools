@@ -1,3 +1,6 @@
+---
+disable-model-invocation: true
+---
 # Builder: Complexity Assessment and Issue Decomposition
 
 This document covers complexity assessment, issue decomposition, and scope management for the Builder role. For the core builder workflow, see `builder.md`.
@@ -43,6 +46,8 @@ When you claim an issue with `loom:building`, you are committing to ONE of these
 > (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
 > This matters most exactly here: a decomposition burst files 2-5 issues in a row, so it is the
 > single likeliest place in a Builder run to meet an exhausted GraphQL pool mid-sequence.
+>
+> **Exception (#13978):** on a foreign public repo the App is not installed on, `create-issue.sh` is refused (`NOT_IN_INSTALLATION`, #9548). File with a raw `gh issue create -R <repo>` (interim) instead of parking the report for an operator: `.loom/docs/gh-issue-create-rest-fallback.md` § "Foreign public repo".
 
 ### If You Discover an Issue Is Too Complex
 
@@ -62,7 +67,10 @@ When you claim an issue and realize mid-work it requires >6 hours or touches >8 
 
 # 2. Park the parent on its children: one body park record per child, then
 #    building -> blocked. NEVER close a parent yourself; humans close it once
-#    children are filed, and loom:blocked is the terminal state.
+#    children are filed, and loom:blocked is the terminal state. If the parent
+#    body carries <!-- loom:split-rescoped --> alone on a line, remove that line
+#    in the same edit (#15256): a stale marker makes split-state print NOT_SPLIT
+#    once these children close, re-opening the #13635 re-dispatch loop.
 loom-daemon park-record apply --issue 812 --blocked-by XXX,YYY,ZZZ --by builder --remove-label loom:building
 
 # Then exit and let the Curator/sweep pipeline pick up each sub-issue.
@@ -369,6 +377,10 @@ children are filed and curated. This is the decomposition-parent exception, not 
 blanket rule: for a **non-parent** issue you verify is already implemented, close it
 with a rationale per `builder.md` → "Issues Are Suggestions" (or the `.no-changes-needed`
 marker under `/loom:sweep`).
+
+If the parent body carries `<!-- loom:split-rescoped -->` alone on a line, remove that line in the same edit that files the
+children or parks the parent (#15256): the marker describes a revision these children supersede, and a stale one makes
+`forge parent split-state` print `NOT_SPLIT` after they close, re-opening the #13635 re-dispatch loop.
 
 ```bash
 loom-daemon park-record apply --issue <parent-number> --blocked-by <phase1>,<phase2>,<phase3> --by builder --remove-label loom:building

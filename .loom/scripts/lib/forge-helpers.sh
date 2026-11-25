@@ -46,6 +46,18 @@ _LOOM_FORGE_HELPERS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "$_LOOM_FORGE_HELPERS_LIB_DIR/config-resolver.sh"
 # shellcheck source=./locate-daemon-bin.sh
 source "$_LOOM_FORGE_HELPERS_LIB_DIR/locate-daemon-bin.sh"
+# shellcheck source=./bounded-run.sh
+# bounded_run (#13927): the formal-review reads at the bottom of this file
+# run `gh` under a hard wall-clock budget, because on a loaded multi-sweep
+# host a fraction of `gh` invocations block indefinitely rather than erroring
+# and an unbounded read inside a command substitution wedges the whole verdict
+# chain (see lib/bounded-run.sh's header for the signal-deferral mechanics).
+# A missing lib is an install defect that must not break the dozens of
+# unrelated scripts sourcing this file: the review reads then degrade to the
+# unbounded pre-#13927 behaviour via _forge_review_read_run's guard.
+if [[ -f "$_LOOM_FORGE_HELPERS_LIB_DIR/bounded-run.sh" ]]; then
+  source "$_LOOM_FORGE_HELPERS_LIB_DIR/bounded-run.sh"
+fi
 
 # --- Forge Detection ---
 
@@ -798,9 +810,12 @@ forge_get_pr_body() {
 #
 # GitHub: Uses GraphQL `closingIssuesReferences` via `gh pr view`. This is
 #   GitHub's authoritative parse of the PR body — it correctly handles case
-#   sensitivity, word boundaries, fenced code blocks, and the full list of
-#   closing keywords (close/closes/closed, fix/fixes/fixed, resolve/resolves/
-#   resolved). It also follows GitHub's own rule that "Updates #N", "See #N",
+#   sensitivity, word boundaries, and the full list of closing keywords
+#   (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved).
+#   Measured per-surface behavior (#15058): fenced code blocks and inline code
+#   spans are ignored, while blockquoted lines and full issue URLs ARE parsed
+#   (and close on merge) — see defaults/docs/issue-pr-linking.md. It also
+#   follows GitHub's own rule that "Updates #N", "See #N",
 #   and "References #N" do NOT close the issue.
 #   Neither branch is negation-aware: "does not fix #N" reads exactly like
 #   "fixes #N" (#1057). A caller about to ACT on a candidate re-checks it with
@@ -832,9 +847,12 @@ forge_pr_close_targets() {
     body=$(forge_get_pr_body "$nwo" "$pr_number")
     # Fenced code blocks and blockquoted lines are prose, not intent (#9879):
     # a `Closes #N` inside a ``` / ~~~ fence or after `>` must not count as a
-    # landing closer. Negation (`Refs #N`, "not closing") stays with the
-    # daemon's has-unnegated-closing-ref cross-check — the GitHub branch's
-    # closingIssuesReferences is API-computed with this same fence-awareness.
+    # landing closer. Measured (#15058): GitHub's API-computed
+    # closingIssuesReferences AGREES on fences (ignored) but DISAGREES on
+    # blockquotes (parsed — PR #12122), so this strip is deliberately stricter
+    # than GitHub for a blockquoted closer; aligning it is out of scope there.
+    # Negation (`Refs #N`, "not closing") stays with the daemon's
+    # has-unnegated-closing-ref cross-check.
     # `|| true` neutralizes grep's exit-1 (no match) under `set -e`.
     { printf '%s\n' "$body" \
         | awk '/^[[:space:]]*(```|~~~)/ { infence = !infence; next } infence { next } /^[[:space:]]*>/ { next } { print }' \
@@ -1261,9 +1279,8 @@ forge_gh_perm_safe() {
 # confirmed wrong-repo signatures above: GitHub's GraphQL "could not resolve
 # to a Repository" rejection (the credential's installation has no access to
 # the name/owner at all), or a REST 404 (`gh`'s own "HTTP 404" rendering,
-# reusing the same `http 404`/`not found` idiom
-# `forge_get_required_status_check_contexts`'s Gitea branch already uses
-# elsewhere in this file). Deliberately text-only and therefore loose on the
+# reusing the same `http 404`/`not found` idiom this file's Gitea branches
+# already used). Deliberately text-only and therefore loose on the
 # REST side -- a genuinely missing issue/PR on a CORRECTLY scoped repo also
 # 404s this way, so callers must treat a positive match as "worth trying a
 # different credential for," not as certain proof of a repo mismatch. That is
@@ -1644,6 +1661,31 @@ forge_gh_create_issue_rl_safe() {
 #
 # Old bodies-only behaviour is one jq away for any caller that genuinely wants
 # it: `forge_get_pr_reviews "$nwo" "$n" | jq -r 'select(.body != "") | .body'`.
+#
+# Wall-clock bound (#13927): every GitHub-branch read below runs `gh` under
+# bounded_run with this budget. Override: LOOM_FORGE_REVIEW_READ_TIMEOUT
+# (seconds). 0 restores the unbounded pre-#13927 behaviour. A timed-out read
+# exits 124 (bounded_run normalizes to GNU timeout's code); callers treat any
+# non-zero as fail-closed, and 124 specifically means "timed out", never
+# "no reviews".
+_LOOM_FORGE_REVIEW_READ_TIMEOUT="${LOOM_FORGE_REVIEW_READ_TIMEOUT:-60}"
+
+# Run ONE review-read gh invocation under that budget (#13927). Preserves the
+# `$gh_cmd` pass-through: tests stub it with a path, and `timeout`/bounded_run
+# exec a path fine. Degrades to the plain unbounded call when the budget is 0
+# or bounded-run.sh is absent (see the sourcing note at the top of this file).
+# The override is RE-RESOLVED per call so `LOOM_FORGE_REVIEW_READ_TIMEOUT=1
+# <script>` (tests, one-off loaded-host runs) is honored, not just a value
+# present when this file was sourced.
+_forge_review_read_run() {
+  _LOOM_FORGE_REVIEW_READ_TIMEOUT="${LOOM_FORGE_REVIEW_READ_TIMEOUT:-60}"
+  if [[ "$_LOOM_FORGE_REVIEW_READ_TIMEOUT" == "0" ]] \
+    || ! declare -F bounded_run > /dev/null 2>&1; then
+    "$@"
+    return $?
+  fi
+  bounded_run "$_LOOM_FORGE_REVIEW_READ_TIMEOUT" "$@"
+}
 
 # jq filter shared by both forges' review reads. Emits one compact JSON record
 # per review. Gitea spells two states differently (REQUEST_CHANGES / COMMENT);
@@ -1678,6 +1720,119 @@ _FORGE_REVIEW_COMMENT_RECORD_JQ='.[] | {
   body: (.body // "")
 } | tojson'
 
+# GraphQL fallback for forge_get_pr_reviews' GitHub branch (#15009): a
+# paginated pullRequest.reviews read mapped onto the identical record shape
+# the REST path emits, so a REST reader shed (#14739) cannot turn the gate's
+# one single-transport input into an automatic UNKNOWN while GraphQL still
+# serves (the inline-thread read already had both paths). Called ONLY after a
+# FAILED REST read — never after a 124, which must reach the caller as "timed
+# out" and must not spend a second wall-clock budget (#13927). Fails closed
+# exactly like the REST path: any gh failure, a GraphQL-level `errors`
+# payload, a page missing the reviews connection / pageInfo / nodes, or a
+# hasNextPage without a usable cursor is a non-zero return with NO output.
+_forge_get_pr_reviews_github_graphql() {
+  local nwo="$1"
+  local pr_number="$2"
+  local gh_cmd="${3:-gh}"
+
+  forge_split_nwo "$nwo"
+
+  local query='query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$pr){
+        reviews(first:100,after:$cursor){
+          pageInfo{hasNextPage endCursor}
+          nodes{
+            databaseId
+            state
+            commit{oid}
+            submittedAt
+            author{login}
+            body
+          }
+        }
+      }
+    }
+  }'
+
+  local cursor="" page=0 response rc records="" page_records has_next
+  while :; do
+    page=$((page + 1))
+    if [[ $page -gt 50 ]]; then
+      echo "forge_get_pr_reviews: exceeded 50 GraphQL pages — refusing to report a truncated review list" >&2
+      return 1
+    fi
+
+    if [[ -z "$cursor" ]]; then
+      response=$(_forge_review_read_run "$gh_cmd" api graphql -f query="$query" \
+        -F owner="$FORGE_OWNER" -F repo="$FORGE_REPO" -F pr="$pr_number")
+    else
+      response=$(_forge_review_read_run "$gh_cmd" api graphql -f query="$query" \
+        -F owner="$FORGE_OWNER" -F repo="$FORGE_REPO" -F pr="$pr_number" \
+        -F cursor="$cursor")
+    fi
+    rc=$?
+    if [[ "$rc" -eq 124 ]]; then
+      echo "forge_get_pr_reviews: the GraphQL review read timed out (#13927)" >&2
+      return 124
+    fi
+    [[ "$rc" -ne 0 ]] && return 1
+
+    # A GraphQL-level error rides a 200 with an `errors` key; a partial-data
+    # response must not pass for a complete page.
+    if printf '%s' "$response" | jq -e '.errors' > /dev/null 2>&1; then
+      echo "forge_get_pr_reviews: GraphQL response carried errors — review read failed" >&2
+      return 1
+    fi
+
+    # Structural guard: reviews + pageInfo + nodes must all be present. A
+    # shape without them is a truncated/errored page, and guessing
+    # "complete" is how a partial read becomes a false CLEAR.
+    if ! printf '%s' "$response" \
+      | jq -e '.data.repository.pullRequest.reviews
+               | type == "object" and has("pageInfo") and has("nodes")' > /dev/null 2>&1; then
+      echo "forge_get_pr_reviews: GraphQL page lacked the reviews/pageInfo shape — treating the read as incomplete" >&2
+      return 1
+    fi
+
+    page_records=$(printf '%s' "$response" \
+      | jq -c '.data.repository.pullRequest.reviews.nodes[] | {
+          id: (.databaseId // 0),
+          state: ((.state // "UNKNOWN") | ascii_upcase
+                  | if . == "REQUEST_CHANGES" then "CHANGES_REQUESTED"
+                    elif . == "COMMENT" then "COMMENTED"
+                    else . end),
+          commit_id: (.commit.oid // ""),
+          submitted_at: (.submittedAt // ""),
+          author: (.author.login // ""),
+          body: (.body // "")
+        }') || return 1
+    # Buffered, not streamed: the fail-closed contract is NO output on a
+    # failed read, and a page-2 failure must not leave page 1's records
+    # looking like an answer.
+    [[ -n "$page_records" ]] && records+="$page_records"$'\n'
+
+    has_next=$(printf '%s' "$response" \
+      | jq -r '.data.repository.pullRequest.reviews.pageInfo.hasNextPage') || return 1
+    if [[ "$has_next" == "false" ]]; then
+      break
+    fi
+    if [[ "$has_next" != "true" ]]; then
+      echo "forge_get_pr_reviews: hasNextPage was not a boolean — treating the read as incomplete" >&2
+      return 1
+    fi
+    cursor=$(printf '%s' "$response" \
+      | jq -r '.data.repository.pullRequest.reviews.pageInfo.endCursor') || return 1
+    if [[ -z "$cursor" || "$cursor" == "null" ]]; then
+      echo "forge_get_pr_reviews: hasNextPage without a usable endCursor — treating the read as incomplete" >&2
+      return 1
+    fi
+  done
+
+  [[ -n "$records" ]] && printf '%s' "$records"
+  return 0
+}
+
 # Get a PR's formal reviews as complete, fully-paginated NDJSON records.
 #
 # Usage: forge_get_pr_reviews NWO PR_NUMBER [GH_CMD]
@@ -1685,9 +1840,16 @@ _FORGE_REVIEW_COMMENT_RECORD_JQ='.[] | {
 #   {"id":…,"state":"APPROVED|CHANGES_REQUESTED|COMMENTED|DISMISSED|PENDING|…",
 #    "commit_id":"…","submitted_at":"…","author":"…","body":"…"}
 # Exit: 0 on a complete read (including a genuinely empty review list),
-#       non-zero on ANY read/pagination failure (fail closed).
+#       non-zero on ANY read/pagination failure (fail closed),
+#       124 when the read exceeded LOOM_FORGE_REVIEW_READ_TIMEOUT (#13927).
 #
-# Both forges: GET /repos/{nwo}/pulls/{n}/reviews
+# GitHub: GET /repos/{nwo}/pulls/{n}/reviews — and, when that REST read FAILS
+#   (non-zero, non-124), a paginated GraphQL pullRequest.reviews fallback
+#   (#15009) emitting the identical record shape, so a REST reader shed
+#   (#14739) cannot turn every approval into UNKNOWN while GraphQL serves. A
+#   timed-out read is NEVER retried through the fallback: 124 reaches the
+#   caller, and the #13927 wall-clock bound holds.
+# Gitea: paginated GET /repos/{o}/{r}/pulls/{n}/reviews (unchanged).
 # Always plain `gh` (never a cache wrapper): this read gates a verdict, and the
 # review that landed 20 seconds ago is exactly the one a cache would hide.
 forge_get_pr_reviews() {
@@ -1702,15 +1864,31 @@ forge_get_pr_reviews() {
     return $?
   fi
 
-  "$gh_cmd" api "repos/$nwo/pulls/$pr_number/reviews?per_page=100" --paginate \
-    --jq "$_FORGE_REVIEW_RECORD_JQ"
+  local out rc
+  out=$(_forge_review_read_run "$gh_cmd" api "repos/$nwo/pulls/$pr_number/reviews?per_page=100" --paginate \
+    --jq "$_FORGE_REVIEW_RECORD_JQ")
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    # Byte-identical to the pre-#15009 stream: the record lines, and nothing
+    # else — command substitution ate the trailing newline, so put one back
+    # only when there were records at all.
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return 0
+  fi
+  if [[ "$rc" -eq 124 ]]; then
+    return 124
+  fi
+  echo "forge_get_pr_reviews: REST review read failed (rc $rc) — falling back to the GraphQL transport (#15009)" >&2
+  _forge_get_pr_reviews_github_graphql "$nwo" "$pr_number" "$gh_cmd"
+  return $?
 }
 
 # Get a PR's INLINE review comments (diff-anchored), fully paginated.
 #
 # Usage: forge_get_pr_review_comments NWO PR_NUMBER [GH_CMD]
 # Output: one JSON object per line (see _FORGE_REVIEW_COMMENT_RECORD_JQ).
-# Exit: 0 on a complete read, non-zero on ANY failure (fail closed).
+# Exit: 0 on a complete read, non-zero on ANY failure (fail closed);
+#       124 when the GitHub-branch read timed out (#13927).
 #
 # GitHub: GET /repos/{nwo}/pulls/{n}/comments — a DIFFERENT endpoint from
 #   /issues/{n}/comments (general PR conversation). Both exist; reading only the
@@ -1737,7 +1915,7 @@ forge_get_pr_review_comments() {
     return 0
   fi
 
-  "$gh_cmd" api "repos/$nwo/pulls/$pr_number/comments?per_page=100" --paginate \
+  _forge_review_read_run "$gh_cmd" api "repos/$nwo/pulls/$pr_number/comments?per_page=100" --paginate \
     --jq "$_FORGE_REVIEW_COMMENT_RECORD_JQ"
 }
 
@@ -1749,7 +1927,9 @@ forge_get_pr_review_comments() {
 #    "path":"…","author":"…","body":"…"}
 # Exit: 0 on a complete read, 2 when the forge has no supported
 #       thread-resolution interface (caller must fall back and fail closed on
-#       the unknown resolution state — NOT treat it as resolved), 1 on failure.
+#       the unknown resolution state — NOT treat it as resolved), 1 on failure
+#       (including a per-page timeout, #13927: a bounded_run 124 is folded
+#       into 1 here — callers already fall back on any non-zero).
 #
 # Resolution state is GraphQL-only on GitHub (REST exposes no `isResolved`), so
 # this is the one read here that cannot use the REST pool. `gh api graphql` dies
@@ -1789,10 +1969,10 @@ forge_get_pr_review_threads() {
     fi
 
     if [[ -z "$cursor" ]]; then
-      response=$("$gh_cmd" api graphql -f query="$query" \
+      response=$(_forge_review_read_run "$gh_cmd" api graphql -f query="$query" \
         -F owner="$FORGE_OWNER" -F repo="$FORGE_REPO" -F pr="$pr_number") || return 1
     else
-      response=$("$gh_cmd" api graphql -f query="$query" \
+      response=$(_forge_review_read_run "$gh_cmd" api graphql -f query="$query" \
         -F owner="$FORGE_OWNER" -F repo="$FORGE_REPO" -F pr="$pr_number" \
         -F cursor="$cursor") || return 1
     fi
@@ -1850,199 +2030,6 @@ _forge_gitea_paginate() {
     [[ "$count" -lt "$limit" ]] && break
   done
 
-  return 0
-}
-
-# Get branch-protection required status check contexts for a branch.
-#
-# Usage: forge_get_required_status_check_contexts NWO BRANCH [GH_CMD]
-# Outputs: One context name per line on stdout. Empty output means the branch
-#   has no required status checks configured (every failing check is
-#   informational from a branch-protection standpoint).
-# Exit code: 0 on success (including empty result), nonzero on lookup failure.
-#
-# This is used by merge-pr.sh's UNSTABLE-fallback (sibling of #3371's CLEAN
-# fallback) to decide whether an auto-merge "Pull request is in unstable status"
-# error can be safely bypassed. If every failing check on the PR is outside this
-# set, the immediate-merge path is taken; otherwise the existing UNSTABLE
-# refusal is preserved. See issue #3486.
-#
-# GitHub: TWO independent sources, unioned — GitHub has two separate backing
-#   systems for branch protection and a required check configured in one is
-#   invisible to the other's API:
-#
-#   1. **Rulesets** (the modern system): `GET /repos/{owner}/{repo}/rules/branches/{branch}`
-#      — the *effective* rules for the branch, merged across repository- and
-#      organization-level rulesets. Rulesets whose enforcement is `evaluate` or
-#      `disabled` are excluded by GitHub, which is exactly right: a rule that
-#      cannot block a merge must not make us refuse one.
-#   2. **Classic branch protection** (the legacy system): the GraphQL
-#      `ref.branchProtectionRule.requiredStatusCheckContexts` field.
-#
-#   Querying only (2) — which this helper did until #8103 — silently reports
-#   "no required checks" on any repo governed by rulesets. Verified live on
-#   rjwalters/loom (2026-09-17): its `main` is governed by an ACTIVE ruleset
-#   (id 8809610, `pull_request` + `required_linear_history` + `deletion` +
-#   `non_fast_forward` rules), and the GraphQL query still returns
-#   `branchProtectionRule: null` while `GET .../rules/branches/main` returns
-#   all four rules. Left unfixed, adding a `required_status_checks` rule to
-#   that ruleset would have changed nothing for `merge-pr.sh --auto` (every
-#   autonomous Champion merge): the empty result keeps taking the
-#   "No-required-checks fallback (#3720)" path and merging over red required
-#   checks, with no error and no signal that the new protection is being
-#   ignored. GitHub's own merge button reads the ruleset directly and would
-#   have blocked — only the API-driven merge path was exposed.
-#
-#   Branches with neither source configured, or whose rules list no contexts,
-#   yield empty output (exit 0). This is the desired behavior — "no required
-#   checks" means every failing check is informational, which is the case the
-#   UNSTABLE-fallback wants to unblock. An EMPTY result from a source that
-#   SUCCEEDED is therefore still "no required checks", not a failure.
-#
-#   A lookup that ERRORS is distinct from that and exits nonzero (fail-closed),
-#   matching the Gitea path and this function's documented contract — and it
-#   fails closed when EITHER source errors, not only when both do. A 403/404/
-#   network failure on the ruleset endpoint combined with an empty (but
-#   successful) classic result is indistinguishable, at the call site, from a
-#   genuinely unprotected branch: it would emit an empty list and send
-#   `merge-pr.sh --auto` down the "No-required-checks fallback (#3720)" path —
-#   reproducing exactly the blind spot this function was rewritten to close.
-#   One source erroring is not evidence that the other's rules do not exist,
-#   but neither is it evidence that the erroring source has none; the callers
-#   in merge-pr.sh already treat a nonzero lookup as "refuse to merge," which
-#   is the correct disposition for an unknown.
-#
-#   ONE narrow exception (#8872, mirroring #8871's Rust
-#   `stale_checks::fetch::is_plan_gated`): a source that answers the exact 403
-#   "upgrade to github ... make this repository public ..." cannot be holding
-#   a rule at all — that's GitHub declining to serve the source because the
-#   repository's PLAN excludes it, not because a rule is unreadable — so it
-#   configures no required checks instead of failing the whole lookup closed,
-#   per source, with a stderr warning. Any OTHER 403 (missing scope, SSO,
-#   rate limit) still fails closed; only that exact message qualifies.
-#
-# Gitea: GET /api/v1/repos/{owner}/{repo}/branch_protections/{name}. Gitea's
-#   branch-protection rule carries both `enable_status_check` (boolean toggle)
-#   and `status_check_contexts` (array of context patterns). The contexts are
-#   only enforced when `enable_status_check` is true — when it's false, the
-#   contexts list is informational and we emit empty output (every failing
-#   check is then treated as informational, same as the GitHub "no rule" path).
-#
-#   Distinguishing 404 (no protection rule, emit empty → fallback fires) from
-#   5xx / network error (emit empty + nonzero exit → caller fails closed) is
-#   important: the issue explicitly requires fail-closed semantics on lookup
-#   failure. `gitea_api` collapses both 4xx and 5xx into exit 1, so this
-#   function uses a direct curl invocation that captures the HTTP code and
-#   branches on it explicitly.
-#
-#   Unknown forge types fall through to a fail-closed nonzero exit, leaving
-#   the caller's existing UNSTABLE refusal intact.
-forge_get_required_status_check_contexts() {
-  local nwo="$1"
-  local branch="$2"
-  local gh_cmd="${3:-gh}"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-
-    # Sanity-check Gitea config before issuing the request. Missing URL or
-    # token is treated as fail-closed (nonzero exit, empty stdout) so the
-    # caller preserves the UNSTABLE refusal.
-    if [[ -z "$_GITEA_BASE_URL" ]] || [[ -z "$_GITEA_TOKEN" ]]; then
-      return 1
-    fi
-    if ! _gitea_validate_basic_auth; then
-      return 1
-    fi
-
-    local url="${_GITEA_BASE_URL}/api/v1/repos/${FORGE_OWNER}/${FORGE_REPO}/branch_protections/${branch}"
-    local response
-    response=$(curl -s -w "\n%{http_code}" \
-      -X GET \
-      --config <(_gitea_auth_cfg) \
-      -H "Accept: application/json" \
-      "$url" 2>/dev/null) || return 1
-
-    local http_code body
-    http_code=$(echo "$response" | tail -1)
-    body=$(echo "$response" | sed '$d')
-
-    # 404: no branch protection rule exists. Mirror GitHub's "no rule means no
-    # required" behavior — emit empty, exit 0 so the fallback fires.
-    if [[ "$http_code" == "404" ]]; then
-      return 0
-    fi
-
-    # 5xx / network failure / auth error / anything else non-2xx: fail closed.
-    # Empty stdout, nonzero exit; the caller will preserve the UNSTABLE refusal.
-    if [[ "$http_code" -lt 200 ]] || [[ "$http_code" -ge 300 ]]; then
-      return 1
-    fi
-
-    # 2xx: parse `enable_status_check` and `status_check_contexts`. When the
-    # toggle is off, contexts are not enforced — emit empty. Otherwise emit
-    # each context on its own line. A missing/null array also yields empty.
-    echo "$body" | jq -r '
-      if (.enable_status_check // false) then
-        (.status_check_contexts // []) | .[]
-      else
-        empty
-      end
-    ' 2>/dev/null || return 1
-    return 0
-  fi
-
-  if [[ "$FORGE_TYPE" != "github" ]]; then
-    # Unknown forge — fail closed so the caller preserves the UNSTABLE refusal.
-    return 1
-  fi
-
-  forge_split_nwo "$nwo"
-
-  # Both queries are written as single lines rather than backslash-continued
-  # blocks, so the explanation lives here instead of in the invocation.
-  #
-  # `--jq` yielding nothing is not an error in either query: `.[]?` over an
-  # empty rules array and a `null` branchProtectionRule both mean "this source
-  # configures no required checks". Only a nonzero `gh` exit — network failure,
-  # 403, 404 on the repo itself — is a lookup failure, and a failure on EITHER
-  # source fails the whole lookup closed: a surviving source's answer is a
-  # partial view, and "partial view of what is required" is not a safe input to
-  # a merge decision. `2>&1` (not `2>/dev/null`) so a failing call's stdout IS
-  # its stderr message — on success `gh`/`jq` write nothing to stderr, so this
-  # changes nothing for the happy path — letting the #8872 plan-gate checks
-  # below (inlined rather than a helper, to hold the line-budget cost down;
-  # matching #8871's Rust `stale_checks::fetch::is_plan_gated`: the exact 403
-  # "upgrade to github ... make this repository public ...", never the status
-  # code alone — a missing token scope, SSO enforcement and a rate-limit
-  # refusal are all 403s where required checks may genuinely exist) see the
-  # real failure text without a temp file. A source the gate excuses
-  # configures no required checks, with a stderr warning so the relaxation is
-  # never silent; any other failure still fails the whole lookup closed.
-  #
-  # #11855: the GraphQL `branchProtectionRule` field needs `Administration:
-  # read`, which a read-only App token lacks ("Resource not accessible by
-  # integration"). On ANY GraphQL failure the classic source is re-read from
-  # the REST branch summary (`GET .../branches/<b>`, read access alone), the
-  # same answer as Rust `stale_checks::fetch::classic_from_branch`. A reply
-  # with no `protected` flag, a protected branch whose summary (or its
-  # `required_status_checks`) is withheld, or a REST failure, still fails closed,
-  # reporting the GraphQL error (so the plan-gate check below still sees it).
-  #
-  # `$branch` goes through url_encode_path_segment for the REST call because
-  # it lands in a URL path there (#9109). The GraphQL call below deliberately
-  # does NOT encode it: `-F ref=refs/heads/$branch` is a typed variable VALUE
-  # gh serialises into the request body, not a path, so percent-encoding would
-  # send a literally wrong ref name.
-  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out="" _pg
-  local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
-  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/$(url_encode_path_segment "${branch}")" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
-  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || { _pg="$classic_out"; classic_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/branches/$(url_encode_path_segment "${branch}")" --jq 'if (.protected | type) != "boolean" then error("no protected flag") elif .protected and (((.protection | type) != "object") or ((.protection.required_status_checks | type) != "object")) then error("protection summary withheld") else ((.protection.required_status_checks // {}) | ((.contexts // []) + [(.checks // [])[].context]) | .[]) end' 2>&1)" || { classic_out="$_pg"; classic_rc=1; }; }
-  [[ "$ruleset_rc" -eq 0 ]] || { _pg=$(printf '%s' "$ruleset_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: ruleset required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $ruleset_out" >&2; ruleset_out=""; } || return 1; }; [[ "$classic_rc" -eq 0 ]] || { _pg=$(printf '%s' "$classic_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: classic branch-protection required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $classic_out" >&2; classic_out=""; } || return 1; }
-  # Union, order-preserving, de-duplicated: a context can legitimately be
-  # required by BOTH a ruleset and a classic rule, and the callers' `comm`
-  # set-difference needs each name once.
-  printf '%s\n%s\n' "$ruleset_out" "$classic_out" | awk 'NF && !seen[$0]++'
   return 0
 }
 

@@ -15,6 +15,8 @@
 #   7. stale reaping — an abandoned slot older than the threshold is reclaimed.
 #   8. re-entrancy — LOOM_BUILD_SLOT_HELD makes a nested acquire a no-op.
 #   9. path shape parity with `loom_daemon::build_slot::slot_path` ("$dir/slot-N").
+#  10. a slot released between the failed mkdir and the -d test is retried
+#      (bounded), not misread as an unusable store (#15157).
 #
 # Style follows test-disk-headroom.sh: throwaway mktemp dirs, assert harness,
 # no network, no real ~/.loom.
@@ -123,6 +125,89 @@ printf 'x' > "$DIR"
     exit 0
 ) && CASE_RC=0 || CASE_RC=$?
 assert_true "$CASE_RC" "an unusable slot dir degrades open (never a failure, never a spin)"
+
+echo ""
+echo "=== build-slot.sh: a slot released mid-race is retried, not 'unusable' (#15157) ==="
+
+# Deterministic interleaving: the FIRST `mkdir <slot>` loses to a "peer" whose
+# release then lands before the follow-up `-d` test — i.e. mkdir reports failure
+# and NO slot dir is on disk. Shadow mkdir with a function (counter in a file,
+# because the round runs in a command substitution subshell).
+DIR="$(new_slot_dir)"
+mkdir -p "$DIR"
+MKDIR_COUNT_FILE="$TMPROOT/mkdir-count.vanish"
+: > "$MKDIR_COUNT_FILE"
+(
+    export LOOM_BUILD_SLOT_DIR="$DIR"
+    mkdir() {
+        if [[ "${1:-}" == "$DIR/slot-0" ]]; then
+            printf 'x\n' >> "$MKDIR_COUNT_FILE"
+            if [[ "$(wc -l < "$MKDIR_COUNT_FILE")" -le 1 ]]; then
+                return 1   # lost the race; the peer's rmdir already ran
+            fi
+        fi
+        command mkdir "$@"
+    }
+    rc=0
+    # Not `$(...)`: that subshell would swallow LOOM_BUILD_SLOT_PATH.
+    loom_build_slot_acquire "vanished" 2>"$TMPROOT/vanished.err" >/dev/null || rc=$?
+    OUT="$(cat "$TMPROOT/vanished.err")"
+    [[ "$rc" == "0" ]] || exit 1
+    [[ "$LOOM_BUILD_SLOT_PATH" == "$DIR/slot-0" ]] || exit 2
+    grep -q "degrading open" <<<"$OUT" && exit 3
+    grep -q "WITHOUT a slot" <<<"$OUT" && exit 4
+    [[ -d "$DIR/slot-0" ]] || exit 5
+    exit 0
+) && CASE_RC=0 || CASE_RC=$?
+assert_true "$CASE_RC" "a slot that vanished between mkdir and -d is retried and taken (no degrade-open)"
+
+# A mkdir that ALWAYS fails with the slot absent (a permission-denied store the
+# shell cannot create in) must exhaust the bounded retry and still degrade open.
+DIR="$(new_slot_dir)"
+mkdir -p "$DIR"
+MKDIR_COUNT_FILE="$TMPROOT/mkdir-count.denied"
+: > "$MKDIR_COUNT_FILE"
+(
+    export LOOM_BUILD_SLOT_DIR="$DIR"
+    mkdir() {
+        if [[ "${1:-}" == "$DIR/slot-0" ]]; then
+            printf 'x\n' >> "$MKDIR_COUNT_FILE"
+            return 1
+        fi
+        command mkdir "$@"
+    }
+    rc=0
+    OUT="$(loom_build_slot_acquire "denied" 2>&1)" || rc=$?
+    [[ "$rc" == "0" ]] || exit 1
+    [[ -z "$LOOM_BUILD_SLOT_PATH" ]] || exit 2
+    grep -q "unusable" <<<"$OUT" || exit 3
+    exit 0
+) && CASE_RC=0 || CASE_RC=$?
+assert_true "$CASE_RC" "a persistently failing mkdir (slot absent) still degrades open"
+ATTEMPTS="$(wc -l < "$MKDIR_COUNT_FILE" | tr -d ' ')"
+if (( ATTEMPTS >= 2 && ATTEMPTS <= 8 )); then
+    pass "the vanished-slot retry is bounded (${ATTEMPTS} mkdir attempts, no spin)"
+else
+    fail "the vanished-slot retry was not bounded as expected (${ATTEMPTS} mkdir attempts)"
+fi
+
+# A real read-only store (skipped as root, which ignores mode bits).
+if [[ "$(id -u)" != "0" ]]; then
+    DIR="$(new_slot_dir)"
+    mkdir -p "$DIR"
+    chmod 555 "$DIR"
+    (
+        export LOOM_BUILD_SLOT_DIR="$DIR"
+        rc=0
+        OUT="$(loom_build_slot_acquire "readonly" 2>&1)" || rc=$?
+        [[ "$rc" == "0" ]] || exit 1
+        [[ -z "$LOOM_BUILD_SLOT_PATH" ]] || exit 2
+        grep -q "unusable" <<<"$OUT" || exit 3
+        exit 0
+    ) && CASE_RC=0 || CASE_RC=$?
+    chmod 755 "$DIR"
+    assert_true "$CASE_RC" "a permission-denied slot dir degrades open (bounded, no spin)"
+fi
 
 echo ""
 echo "=== build-slot.sh: LOOM_BUILD_SLOTS=0 disables serialization ==="
