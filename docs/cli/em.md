@@ -1,8 +1,8 @@
 # `klt em`
 
-Compute a Maxwell capacitance matrix in farads with the released Geode CLI.
+Compute capacitance, steady temperature or Joule self-heating with the Geode CLI.
 A request can supply a tagged mesh or ask `klt em` to mesh a labelled GDS
-region using its PDK stackup. Both paths use `engine: "geode_fem"`,
+region using its PDK stackup for capacitance. Both capacitance paths use `engine: "geode_fem"`,
 `solve_mode: "quasi_static"` and `outputs: ["c"]`.
 
 How close those numbers are to the true answer is answered by
@@ -67,7 +67,7 @@ OpenCASCADE and put `gmsh` on `PATH`, or set `GEODE_GMSH` to its executable.
 A missing or unrunnable Gmsh returns exit 1 with Geode's diagnostic in the
 standard error envelope. [Geode meshing documentation](https://github.com/rjwalters/geode-fem/blob/v0.9.0/crates/geode-cli/examples/mesh/README.md)
 
-## Supplied mesh request
+## Supplied mesh capacitance request
 
 ```json
 {
@@ -88,7 +88,7 @@ standard error envelope. [Geode meshing documentation](https://github.com/rjwalt
 
 | Field | Description |
 | --- | --- |
-| `engine`, `solve_mode`, `outputs` | Optional; default to the only supported values. |
+| `engine`, `solve_mode`, `outputs` | Optional for capacitance. Defaults are `geode_fem`, `quasi_static` and `["c"]`. |
 | `mesh` | Object: `path` (relative to the request file) and `length_unit_m` (metres per mesh length unit, finite > 0). Both required — geode's `MeshSpec` needs the length unit to scale the matrix to farads. |
 | `terminals[]` | `name` (caller-facing) and the mesh dimension-2 physical group `surface` it binds to. `surface` values go into the geode spec in matrix row/column order; `name` never reaches the engine. |
 | `ground[]` | The 0 V reference conductor(s), same `{name, surface}` shape. At least one is required (geode schema v1 rejects a ground-less spec at load). A conductor is a terminal or ground, never both. |
@@ -99,7 +99,39 @@ standard error envelope. [Geode meshing documentation](https://github.com/rjwalt
 | `options.keep_artifacts` | Default `true`. Keep outputs under `output_dir` (default `.klt/em/<request-stem>/` beside the request). Layout runs use a fresh `run-*` directory. With `false`, temporary outputs are removed and a caller-supplied mesh still appears in `artifacts`. |
 | `options.output_dir` | Artifact directory; must be a string when present. |
 
-### Resolving `geode`
+## Thermal requests
+
+Set `solve_mode` to `thermal` or `self_heating` and supply a tagged tetrahedral
+mesh with its length unit in metres. Put Geode’s material laws and boundary
+conditions in an object with the same name as the mode. The default output
+for both modes is `["temperature"]`. Geode validates physical groups and
+material values. Configure its binary and timeout with the same `options`
+used for capacitance. Both commands were tested with Geode revision
+`aed7dba7`. The v0.9.0 release predates them. [Upstream CLI](https://github.com/2AMLogic/geode-fem/pull/1806)
+
+The [heated bar example](../../examples/em/heated_bar/request.json) fixes both
+ends of a 2 mm bar at 300 K. Its constant source of 4 × 10⁸ W/m³ and thermal
+conductivity of 40 W/(m·K) give an analytical peak of 305 K and 0.2 W of
+outward heat flow. From the example directory, run:
+
+```sh
+gmsh -3 bar.geo -o bar.msh
+klt em request.json --format json
+```
+
+For `self_heating`, supply a `self_heating` object with voltage-driven
+`terminals`, `initial_temperature_k`, `fixed_temperatures`, and `regions` with
+their electrical and thermal properties. The optional `picard` object controls
+iteration. A converged solve includes `termination: "converged"`. Iteration
+exhaustion and runaway return exit 1 with the upstream termination value in
+the error message. [Upstream spec and examples](https://github.com/2AMLogic/geode-fem/blob/aed7dba7c3dd1387aab05ed5e05f2a74763fe3b8/crates/geode-cli/tests/thermal_golden.rs)
+
+`results.temperature` carries one `temperature_k` value per mesh node in Geode
+file order, `peak_temperature_k`, `source_power_w`, `boundary_power_w` (outward
+positive), and the dimensionless `energy_rel_mismatch`. Retained thermal runs
+write to a fresh subdirectory under the output directory.
+
+## Resolving `geode`
 
 `options.geode_binary` → `$KLT_GEODE_BINARY` → `geode` on `PATH`. A binary named
 by the first two that is not runnable is an error (no silent fallback). If none

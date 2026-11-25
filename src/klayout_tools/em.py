@@ -1,4 +1,4 @@
-"""Run a quasi-static capacitance request on a supplied mesh or a GDS region.
+"""Run a field-solver request on a supplied mesh or a capacitance layout region.
 
 The engine and mesher are subprocesses. See docs/cli/em.md for the contract.
 """
@@ -13,14 +13,16 @@ from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope
 from ._digest import sha256_file
+from ._em_thermal import THERMAL_MODES, parse_thermal_report, validate_thermal_request
 from ._geode import (
+    GEODE_SPEC_SCHEMA_VERSION,
     EmError,
     _probe_version,
     _reorder_matrix,
     build_geode_spec,
     generate_mesh,
     resolve_geode_binary,
-    solve_mesh,
+    run_solver,
     write_geode_json,
 )
 from ._geode import (
@@ -260,9 +262,16 @@ def load_request(request_path: str) -> dict[str, Any]:
             f'unsupported engine {engine!r}: this slice supports only "{ENGINE}"'
         )
     mode = request.get("solve_mode", SOLVE_MODE)
+    request["_options"] = _validate_options(request.get("options") or {})
+    if mode in THERMAL_MODES:
+        validate_thermal_request(request, mode)
+        request["_mesh"] = _validate_mesh(request.get("mesh"))
+        request["_geometry"] = None
+        return request
     if mode != SOLVE_MODE:
         raise EmError(
-            f'unsupported solve_mode {mode!r}: this slice supports only "{SOLVE_MODE}"'
+            f"unsupported solve_mode {mode!r}: expected quasi_static, "
+            "thermal or self_heating"
         )
     outputs = request.get("outputs", list(SUPPORTED_OUTPUTS))
     if outputs != list(SUPPORTED_OUTPUTS):
@@ -293,7 +302,6 @@ def load_request(request_path: str) -> dict[str, Any]:
         request.get("checks"), {t["name"] for t in terminals}
     )
     request["_terminals"] = terminals
-    request["_options"] = _validate_options(request.get("options") or {})
     return request
 
 
@@ -350,6 +358,16 @@ def _output_directory(
     return tempfile.mkdtemp(prefix="klt-em-")
 
 
+def _capacitance_results(request: dict, text: str) -> tuple[dict, list]:
+    terminals = request["_terminals"]
+    names = [t["name"] for t in terminals]
+    surfaces = [t["surface"] for t in terminals]
+    engine_names, engine_matrix = parse_capacitance_report(text)
+    matrix = _reorder_matrix(engine_names, engine_matrix, surfaces)
+    checks = [_evaluate_check(c, names, matrix) for c in request["_checks"]]
+    return {"c": {"unit": "F", "terminals": names, "matrix": matrix}}, checks
+
+
 def run_em(request_path: str) -> dict[str, Any]:
     """Run one ``klt em`` request; returns the response payload.
 
@@ -362,10 +380,8 @@ def run_em(request_path: str) -> dict[str, Any]:
     # repo, never the cwd's, so one request yields one committed report.
     repo_root = find_repo_root(request_dir)
     options = request["_options"]
-    terminals = request["_terminals"]
-    names = [t["name"] for t in terminals]
-    surfaces = [t["surface"] for t in terminals]
-
+    mode = request.get("solve_mode", SOLVE_MODE)
+    thermal = mode in THERMAL_MODES
     geometry = request["_geometry"]
     if geometry is None:
         mesh = os.path.join(request_dir, request["_mesh"]["path"])
@@ -376,16 +392,24 @@ def run_em(request_path: str) -> dict[str, Any]:
     version = _probe_version(binary)
 
     keep = options.get("keep_artifacts", True)
-    outdir = _output_directory(request_path, request_dir, options, geometry is not None)
+    outdir = _output_directory(
+        request_path, request_dir, options, thermal or geometry is not None
+    )
     try:
         timeout = options.get("timeout_s", DEFAULT_TIMEOUT_S)
         environment = {}
         diagnostics = []
         files = {"spec": "spec.json", "report": "report.json", "log": "solve.log"}
         if geometry is None:
-            write_geode_json(
-                os.path.join(outdir, "spec.json"), build_geode_spec(request, mesh)
-            )
+            if thermal:
+                spec = {
+                    "schema_version": GEODE_SPEC_SCHEMA_VERSION,
+                    "mesh": {**request["_mesh"], "path": mesh},
+                    mode: request[mode],
+                }
+            else:
+                spec = build_geode_spec(request, mesh)
+            write_geode_json(os.path.join(outdir, "spec.json"), spec)
         else:
             deadline = time.monotonic() + timeout
             mesh, stats = generate_mesh(
@@ -401,10 +425,13 @@ def run_em(request_path: str) -> dict[str, Any]:
                 mesh_report="mesh-report.json",
                 mesh_log="mesh.log",
             )
-        engine_names, engine_matrix = solve_mesh(binary, outdir, timeout, keep)
-        matrix = _reorder_matrix(engine_names, engine_matrix, surfaces)
-
-        check_results = [_evaluate_check(c, names, matrix) for c in request["_checks"]]
+        command = mode.replace("_", "-") if thermal else "capacitance"
+        text = run_solver(binary, command, outdir, timeout, keep)
+        if thermal:
+            results = {"temperature": parse_thermal_report(text, mode)}
+            check_results = []
+        else:
+            results, check_results = _capacitance_results(request, text)
         status = "fail" if any(c["status"] == "fail" for c in check_results) else "pass"
 
         mesh_digest = sha256_file(mesh)
@@ -431,12 +458,12 @@ def run_em(request_path: str) -> dict[str, Any]:
         "environment": {
             "engine": ENGINE,
             "engine_version": version,
-            "solve_mode": SOLVE_MODE,
+            "solve_mode": mode,
             "binary": os.path.basename(binary),
             "mesh_sha256": mesh_digest,
             **environment,
         },
-        "results": {"c": {"unit": "F", "terminals": names, "matrix": matrix}},
+        "results": results,
         "checks": check_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
