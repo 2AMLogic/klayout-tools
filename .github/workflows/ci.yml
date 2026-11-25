@@ -198,9 +198,11 @@ jobs:
         run: uv run --frozen --extra dev python scripts/check_changelog_fragments.py
 
       - name: Canary manifest matches the forge
-        # The pytest matrix checks manifest invariants on every PR. Only
-        # relevant PRs and merge groups also depend on today's public inventory.
-        # Pushes to main and the scheduled canary-manifest workflow always check it.
+        # GATES -- do not add continue-on-error. A failed forge read fails the check.
+        # The pytest matrix checks manifest invariants on every PR. Main CI and
+        # relevant PRs and merge groups also check the live inventory.
+        # Repair drift with python scripts/ingest-canary.py --sync-manifest,
+        # then ingest new entries as described in blocks/README.md.
         env:
           GH_TOKEN: ${{ github.token }}
           CANARY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
