@@ -832,7 +832,7 @@ a second input the envelope happens to mention:
 | ---- | ----- | ---- |
 | `drc`, `extract`, `erc` | `file` | The layout stream each ran on. |
 | `lvs` | `layout` | The **layout side** of the compare, which is what `provenance.input` pins (issue #1969) — the GDS/OASIS stream of a `layout.file` request, or the SPICE file of a pre-extracted `layout.netlist` one. `reference` is deliberately not re-hashed: it is pinned separately under `environment.reference_sha256`, so comparing it here would report a mismatch that is not one. |
-| `sim` | `netlist` | The SPICE deck it simulated. |
+| `sim` | `netlist` | The SPICE deck it simulated — the **top deck only**. Its recorded `.include` closure is re-hashed separately; see "`klt sim` include closure" below. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
 | `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; an older absolute string can also verify against a same-named file beside the evidence when its content hash matches. |
 | `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` when a tracked or non-checkout samples file is hashed. In a functioning checkout the index excludes untracked samples (#6139). Without another source, both fields are then `null`. With a store pin (issue #5963), when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
@@ -850,6 +850,36 @@ into `input_verified`: any `stale` makes it `false`; `true` requires the
 layout and every schematic-side input to verify; otherwise (unverifiable
 input) it is `null`, never silently `true`. Legacy envelopes with no such
 digests keep layout-only verification and carry no `pex_inputs` key.
+
+**`klt sim` include closure (issue #7860).** A `sim` report's
+`provenance.input.content_hash` digests the top deck only (it is pinned equal
+to `environment.netlist_sha256`), so a thin wrapper that `.include`s its real
+sources keeps a matching hash after an included file changes. The report
+already records the resolved closure — `environment.netlist_closure`, one
+`{path, scope, sha256}` per file ([`sim.md`](sim.md)) — so signoff re-hashes
+every include in it, resolving each path the way `klt sim --check` does
+(`scope: "repo"` against [`--repo-root`](#grading-outside-a-git-checkout---repo-root)
+or the evidence file's `.git` ancestor). The closure's first entry is the top
+deck, already covered by the check above, so it is not counted twice. The
+citation gains `sim_closure`:
+
+| `status` | Meaning | `input_verified` |
+| --- | --- | --- |
+| `verified` | Every include re-hashed to its recorded digest. | unchanged |
+| `stale` | An include was read and differs. `stale[]` names it as `{path, recorded, actual}`. A comment-only edit counts, exactly as for the top deck; `klt sim --check` gives the `cosmetic`/`electrical` diagnosis. | **`false`** |
+| `partial` | Nothing drifted, but some include could not be judged here: a host-resolved `$VAR`/`$PDK_ROOT` target, a `scope: "external"` entry, a file not readable from the grading context, or one git does not track. `unverifiable[]` names each with a `reason`. | unchanged |
+| `not_recorded` | The report carries no closure (it predates #2799) or `netlist_closure_error` is set; `reason` says which. Top-deck-only, as before. | unchanged |
+
+This is disclosure, like the rest of `input_verified`: a stale include leaves
+the item `met` (no `input_changed` reason exists), and `false` still requires
+having genuinely read a named file and found it different — an include that is
+gone, host-resolved or untracked is `unverifiable`, never `stale`. Only `stale`
+moves `input_verified`; for every other status it keeps what the top-deck check
+set, so existing citations grade exactly as before. `input_verified: true` on a
+`sim` citation therefore still means "the top deck re-hashed"; read
+`sim_closure.status` for how far the include check reached. `sim_closure` is
+absent on every other kind, and `klt sim` reports and the meaning of
+`provenance.input.content_hash` are unchanged.
 
 Every other kind reports `null`: `functional-verification`, `power` and
 `place-and-route` either populate no `provenance.input` at all or echo only

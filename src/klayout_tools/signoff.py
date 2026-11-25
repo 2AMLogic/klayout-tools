@@ -337,6 +337,7 @@ from .signoff_runset import (
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
+from .signoff_sim_closure import sim_closure_disclosure, with_sim_closure
 from .signoff_spec_row_table import build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
@@ -5728,24 +5729,22 @@ def _resolve_evidence(
         check_kind, envelope, spec, local_file, actual_hash, input_verified, repo_root
     )
 
-    return (
-        {
-            "spec": spec,
-            "envelope": envelope,
-            "kind": check_kind,
-            "file": file_label,
-            "command": command_label,
-            "exit_status": exit_status,
-            "content_hash": actual_hash,
-            "content_hash_unresolved": content_hash_unresolved,
-            "yield_samples_source": yield_samples_source,
-            "content_hash_basis": samples_basis or file_hash_basis,
-            "input_verified": input_verified,
-            "pex_inputs": pex_inputs,
-            "input_members": input_members,
-        },
-        None,
-    )
+    resolution = {
+        "spec": spec,
+        "envelope": envelope,
+        "kind": check_kind,
+        "file": file_label,
+        "command": command_label,
+        "exit_status": exit_status,
+        "content_hash": actual_hash,
+        "content_hash_unresolved": content_hash_unresolved,
+        "yield_samples_source": yield_samples_source,
+        "content_hash_basis": samples_basis or file_hash_basis,
+        "input_verified": input_verified,
+        "pex_inputs": pex_inputs,
+        "input_members": input_members,
+    }
+    return with_sim_closure(resolution, local_file, repo_root), None  # issue #7860
 
 
 def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -5774,6 +5773,7 @@ def _citation(
     citation.update(sta_citation_detail(resolution["kind"], resolution["envelope"]))
     citation.update(synthesis_disclosure(resolution["kind"], resolution["envelope"]))
     citation.update(declared_hash_unbound_disclosure(resolution))
+    citation.update(sim_closure_disclosure(resolution))
     # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
     citation.update(_citation_pointer(resolution["spec"]))
     if resolution.get("content_hash_basis") is not None:

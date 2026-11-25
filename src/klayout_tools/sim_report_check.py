@@ -41,10 +41,13 @@ from .sim_errors import SimError
 from .sim_staging import IncludeStagingError, _normalized_netlist_text, _read_text
 
 
-def _entry_path(
+def entry_path(
     entry: dict[str, Any], *, report_path: str, root: str | None
 ) -> str | None:
-    """The on-disk path of one closure entry, or ``None`` when unresolvable."""
+    """The on-disk path of one closure entry, or ``None`` when unresolvable.
+
+    Public so ``klt signoff`` re-resolves a cited report's closure the same
+    way ``--check`` does (issue #7860), not with a second implementation."""
     if root and entry.get("scope") == "repo":
         relative = entry.get("path")
         return (
@@ -118,7 +121,7 @@ def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, 
             )
             complete = False
             continue
-        path = _entry_path(entry, report_path=report_path, root=root)
+        path = entry_path(entry, report_path=report_path, root=root)
         if path is None:
             skipped.append(
                 {
