@@ -90,6 +90,9 @@ def _run_gate(checkout, event, base, head):
     step = next(
         s for s in job["steps"] if s.get("name") == "Canary manifest matches the forge"
     )
+    # The wrapper owns event selection. An outer main-only condition would
+    # skip relevant PRs before these event and path checks could run.
+    assert "if" not in job and "if" not in step
     env = dict(
         os.environ,
         GITHUB_EVENT_NAME=event,
