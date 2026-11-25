@@ -2015,7 +2015,8 @@ of members, each `{"path": <string | {"path", "scope": "repo"}>,
 "content_hash": "sha256:..."}`, with `path` resolved exactly as
 `provenance.input.path` is (including `--repo-root`). Members may also include
 an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
-or declared generator input.
+or declared generator input. Item 1 also accepts a Git-scoped member with
+`repo`, `commit` and `path`. See [Git-backed design sources](#git-backed-design-sources).
 
 ```json
 "input": {
@@ -2028,7 +2029,7 @@ or declared generator input.
 ```
 
 `provenance.input.content_hash` is then the **combined digest** of the set,
-so the manifest pin (unchanged — pin that value) covers every member: the
+so the manifest pin covers every member. For a set of local paths, it is the
 sha256 of the lines `<hex>  <path>\n`, one per member, where `<hex>` is the
 member's hash without its `sha256:` prefix and `<path>` is the path string
 as written in the envelope (for a `{path, scope}` member, its `path`),
@@ -2775,7 +2776,7 @@ Every inventory is a JSON object with these common fields:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
+| `schema_version` | yes | Integer. This build reads `1` and `2`. Version 2 adds glob entries and item 1 Git sources. Other values are refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
 | `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description` (item 8, which has no `artifact_binding`: `citation.attestation.description`). Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
@@ -2786,7 +2787,7 @@ an inventory the author did not write.
 
 | Item | Field | Required | Checks run |
 | ---- | ----- | -------- | ---------- |
-| **1** Design sources | `sources`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `source`) |
+| **1** Design sources | `sources`: list of paths — each entry a literal path or, in schema 2, a glob or a pinned Git source | yes, non-empty | each file exists and each Git blob matches its declared SHA-256 (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
@@ -2900,8 +2901,9 @@ is the repo owner's action (the item-10 rule below).
   the inventory, so a changed *source* does not change the manifest pin;
   `--check` catches that drift through these per-file hashes, so run it in
   CI. Item 1 is different: its pin is the combined digest over sources,
-  derived files and the inventory (sorted by path), so any member edit changes
-  it.
+  derived files and the inventory. A Git source stores its declared digest
+  in `content_hash` and, on failure, the observed digest in
+  `actual_content_hash` (`null` if the blob is unavailable).
 - Item 9's member binding is shallow (issue #5850): only the `testbenches`
   members themselves are hashed. A member's own dependencies — the helper it
   imports, the model card it includes — are neither resolved nor hashed
@@ -3413,6 +3415,98 @@ producer itself as command-backed evidence (`{"command": ["klt", "signoff",
 unchanged attestation leaves the committed file untouched (mtime included),
 and a failing one never replaces a committed passing one. Without `-o`
 nothing is written.
+
+##### Git-backed design sources
+
+An item 1 schema 2 inventory can name a source in a separate checkout or bare
+Git repository. `repo` is a local filesystem path, either absolute or relative
+to the consumer repository root (the grading root selected by `--repo-root`
+when supplied). Keep the Git objects available at this locator on each grading
+host. Minting and grading use Git locally and read the raw blob at `commit:path`.
+A checkout may move to another revision, contain edits, or be replaced at the
+same locator by a bare repository retaining the pinned objects.
+
+Use the full hexadecimal commit ID (40 digits for SHA-1 or 64 for SHA-256),
+a slash-separated path from the upstream tree root, and the lowercase SHA-256
+of the blob bytes. Branch names, tag names and short revisions are refused.
+In the list form of `derived[].recorded.sources`, repeat the Git source with
+the digest recorded when the output was generated. For a local input in the
+same list, use `{"path": "...", "sha256": "..."}`.
+
+For example, this consumer tracks `inventory.json` and `top.spice`, and
+keeps a bare upstream at `../rtl.git`.
+
+```json
+{
+  "schema_version": 2,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 1,
+  "sources": [
+    {
+      "repo": "../rtl.git",
+      "commit": "d2d6db31d32bc4ada339cd804d9378a6c419b409",
+      "path": "rtl/top.v",
+      "sha256": "ed3401c6a19282e3661e5ed458b1df08fa7f52c71875180a820266be6cdc0e79"
+    }
+  ],
+  "derived": [
+    {
+      "path": "top.spice",
+      "generator": "netlist export",
+      "recorded": {
+        "derived_sha256": "f21b23267c0774d234eedb910c21b8577f1348bddcb6f5b0d37d0b2d9d5dfafc",
+        "sources": [
+          {
+            "repo": "../rtl.git",
+            "commit": "d2d6db31d32bc4ada339cd804d9378a6c419b409",
+            "path": "rtl/top.v",
+            "sha256": "ed3401c6a19282e3661e5ed458b1df08fa7f52c71875180a820266be6cdc0e79"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+From the consumer root, mint and copy the emitted `manifest_entry` into the
+block manifest. These commands build the citation with the digest of your
+own inventory and members.
+
+```sh
+klt signoff --attest 1 --inventory inventory.json -o item1.json --format json > mint.json
+jq '{block: "demo", kind: "analog", evidence: {"1": .manifest_entry}}' mint.json > manifest.json
+klt signoff --manifest manifest.json --format json
+```
+
+The example produces the following manifest.
+
+```json
+{
+  "block": "demo",
+  "kind": "analog",
+  "evidence": {
+    "1": {
+      "file": "item1.json",
+      "content_hash": "sha256:8439cef4dad968e9d4cc5f046d2b5388803ba34a2619463fb9eed228d3fc2d73"
+    }
+  }
+}
+```
+
+The member report carries `path: {scope: "git", repo, commit, path}`, the
+expected `content_hash` and its `status`. A matching blob is `verified`.
+A readable blob with the wrong digest is `stale` (item reason
+`stale_evidence`). A missing repository, commit or blob is `unverifiable`
+(`unverifiable_provenance`). Both failures leave item 1 unmet.
+
+A set containing a Git member hashes typed records. Each local record is
+`["path", path, content_hash]` and each Git record is
+`["git", repo, commit, path, content_hash]`, with the commit lowercased.
+Sort the records lexicographically by their fields, serialize the array as
+compact ASCII-escaped JSON, prefix those bytes with `klt-git-input-set-v1`
+and a NUL byte, then take SHA-256. This binds the repository and commit even
+when another location contains identical bytes.
 
 #### CI usage: `--check`
 

@@ -112,13 +112,15 @@ from .signoff_base import (
     _finite_json_float,
     _read_envelope,
     _reject_json_constant,
-    input_set_digest,
 )
 from .signoff_base import (
     FLEET_REPORT_SCHEMA_VERSION as FLEET_REPORT_SCHEMA_VERSION,
 )
 from .signoff_base import (
     _read_json_source as _read_json_source,
+)
+from .signoff_base import (
+    input_set_digest as input_set_digest,
 )
 
 # Item 8's `citation.attestation` disclosure block, split out for the
@@ -254,6 +256,13 @@ from .signoff_generator_batch import (
     GeneratorExecution,
     match_approval,
     run_approved_generator,
+)
+from .signoff_git_source import git_scoped
+from .signoff_input_set import (
+    generic_input_set,
+    member_identity,
+    member_set_digest,
+    verify_generic_input_set,
 )
 
 # The joint-grid spec-row form (issue #6969), hooked into
@@ -5052,7 +5061,10 @@ def _attested_check_members(envelope: Mapping[str, Any]) -> list[tuple[Any, str]
             continue
         path = check.get("path")
         recorded = check.get("content_hash")
-        if (
+        if envelope.get("t1_item") == 1 and git_scoped(path):
+            # Even a missing digest must fail the comparison to the bound set.
+            members.append((path, recorded if isinstance(recorded, str) else ""))
+        elif (
             isinstance(path, str)
             and path
             and isinstance(recorded, str)
@@ -5075,13 +5087,34 @@ def _attested_checks_refusal(
     drift is :data:`_REASON_STALE_EVIDENCE`, an unreadable file
     :data:`_REASON_UNVERIFIABLE_PROVENANCE`, all-matching ``None``."""
     members = _attested_check_members(resolution["envelope"])
-    results = _verify_generic_input_set(
-        members, resolution["spec"], resolution.get("file"), repo_root
+    # A Git present check must identify the very revision bound by the manifest.
+    # Each bound member was already read from that object database in this grade.
+    bound = {
+        member_identity(m["path"]): m["content_hash"]
+        for m in resolution.get("input_members") or []
+        if git_scoped(m["path"])
+    }
+    results = []
+    local = []
+    for path, recorded in members:
+        if git_scoped(path):
+            if bound.get(member_identity(path)) != recorded:
+                results.append(
+                    {"path": path, "content_hash": recorded, "status": "unverifiable"}
+                )
+        else:
+            local.append((path, recorded))
+    results.extend(
+        verify_generic_input_set(
+            local, resolution["spec"], resolution.get("file"), repo_root
+        )
     )
     results.extend(_rehash_yaml(resolution, repo_root, _resolve_input_artifact_value))
     bad = [
         {
-            "path": member["path"]["path"],
+            "path": member["path"]
+            if git_scoped(member["path"])
+            else member["path"]["path"],
             "content_hash": member["content_hash"],
             "status": member["status"],
         }
@@ -5293,102 +5326,14 @@ def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
     return None
 
 
-def _binding_member_name(path: Any) -> str | None:
-    """The path string of one ``provenance.input.paths`` member's ``path``
-    (a non-empty string, or a ``{path, scope: "repo"}`` object), or ``None``
-    when it is neither."""
-    if isinstance(path, str) and path:
-        return path
-    if isinstance(path, Mapping) and path.get("scope") == "repo":
-        name = path.get("path")
-        if isinstance(name, str) and name:
-            return name
-    return None
-
-
-def _generic_input_set(
-    envelope: Mapping[str, Any],
-) -> tuple[bool, list[tuple[Any, str]] | None]:
-    """``(declared, members)`` for a generic envelope's opt-in
-    ``provenance.input.paths`` (issue #3044): a non-empty list of ``{path,
-    content_hash}`` members, ``path`` being as for ``input.path``.
-
-    ``declared`` is whether the key is present at all; ``members`` is the
-    ``(path value, recorded hash)`` pairs, or ``None`` when it is present
-    but malformed (not a list, empty, a member of the wrong shape, a
-    non-string or empty ``content_hash``, or two members naming the same
-    path). A malformed set never falls back to ``input.path``."""
-    provenance = envelope.get("provenance")
-    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
-    if not isinstance(input_block, Mapping) or "paths" not in input_block:
-        return False, None
-    raw = input_block["paths"]
-    if not isinstance(raw, list) or not raw:
-        return True, None
-    members: list[tuple[Any, str]] = []
-    names: set[str] = set()
-    for entry in raw:
-        if not isinstance(entry, Mapping):
-            return True, None
-        name = _binding_member_name(entry.get("path"))
-        recorded = entry.get("content_hash")
-        if name is None or not isinstance(recorded, str) or not recorded:
-            return True, None
-        if name in names:
-            return True, None
-        names.add(name)
-        members.append((entry["path"], recorded))
-    return True, members
-
-
 def _generic_binding_present(envelope: Mapping[str, Any]) -> bool:
     """Whether a generic envelope names something to bind: a valid
     ``provenance.input.paths`` set (issue #3044) when it declares one, else a
     usable ``provenance.input.path`` (issue #2718)."""
-    declared, members = _generic_input_set(envelope)
+    declared, members = generic_input_set(envelope)
     if declared:
         return members is not None
     return _generic_binding_path(envelope) is not None
-
-
-def _verify_generic_input_set(
-    members: list[tuple[Any, str]],
-    spec: Mapping[str, Any],
-    evidence_file: str | None,
-    repo_root: str | Path | None = None,
-) -> list[dict[str, Any]]:
-    """Re-hash each member of a generic envelope's ``provenance.input.paths``
-    (issue #3044) through :func:`_resolve_input_artifact_value`, as
-    :func:`_verify_pex_schematic_inputs` does for ``pex``. One ``{path,
-    content_hash, status}`` per member, ``status`` being ``"verified"``,
-    ``"stale"`` or ``"unverifiable"`` with the same meanings."""
-    evidence_dir = (
-        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
-    )
-    results: list[dict[str, Any]] = []
-    for path_value, recorded in members:
-        read_any = False
-        matched = False
-        for candidate in _resolve_input_artifact_value(
-            path_value, spec, evidence_dir, repo_root
-        ):
-            digest = sha256_file(candidate)
-            if digest is None:
-                continue
-            read_any = True
-            if f"sha256:{digest}" == recorded:
-                matched = True
-                break
-        results.append(
-            {
-                "path": path_value,
-                "content_hash": recorded,
-                "status": "verified"
-                if matched
-                else ("stale" if read_any else "unverifiable"),
-            }
-        )
-    return results
 
 
 def _fold_generic_input_set(
@@ -5410,15 +5355,13 @@ def _fold_generic_input_set(
     stale or the recorded combined digest is not the one its own members
     produce (member hashes rewritten without the digest); ``True`` only when
     every member re-hashes and the digest is consistent; else ``None``."""
-    declared, parsed = _generic_input_set(envelope)
+    declared, parsed = generic_input_set(envelope)
     if not declared:
         return None, input_verified
     if parsed is None:
         return None, None
-    members = _verify_generic_input_set(parsed, spec, file_label, repo_root)
-    combined = input_set_digest(
-        (_binding_member_name(path) or "", recorded) for path, recorded in parsed
-    )
+    members = verify_generic_input_set(parsed, spec, file_label, repo_root)
+    combined = member_set_digest(parsed)
     statuses = {member["status"] for member in members}
     if "stale" in statuses or recorded_hash != combined:
         return members, False

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TypeGuard
 
 _FULL_GIT_COMMIT = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def full_git_commit(value: Any) -> TypeGuard[str]:
+    return isinstance(value, str) and _FULL_GIT_COMMIT.fullmatch(value) is not None
 
 
 def read_upstream_source(
@@ -39,7 +43,7 @@ def read_upstream_source(
             f"string naming the upstream repository, got {repository!r}"
         )
     commit = raw["commit"]
-    if not isinstance(commit, str) or not _FULL_GIT_COMMIT.fullmatch(commit):
+    if not full_git_commit(commit):
         raise error_type(
             "block manifest 'upstream_source.commit' must be a full "
             "hexadecimal Git commit ID (40 hex digits, or 64 in a SHA-256 "
