@@ -11,6 +11,9 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 - **#6962**: chore(release): bump version to 0.10.0
 - **#7047**: fix(release): gate PR setup pre-push, recover pushed branch, report failed runs
 - **#7547**: build(deps): bump docker/login-action from 4.7.0 to 4.8.0 in the github-actions group across 1 directory
+- **#7859**: feat: cadence-gated automatic patch releases via the fleet publisher
+- **#7869**: feat: re-hash a cited klt sim report's .include closure in signoff
+- **#7890**: refactor: retire the experimental congestion pre-check
 
 ## Very Important
 
@@ -42,19 +45,19 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#6526**: klt signoff --attest 9: 'dependency_binding' text line says '1 dependencies declared'
 - **#6681**: klt lvs category CHANGELOG guard is blind to changelog.d/ fragments, so the documented changelog convention fails it
 - **#6897**: Publish the v0.10.0 bridge release for consumers pinned to PyPI
-- **#7861**: klt sim deck-list --attach <shard map>: a --max-workers given at submit is now part of the request digest, and the mismatch hint does not name it
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#3147**: ASAP7 DRC deck: resolve remaining V0–V3 spacing, enclosure and track-dependent rules
 - **#5005**: Release on the Loom model: cadence-gated 0.9.x patch bump via the fleet publisher, tag + PyPI on green main
 - **#5084**: [Epic #520] Sharded gf180mcuD run and CI sample
+- **#7710**: Remove unwired FLUTE/RUDY congestion pre-check spike (Rust crate + wrapper + CI leg)
 - **#7840**: Share session constraint and reporting Tcl assembly between _sta_script_lines and _sta_netlist_script_lines
-- **#7855**: klt lvs klayout-runset + form subckt-call (sg13g2): cap_cmim purged by min_caps, poly-resistor terminals shifted by positional 0, and reference_source is null
-- **#7856**: klt lvs klayout-runset: connectivity-mismatched device pairs with equal parameters are reported as device.property
-- **#7857**: batch: no way to run a grid from a client pinned to an older minor once the fleet image moves on
+- **#7860**: klt sim provenance hash covers only the top deck, not files it .include-s
+- **#7879**: CI: the live canary manifest gate reds every in-flight PR whose branch predates a manifest sync (third recurrence)
+- **#7882**: CI: nothing surfaces a failure of the daily canary-inventory check
+- **#7892**: [Epic #708] Expose steady heat and Joule self-heating through klt em
 
 ## PRs Awaiting Review
 
@@ -69,10 +72,7 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#6733**: fix: pluralize the signoff dependency count correctly
 - **#6739**: test: accept changelog.d fragments in the lvs CATEGORY_* changelog guard
 - **#7843**: Share Tcl assembly for DEF and netlist timing sessions
-- **#7851**: Record measured ASAP7 V1-V3 corner-spacing dispositions
-- **#7858**: fix(lvs): identify runset device terminal mismatches
-- **#7859**: feat: cadence-gated automatic patch releases via the fleet publisher
-- **#7862**: Name the pinned-client uvx remedy in older-client batch runner refusals
+- **#7894**: feat(em): solve steady heat and Joule self-heating with Geode
 
 ## Approved (Awaiting Merge)
 
@@ -82,14 +82,15 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#6962**: chore(release): bump version to 0.10.0
 - **#7047**: fix(release): gate PR setup pre-push, recover pushed branch, report failed runs
 - **#7547**: build(deps): bump docker/login-action from 4.7.0 to 4.8.0 in the github-actions group across 1 directory
-- **#7854**: Run and verify pinned GF180 corpus shards on the Spot fleet
+- **#7859**: feat: cadence-gated automatic patch releases via the fleet publisher
+- **#7869**: feat: re-hash a cited klt sim report's .include closure in signoff
+- **#7890**: refactor: retire the experimental congestion pre-check
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions *(curated)*
-- **#3147**: ASAP7 DRC deck: resolve remaining V0–V3 spacing, enclosure and track-dependent rules *(curated)*
 - **#3962**: Split cli/parser.py: move per-verb parser registration into verb modules (190 commits / 20 conflict merges in 5 weeks) *(curated)*
 - **#4075**: test flake: Install the klayout binary fails on ASAP7 DRC deck fixtures (PR #4074, recurrence of #4059) *(curated)*
 - **#4351**: klt sim --backend batch: add --cancel JOB_ID (needs fleet-side cancel primitive) *(curated)*
@@ -115,18 +116,16 @@ Issues carrying `loom:curated`.
 - **#6911**: Report failed release preparation and tagging, and recover the release branch on retry *(curated)*
 - **#6914**: klt lvs klayout-runset (ihp-sg13g2): measure a terminal-order normalisation for mirrored inductor2 and route the item 4/11 grading question (split from #6903 part D) *(curated)*
 - **#7831**: Preserve SDF preflight instance checks when a gate-level assignment writes a part-select *(curated)*
-- **#7855**: klt lvs klayout-runset + form subckt-call (sg13g2): cap_cmim purged by min_caps, poly-resistor terminals shifted by positional 0, and reference_source is null *(curated)*
-- **#7856**: klt lvs klayout-runset: connectivity-mismatched device pairs with equal parameters are reported as device.property *(curated)*
-- **#7857**: batch: no way to run a grid from a client pinned to an older minor once the fleet image moves on *(curated)*
 - **#7860**: klt sim provenance hash covers only the top deck, not files it .include-s *(curated)*
-- **#7861**: klt sim deck-list --attach <shard map>: a --max-workers given at submit is now part of the request digest, and the mismatch hint does not name it *(curated)*
+- **#7879**: CI: the live canary manifest gate reds every in-flight PR whose branch predates a manifest sync (third recurrence) *(curated)*
+- **#7882**: CI: nothing surfaces a failure of the daily canary-inventory check *(curated)*
 
 ## Proposed (Architect / Hermit)
 
 - **#485**: Live digital fleet validation — measure T_o/t, derive the K-selection rule *(architect)*
 - **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(architect)*
 - **#708**: Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation *(architect)*
-- **#7710**: Remove unwired FLUTE/RUDY congestion pre-check spike (Rust crate + wrapper + CI leg) *(hermit)*
+- **#7893**: [Epic #708] Validate electrothermal temperature rise on a real power device *(architect)*
 - **#7810**: Extract duplicated Rust Liberty parser shared by native/statime and native/techmap *(hermit)*
 
 ## Epics
@@ -139,14 +138,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 4 |
+| Operator merge-risk holds | 7 |
 | Very important | 1 |
 | Important | 5 |
-| Ready (`loom:issue`) | 11 |
-| In Progress (`loom:building`) | 7 |
-| PRs awaiting review | 13 |
-| Approved PRs awaiting merge | 5 |
-| Curated | 32 |
+| Ready (`loom:issue`) | 10 |
+| In Progress (`loom:building`) | 8 |
+| PRs awaiting review | 10 |
+| Approved PRs awaiting merge | 7 |
+| Curated | 29 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
