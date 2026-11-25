@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+from functools import partial
 from typing import Any
 
 from .sim_batch_contract import BATCH_NETLIST_FILENAME
@@ -74,8 +75,9 @@ def _job_netlist_path(deck_text: str, expanded_path: str | None) -> str | None:
     return None
 
 
-def _quote_target(target: str, original_quote: str) -> str:
+def _quote_target(target: str, match: re.Match[str]) -> str:
     """Preserve the source delimiter when possible and protect spaces and comments."""
+    original_quote = match["quote"]
     if original_quote and original_quote not in target:
         return f"{original_quote}{target}{original_quote}"
     if not any(c.isspace() or c == ";" for c in target):
@@ -132,13 +134,12 @@ def rewrite_job_input_includes(
         exact = re.compile(
             r"""(?P<quote>["']?)""" + re.escape(job_path) + r"(?P=quote)(?![\w./-])"
         )
+        quote_target = partial(_quote_target, target)
         for path in (deck, *(os.path.join(folder, n) for n in _SIBLING_FILES)):
             text = deck_text if path == deck else _read(path)
             if text is None:
                 continue
-            updated = exact.sub(
-                lambda match, target=target: _quote_target(target, match["quote"]), text
-            )
+            updated = exact.sub(quote_target, text)
             if updated == text:
                 continue
             with open(
