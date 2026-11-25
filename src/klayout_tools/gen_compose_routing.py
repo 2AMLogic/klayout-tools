@@ -122,7 +122,7 @@ from .gen_compose_plane_change import (
     _segments_field,
     _unrouted_leg_record,
 )
-from .gen_compose_plane_climb import PlaneClimbContext
+from .gen_compose_plane_climb import PlaneClimbContext, _endpoint_geometry_for
 
 #: ``direction_deg`` values a *stub-widen* (#496) applies to -- a port's own
 #: outward-facing north/south stub, never an east/west one. Scoped this
@@ -4312,42 +4312,10 @@ def route_bundle(
         key=lambda pair: (_candidate_distance_um(pair), pair[0], pair[1]),
     )
 
-    # Own-block geometry (issue #1527): for an *inter*-block leg (unlike a
-    # same-block self-net, always fetched below), also fetched for whichever
-    # endpoint's own block is a `blocks[].cell` block -- an existing
-    # GDS/OASIS stream this command did not generate, whose `ports[]` are
-    # hand-declared by the caller directly on the stream's own internal
-    # geometry (see `_parse_cell_block`). That is the one block kind where
-    # "every merged shape not touching my own declared port is a genuinely
-    # different net" actually holds: a `generator_report` block can
-    # legitimately carry drawn geometry no `ports[]` entry names (e.g.
-    # `mos_array`'s own unreported dummy matching columns, deliberately
-    # excluded from `klt extract`'s netlist via its own dummy-suppression
-    # convention, #295/#462) that this check cannot tell apart from a real
-    # obstacle -- so it is scoped to `cell` blocks only, see
-    # route_two_pin()'s own "own-block escape check" docstring.
-    # block_geometry_for()/cross_block_geometry_for() each return the *same*
-    # growing {block_id: geometry} cache object regardless of which block id
-    # is requested (populating it lazily, once per block), so the two
-    # assignments below always end up pointing at one dict either way.
-    # Shared by both the explicit-legs loop and the automatic candidate loop
-    # below (#1529) -- previously duplicated inline in the candidate loop
-    # only, since explicit legs did not exist yet.
-    def _endpoint_geometry(i: int, j: int, fetch: Any) -> Any:
-        if fetch is None:
-            return None
-        if pins[i]["block"] == pins[j]["block"]:
-            return fetch(pins[i]["block"])
-        geometry = None
-        for pin in (pins[i], pins[j]):
-            if blocks[pin["block"]].get("source") == "cell":
-                geometry = fetch(pin["block"])
-        return geometry
-
     def _leg_geometry(i: int, j: int) -> tuple[Any, Any]:
         return (
-            _endpoint_geometry(i, j, block_geometry_for),
-            _endpoint_geometry(i, j, cross_block_geometry_for),
+            _endpoint_geometry_for(pins, blocks, i, j, block_geometry_for),
+            _endpoint_geometry_for(pins, blocks, i, j, cross_block_geometry_for),
         )
 
     # Cross-plane leg retries: the request-configured cross_block_route_layer
@@ -4455,7 +4423,9 @@ def route_bundle(
             override_geometry = (
                 geometry
                 if override_layer == route_layer
-                else _endpoint_geometry(
+                else _endpoint_geometry_for(
+                    pins,
+                    blocks,
                     i,
                     j,
                     None
