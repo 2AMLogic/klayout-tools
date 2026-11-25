@@ -1350,9 +1350,11 @@ klt sim grid.json --backend batch --submit-only --max-units-per-job 5 -o out --f
 klt sim grid.json --backend batch --attach out/batch-shards.json --max-units-per-job 5 -o out --format json
 ```
 
-Use the same request file, overrides (`--max-units-per-job`, `--budget-s`,
-`--pdk-root`) and environment at `--attach`; on a `request_sha256` mismatch
-the error names the differing request field(s).
+At `--attach`, use the same request file and environment and repeat any
+`--max-units-per-job`, `--budget-s`, `--max-workers`, or `--pdk-root` overrides.
+A `request_sha256` mismatch names the differing fields. For example, a new
+deck-list shard map reports `options.max_workers` if the worker count differs.
+Older maps may report only `options` or list the overrides to repeat.
 
 *Attaching from another host.* The shard map records the jobs prefix, region,
 profile and every shard's `job_id` (never the bucket), and `--attach` reads
