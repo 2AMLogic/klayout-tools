@@ -50,7 +50,6 @@ updates:
         update-types: ["minor", "patch"]
   - package-ecosystem: "cargo"
     directories:
-      - "/native/congestion"
       - "/native/legalize"
       - "/native/mom"
       - "/native/nldm-interp"

@@ -252,22 +252,8 @@ jobs:
 
   native:
     name: ${{ matrix.job_name }}
-    # `native/mom/` (issue #718), `native/congestion/` (issue #785, Epic
-    # #700 Phase 1 §3.6) and `native/yield/` (issue #816, Phase 1a of the
-    # statistical/yield epic #710) are this repo's first three Rust
-    # components -- the `klt_mom_native`/`klt_congestion_native`/
-    # `klt_yield_native` pyo3 extensions behind `klt mom`/the congestion
-    # pre-check research spike/`klt yield`. Each crate's numerics have their
-    # own `cargo test` suite the Python job never exercises, so this job
-    # exists: fmt + clippy + unit tests, plus a real end-to-end run through
-    # the built extension. One matrix leg per crate (issue #929) collapses
-    # what used to be three structurally-identical `native`/
-    # `native-congestion`/`native-yield` jobs into a single parameterized
-    # job -- `${{ matrix.job_name }}` above preserves each leg's original,
-    # separately-attributable check name in the GitHub checks UI (GitHub
-    # names each matrix run's check after the job's `name:` with its
-    # already-interpolated matrix values, so branch-protection required
-    # status checks configured against the old three names keep matching).
+    # Each pyo3 extension has its own Rust tests and end-to-end Python tests.
+    # Keep the check names stable for branch protection when changing this matrix.
     #
     # `native/legalize/` and `native/statime/` are intentionally NOT in this
     # matrix -- `native/statime/` has its own pyo3-extension job below
@@ -285,10 +271,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
-      # fail-fast: false so e.g. a congestion regression doesn't cancel the
-      # in-flight mom/yield legs -- matches this repo's other multi-leg
-      # matrix (`test` below) and preserves the old three-independent-jobs
-      # behavior, where one job's failure never touched the others.
+      # Report both crates independently if one fails.
       fail-fast: false
       matrix:
         include:
@@ -302,8 +285,7 @@ jobs:
             # criterion that the rate be *reported*, not only asserted)
             # lands in this leg's log on a green run too, matching how the
             # Python step already does this for
-            # tests/test_mom_validation.py's convergence tables. Neither
-            # congestion nor yield need this.
+            # tests/test_mom_validation.py's convergence tables.
             cargo_test_args: "-- --nocapture"
             # tests/test_mom_ports_validation.py (issue #894, Phase 2b),
             # tests/test_mom_peec_validation.py (issue #797), and
@@ -322,15 +304,6 @@ jobs:
               tests/test_mom_fullwave_validation.py
             extension_module: klt_mom_native
             no_skip_message: "klt_mom_native did not install -- tests/test_mom.py would have skipped"
-          - crate: congestion
-            job_name: Native engines (Rust) — congestion pre-check
-            dir: native/congestion
-            group: congestion
-            timeout_minutes: 20
-            cargo_test_args: ""
-            test_paths: tests/test_congestion.py
-            extension_module: klt_congestion_native
-            no_skip_message: "klt_congestion_native did not install -- tests/test_congestion.py would have skipped"
           - crate: yield
             job_name: Native engines (Rust) — yield statistics
             dir: native/yield
@@ -415,7 +388,7 @@ jobs:
         # other wheel in the environment still comes from the cache and the
         # step stays fast. The crate name matches
         # pyproject.toml's [tool.uv.sources] keys: klt-mom-native,
-        # klt-congestion-native, klt-yield-native.
+        # klt-yield-native.
         #
         # The freshness gate below is what keeps that flag honest -- see
         # docs/design/native-extension-freshness.md.
@@ -477,9 +450,7 @@ jobs:
         # extra's own pyproject.toml comment for the marker), so this step
         # runs after the klt_mom_native checks above rather than folded into
         # the same `uv sync` line, keeping the two dependency surfaces easy
-        # to attribute independently on a failure. mom-only (issue #929's
-        # matrix has no equivalent for congestion/yield): guarded so it does
-        # not run on those legs.
+        # to attribute independently on a failure. Only the mom leg uses this oracle.
         #
         # No --reinstall-package here on purpose: klt-mom-native is already
         # installed from this checkout (and gated on above), and this sync
@@ -585,7 +556,7 @@ jobs:
         # scripts/mom_pypeec_reference.py, always invoked as its own
         # subprocess; and it lives in its own extra so a failure here
         # attributes to exactly one oracle. mom-only (guarded so it does not
-        # run on the congestion/yield legs).
+        # run on the yield leg).
         #
         # timeout-minutes (the per-step discipline issues #1204/#1219
         # established for every external-tool install step): pypeec's
@@ -643,7 +614,7 @@ jobs:
     # #925 (Epic #704 Phase 3) promoted it to the `klt_statime_native` pyo3
     # extension backing `klt synthesize`'s additive `sta` critical-path
     # field, so it gets its own job here, per the one-job-per-native-engine
-    # precedent `native`/`native-congestion`/`native-yield` set above. The
+    # convention used for mom and yield above. The
     # crate still builds its standalone `klt-statime` CLI binary from the
     # same source -- `cargo test`/`clippy` below cover both targets
     # (`--all-targets`).
@@ -1383,7 +1354,7 @@ jobs:
         # rustup-managed stable Rust already (see the `native` job's own
         # comment above), so no toolchain-install step is needed. Rebuilt
         # once per matrix entry (this job has no dedicated single-crate
-        # job the way `native-mom`/`native-congestion`/`native-yield` do,
+        # job the way the mom and yield crates do,
         # since `klt-techmap` has no `pyo3` extension surface to build);
         # the cache step above keeps a warm-cache rebuild fast.
         run: cargo build --manifest-path native/techmap/Cargo.toml

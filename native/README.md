@@ -17,7 +17,6 @@ shipped `klt` verb — its own `pyproject.toml` reached from the top-level
 | Crate | `name` | Backs | Status |
 | --- | --- | --- | --- |
 | [`mom/`](mom/) | `klt-mom-native` | `klt mom` (Method-of-Moments capacitance + PEEC inductance/resistance solver) | Shipped `pyo3` extension — this repo's first Rust component |
-| [`congestion/`](congestion/) | `klt-congestion-native` | Not a `klt` CLI verb — a RUDY/RSMT-family post-placement congestion pre-check for the fleet DSE loop's own internal candidate-ranking (`digital_fleet.py`) | Research spike, `pyo3` extension, wired via dependency group |
 | [`yield/`](yield/) | `klt-yield-native` | `klt yield` / `klt yield-campaign` / `klt yield-sensitivity` (distribution fit, yield estimate + confidence intervals, Cp/Cpk, sample-size verdict) | Shipped `pyo3` extension |
 | [`statime/`](statime/) | `klt-statime-native` | `klt synthesize`'s `sta` response field (gate-level static timing, NLDM) | Shipped `pyo3` extension (promoted from a go/no-go spike, issue #925); standalone `klt-statime` CLI binary also builds from the same crate |
 | [`techmap/`](techmap/) | `klt-techmap-native` | `klt techmap` (Liberty-driven technology mapping, standalone binary invoked as a subprocess) | Standalone binary + library — not (yet) folded into a `pyo3` extension |
@@ -37,7 +36,6 @@ dependency groups from a full repo checkout:
 uv sync --extra dev --group mom       # klt mom
 uv sync --extra dev --group yield     # klt yield / yield-campaign / yield-sensitivity
 uv sync --extra dev --group statime   # klt synthesize's sta field
-uv sync --extra dev --group congestion  # the congestion research crate (no klt verb)
 ```
 
 `techmap/`, `wave/`, and `legalize/` have no `pyo3`/dependency-group wiring —
