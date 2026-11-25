@@ -15,8 +15,7 @@ def add_em_parser(
     subparsers: argparse._SubParsersAction,
     _add_format_arg: Callable[..., Any],
 ) -> None:
-    """Register the ``em`` verb (issue #5616, Epic #708 brief 1.A): wraps
-    the ``geode`` binary for quasi-static capacitance. See docs/cli/em.md."""
+    """Register Geode solves for capacitance, steady heat, and Joule self-heating."""
     em_parser = subparsers.add_parser(
         "em",
         help="Geode capacitance, steady heat and Joule self-heating",

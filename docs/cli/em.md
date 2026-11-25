@@ -144,6 +144,9 @@ install guidance. It never produces a result without running the engine.
 - `environment`: `engine`, `engine_version` (from `geode --version`, `null` if unparseable), `solve_mode`, `binary`, `mesh_sha256`.
 - For layout requests, `environment` also includes `stackup`, `layout_sha256` (stream bytes), `stackup_sha256` (the full resolved stackup JSON, UTF-8 with sorted keys, compact separators and ASCII escaping), and `mesh_stats` with Geode's `nodes`, `tets` and boundary `triangles` counts.
 - `results.c`: `unit` (`"F"`), `terminals` (label order for a layout, request order for a supplied mesh), `matrix` (Maxwell capacitance, farads).
+- `results.temperature` reports nodal and peak temperatures, source and boundary power,
+  and the relative energy mismatch. Converged Joule self-heating also reports
+  `termination`. [Thermal requests](#thermal-requests)
 - `checks[]`: `name`, `output`, `terminal_pair`, `unit`, `limits`, `status`, `value`, `margin` (positive headroom, negative violation, `null` without limits).
 - `diagnostics[]`: model limitations encountered while translating the stackup.
 - `artifacts`: `mesh`, and with `keep_artifacts` `spec`, `report`, `log`, each a hashed `{path, scope, sha256}` envelope. Retained layout runs also reference the generated Geode layout JSON (`layout`), `mesh_report` and `mesh_log`. The mesh hash and statistics survive temporary artifact cleanup. Every envelope's `repo` scope is relative to the repository containing the request file (#6764) — never the invoking directory — so one request yields one committed report from any cwd; a supplied path outside that repository (a mesh or `options.output_dir` in another checkout, even the invoking one) is `external`, and a request outside every repository makes every artifact `external`.

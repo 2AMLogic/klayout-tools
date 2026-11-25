@@ -1,6 +1,6 @@
-Run a field-solver request: engine geode_fem, solve_mode quasi_static, outputs
-[c]. Supply a mesh or a layout region and PDK stackup. Layout meshing requires
-Gmsh. Both paths require geode. See docs/cli/em.md.
+Run a Geode field solve. Supply a mesh for capacitance, steady heat or Joule
+self-heating. Capacitance also accepts a layout region and PDK stackup using
+Gmsh. See docs/cli/em.md.
 
 positional arguments:
   request path to the klt em request JSON
