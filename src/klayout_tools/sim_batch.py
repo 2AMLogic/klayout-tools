@@ -141,6 +141,7 @@ from .sim_batch_reattach import (
     _resume_or_submit_one_job,
     _try_reattach_shard,
 )
+from .sim_batch_version_remedy import older_client_remedy
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
@@ -760,8 +761,10 @@ def dry_run_runner_check(
 def _assess_published_runner(
     request: dict[str, Any], config: BatchConfig
 ) -> dict[str, Any]:
-    """Compare the published sim image's klt major.minor with the client.
-    Unavailable metadata leaves the runner-side preflight authoritative."""
+    """Compare the published sim image's klt major.minor with the client,
+    appending the #7857 pinned-client remedy when the client is the older
+    side. Unavailable metadata leaves the runner-side preflight
+    authoritative."""
     client = _provenance._klt_version()
     assessment: dict[str, Any] = {
         "status": "unknown",
@@ -776,10 +779,7 @@ def _assess_published_runner(
     client_release = _runner_gate_release(client)
     if not images or client_release is None:
         return assessment
-    releases = [
-        _runner_gate_release(image["klt_version"]) if image["klt_version"] else None
-        for image in images
-    ]
+    releases = [_runner_gate_release(image["klt_version"] or "") for image in images]
     if any(release is None for release in releases):
         return assessment
     if any(release == client_release for release in releases):
@@ -796,7 +796,7 @@ def _assess_published_runner(
         f"the batch image pointer publishes the fleet runner image as {published}, "
         f"but the submitting client is klt {client}; their major.minor "
         "releases differ, so the runner-side version gate would reject the job"
-    )
+    ) + older_client_remedy(client_release, releases)
     return assessment
 
 

@@ -2603,7 +2603,11 @@ report a pass. Policy: **reject before simulating**.
   the remedy: submit from a client of that major.minor, update the runner
   image to the client's, or set `batch.runner_version_check: "warn"` to run
   anyway (under `warn` the runner-side gate is not applied, so the job is
-  submitted and runs despite the skew). It is additive (the per-unit
+  submitted and runs despite the skew). When the client is the older side the
+  message also carries the concrete pinned-client command of
+  [#7857](https://github.com/2AMLogic/klayout-tools/issues/7857)
+  (`uvx --from "klayout-tools==<major.minor>.*" klt sim ...`); only the
+  `message` text changes, never the JSON fields. It is additive (the per-unit
   diagnostics and `environment.remote` fields above are unchanged), appears
   once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
   under `runner_version_check: "warn"` when the run proceeded (that skew stays
@@ -2633,6 +2637,26 @@ report a pass. Policy: **reject before simulating**.
   `environment.remote`; use it deliberately (for example a client on a newer
   release than the image), because it is detection after execution and does
   not guarantee request options were honored.
+- **Client older than the image**
+  ([#7857](https://github.com/2AMLogic/klayout-tools/issues/7857)): a client
+  pinned to an older minor (a repo on klt `0.7.*` once the pointer publishes
+  a `0.9` runner) hits the same refusal, and does not need a fleet change or
+  a flag -- run the same request from a client of the image's major.minor:
+
+  ```
+  uvx --from "klayout-tools==0.9.*" klt sim request.json --backend batch
+  ```
+
+  (a PEP 440 wildcard pin; substitute the major.minor the refusal names).
+  Both the pre-launch `batch_runner_version_mismatch` error and the
+  runner-side diagnostic above carry that command. The
+  `batch.runner_version_check: "warn"` opt-out applies to this direction too:
+  the newer-minor runner's request-key set is a superset of the older
+  client's (the feature registry only grows and the runner contract breaks
+  only in a minor, per the release discipline above), so there is no known
+  request key it would reject -- but `warn` is still detection after
+  execution and not a behavioral guarantee, which is why the pinned-client
+  run is the documented remedy.
 
 ```json
 "remote": {
@@ -2652,7 +2676,10 @@ builds of one minor (a `0.7.1.devN+g<sha>` client or a `0.7.3` release can
 carry changes the `0.7.0` runner lacks; by the release discipline above, none
 of them may break the runner contract). **Remediation** on a mismatch:
 update the runner image to the client's minor, or submit from a client of the
-image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
+image's minor -- for an older client, concretely
+`uvx --from "klayout-tools==<image major.minor>.*" klt sim ...`
+([#7857](https://github.com/2AMLogic/klayout-tools/issues/7857)). Jobs that
+never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
 #### Request-feature capability check ([#3249](https://github.com/2AMLogic/klayout-tools/issues/3249))
