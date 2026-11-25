@@ -15,15 +15,14 @@ def add_em_parser(
     subparsers: argparse._SubParsersAction,
     _add_format_arg: Callable[..., Any],
 ) -> None:
-    """Register the ``em`` verb (issue #5616, Epic #708 brief 1.A): wraps
-    the ``geode`` binary for quasi-static capacitance. See docs/cli/em.md."""
+    """Register Geode solves for capacitance, steady heat, and Joule self-heating."""
     em_parser = subparsers.add_parser(
         "em",
-        help="field-solver wrapper (geode-fem quasi-static capacitance)",
+        help="Geode capacitance, steady heat and Joule self-heating",
         description=(
-            "Run a field-solver request: engine geode_fem, solve_mode "
-            "quasi_static, outputs [c]. Supply a mesh or a layout region and "
-            "PDK stackup. Layout meshing requires Gmsh. Both paths require geode. "
+            "Run a Geode field solve. Supply a mesh for capacitance, steady heat "
+            "or Joule self-heating. Capacitance also accepts a layout region "
+            "and PDK stackup using Gmsh. "
             "See docs/cli/em.md."
         ),
     )

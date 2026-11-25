@@ -12,6 +12,8 @@ itself (decks, harvest, coverage, grading, exit codes) is covered by
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -26,6 +28,26 @@ CORNERS = {
     "supply_v": {"vdd": [1.0, 2.0]},
     "params": {"code": [0, 128, 255]},
 }
+
+
+def test_standalone_range_rollup():
+    probe = """
+import sys
+from klayout_tools.sim_derive_rollup import rollup_fields
+
+spec = {"name": "span", "derive": {
+    "from": "vout", "axis": "params.code", "group_by": [], "reduce": "range",
+}}
+corners = [
+    {"params": {"code": code}, "status": "pass",
+     "measurements": [{"name": "vout", "status": "pass", "value": value}]}
+    for code, value in enumerate((1.0, 3.0))
+]
+group, = rollup_fields(spec, corners)["derive"]["groups"]
+assert (group["value"], group["status"]) == (2.0, "pass")
+assert "klayout_tools.sim" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", probe], check=True)
 
 
 def derive(**body) -> dict:

@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+from threading import Barrier
 from unittest.mock import Mock
 
 import pytest
 
 from klayout_tools import sim, sim_decks
 from klayout_tools import sim_batch as sb
+from klayout_tools import sim_batch_shards as sbs
 from test_sim_decks import (
     _FakeFleet,
     batch_deck_request,
@@ -37,8 +39,9 @@ class _MultiFleet(_FakeFleet):
         return dict(self.statuses.get(job_id, self.status))
 
     def collect(self, config, job_id, local_dir, **kwargs):
-        self.spec = self.specs[job_id]
-        super().collect(config, job_id, local_dir, **kwargs)
+        worker = _FakeFleet(self.status, fail_collect=self.fail_collect)
+        worker.submit(config, job_id, self.specs[job_id])
+        worker.collect(config, job_id, local_dir, **kwargs)
 
 
 def _install(monkeypatch, fleet):
@@ -75,6 +78,15 @@ def _staged_ids(spec):
 
 
 def test_split_submits_balanced_jobs_and_merges_in_order(tmp_path, monkeypatch):
+    # Let all three shards select their job before any fake worker reads its spec.
+    collectors = Barrier(3, timeout=10)
+    collect = _FakeFleet.collect
+
+    def collect_together(self, config, job_id, local_dir, **kwargs):
+        collectors.wait()
+        return collect(self, config, job_id, local_dir, **kwargs)
+
+    monkeypatch.setattr(_FakeFleet, "collect", collect_together)
     (tmp_path / ".git").mkdir()
     fleet = _install_and_fleet(monkeypatch)
     report = _run(tmp_path, _request(tmp_path), max_units_per_job=2)
@@ -162,6 +174,34 @@ def test_attach_shard_map_collects_all(tmp_path, monkeypatch):
         max_units_per_job=2,
     )
     assert [u["id"] for u in report["units"]] == ["d0", "d1", "d2", "d3"]
+    assert report["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "legacy_map", [False, True], ids=["per-option", "whole-options"]
+)
+def test_attach_shard_map_repeats_max_workers(tmp_path, monkeypatch, legacy_map):
+    _install_and_fleet(monkeypatch)
+    request = _request(tmp_path, count=4, max_units_per_job=2)
+    _run(tmp_path, request, max_workers=3)
+    map_path = tmp_path / "out" / sb.BATCH_SHARDS_FILENAME
+    if legacy_map:
+        document = json.loads(map_path.read_text())
+        sections = document["request_sections"]
+        for key in list(sections):
+            if key.startswith("options."):
+                del sections[key]
+        submitted_options = {**request["options"], "max_workers": 3}
+        sections["options"] = sbs.legacy_request_sha256(submitted_options)[:12]
+        map_path.write_text(json.dumps(document))
+
+    with pytest.raises(sim.SimError) as err:
+        _run(tmp_path, request, attach_job_id=str(map_path))
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    field = "options" if legacy_map else "options.max_workers"
+    assert f"differing request field(s): {field})" in str(err.value)
+
+    report = _run(tmp_path, request, attach_job_id=str(map_path), max_workers=3)
     assert report["status"] == "pass"
 
 

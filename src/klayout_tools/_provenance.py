@@ -42,7 +42,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import EllipsisType
 from typing import Any
 
@@ -236,6 +236,40 @@ def _canonical_instance_token(inst: Any) -> str:
     return token
 
 
+def _hash_layout_cells(layout: Any, cells: Iterable[Any], header: str) -> str:
+    """Hash the selected cells using the canonical geometry stream format."""
+    digest = hashlib.sha256()
+
+    def feed(line: str) -> None:
+        digest.update(line.encode("utf-8", errors="backslashreplace"))
+        digest.update(b"\n")
+
+    feed(header)
+    feed(f"dbu {layout.dbu:.12g}")
+
+    layer_keys = [
+        (index, _canonical_layer_key(layout.get_info(index)))
+        for index in layout.layer_indexes()
+    ]
+    for cell in sorted(cells, key=lambda c: c.name):
+        tokens: list[str] = []
+        for index, layer_key in layer_keys:
+            for shape in cell.shapes(index).each():
+                tokens.append(
+                    f"shape {layer_key} {_canonical_shape_token(shape)}"
+                    f"{_canonical_properties(layout, shape.prop_id)}"
+                )
+        for inst in cell.each_inst():
+            tokens.append(
+                f"{_canonical_instance_token(inst)}"
+                f"{_canonical_properties(layout, inst.prop_id)}"
+            )
+        feed(f"cell {cell.name}")
+        for token in sorted(tokens):
+            feed(f"  {token}")
+    return f"sha256:{digest.hexdigest()}"
+
+
 def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
     """A ``sha256:``-prefixed digest of one cell's decoded geometry, or
     ``None`` when it cannot be computed (issue #4530).
@@ -257,39 +291,13 @@ def cell_geometry_digest(path: str | None, cell_name: str) -> str | None:
         if top is None:
             return None
         subtree = {top.cell_index(), *top.called_cells()}
-
-        digest = hashlib.sha256()
-
-        def feed(line: str) -> None:
-            digest.update(line.encode("utf-8", errors="backslashreplace"))
-            digest.update(b"\n")
-
-        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION + " cell")
-        feed(f"dbu {layout.dbu:.12g}")
-        layer_keys = [
-            (index, _canonical_layer_key(layout.get_info(index)))
-            for index in layout.layer_indexes()
-        ]
-        cells = [layout.cell(i) for i in subtree]
-        for cell in sorted(cells, key=lambda c: c.name):
-            tokens: list[str] = []
-            for index, layer_key in layer_keys:
-                for shape in cell.shapes(index).each():
-                    tokens.append(
-                        f"shape {layer_key} {_canonical_shape_token(shape)}"
-                        f"{_canonical_properties(layout, shape.prop_id)}"
-                    )
-            for inst in cell.each_inst():
-                tokens.append(
-                    f"{_canonical_instance_token(inst)}"
-                    f"{_canonical_properties(layout, inst.prop_id)}"
-                )
-            feed(f"cell {cell.name}")
-            for token in sorted(tokens):
-                feed(f"  {token}")
+        return _hash_layout_cells(
+            layout,
+            (layout.cell(i) for i in subtree),
+            _LAYOUT_GEOMETRY_DIGEST_VERSION + " cell",
+        )
     except Exception:
         return None
-    return f"sha256:{digest.hexdigest()}"
 
 
 def layout_geometry_digest(path: str | None) -> str | None:
@@ -333,39 +341,11 @@ def layout_geometry_digest(path: str | None) -> str | None:
 
         layout = kdb.Layout()
         layout.read(path)
-
-        digest = hashlib.sha256()
-
-        def feed(line: str) -> None:
-            digest.update(line.encode("utf-8", errors="backslashreplace"))
-            digest.update(b"\n")
-
-        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION)
-        feed(f"dbu {layout.dbu:.12g}")
-
-        layer_keys = [
-            (index, _canonical_layer_key(layout.get_info(index)))
-            for index in layout.layer_indexes()
-        ]
-        for cell in sorted(layout.each_cell(), key=lambda c: c.name):
-            tokens: list[str] = []
-            for index, layer_key in layer_keys:
-                for shape in cell.shapes(index).each():
-                    tokens.append(
-                        f"shape {layer_key} {_canonical_shape_token(shape)}"
-                        f"{_canonical_properties(layout, shape.prop_id)}"
-                    )
-            for inst in cell.each_inst():
-                tokens.append(
-                    f"{_canonical_instance_token(inst)}"
-                    f"{_canonical_properties(layout, inst.prop_id)}"
-                )
-            feed(f"cell {cell.name}")
-            for token in sorted(tokens):
-                feed(f"  {token}")
+        return _hash_layout_cells(
+            layout, layout.each_cell(), _LAYOUT_GEOMETRY_DIGEST_VERSION
+        )
     except Exception:
         return None
-    return f"sha256:{digest.hexdigest()}"
 
 
 def _yosys_version(binary: str = "yosys") -> str | None:
@@ -927,11 +907,9 @@ def build_provenance(
     the resolved ``klayout_version`` differs from
     :func:`klayout_tools.build_identity.klayout_version_expected` (the
     version this ``klayout-tools`` build/commit was tested against), else
-    ``False``. Passed by ``klt drc``/``klt lvs`` only -- see
-    ``docs/design/klayout-engine-version-pin.md`` for why those two verbs and
-    not every ``build_provenance`` caller. A ``True`` result also prints a
-    one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
-    caller sees the drift even without inspecting the JSON.
+    ``False``. DRC, LVS and in-process extraction opt in. A mismatch also
+    emits a stderr warning. See ``docs/design/klayout-engine-version-pin.md``
+    for the scope and :func:`_warn_klayout_version_mismatch` for the remedy.
     ``klayout_version_override`` (+ ``..._active``, issue #5660) repopulates
     ``klayout_version`` from the binary that ran the deck (``--engine klayout``
     sites); the wheel's version moves to ``klayout_module_version``.
@@ -964,14 +942,9 @@ def build_provenance(
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
-        # Build-time-recorded only -- deliberately *not* the live-checkout
-        # `git` fallback of `build_identity.klayout_version_expected()`
-        # (issue #1490): it is fine as a one-shot cost for `klt version`,
-        # but every `klt drc`/`klt lvs` report would gain a subprocess call
-        # on a dev/editable install -- and no `uv tool install ... @<sha>`
-        # install (the case this field exists for) is ever editable. With
-        # no build-time record the field reports `False`, matching
-        # `_klayout_version_mismatch`'s "unresolvable renders as False" rule.
+        # Report generation uses the build-time record. The checkout fallback
+        # spawns git, which is appropriate for an explicit `klt version` call.
+        # Editable installs without a record cannot confirm a mismatch.
         expected_klayout_version = build_identity._recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version

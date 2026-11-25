@@ -14,7 +14,7 @@ name = "klt_yield_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Pinned to the same floor as native/mom and native/congestion (0.29 is the
+# Pinned to the same floor as native/mom (0.29 is the
 # first line supporting Python 3.14 -- see native/mom/Cargo.toml for the
 # verified rejection behavior of 0.22/0.23 against a 3.14 interpreter).
 #

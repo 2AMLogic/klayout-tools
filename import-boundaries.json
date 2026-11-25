@@ -115,13 +115,6 @@
         "klayout_tools.corner_matrix"
       ]
     },
-    "congestion": {
-      "kind": "verb",
-      "description": "`klt congestion` implementation: core modules plus CLI adapter.",
-      "modules": [
-        "klayout_tools.congestion"
-      ]
-    },
     "deck": {
       "kind": "verb",
       "description": "`klt deck` implementation: core modules plus CLI adapter.",
@@ -218,6 +211,7 @@
         "klayout_tools.cli.parsers.em",
         "klayout_tools._em_geometry",
         "klayout_tools._em_layout",
+        "klayout_tools._em_thermal",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
@@ -577,6 +571,7 @@
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
+        "klayout_tools.lvs_gate_level_preparation",
         "klayout_tools.lvs_hierarchy",
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_label_coverage",
@@ -597,6 +592,7 @@
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
+        "klayout_tools.lvs_runset_sg13g2_cards",
         "klayout_tools.lvs_runset_census",
         "klayout_tools.lvs_runset_findings",
         "klayout_tools.lvs_runset_ports",
@@ -665,6 +661,8 @@
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
+        "klayout_tools.decks.asap7_v0_gaps",
+        "klayout_tools.decks.asap7_v123_gaps",
         "klayout_tools.decks.extraction",
         "klayout_tools.decks.extraction_inductor",
         "klayout_tools.decks.finfet",
@@ -766,6 +764,7 @@
         "klayout_tools.place_and_route_multicycle",
         "klayout_tools.place_and_route_layers",
         "klayout_tools.place_and_route_macro_halo",
+        "klayout_tools.place_and_route_m4_grid",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",
@@ -902,6 +901,7 @@
         "klayout_tools._vendor.mutation_variants",
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
+        "klayout_tools._verilog_text",
         "klayout_tools._verilog_top",
         "klayout_tools._warn",
         "klayout_tools._yosys_error_messages",
@@ -1019,6 +1019,7 @@
         "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_job_cancel",
+        "klayout_tools.cli.sim_job_list",
         "klayout_tools.cli.sim_job_status",
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
@@ -1059,6 +1060,8 @@
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
+        "klayout_tools.sim_batch_fleet_status",
+        "klayout_tools.sim_batch_pdk",
         "klayout_tools.sim_batch_corner_libs",
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
@@ -1069,6 +1072,7 @@
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
+        "klayout_tools.sim_batch_version_remedy",
         "klayout_tools.sim_batch_warn",
         "klayout_tools.sim_batch_worker_engine_build",
         "klayout_tools.sim_commands",
@@ -1124,6 +1128,7 @@
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",
         "klayout_tools.sim_noise_mechanism",
+        "klayout_tools.sim_noise_spectrum",
         "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
@@ -2839,12 +2844,6 @@
         "consumer": "klayout_tools.cli.yield_campaign_cmd",
         "exporter": "klayout_tools.cli.yield_cmd",
         "symbol": "_print_text",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.congestion",
-        "exporter": "klayout_tools._native",
-        "symbol": "_load_native_extension",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {

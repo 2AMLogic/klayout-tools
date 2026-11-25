@@ -22,6 +22,13 @@ def _warn_klayout_version_mismatch(
     this on the terminal, since JSON output goes to stdout only
     (``docs/json-contract.md``).
 
+    Emitted for ``klt drc``/``klt lvs`` reports and for the default
+    in-process ``klt extract`` engine (issue #7824), so its consequence
+    sentence names both verb families: DRC/LVS *report counts* (verdict
+    unaffected) and the extracted netlist's *measured device parameters and
+    parasitic R/C* -- which for extraction are the product itself, not
+    bookkeeping around a verdict.
+
     ``reinstall_spec`` is the running build's
     :func:`klayout_tools.build_identity.reinstall_spec` value -- the same
     string already computed for ``provenance.klt_reinstall_spec``, passed
@@ -53,11 +60,12 @@ def _warn_klayout_version_mismatch(
     message = (
         f"klt: warning: resolved klayout engine version {actual!r} differs "
         f"from klayout=={expected}, the version this klayout-tools build/"
-        "commit was tested against -- DRC/LVS report counts (deck content "
-        "hash, rules_skipped, category_counts, ...) may differ from a "
-        f"report generated with klayout=={expected}, even though the "
-        "verdict itself is unaffected. To reproduce the exact engine: "
-        f"{remedy} -- see docs/json-contract.md's "
+        "commit was tested against -- report content may differ from a "
+        f"report generated with klayout=={expected}: DRC/LVS report counts "
+        "(deck content hash, rules_skipped, category_counts, ...) with the "
+        "verdict itself unaffected; an extracted netlist's device "
+        "parameters and parasitic R/C (issue #7824). To reproduce the "
+        f"exact engine: {remedy} -- see docs/json-contract.md's "
         '"Shared `provenance` block".'
     )
     _warn.warn(message)

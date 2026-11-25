@@ -7,7 +7,7 @@ so a plain `pip install 'klayout-tools[<extra>]'` needs no Rust toolchain.
 | Crate | PyPI package | Extra | Status |
 |---|---|---|---|
 | `native/yield/` | `klt-yield-native` | `klayout-tools[yield]` | enabled |
-| `native/mom/`, `native/congestion/`, `native/statime/` | `klt-<crate>-native` | — | not yet (add when asked, see below) |
+| `native/mom/`, `native/statime/` | `klt-<crate>-native` | — | not yet (add when asked, see below) |
 
 Platforms: Linux x86_64 (manylinux_2_28) and macOS arm64 (GitHub-hosted
 `macos-15` runner). Wheels are `abi3` (`cp310-abi3`), so one wheel per platform

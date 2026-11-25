@@ -93,12 +93,17 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
+
+#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
+#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
+#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
 from . import (
     _warn,
     env_provenance,
     output_lock,
     sim_ac_waveform,
     sim_batch_history,
+    sim_batch_pdk,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -118,6 +123,7 @@ from . import (
     sim_mismatch_scale,
     sim_noise,
     sim_noise_mechanism,
+    sim_noise_spectrum,
     sim_op_args,
     sim_passes,
     sim_portable,
@@ -199,10 +205,6 @@ from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_attach import apply_attach as _apply_attach
-
-#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
-#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import (
     _remove_shard_manifest,
@@ -354,7 +356,15 @@ from .sim_analysis_overrides import (  # isort: skip
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from . import sim_errors, sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
-from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
+from .sim_measurement_grading import (
+    _ABSENT_STATUS as _ABSENT_STATUS,
+)
+from .sim_measurement_grading import (
+    _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS,
+)
+from .sim_measurement_grading import (
+    _RECOGNISED_LIMIT_KEYS as _RECOGNISED_LIMIT_KEYS,
+)
 
 #: Moved to `sim_measurement_grading.py` (issue #7320) so the measurement
 #: sidecars import the grading primitives and shared response builders at
@@ -363,6 +373,9 @@ from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATU
 #: ``klayout_tools.sim.<name>`` keeps working.
 from .sim_measurement_grading import (
     IMPLAUSIBLE_DIAGNOSTIC_CODE as IMPLAUSIBLE_DIAGNOSTIC_CODE,
+)
+from .sim_measurement_grading import (
+    NOT_REACHED_STATUS as NOT_REACHED_STATUS,
 )
 from .sim_measurement_grading import (
     SAVE_MODE_NETLIST_NO_VALUE_HINT as SAVE_MODE_NETLIST_NO_VALUE_HINT,
@@ -594,6 +607,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        "pdk_stamp_mismatch",
+        "pdk_stamp_not_comparable",
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
@@ -2213,6 +2228,7 @@ def run_sim(
     max_units_per_job: int | None = None,
     max_concurrent_jobs: int | None = None,
     dry_run: bool = False,
+    require_pdk_match: bool | None = None,
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
@@ -2444,15 +2460,9 @@ def run_sim(
     library, unsupported engine, unknown backend) -- once the sweep starts,
     every corner is reported in the response, including ones that error.
 
-    **Async submit (issue #3073).** ``submit_only=True`` uploads and launches
-    one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
-    ``launched_at``, ...) *instead of the report*, without polling or
-    collecting; read it later with :func:`sim_batch_async.read_job_status`.
-    A deck-list request is one job too (issue #3958): ``submit_only`` and
-    ``attach_job_id`` apply to it on ``batch`` with ``job_ceiling: null``.
-    Anything it cannot represent as one job (another backend, ``hosts > 1``,
-    ``resume``, ``plot_dir``) raises :class:`SimError`
-    with code ``submit_only_unsupported`` before any S3 write.
+    With ``submit_only=True``, batch returns a job identity for later status
+    or attachment. A deck-list job has a null ceiling. Unsupported combinations
+    raise ``submit_only_unsupported`` before upload.
 
     **Output-directory ownership (issue #2770).** A run that writes
     persistent artifacts -- ``options.keep_artifacts``, ``resume``, a
@@ -2466,16 +2476,13 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
 
-    **Dry run (issues #3064, #5674).** ``dry_run=True`` runs every
-    pre-dispatch check of a corner request (shape, Monte Carlo spec,
-    measurement forms, model/OSDI resolution, staging closure, off-host PDK
-    check, and on ``batch`` the whole-job ceiling/split plan) and returns
-    :func:`_build_dry_run_report` -- the expanded unit list with its derived
-    seeds plus the batch ``job_ceiling`` assessment -- without running the
-    fail-fast probe, taking an output-directory lock, or invoking any
-    backend (no ngspice, SSH, S3 or EC2).
+    A dry run validates and expands corner requests, including off-host staging
+    and the batch ceiling/split plan. It returns the planned units and seeds
+    without a probe, an output lock or a dispatch.
     """
-    request = load_request(request_path)
+    request = sim_batch_pdk.apply_request_gate(
+        load_request(request_path), require_pdk_match
+    )
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
     # ``artifacts_dir`` baked into the command line would resolve against the
     # corner dir and ngspice would never find its deck. Absolutise once here.
@@ -2910,6 +2917,9 @@ def _prepare_sim_request(
     backend_source = _backend_source(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
     requested_backend = backend
+    backend_from_host_default = sim_batch_pdk.allow_backend_fallback(
+        request, backend, backend_from_host_default
+    )
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
@@ -3676,6 +3686,7 @@ def _run_sim_corners(
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
     fingerprint_inputs: dict[str, Any] = {
+        "pdk_requirement": sim_batch_pdk.checkpoint_requirement(request),
         "netlist_path": dispatch_netlist_path,
         "models_lib": models_lib,
         "analysis": analysis,
@@ -7587,6 +7598,17 @@ def _run_corner(
                             "message": f"could not parse waveform rawfile: {exc}",
                         }
                     )
+                # Issue #7866: a `noise` corner's per-frequency spectrum, a
+                # sibling of the (totals-only) waveform artifact above.
+                artifacts.update(
+                    sim_noise_spectrum.persist(
+                        analysis,
+                        raw_path,
+                        waveform_max_bytes,
+                        waveform_decimate,
+                        diagnostics,
+                    )
+                )
             # Issue #3052: the engine has exited and its log is parsed, so the
             # persisted deck/log can now be rewritten to stable tokens.
             diagnostics.extend(
@@ -7775,10 +7797,6 @@ def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
         return None, f"SIG{-returncode}"
 
 
-#: The measurement ``status`` of an ``optional`` measurement that produced no
-#: value (issue #2925): data ("this figure does not exist at this point"),
-#: not a failure -- it never makes its corner ``error``/``fail``.
-_ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
@@ -7930,11 +7948,6 @@ def _parse_meas_errors(log_text: str) -> dict[str, str]:
             text = text[: _MEAS_ERROR_MAX_CHARS - 3] + "..."
         errors.setdefault(match.group(1).lower(), text)
     return errors
-
-
-#: The additive measurement status for an unreached target (its diagnostic
-#: ``code``, ``NOT_REACHED_DIAGNOSTIC_CODE``, lives in ``sim_measurement_results``).
-NOT_REACHED_STATUS = "not_reached"
 
 
 #: ngspice-46's reason line for a ``.meas`` target the completed sweep never
@@ -8513,6 +8526,7 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        lines.extend(sim_noise_spectrum.control_lines(analysis, raw_path))  # #7866
         if analysis["kind"] == "ac" and not measurements_spec:
             # An aborted sweep has no frequency vector to count (#7293).
             lines.extend(["if length(frequency) > 0", "display frequency", "end"])
@@ -9674,10 +9688,6 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     return values
 
 
-#: The numeric bounds that contribute coverage checks (issue #1996).
-_RECOGNISED_LIMIT_KEYS = ("min", "max")
-
-
 def _measurement_coverage(
     spec: dict[str, Any], corner: dict[str, Any], corner_index: int
 ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
@@ -10348,26 +10358,11 @@ def _rollup_measurements(
 
 # --------------------------------------------------------------------------- #
 # Waveform artifact (rawfile -> JSON)
-# The reader/writer moved to `sim_raw.py` (issue #6752); only the noise-mode
-# classifier of a parsed waveform stays here.
+# The reader/writer moved to `sim_raw.py` (issue #6752), the noise-mode
+# classifier of a parsed waveform to `sim_noise.py` (issue #7866).
 # --------------------------------------------------------------------------- #
 
-
-def noise_representation(waveform: dict[str, Any]) -> str:
-    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
-    (issue #3006).
-
-    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
-    records which mode produced it: the integrated plot is named
-    ``Integrated Noise`` with ``voltage``/``current`` variables, or
-    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
-    """
-    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
-        return "power"
-    for var in waveform.get("variables", []):
-        if str(var.get("type", "")).endswith("^2"):
-            return "power"
-    return "amplitude"
+noise_representation = sim_noise.noise_representation
 
 
 # --------------------------------------------------------------------------- #

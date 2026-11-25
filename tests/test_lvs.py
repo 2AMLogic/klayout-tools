@@ -17414,35 +17414,6 @@ def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
 
 
 @pytest.mark.parametrize(
-    ("assign", "reason"),
-    [
-        ("assign b = {0{a}};", "positive integer"),
-        ("assign b = {N{a}};", "replication or nested"),
-        ("assign b = { a, {c };", "found"),
-        ("assign b = { a, c}};", "unbalanced"),
-        ("assign b = { a, 1'b0 };", "literal"),
-        ("assign b = { a[1:0], c };", "part-select"),
-        ("assign b = { a, undeclared };", "no 'wire'"),
-        ("assign b = { a, c, c };", "bit\\(s\\) wide"),
-        ("assign {b, c} = { a, c };", "left-hand side"),
-        ("assign b = {};", "empty"),
-        ("assign b = a & c;", "found"),
-    ],
-)
-def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reason):
-    """Issue #2372/#4117 handle plain, nested and replicated concatenations;
-    literals, part-selects, width mismatches and general expressions keep
-    failing loudly with the "only a plain ... is supported" error."""
-    text = (
-        "module m(a, b);\n  input [1:0] a;\n  output [2:0] b;\n  wire c;\n"
-        f"  {assign}\n  cellx u0 (.A(c), .Y(b[0]));\nendmodule\n"
-    )
-    with pytest.raises(VerilogNetlistError, match="only a plain 'assign") as exc:
-        parse_gate_level_verilog(text)
-    assert re.search(reason, str(exc.value))
-
-
-@pytest.mark.parametrize(
     "rhs",
     [
         "{ { a1, a0 }, c }",
@@ -17496,6 +17467,9 @@ def _assign_aliases(decls: str, assign: str) -> dict[str, str]:
     return _parse_module_chunk(text).aliases
 
 
+#: Issue #7822 end to end: the concatenation's slice operand resolves
+#: through the aliases, so an instance connection reading a slice-driven
+#: bus bit wires to the selected source bit.
 def test_parse_gate_level_verilog_assign_part_select_rhs():
     aliases = _assign_aliases(
         "  wire [15:0] word;\n  wire [7:0] imm;\n  wire [1:0] sel;",

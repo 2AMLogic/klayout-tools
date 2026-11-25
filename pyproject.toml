@@ -117,7 +117,7 @@ yield = [
 #      script is always invoked as its own subprocess by the cross-
 #      validation test -- see that script's module docs for the full
 #      rationale. Kept as an installable extra (not a `[tool.uv.sources]`
-#      path dependency like the `mom`/`congestion`/`yield` groups above)
+#      path dependency like the checkout-local `mom` and `yield` groups)
 #      because -- unlike those in-repo Rust crates -- `PyNEC` is a real
 #      published PyPI package with no in-repo source of its own.
 #   2. `python_version >= "3.11"` mirrors `PyNEC`'s own declared
@@ -172,17 +172,12 @@ mom-pypeec-cross-validation = [
 #      in published metadata.
 #
 # - `mom`: `klt_mom_native` backing `klt mom` (issue #718, epic #701).
-# - `congestion`: `klt_congestion_native`, FLUTE/RUDY post-placement
-#   congestion research spike (issue #785); no shipped `klt` verb.
 # - `yield`: `klt_yield_native` backing `klt yield` (issue #816, epic #710).
 # - `statime`: `klt_statime_native` backing `klt synthesize`'s `sta` report
 #   (issues #809/#925); the field degrades to `null` when absent.
 [dependency-groups]
 mom = [
     "klt-mom-native",
-]
-congestion = [
-    "klt-congestion-native",
 ]
 # Checkout-local from-source build of the same crate that the `yield` *extra*
 # above installs prebuilt from PyPI (issue #2531); CI uses this group so the
@@ -214,7 +209,6 @@ cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true 
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
-klt-congestion-native = { path = "native/congestion" }
 klt-yield-native = { path = "native/yield" }
 klt-statime-native = { path = "native/statime" }
 

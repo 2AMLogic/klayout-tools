@@ -46,8 +46,13 @@ def reference_module_names(path: str, form: str) -> dict[str, dict[str, str]]:
     every other form or when none was mapped, so it splats into the report."""
     if form != "gate-level-verilog":
         return {}
+    with open(path, encoding="utf-8") as handle:
+        return reference_module_names_from_text(handle.read())
+
+
+def reference_module_names_from_text(text: str) -> dict[str, dict[str, str]]:
+    """Report the module names mapped when converting this Verilog source."""
     from .verilog_netlist import _parse_with_names
 
-    with open(path, encoding="utf-8") as handle:
-        names = _parse_with_names(handle.read())[1]
+    names = _parse_with_names(text)[1]
     return {"reference_module_names": names} if names else {}

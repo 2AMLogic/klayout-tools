@@ -91,9 +91,10 @@ from .signoff_base import (
     ATTESTABLE_ITEMS,
     CHARACTERIZATION_ITEM,
     SCHEMA_VERSION,
-    SignoffError,
 )
 from .signoff_base import STREAM_ATTESTABLE_ITEM as STREAM_ATTESTABLE_ITEM
+from .signoff_base import AttestationError as AttestationError
+from .signoff_base import SignoffError as SignoffError
 
 #: The attestation-inventory schema version this build mints against. The
 #: inventory is a public, versioned contract (``docs/json-contract.md``);
@@ -154,14 +155,6 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
-
-
-class AttestationError(SignoffError):
-    """A malformed inventory or committed envelope -- nothing was attested.
-
-    A :class:`~klayout_tools.signoff.SignoffError` subclass so the CLI's
-    existing ``except SignoffError`` reports it through the ordinary error
-    envelope (exit ``1``)."""
 
 
 # --------------------------------------------------------------------------- #

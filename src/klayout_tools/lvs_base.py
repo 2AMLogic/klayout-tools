@@ -55,6 +55,7 @@ CATEGORY_DEVICE_FINFET_BULK_TIED = "device.finfet_bulk_tied"
 #: geometry alone (see `_apply_reference_placeholder_values`).
 CATEGORY_DEVICE_PLACEHOLDER_VALUE = "device.placeholder_value"
 CATEGORY_DEVICE_PROPERTY = "device.property"
+CATEGORY_DEVICE_CONNECTIVITY = "device.connectivity"
 #: Issue #589: `options.parameter_tolerance` absorbed a matched device pair's
 #: parameter difference -- the disclosure that a `"match"` verdict rests on a
 #: caller-supplied *design* tolerance rather than on the two values actually

@@ -33,13 +33,13 @@ token from :data:`ERROR_CODES` -- never a silent pass or a substituted value.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_measurement_kind, sim_slope_band
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
 from .sim_measurement_grading import _vector_measurement_result
 
@@ -61,10 +61,6 @@ _NUMBER_KEYS = ("anchor", "min_slope", "max_slope")
 _KEYS = (*_SELECTOR_KEYS, *_NUMBER_KEYS, "report")
 _ALLOWED_KEYS = frozenset(_KEYS)
 
-#: Single-ended ``v(node)``: one non-empty token without whitespace, control
-#: characters, commas or parentheses -- the same rule as ``snm``.
-_SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
 _VECTOR_PREFIX = "__klt_sband_"
 
 #: Every other measurement form an entry must not also declare, derived from
@@ -82,14 +78,6 @@ def slope_band_measurements(
     measurements_spec: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [spec for spec in measurements_spec if is_slope_band(spec)]
-
-
-def normalize_selector(selector: Any) -> str | None:
-    """``"v(node)"`` lower-cased, or ``None`` when not an accepted selector."""
-    if not isinstance(selector, str):
-        return None
-    match = _SELECTOR_RE.match(selector)
-    return None if match is None else f"v({match.group(1).lower()})"
 
 
 def _pair(spec: dict[str, Any]) -> tuple[str, str]:

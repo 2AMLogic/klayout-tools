@@ -374,6 +374,7 @@ def _print_from_def_text(report: dict) -> None:
     print()
     _pass("min_area_repair", report["min_area_repair"])
     _pass("power_stack_repair", report["power_stack_repair"])
+    _pass("m4_grid_repair", report["m4_grid_repair"])
     trim = report["via_pad_trim"]
     _pass("via_pad_trim", trim)
     if trim is not None:

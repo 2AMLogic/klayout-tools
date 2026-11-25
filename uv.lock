@@ -1520,9 +1520,6 @@ yield = [
 ]
 
 [package.dev-dependencies]
-congestion = [
-    { name = "klt-congestion-native" },
-]
 mom = [
     { name = "klt-mom-native" },
 ]
@@ -1558,16 +1555,10 @@ requires-dist = [
 provides-extras = ["dev", "functional-verification", "mcp", "mom-cross-validation", "mom-pypeec-cross-validation", "yield"]
 
 [package.metadata.requires-dev]
-congestion = [{ name = "klt-congestion-native", directory = "native/congestion" }]
 mom = [{ name = "klt-mom-native", directory = "native/mom" }]
 numerical = [{ name = "numpy", specifier = ">=2.2" }]
 statime = [{ name = "klt-statime-native", directory = "native/statime" }]
 yield = [{ name = "klt-yield-native", directory = "native/yield" }]
-
-[[package]]
-name = "klt-congestion-native"
-version = "0.1.0"
-source = { directory = "native/congestion" }
 
 [[package]]
 name = "klt-mom-native"

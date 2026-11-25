@@ -524,10 +524,6 @@
       "line": 94.6,
       "branch": 87.7
     },
-    "src/klayout_tools/congestion.py": {
-      "line": 22.3,
-      "branch": 0.0
-    },
     "src/klayout_tools/corner_matrix.py": {
       "line": 87.3,
       "branch": 73.0

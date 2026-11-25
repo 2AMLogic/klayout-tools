@@ -18,12 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-
-def _error(message: str) -> Exception:
-    """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
-    from klayout_tools.signoff_attest import AttestationError
-
-    return AttestationError(message)
+from .signoff_base import AttestationError
 
 
 def validated_depends_on(
@@ -43,7 +38,7 @@ def validated_depends_on(
     enjoys), so a dependency may repeat across entries and may itself be an
     inventoried member -- only a repeat *within* one entry is refused."""
     if not isinstance(raw, list):
-        raise _error(
+        raise AttestationError(
             f"'{field}.depends_on' must be a list of repository-relative paths"
         )
     seen: set[str] = set()
@@ -51,7 +46,9 @@ def validated_depends_on(
     for dep in raw:
         normalized = normalize_path(dep, f"{field}.depends_on", root)
         if normalized in seen:
-            raise _error(f"'{field}.depends_on' lists '{normalized}' more than once")
+            raise AttestationError(
+                f"'{field}.depends_on' lists '{normalized}' more than once"
+            )
         seen.add(normalized)
         deps.append(normalized)
     return sorted(deps)

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .place_and_route_portable import PDK_ROOT_TOKEN, path_under_root
+
+if TYPE_CHECKING:
+    from .lvs_gate_level_preparation import _GateLevelPreparation
 
 
 def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
@@ -71,6 +74,7 @@ def assemble_lvs_report(
     reference_pin_order_sources: Any,
     reference_pin_order_files: Any,
     reference_netlist_path: Any,
+    prepared_reference: _GateLevelPreparation | None = None,
     extracted_netlist_path: Any,
     equivalent_pins_applied: Any,
     constant_bindings: Any,
@@ -425,9 +429,17 @@ def assemble_lvs_report(
             # launches no subprocess.
             "netgen_binary": netgen_binary,
             "layout_sha256": sha256_file(layout_hash_source),
-            "reference_sha256": sha256_file(reference_netlist_path),
+            "reference_sha256": (
+                prepared_reference.source_sha256
+                if prepared_reference is not None
+                else sha256_file(reference_netlist_path)
+            ),
             "extracted_netlist": extracted_netlist_path,
-            **reference_module_names(reference_netlist_path, reference_form),
+            **(
+                prepared_reference.module_names
+                if prepared_reference is not None
+                else reference_module_names(reference_netlist_path, reference_form)
+            ),
         },
         # Issue #2693: built above the return (per-form `pin_order_sources`).
         "provenance": provenance,

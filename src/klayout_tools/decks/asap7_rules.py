@@ -23,6 +23,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import asap7_v0_gaps as _v0_gaps
+from . import asap7_v123_gaps as _v123_gaps
+
 #: The DRC-DSL deck script this module describes.
 DECK_PATH = Path(__file__).with_name("asap7.drc")
 
@@ -46,8 +49,7 @@ class Asap7Rule:
 
 @dataclass(frozen=True)
 class Asap7RuleGap:
-    """A DRM rule in a covered table (3.1-3.19) that the deck does not
-    check yet."""
+    """An unchecked rule from DRM Tables 3.1–3.19."""
 
     id: str
     table: str
@@ -533,19 +535,9 @@ _ACTIVE_NOTCH = (
     "enforced"
 )
 _TRACK = (
-    "classified by routing track (same / parallel / aligned tracks); the deck "
-    "has no routing-direction or track assignment"
-)
-_END_CAP = (
-    "corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs "
-    "per-via end-cap classification against the upper metal"
-)
-_LISD_EXACT_3 = (
-    "'== 3 nm on at least two opposite sides' is expressible without a routing "
-    "direction, but the literal '==' contradicts the pinned shipped cells (100 "
-    "V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every "
-    "opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells "
-    "satisfy only the 'at least 3 nm' reading, so the exact check is not shipped"
+    "The deck lacks routing direction and track assignment to distinguish same-track "
+    "from parallel-track pairs. Shifted cuts in Fig. 1.2.6(c) need 27 nm. For strictly "
+    "nested projections, the choice between 18 and 27 nm is unverified."
 )
 _EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
 _SADP_TRACK = (
@@ -614,23 +606,13 @@ def _top_metal_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     )
 
 
-def _v123_spacing_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
+def _v123_spacing_gaps(layer: str, corner: str) -> tuple[Asap7RuleGap, ...]:
     t = "Table 3.13.1"
     return (
         Asap7RuleGap(f"{layer}.S.1", t, _TRACK, "#3147"),
-        *_gaps(tuple(f"{layer}.S.{n}" for n in (2, 3, 4)), t, _END_CAP, "#3147"),
+        *_gaps(tuple(f"{layer}.S.{n}" for n in (2, 3, 4)), t, corner, "#3147"),
     )
 
-
-_V0_LIG_ENCLOSURE = (
-    "V0 encloses LIG by at least 1 nm on opposite sides. Each pinned RVT, LVT "
-    "and SLVT library has 1,413 selected V0 wholly inside LIG."
-)
-
-_V0_LIG_DIRECTION = (
-    "In each pinned library, 4,899 selected cuts touch horizontal LIG only on their "
-    "vertical V0 edges. A square LIG has no unique length axis."
-)
 
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
@@ -646,17 +628,21 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     ),
     # V0 (Tables 3.11.1 / 3.11.2)
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
-    *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
-    *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
-    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _V0_LIG_ENCLOSURE, "#3147"),
-    Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _V0_LIG_DIRECTION, "#3147"),
+    *_gaps(
+        ("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _v0_gaps.CORNER_SPACING, "#3147"
+    ),
+    *_gaps(
+        ("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _v0_gaps.LISD_EXACT_3, "#3147"
+    ),
+    Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _v0_gaps.LIG_ENCLOSURE, "#3147"),
+    Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _v0_gaps.LIG_DIRECTION, "#3147"),
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
-    *_v123_spacing_gaps("V1"),
+    *_v123_spacing_gaps("V1", _v123_gaps.CORNER_SPACING_M2_M3),
     Asap7RuleGap("V1.M2.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
-    *_v123_spacing_gaps("V2"),
+    *_v123_spacing_gaps("V2", _v123_gaps.CORNER_SPACING_M2_M3),
     Asap7RuleGap("V2.M3.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
-    *_v123_spacing_gaps("V3"),
+    *_v123_spacing_gaps("V3", _v123_gaps.CORNER_SPACING_M4),
     # M4-M7 / V4-V7 (Tables 3.14-3.17)
     *_sadp_metal_gaps("M4", "Table 3.14.1", "Table 3.14.2"),
     *_sadp_metal_gaps("M5", "Table 3.14.1", "Table 3.14.2"),

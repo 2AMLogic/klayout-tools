@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 
 import klayout.db as kdb
 import pytest
@@ -202,7 +203,9 @@ def test_discard_generated_artifacts(request_file, monkeypatch):
 
     from klayout_tools import _geode
 
-    _edit(request_file, options={"geode_binary": "/bin/true", "keep_artifacts": False})
+    _edit(
+        request_file, options={"geode_binary": sys.executable, "keep_artifacts": False}
+    )
     stages = []
 
     def replay(cmd, report_path, log_path, timeout, keep):

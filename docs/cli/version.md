@@ -430,8 +430,9 @@ The recorded form is the canonical reconstruction recipe — see
 "Reproducing a recorded pin" above for its edge cases (`klayout_version:
 null`, `reinstall_spec: null`).
 
-`klt drc`/`klt lvs` reports compare the two fields automatically —
-`provenance.klayout_version_mismatch` — with a stderr warning on drift whose
+`klt drc`/`klt lvs`/`klt extract` reports compare the two fields
+automatically — `provenance.klayout_version_mismatch` — with a stderr
+warning on drift whose
 remedy prints whichever of the two forms matches the running build (issue
 #5601); see [`../json-contract.md`](../json-contract.md)'s "Pinning the
 KLayout engine version" section.

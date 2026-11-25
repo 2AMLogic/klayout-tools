@@ -42,8 +42,12 @@ warranted."
    same count (it *parses the 25 above out of this file*, so the two can never
    drift apart), and `.github/workflows/release.yml` runs it first on every
    scheduled or dispatched run (see "Automated release"). The script itself is
-   advisory and never tags, pushes, or triggers `publish.yml`. Run it locally
-   the same way CI does:
+   advisory and never tags, pushes, or triggers `publish.yml`. When it can read
+   Actions history (a `gh` on PATH plus `GH_TOKEN`/`GITHUB_TOKEN`), the report
+   links to the most recent failed `release.yml` run, including after a later
+   successful run. The lookup is best-effort and preserves the exit codes
+   (issue #6911). Run it
+   locally the same way CI does:
 
    ```bash
    scripts/check-release-lag.sh            # exit 1 ⇒ a release is due
@@ -216,8 +220,17 @@ depending on someone remembering. Design decisions:
   issue if the table differs in anything other than `git_commit`.
 - **Gates fail loudly, once.** `scripts/check_native_extras.py` runs before the
   PR is opened and again before tagging; if a `klt-*-native` pin is unpublished
-  the job files (or refreshes in place) a single "Automated release blocked"
-  issue and opens no PR or tag. `publish.yml` keeps its own copy of the gate.
+  the job fails at that step and opens no PR or tag. `publish.yml` keeps its
+  own copy of the gate.
+- **A failed job is reported, recoverably (issue #6911).** A `report-failure`
+  job runs after either the prepare or the tag job fails and files — or
+  refreshes in place — the one open "Automated release blocked" issue with the
+  failed step, its diagnostic, and the run URL, using the workflow's own token
+  (never the release-PR credential, which may be exactly what failed; this
+  covers native-extras failures too). The prepare job also checks the
+  PR-creation setup *before* pushing anything, and a PR-creation failure after
+  a successful push is reconciled against the exact branch that run pushed —
+  see "When the automated release fails" below.
 - **The GitHub Release is part of the pipeline.** After the PyPI upload
   succeeds, `publish.yml`'s `github-release` job creates the GitHub Release
   for the tag from the matching `## X.Y.Z (date)` section of `CHANGELOG.md`
@@ -230,25 +243,87 @@ depending on someone remembering. Design decisions:
   existing `vX.Y.Z` tag; do not re-tag.
 - `release-lag.yml` was retired; its check is the first step of `release.yml`.
 
-One-time setup (human): enable "Allow GitHub Actions to create and approve pull
-requests" in repository settings and, optionally, add `RELEASE_BOT_TOKEN`. The
-workflow has not been exercised live; use a `dry_run` dispatch first.
+### Administrator setup (human-only)
+
+These settings are owned by a repository administrator (or, when an
+organization policy enforces a value, by the organization owner — automation
+cannot read or change either):
+
+1. **PR creation.** Enable **Settings → Actions → General → Workflow
+   permissions → "Allow GitHub Actions to create and approve pull requests"**
+   for this repository. Without it, the default `GITHUB_TOKEN` cannot open the
+   release PR: this was observed live on 2026-11-16
+   ([run 43981896573](https://github.com/2AMLogic/klayout-tools/actions/runs/43981896573)),
+   where GitHub accepted the push of `release/v0.10.0` and one second later
+   denied `createPullRequest` with "GitHub Actions is not permitted to create
+   or approve pull requests", leaving the branch orphaned on the remote (the
+   workflow now probes this setting before pushing and reconciles the branch
+   on a PR failure; #6897 tracks the one-time disposition of the two orphaned
+   branches).
+   The prepare job's setup check reads the setting when it can; a readable
+   `can_approve_pull_request_reviews: false` stops the run *before* anything is
+   pushed (a 403 — the value is admin-only — leaves it unknown and the run
+   proceeds under the push-time recovery above).
+2. **`RELEASE_BOT_TOKEN` (alternative to 1).** An optional repository secret
+   holding a token that may open pull requests (e.g. a GitHub App token). When
+   set, the checkout, the push, and the PR all use its own permissions instead
+   and the setting in 1 does not apply.
+3. **Required checks on the release PR.** A PR opened with the default
+   `GITHUB_TOKEN` does not start other workflows' `pull_request` events, so
+   required checks never run on it. With `RELEASE_BOT_TOKEN` (2) they run on
+   the PR as usual. Without it, start CI by pushing an empty commit to the
+   release branch (`git commit --allow-empty -m ci --no-verify && git push`).
+
+Until the applicable setting in 1 or the token in 2 is in place, the automated
+release reports a blocked issue instead of opening a PR; use a `dry_run`
+dispatch to exercise the pipeline safely.
+
+### When the automated release fails
+
+- Any failed `prepare` or `tag` job produces **one** open
+  "Automated release blocked" issue, refreshed in place by the next failure
+  (not re-filed): the failed step, the diagnostic tail, and links to the run
+  and job. Start there. The release-lag report also names the newest failed
+  `release.yml` run when Actions history is available.
+- **The release branch was kept** (the log says so): the open-PR lookup or the
+  remote-ref lookup was inconclusive, or the remote branch had moved off the
+  SHA this run pushed. Check for an open PR on that head first — the PR may
+  exist even though the creating call reported an error — and delete the
+  branch by hand only when there is none and it still points at the run's
+  recorded SHA. A kept branch makes the next attempt's push fail fast rather
+  than overwrite it; delete or merge it before re-running.
+- **A PR failure after a successful push is recoverable on retry**: the run
+  deletes the branch it pushed (expected-SHA lease) when no open PR exists for
+  it, so a re-run prepares a fresh commit and pushes cleanly. Fix the reported
+  cause first — usually the administrator setup above.
+- **The tag was pushed but `publish.yml` was not dispatched**: run
+  `publish.yml` via "Run workflow" on the existing `vX.Y.Z` tag; do not re-tag.
 
 ## The release sequence (manual fallback)
 
 Let `X.Y.Z` be the new version.
 
 1. **Prepare the release** on a branch and merge it to `main` through a normal
-   PR.
+   PR. The order mirrors the prepare job in
+   `.github/workflows/release.yml` — in particular the version bump must be
+   *committed* before the generators run (the site data reads the new
+   CHANGELOG heading, the deck history reads HEAD's `pyproject.toml` as the
+   release), and the generated files are folded in by amending that commit:
 
    ```bash
+   # The native gate both automated jobs run first (docs/releasing-native.md).
+   uv run --python 3.12 --no-project python scripts/check_native_extras.py
+
    git checkout -b release/vX.Y.Z
    python3 scripts/release_prep.py prepare --version X.Y.Z
    uv lock
-   uv run python scripts/gen_site_cli_data.py
    git add -A -- pyproject.toml uv.lock CHANGELOG.md changelog.d/ \
-     docs/cli/signoff.md site/src/data/cli.generated.json
+     docs/cli/signoff.md
    git commit -m "chore(release): bump version to X.Y.Z"
+   uv run python scripts/gen_site_cli_data.py
+   python3 scripts/generate_deck_history.py --as-release vX.Y.Z
+   git add -A
+   git commit --amend --no-edit
    git push -u origin release/vX.Y.Z
    gh pr create --title "chore(release): bump version to X.Y.Z" --body "Release X.Y.Z"
    ```
@@ -288,7 +363,9 @@ Let `X.Y.Z` be the new version.
 
 5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see
-   `docs/cli/deck.md`'s "Regenerating" section):
+   `docs/cli/deck.md`'s "Regenerating" section). Step 1 already added the
+   pending entry via `--as-release` (its `git_commit` is `null` until the tag
+   exists); this replaces that placeholder with the tag's sha:
 
    ```bash
    python scripts/generate_deck_history.py

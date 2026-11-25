@@ -2130,18 +2130,13 @@ def run_deck_request(
     dry_run: bool = False,
     collect_partial: bool = False,
 ) -> dict[str, Any]:
-    """Run a validated-in-shape deck-list request on ``backend`` and return
-    the deck-list report (the dict ``klt sim`` emits through the shared
-    JSON envelope). Called by ``sim.run_sim`` when the request carries
-    ``decks``; the caller-facing flags the corner machinery owns
-    (``--hosts``, ``--budget-s``, ``--plot``,
-    ``--fail-fast-probe``, ``--fail-on-diagnostic``) are rejected by
-    ``run_sim`` before reaching here.
+    """Run a deck list and return the report emitted by ``klt sim``.
+    The dispatcher rejects the corner-only hosts, budget, plot, probe and
+    diagnostic flags before calling this function. A CLI worker override
+    travels to off-host executors in the staged request options.
 
-    ``artifacts_dir`` is where every unit's directory (streams and declared
-    outputs) is written -- there is no keep_artifacts switch, because the
-    streams *are* the result. It defaults to a ``.klt/sim/`` directory next
-    to the request file, the same convention as the corner backend.
+    Every unit writes its streams and declared outputs under ``artifacts_dir``,
+    which defaults to ``.klt/sim/`` next to the request file.
 
     ``resume`` (``local``/``local-parallel``/``batch``; issue #3957) skips
     every unit whose ``<outdir>/<id>/unit.json`` completion record matches
@@ -2169,6 +2164,12 @@ def run_deck_request(
             "--attach for a deck-list request -- the submitted job is one "
             "unit of work that is collected whole"
         )
+    options = request_options(request)
+    if max_workers is not None:
+        # The off-host worker receives only the staged JSON, including CLI overrides.
+        options = {**options, "max_workers": max_workers}
+        request = {**request, "options": options}
+    max_workers = options.get("max_workers")
     if max_workers is not None and (not is_int(max_workers) or max_workers < 1):
         raise SimError("options.max_workers must be a positive integer")
     units = plan_deck_units(
@@ -2176,7 +2177,6 @@ def run_deck_request(
         request_dir=request_dir,
         allow_worker_form=backend not in ("remote", "batch"),
     )
-    options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     # Issue #5738: plan_deck_units already rejected a malformed value; this
     # re-read of the (now known-good) option is what threads the lines into

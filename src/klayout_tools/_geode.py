@@ -84,12 +84,14 @@ def build_geode_spec(request: dict[str, Any], mesh_abs: str) -> dict[str, Any]:
     return spec
 
 
-def build_geode_command(binary: str, spec_path: str, report_path: str) -> list[str]:
+def build_geode_command(
+    binary: str, spec_path: str, report_path: str, command: str = "capacitance"
+) -> list[str]:
     """argv per geode-fem ``main.rs`` (``StaticArgs``): the positional
     argument is the problem-spec path (not a mesh path) and ``--output``
     moves the JSON report from stdout to a file. There is no
     ``--terminals`` and no ``--format`` flag."""
-    return [binary, "capacitance", spec_path, "--output", report_path]
+    return [binary, command, spec_path, "--output", report_path]
 
 
 def _validated_matrix(names: list[Any], matrix: Any) -> list[list[float]]:
@@ -265,11 +267,11 @@ def generate_mesh(
     return mesh, _mesh_stats(report)
 
 
-def solve_mesh(
-    binary: str, outdir: str, timeout: float, keep: bool
-) -> tuple[list[str], list[list[float]]]:
+def run_solver(
+    binary: str, command: str, outdir: str, timeout: float, keep: bool
+) -> str:
     spec = os.path.join(outdir, "spec.json")
     report = os.path.join(outdir, "report.json")
-    cmd = build_geode_command(binary, spec, report)
+    cmd = build_geode_command(binary, spec, report, command)
     _run_engine(cmd, report, os.path.join(outdir, "solve.log"), timeout, keep)
-    return parse_capacitance_report(_read_file(report))
+    return _read_file(report)
