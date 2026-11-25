@@ -334,20 +334,31 @@ def test_one_converted_passive_call_restores_the_native_pairing(
 @pytest.mark.parametrize(
     ("model", "paired"), [("rppd", 84), ("rhigh", 90), ("rsil", 86)]
 )
-def test_unwrapped_valued_poly_keeps_mixed_census_and_unresolved_call(
-    pdk_lvs, tmp_path, model, paired
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("$SUB=sub $[{model}]", "$SUB=sub {model}"),
+        ("$SUB=sub $[{model}]", "$SUB=sub ${model}"),
+        ("a_2 b_2 sub {model}", "a_2 b_2 sub / {model}"),
+        ("a_1 b_1 sub {model}", "a_1 b_1 sub / {model}"),
+    ],
+    ids=["bare", "dollar", "slash-native", "slash-call"],
+)
+def test_native_poly_spellings_keep_mixed_census_and_unresolved_call(
+    pdk_lvs, tmp_path, model, paired, original, replacement
 ):
     gds, cdl = _unit_control(pdk_lvs, tmp_path, "res_devices", model)
     mixed = _passives_as_calls(cdl, model, {"R_pattern_1"})
     assert "\nXR_pattern_1 " in mixed
-    wrapped = f"$SUB=sub $[{model}]"
-    assert wrapped in mixed
-    mixed = mixed.replace(wrapped, f"$SUB=sub {model}", 1)
+    original = original.format(model=model)
+    assert original in mixed
+    mixed = mixed.replace(original, replacement.format(model=model), 1)
     mixed = mixed.replace(".ENDS top", "XQ9 a b c sub npn13G2v Nx=1\n.ENDS top")
     report = _lvs(pdk_lvs, tmp_path, gds, mixed, form="subckt-call")
     assert report["counts"]["devices"]["matched"] == paired
     census = report["device_census"]
     assert census["reference_source"] == _folded(census["reference"])
+    assert sum(census["reference_source"].values()) == paired
     assert unrecognised_device_gaps(report) == []
     assert [m["instance"]["reference"] for m in _unresolved(report)] == ["Q9"]
 

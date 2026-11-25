@@ -77,11 +77,17 @@ _TERMINALS = 4
 _CDL_MODEL = re.compile(r"\$\[(.+)\]")
 
 
-def sg13g2_model_name(name: object) -> str:
+def sg13g2_model_name(name: object, element: str | None = None) -> str:
     """The upper-cased model name as the IHP reader sees it in native CDL."""
-    text = str(name or "")
+    text = str(name or "").upper()
     wrapped = _CDL_MODEL.fullmatch(text)
-    return (wrapped.group(1) if wrapped else text).upper()
+    if wrapped:
+        return wrapped.group(1)
+    # IHP also accepts bare $rppd, $rhigh and $rsil on poly resistor cards.
+    bare = text.removeprefix("$")
+    if element == "R" and PASSIVE_CARD_SHAPES.get(bare) == ("R", 3):
+        return bare
+    return text
 
 
 def native_primitive_names() -> frozenset[str]:

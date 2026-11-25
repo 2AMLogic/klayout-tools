@@ -9,10 +9,13 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .lvs_base import LvsError
 from .lvs_runset_sg13g2_cards import PASSIVE_CARD_SHAPES, sg13g2_model_name
+
+if TYPE_CHECKING:
+    import klayout.db as kdb
 
 #: ``reference.form`` values the runset engine accepts.
 _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
@@ -150,7 +153,8 @@ def _sg13g2_reference_cards(
         elif head[0].lower() == ".ends":
             enclosing = ""
         elif head[0][:1].lower() == "x":
-            tokens = _tokenize(line)
+            # The CDL pin/model separator is not a terminal of the native card.
+            tokens = [token for token in _tokenize(line) if token != "/"]
             positional, params = _split_params(tokens[1:])
             name = positional[-1] if positional else ""
             model = name.upper()
@@ -299,6 +303,24 @@ _VALUE_ELEMENTS = ("C", "R", "L")
 _CDL_SUBSTRATE = re.compile(r"(?<!\S)\$?SUB\s*=\s*", re.IGNORECASE)
 
 
+def _restore_poly_card(
+    reader: kdb.NetlistSpiceReaderDelegate, s: str, card: kdb.ParseElementData
+) -> None:
+    """Keep KLayout's parsed resistance and recover the IHP model and substrate."""
+    model = sg13g2_model_name(card.model_name, "R")
+    if PASSIVE_CARD_SHAPES.get(model) != ("R", 3):
+        return
+    card.model_name = model
+    if (
+        len(card.net_names) == 2
+        and {"$SUB", "SUB"}.intersection(card.parameters)
+        and (substrate := _CDL_SUBSTRATE.search(s))
+    ):
+        # Read the RHS as a net token so e.g. 007 keeps its spelling.
+        tail = reader.parse_element_components(s[substrate.end() :], reader.variables())
+        card.net_names = [*card.net_names, tail.strings[0]]
+
+
 def _stand_in_card(card: str, element: str) -> tuple[str, str]:
     """``(card, element)`` to re-parse a valueless ``R``/``C``/``L`` card the
     plain parse refused: the retries of IHP's ``CustomReader#parse_element``
@@ -370,12 +392,14 @@ def tolerant_spice_reader() -> Any:
 
     class _Delegate(kdb.NetlistSpiceReaderDelegate):
         def parse_element(self, s: str, element: str) -> Any:
+            # IHP CDL permits a standalone slash between the pins and model.
+            s = re.sub(r"\s+/\s+", " ", s)
             if element not in _VALUE_ELEMENTS:
                 return super().parse_element(s, element)
             parts = self.parse_element_components(s, self.variables())
             if parts.strings:
                 *nets, model = parts.strings
-                model = sg13g2_model_name(model)
+                model = sg13g2_model_name(model, element)
                 params = parts.parameters
                 value = params.get(element, 0.0)
                 # CDL can put a resistance in the third field. Let KLayout
@@ -392,24 +416,10 @@ def tolerant_spice_reader() -> Any:
             try:
                 card = super().parse_element(s, element)
             except RuntimeError:
-                return super().parse_element(*_stand_in_card(s, element))
+                card = super().parse_element(*_stand_in_card(s, element))
 
-            model = sg13g2_model_name(card.model_name)
-            if (
-                element == "R"
-                and PASSIVE_CARD_SHAPES.get(model) == ("R", 3)
-                and len(card.net_names) == 2
-                and {"$SUB", "SUB"}.intersection(card.parameters)
-                and (substrate := _CDL_SUBSTRATE.search(s))
-            ):
-                # KLayout reads the positional resistance but leaves SUB in
-                # parameters. Read its RHS as a net token so e.g. 007 retains
-                # its spelling instead of becoming the numeric parameter 7.0.
-                tail = self.parse_element_components(
-                    s[substrate.end() :], self.variables()
-                )
-                card.net_names = [*card.net_names, tail.strings[0]]
-                card.model_name = model
+            if element == "R":
+                _restore_poly_card(self, s, card)
             return card
 
         def element(

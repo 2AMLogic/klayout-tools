@@ -36,6 +36,7 @@ tmp_path = reference_tests.tmp_path  # pytest collects the fixture by module-lev
         ),
         # ``m`` omitted takes the symbol's default; keys fold to lower case.
         ("Xc2 a b cap_cmim W=7u L=8u", "CXc2 a b cap_cmim w=7u l=8u m=1"),
+        ("XC3 a/b c / cap_cmim w=7u l=8u", "CXC3 a/b c cap_cmim w=7u l=8u m=1"),
         # Three terminals ``A B <body>``; ``b``/``ps`` are carried as written.
         (
             "XR1 n1 n2 sub rppd w=0.5u l=0.5u m=1 b=0",
@@ -167,11 +168,13 @@ def test_sg13g2_reader_keeps_the_valueless_cards_as_devices(tmp_path):
     ],
 )
 @pytest.mark.parametrize("bodies", [("0", "sub"), ("sub", "0"), ("sub", "7")])
+@pytest.mark.parametrize("separator", ["", "/"])
 def test_numeric_passive_terminals_retain_their_connections(
-    tmp_path, element, pins, model, bodies
+    tmp_path, element, pins, model, bodies, separator
 ):
     cards = [
-        f"{element}{i} {pins} {body} {model} w=1u" for i, body in enumerate(bodies, 1)
+        f"{element}{i} {pins} {body} {separator} {model} w=1u"
+        for i, body in enumerate(bodies, 1)
     ]
     path, deck = _read(tmp_path, ".subckt top\n" + "\n".join(cards) + "\n.ends\n")
     netlist = kdb.Netlist()
@@ -193,7 +196,11 @@ def test_numeric_passive_terminals_retain_their_connections(
 @pytest.mark.parametrize("native_first", [True, False])
 @pytest.mark.parametrize(
     ("native_fields", "substrate"),
-    [("$SUB=sub {model}", "SUB"), ("sub=007 $[{model}]", "007")],
+    [
+        ("$SUB=sub {model}", "SUB"),
+        ("sub=007 $[{model}]", "007"),
+        ("$SUB=sub/007 ${model}", "SUB/007"),
+    ],
 )
 def test_valued_poly_resistor_keeps_its_substrate_and_resistance(
     tmp_path, model, native_first, native_fields, substrate
@@ -217,14 +224,22 @@ def test_valued_poly_resistor_keeps_its_substrate_and_resistance(
     }
 
 
-def test_grounded_wrapped_resistor_beside_native_valued_cdl(tmp_path):
+@pytest.mark.parametrize("model", ["$[rppd]", "$rppd"])
+def test_grounded_resistor_beside_native_valued_cdl(tmp_path, model):
     path, deck = _read(
         tmp_path,
-        ".subckt top\nR1 a b 0 $[rppd] w=1u l=1u\n"
+        f".subckt top\nR1 a b 0 {model} w=1u l=1u\n"
         "R2 c d sub $[rppd] w=1u l=1u\n"
         "R3 e f 260 $SUB=sub $[rppd] w=1u l=1u\n.ends\n",
     )
     assert lvs_runset_census._reference_source_census(path, deck) == {"RPPD": 3}
+
+
+def test_dollar_prefixed_capacitor_keeps_its_model_name(tmp_path):
+    path, deck = _read(
+        tmp_path, ".subckt top\nC1 a b 74.620f $cap_cmim w=6.99u l=6.99u\n.ends\n"
+    )
+    assert lvs_runset_census._reference_source_census(path, deck) == {"$CAP_CMIM": 1}
 
 
 def test_census_counts_the_converted_passives(tmp_path):
