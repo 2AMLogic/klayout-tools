@@ -23,6 +23,27 @@ def test_merge_group_trigger_and_concurrency(filename: str) -> None:
     )
 
 
+def test_live_canary_manifest_check_reports_drift_only_on_main_pushes() -> None:
+    """The forge comparison must not gate PRs or merge groups (issue #7879).
+
+    `--check-manifest` compares the committed blocks/canaries.json with the live
+    set of public canary repos, so a branch cut before a manifest sync fails it
+    for drift its own diff cannot reach. Only a push to main may report it.
+    """
+    ci = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    lint = ci["jobs"]["lint"]
+    # The required job itself must always run; only this one step is conditional.
+    assert "if" not in lint
+    (step,) = [s for s in lint["steps"] if "--check-manifest" in s.get("run", "")]
+    # Exact condition: adding `|| github.event_name == 'merge_group'` (or any
+    # other event) or dropping it altogether puts the live check back on PRs.
+    assert " ".join(str(step.get("if", "")).split()) == (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    )
+    # On main a drift result must stay a failure, never a silent pass.
+    assert "continue-on-error" not in step
+
+
 def test_authorization_rechecks_only_same_repository_merge_group_ci() -> None:
     workflow = yaml.safe_load((WORKFLOWS / "merge-group-check.yml").read_text())
     ci = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
