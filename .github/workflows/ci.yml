@@ -205,6 +205,20 @@ jobs:
         # failure (never a silent pass). Fix: `scripts/ingest-canary.py
         # --sync-manifest`, then ingest the new entries (blocks/README.md).
         # GATES -- do not add continue-on-error.
+        #
+        # Reports drift on pushes to main ONLY (issue #7879). The comparison is
+        # a committed file against mutable live forge state, so nothing in a
+        # PR's own commits can hold it stable: each time a canary repo went
+        # public (#6763, #7865, #7874) every open PR whose branch predated the
+        # manifest sync went red on a diff that cannot reach the gate, costing
+        # each one a Doctor pass, a Judge pass and a full CI run. Pull requests
+        # and merge groups skip this step and still run the rest of this
+        # required job; main keeps the signal, so a newly public canary turns
+        # the next main lint run red until the manifest is synced. The
+        # deterministic half -- the shipped manifest validating against the
+        # checker -- stays in the pytest suite (tests/test_ingest_canary.py).
+        # tests/test_merge_group_workflow_triggers.py pins this condition.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run --frozen --extra dev python scripts/ingest-canary.py --check-manifest
