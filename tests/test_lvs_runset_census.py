@@ -99,7 +99,7 @@ def test_reference_source_census_folds_the_cdl_model_wrapper(tmp_path):
     reader strips that wrapper from the converted reference, so the source
     census counts those cards under the plain model -- never as a class of
     their own, which signoff would report as devices the reference lacks."""
-    deck = _write_spice(tmp_path / "pdk.lvs", _DECK_TEXT)
+    deck = _write_spice(tmp_path / "sg13g2.lvs", _DECK_TEXT)
     ref = _write_spice(
         tmp_path / "ref.spice",
         "Rp1 n1 n2 260 $SUB=sub $[pdk__res] m=1 l=0.5u w=0.5u\n"
@@ -111,6 +111,13 @@ def test_reference_source_census_folds_the_cdl_model_wrapper(tmp_path):
     assert lvs_runset_census._reference_source_census(ref, deck) == {
         "PDK__CAP": 2,
         "PDK__RES": 2,
+    }
+    other_deck = _write_spice(tmp_path / "gf180mcu.lvs", _DECK_TEXT)
+    assert lvs_runset_census._reference_source_census(ref, other_deck) == {
+        "PDK__CAP": 1,
+        "$[PDK__CAP]": 1,
+        "PDK__RES": 1,
+        "$[PDK__RES]": 1,
     }
 
 

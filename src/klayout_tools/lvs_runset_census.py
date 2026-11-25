@@ -85,7 +85,7 @@ def _reference_source_census(
     import klayout.db as kdb
 
     from .lvs_runset import _deck_device_list
-    from .lvs_runset_reference import reference_spice_reader
+    from .lvs_runset_reference import is_sg13g2_runset, reference_spice_reader
 
     netlist = kdb.Netlist()
     try:
@@ -93,6 +93,7 @@ def _reference_source_census(
     except Exception:
         return None
     device_list = _deck_device_list(deck_file)
+    class_key = _device_class_key if is_sg13g2_runset(deck_file) else str.upper
     counts: dict[str, int] = {}
     for circuit in netlist.each_circuit():
         for subcircuit in circuit.each_subcircuit():
@@ -110,7 +111,7 @@ def _reference_source_census(
                     subcircuit_counts[name] = subcircuit_counts.get(name, 0) + 1
                 counts[name] = counts.get(name, 0) + 1
         for device in circuit.each_device():
-            name = _device_class_key(device.device_class().name)
+            name = class_key(str(device.device_class().name or ""))
             if name:
                 counts[name] = counts.get(name, 0) + 1
     return dict(sorted(counts.items()))
