@@ -117,10 +117,16 @@ def _endpoint_geometry_for(
     j: int,
     fetch: Any,
 ) -> Any:
-    """``route_bundle()``'s own endpoint-geometry rule (relocated): the two
-    endpoint blocks' drawn geometry from ``fetch`` when the pair shares one
-    block or an endpoint is a hand-drawn ``cell`` block, ``None`` otherwise
-    -- the same scoping checks 3/4 apply to a same-block self-net."""
+    """Fetch endpoint obstacles for a bundle leg on the selected layer.
+
+    A same-block leg uses its own geometry. Between blocks, only hand-declared
+    cell ports identify the drawn geometry reliably enough for the own-block
+    escape check (#1527). A generator can draw unreported geometry, such as a
+    MOS array's dummy matching columns (#295, #462).
+
+    The fetcher populates one shared cache. Visit both cell endpoints in pin
+    order so the returned cache includes the geometry of both blocks.
+    """
     if fetch is None:
         return None
     if pins[i]["block"] == pins[j]["block"]:
