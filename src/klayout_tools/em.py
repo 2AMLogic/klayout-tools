@@ -429,7 +429,7 @@ def run_em(request_path: str) -> dict[str, Any]:
         text = run_solver(binary, command, outdir, timeout, keep)
         if thermal:
             results = {"temperature": parse_thermal_report(text, mode)}
-            check_results = []
+            check_results: list[dict[str, Any]] = []
         else:
             results, check_results = _capacitance_results(request, text)
         status = "fail" if any(c["status"] == "fail" for c in check_results) else "pass"
