@@ -63,14 +63,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_finite_number, is_int
-from ._provenance import sha256_file
 from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
@@ -86,7 +84,8 @@ from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import attestation_block, input_binding
 from .signoff_attest_pins import item9_pin_checks
 from .signoff_attest_presence import file_check as _file_check
-from .signoff_attest_presence import path_checks, split_entries
+from .signoff_attest_presence import git_source_checks, path_checks, split_entries
+from .signoff_attest_recorded import recorded_hash_check, validated_recorded
 from .signoff_base import (
     ATTESTABLE_ITEMS,
     CHARACTERIZATION_ITEM,
@@ -95,6 +94,7 @@ from .signoff_base import (
 from .signoff_base import STREAM_ATTESTABLE_ITEM as STREAM_ATTESTABLE_ITEM
 from .signoff_base import AttestationError as AttestationError
 from .signoff_base import SignoffError as SignoffError
+from .signoff_git_source import GitPath, git_entry, git_source
 
 #: The attestation-inventory schema version this build mints against. The
 #: inventory is a public, versioned contract (``docs/json-contract.md``);
@@ -274,7 +274,11 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 
 
 def _path_list(
-    inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
+    inventory: Mapping[str, Any],
+    field: str,
+    root: str,
+    seen: dict[str, str],
+    git_sources: dict[GitPath, str] | None = None,
 ) -> list[str]:
     """The normalised members of one path-list field, each claimed in
     ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
@@ -287,7 +291,17 @@ def _path_list(
             f"inventory field '{field}' is empty -- an empty inventory attests nothing"
         )
     paths = []
-    for raw in value:
+    for index, raw in enumerate(value):
+        if git_sources is not None and git_entry(raw):
+            if inventory["schema_version"] < 2:
+                raise AttestationError("Git sources require inventory schema_version 2")
+            location, digest = git_source(raw, f"{field}[{index}]")
+            if location in git_sources:
+                raise AttestationError(
+                    f"Git source {location} is listed more than once"
+                )
+            git_sources[location] = digest
+            continue
         paths.extend(
             expand_entry(raw, field, root, seen, inventory.get("schema_version"))
         )
@@ -392,11 +406,15 @@ def _validated_inventory(
     normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
     if yaml_selects:
         normalized["yaml"] = dict(sorted(yaml_selects.items()))
+    git_sources: dict[GitPath, str] = {}
     for field, _role in _PATH_LISTS[item]:
-        normalized[field] = _path_list(inventory, field, root, seen)
+        normalized[field] = _path_list(
+            inventory, field, root, seen, git_sources if item == 1 else None
+        )
     if item == 1:
+        normalized["git_sources"] = git_sources
         normalized["derived"] = _validated_derived(
-            inventory, root, seen, set(normalized["sources"])
+            inventory, root, seen, {*normalized["sources"], *git_sources}
         )
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
@@ -523,54 +541,11 @@ def _validated_envelope_checks(
     return envelope_checks
 
 
-_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
-
-
-def _hex_digest(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
-        raise AttestationError(
-            f"'{field}' must be a 64-character lowercase hex sha256 digest"
-        )
-    return value
-
-
-def _validated_recorded(
-    raw: Any, field: str, root: str, sources: set[str]
-) -> dict[str, Any]:
-    """Validate a ``derived[]`` entry's ``recorded`` freshness record: the
-    derived file's digest plus the digest of every source it was built from."""
-    if not isinstance(raw, Mapping):
-        raise AttestationError(f"'{field}' must be an object")
-    unknown = sorted(set(raw) - {"derived_sha256", "sources"})
-    if unknown:
-        raise AttestationError(f"'{field}' has unknown field(s): {', '.join(unknown)}")
-    derived_sha256 = _hex_digest(raw.get("derived_sha256"), f"{field}.derived_sha256")
-    recorded_sources = raw.get("sources")
-    if not isinstance(recorded_sources, Mapping) or not recorded_sources:
-        raise AttestationError(
-            f"'{field}.sources' must be a non-empty object mapping each source "
-            "path to its sha256 -- a hash of the artifact alone proves nothing "
-            "about the sources it was built from"
-        )
-    normalized: dict[str, str] = {}
-    for raw_path, digest in recorded_sources.items():
-        path = _normalize_repo_path(raw_path, f"{field}.sources", root)
-        if path not in sources:
-            raise AttestationError(
-                f"'{field}.sources' lists '{path}', which is not in the "
-                "inventory's top-level 'sources'"
-            )
-        if path in normalized:
-            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
-        normalized[path] = _hex_digest(digest, f"{field}.sources[{path}]")
-    return {"derived_sha256": derived_sha256, "sources": normalized}
-
-
 def _validated_derived(
     inventory: Mapping[str, Any],
     root: str,
     seen: dict[str, str],
-    sources: set[str],
+    sources: set[str | GitPath],
 ) -> list[dict[str, Any]]:
     derived = inventory.get("derived")
     if not isinstance(derived, list) or not derived:
@@ -613,8 +588,12 @@ def _validated_derived(
         if "check" in raw:
             entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
         else:
-            entry["recorded"] = _validated_recorded(
-                raw["recorded"], f"{field}.recorded", root, sources
+            entry["recorded"] = validated_recorded(
+                raw["recorded"],
+                f"{field}.recorded",
+                root,
+                sources,
+                inventory["schema_version"],
             )
         entries.append(entry)
     return sorted(entries, key=lambda entry: entry["path"])
@@ -623,31 +602,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
-
-
-def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
-    """Compare the derived file and each recorded source against the digests
-    the inventory recorded; no command is run. ``mismatches`` names every
-    differing path with its expected and actual digest (``None`` = missing)."""
-    recorded = entry["recorded"]
-    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
-    mismatches = []
-    for path in sorted(expected):
-        actual = sha256_file(os.path.join(root, path))
-        if actual != expected[path]:
-            mismatches.append(
-                {"path": path, "expected": expected[path], "actual": actual}
-            )
-    check: dict[str, Any] = {
-        "check": "recorded_hash",
-        "role": "freshness",
-        "target": entry["path"],
-        "generator": entry["generator"],
-        "passed": not mismatches,
-    }
-    if mismatches:
-        check["mismatches"] = mismatches
-    return check
 
 
 def _command_check(
@@ -732,11 +686,12 @@ def _derived_freshness_check(
     root: str,
     entry: Mapping[str, Any],
     command: Callable[..., dict[str, Any]],
+    git_hashes: Mapping[GitPath, str | None],
 ) -> dict[str, Any]:
     """The freshness check for one item-1 ``derived`` entry: the recorded
     hash comparison, or the entry's ``check`` command."""
     if "recorded" in entry:
-        return _recorded_hash_check(root, entry)
+        return recorded_hash_check(root, entry, git_hashes)
     return command(
         entry["check"],
         "freshness",
@@ -780,10 +735,13 @@ def _run_checks(
     for field, role in _PATH_LISTS[item]:
         checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
+        sources = normalized["git_sources"]
+        git_hashes = {location: location.sha256(root) for location in sources}
+        checks.extend(git_source_checks(sources, git_hashes))
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
         checks.extend(
-            _derived_freshness_check(root, entry, command)
+            _derived_freshness_check(root, entry, command, git_hashes)
             for entry in normalized["derived"]
         )
     elif item == CHARACTERIZATION_ITEM:

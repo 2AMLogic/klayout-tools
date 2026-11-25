@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ._provenance import sha256_file
-from .signoff_base import input_set_digest
+from .signoff_input_set import member_set_digest
 
 
 def normalized_description(source: Mapping[str, Any]) -> str | None:
@@ -72,9 +72,10 @@ def input_binding(
 
     Item 1 binds the whole input set (every source, every derived file and the
     inventory itself) through ``provenance.input.paths`` so editing any member
-    makes the manifest row ``stale_evidence``. A member that cannot be read is
-    left out: its ``present`` check already fails the attestation. Other items
-    bind the inventory alone."""
+    makes the manifest row ``stale_evidence``. An unreadable local file is
+    omitted. Git members bind their declared digest even when their blob
+    cannot be read. In either case the presence check fails at mint time.
+    Other items bind the inventory alone."""
     if item != 1:
         return (
             {
@@ -88,17 +89,20 @@ def input_binding(
         *(entry["path"] for entry in normalized["derived"]),
         inventory_rel,
     }
-    members: list[tuple[str, str]] = []
+    members: list[tuple[dict[str, str], str]] = []
     for path in sorted(member_paths, key=lambda value: value.encode("utf-8")):
         digest = sha256_file(os.path.join(root, path))
         if digest is not None:
-            members.append((path, f"sha256:{digest}"))
-    combined = input_set_digest(members)
+            members.append(({"path": path, "scope": "repo"}, f"sha256:{digest}"))
+    members.extend(
+        (location.binding(), f"sha256:{expected}")
+        for location, expected in sorted(normalized["git_sources"].items())
+    )
+    combined = member_set_digest(members)
     return (
         {
             "paths": [
-                {"path": {"path": path, "scope": "repo"}, "content_hash": digest}
-                for path, digest in members
+                {"path": path, "content_hash": digest} for path, digest in members
             ],
             "content_hash": combined,
         },
