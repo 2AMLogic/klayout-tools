@@ -459,6 +459,8 @@ count).
 
 ### 4.3 Native-Rust congestion-aware pre-router (global-routing-level), building on #785 (Priority 3)
 
+The implementation cited in this historical proposal was retired in #7710. The study records the additional measurements and links to the original code. [Congestion pre-check study](flute-congestion-precheck-results.md)
+
 - **Technique:** extend #785's already-shipped RUDY/RSMT congestion
   estimator (`native/congestion/`) from a read-only pre-check into an
   actual **global routing guide generator** — a negotiated-congestion

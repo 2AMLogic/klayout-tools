@@ -51,7 +51,6 @@ NATIVE_DIR = REPO_ROOT / "native"
 # and native/wave are plain cargo binaries with no Python tier).
 PYO3_CRATES = {
     "mom": "klt_mom_native",
-    "congestion": "klt_congestion_native",
     "yield": "klt_yield_native",
     "statime": "klt_statime_native",
 }
@@ -308,8 +307,8 @@ def test_rust_build_script_sees_a_source_edit(tmp_path: Path) -> None:
 def test_every_pyo3_leg_forces_a_rebuild_and_gates_on_freshness() -> None:
     workflow = WORKFLOW.read_text()
 
-    # The shared native matrix installs klt-<crate>-native for the mom /
-    # congestion / yield legs via matrix interpolation (#1885); the statime
+    # The shared native matrix installs klt-<crate>-native for the mom and
+    # yield legs via matrix interpolation (#1885); the statime
     # job names its package directly (#1892).
     assert "--reinstall-package klt-${{ matrix.crate }}-native" in workflow
     assert "--reinstall-package klt-statime-native" in workflow

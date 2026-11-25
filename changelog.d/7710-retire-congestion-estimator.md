@@ -1,0 +1,1 @@
+- Retired the experimental post-placement congestion estimator, its measurement harness and its dedicated CI job. The original study and subsequent validation results are preserved in [the congestion pre-check study](https://github.com/2AMLogic/klayout-tools/blob/main/docs/design/flute-congestion-precheck-results.md). (#7710)

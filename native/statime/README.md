@@ -367,8 +367,8 @@ this repo, implemented as described below rather than merely proposed:
   panic as the same `ValueError` every other failure mode already raises.
 
 **CI/wheel story**: `ci.yml` grew a `native-statime` job with issue #925 —
-the one-job-per-native-engine convention `native-mom`/`native-congestion`/
-`native-yield` already set. No Rust toolchain install step is needed
+the same one-job-per-engine convention used for mom and yield.
+No Rust toolchain install step is needed
 (`ubuntu-latest` GitHub runners ship a rustup-managed stable Rust already);
 the job caches `~/.cargo/registry` + `native/statime/target` keyed on
 `Cargo.lock`, runs `cargo fmt --check` / `cargo clippy --all-targets -- -D
