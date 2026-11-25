@@ -17,6 +17,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #7897** (closed): docs: index results.temperature in klt em's Response section and refresh the em parser docstring
 - **Issue #7893** (closed): [Epic #708] Validate electrothermal temperature rise on a real power device
 - **Issue #7892** (closed): [Epic #708] Expose steady heat and Joule self-heating through klt em
+- **Issue #708** (closed): Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation
 - **PR #7888**: Document the canary CI gate and allow manual inventory checks
 - **PR #7887**: Keep parallel fake fleet collectors bound to their own shard
 - **PR #7871**: fix: write SG13G2 cap_cmim and poly-resistor calls as native cards
