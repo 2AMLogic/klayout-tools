@@ -1721,7 +1721,7 @@ def _install_batch_artifacts(
     client_netlist: str | None = None,
     job_id: str | None = None,
 ) -> None:
-    """Install the kept worker files and localize their report and deck paths (#7905)."""
+    """Install kept worker files and localize their report and deck paths (#7905)."""
     kept = sim_batch_kept_artifacts
     source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(source):
