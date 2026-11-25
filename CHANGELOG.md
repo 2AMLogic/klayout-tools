@@ -3825,6 +3825,111 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 - **`klt characterize` refuses non-finite numbers in a request** -- a bare `NaN` / `Infinity` / `-Infinity` literal (which `json.loads` accepts) or an integer too large for a float in `corner.supply_v` / `temperature_c` / `nom_process`, `thresholds.*`, the `grid` axes, a pin's `capacitance_pf`, `options.settle_ns` / `tran_step_ns` / `timeout_s` / `constraint_tolerance_ns` / `constraint_window_ns`, or `--timeout-s` now gets the JSON error envelope instead of a malformed SPICE deck, a bisection that runs to its iteration cap, or an uncaught `OverflowError` (#7812).
 
+- **`klt sim --require-pdk-match` grades each batch job against the expected worker PDK revision stamp** (#3462).
+
+- **`klt sim --list-jobs` shows pending and running fleet instances grouped by job, along with available instance and vCPU capacity** (#5531, 2026-11-24).
+
+- **The automated release pipeline now reports and recovers from failed
+  prepare/tag runs** (#6911, 2026-11-21): a failed `release.yml` job files or
+  refreshes one open "Automated release blocked" issue (failed step,
+  diagnostic, run URL) using the workflow's own token, so the report works
+  even when the release-PR credential is what failed (native-extras failures
+  included); the prepare job checks the PR-creation permission *before*
+  pushing anything — a readable `can_approve_pull_request_reviews: false`
+  stops the run and names the administrator setting or the
+  `RELEASE_BOT_TOKEN` alternative, an unreadable setting proceeds —; and a
+  PR-creation failure after a successful push reconciles the exact branch
+  that run pushed: an open PR on that head wins, an inconclusive lookup or a
+  moved remote SHA keeps the branch, otherwise it is deleted under an
+  expected-SHA lease so a retry pushes cleanly. The release-lag report
+  additionally names the most recent failed `release.yml` run (new
+  additive JSON field `last_failed_run`; exit codes unchanged), and
+  RELEASING.md's manual sequence now mirrors the prepare job's order
+  (committed bump before the generators, amend before pushing).
+
+- Retired the experimental post-placement congestion estimator, its measurement harness and its dedicated CI job. The original study and subsequent validation results are preserved in [the congestion pre-check study](https://github.com/2AMLogic/klayout-tools/blob/main/docs/design/flute-congestion-precheck-results.md). (#7710)
+
+- On ASAP7, the DEF→GDS merge repairs the router's off-grid M4 (`M4.AUX.1`/`AUX.2` track-grid and `M4.W.3` even-multiple-width markers) with a grow-only band per flagged polygon, reported in the new `m4_grid_repair` response field; a documented no-op (GDS byte-identical) on every other PDK (#7817).
+
+- **`klt lvs` accepts a fixed part-select operand inside an `assign`
+  concatenation, and validates a `gate-level-verilog` reference before
+  layout extraction** (2026-11-24, additive — `klt lvs`
+  `schema_version` unchanged): a Yosys-written
+  `assign x = { a[7:0], a };` was refused with "operand 'a[7:0]' is a
+  multi-bit part-select, which is not supported inside a concatenation" —
+  and only *after* device extraction had finished (minutes on a large
+  layout). A concatenation right-hand-side operand may now be a fixed
+  part-select of a declared bus in its declared direction (`a[7:4]`, also
+  on an escaped base `\bus [7:0]`), including inside a nested or replicated
+  operand; the same total-width requirement, and the same rejection for a
+  slice with non-integer bounds, an undeclared base, or one against the
+  declared direction, apply as for a standalone part-select `assign`
+  (issue #2941). Independently, the whole gate-level conversion now runs
+  before the extraction stage, so any reference-input error it can raise
+  names the failing `reference.netlist` immediately instead of after
+  extraction; a valid reference is converted once up front and reused, with
+  unchanged pin bindings, warnings, and provenance. See
+  `docs/cli/lvs.md`, "Digital gate-level LVS". (#7822)
+
+- **`klt extract` flags KLayout engine drift at run time**
+  (#7824, additive — `klt extract` `schema_version` unchanged). The default
+  in-process engine now opts into the same `provenance.klayout_version_mismatch`
+  comparison `klt drc`/`klt lvs` carry (issue #1490): a run whose resolved
+  `klayout` engine differs from the version this `klayout-tools` build/commit
+  was tested against records `true` and prints the shared stderr warning
+  (naming both versions and the `--with klayout==<expected>` install remedy,
+  issue #5601); a match or an unresolvable expected version records `false`
+  with no warning, and the report always retains the actual
+  `provenance.klayout_version`. The warning's consequence sentence now names
+  extraction alongside DRC/LVS — an extracted netlist's measured device
+  parameters and parasitic R/C are first-class engine outputs, which is why a
+  `klayout-tools==X.Y.Z` pin used as an evidence standard has the same
+  engine-drift hole DRC/LVS had. `--engine klayout-runset` reports are
+  unchanged (standalone application; out of scope). Replay guidance — the
+  paired-pin `uvx --from ... --with klayout==<recorded version>` example,
+  distinct from `klayout_version_expected` for new evidence — is in
+  `docs/cli/extract.md` → "Engine-version drift".
+
+- SDF preflight now checks cell and interconnect instance names in gate-level netlists that assign concatenations to bus slices (#7831).
+
+- Share the attestation error class across signoff checks and preserve its public import path (#7834).
+
+- `klt sim` now honors `options.max_workers` for local-parallel deck lists and staged workers. An explicit `--max-workers` takes precedence, and the executing host's `KLT_SIM_MAX_WORKERS` cap still applies (#7842).
+
+- **`klt lvs` (`klayout-runset`, `sg13g2.lvs`, `reference.form: "subckt-call"`) converts `cap_cmim` and `rppd`/`rhigh`/`rsil` calls to native `C`/`R` cards** that keep `w`/`l`/`m`/`b`/`ps` and the `(n1, n2, body)` terminal order, so converted capacitors are no longer purged by the deck's `min_caps` and resistor parameters are no longer lost. `device_census.reference_source` is no longer `null` for a reference containing valueless native `C`/`R`/`L` cards, and an unresolved `X` call in the same file is reported again. The source census also folds a CDL `$[model]` wrapper (the PDK's own spelling on a few `rppd`/`rhigh`/`rsil`/`cap_cmim` cards) into the model, so a mixed or native reference no longer makes `klt signoff` report those cards as missing devices (#7855).
+
+- `klt lvs` with `engine: "klayout-runset"` reports `device.connectivity`
+  for a mismatched device pair with identical primary parameters. For example,
+  shorting a MOS gate to its drain now identifies a terminal connectivity
+  error with both sets of dimensions in the report. (#7856)
+
+- `klt sim --attach` names the changed request option when a shard map records it, including `options.max_workers` when a deck list was submitted with a different worker count (#7861).
+
+- Document `device.connectivity` in the LVS response field table and check its category list against the emitted category constants (#7863).
+
+- **`klt sim` keeps a noise run's per-frequency spectrum as
+  `artifacts.waveform_spectrum`** (#7866): `options.waveforms` on an
+  `analysis.kind: "noise"` request exported only ngspice's current plot, the
+  one-point `Integrated Noise` totals, so the full spectrum (`frequency`,
+  `inoise_spectrum`, `onoise_spectrum`, one point per swept frequency) could not
+  be kept as evidence, including from a batch run. A `noise` corner with
+  `options.waveforms` + `options.keep_artifacts` now also writes the spectrum
+  plot to `waveform_spectrum.raw` and converts it to
+  `waveform_spectrum.raw.json` (same shape, `waveform_max_bytes` guard and
+  `waveform_decimate` stride as the main artifact), reported as
+  `corners[].artifacts.waveform_spectrum`. Additive: `waveform.raw`,
+  `waveform.raw.json` and `noise_representation` are unchanged, decks for other
+  analyses and for `noise` without `options.waveforms` are byte-identical, and
+  the current plot is restored so `expr`/`noise`/`noise.mechanism` measurements
+  resolve as before. Not a runner-gated batch feature (a gate would refuse
+  requests that only need the integrated plot); an older runner image writes no
+  spectrum, so check that `artifacts.waveform_spectrum` is a path.
+
+- **`klt em` adds steady heat and Joule self-heating on tagged meshes** (#7892).
+  Both modes return nodal temperatures and a heat balance in watts.
+  Self-heating reports Picard iteration exhaustion and runaway as errors.
+  These modes require a Geode CLI that includes geode-fem#1806.
+
 ## 0.9.2 (2026-11-14)
 
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,

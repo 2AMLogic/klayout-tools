@@ -1,1 +1,0 @@
-- `klt sim --attach` names the changed request option when a shard map records it, including `options.max_workers` when a deck list was submitted with a different worker count (#7861).

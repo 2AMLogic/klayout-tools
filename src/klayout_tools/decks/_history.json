@@ -631,7 +631,21 @@
     },
     {
       "deck": "asap7_rules",
-      "content_hash": "sha256:134c7c4a52dd438cde69cbe2db9909cd8d41753ac7c65b285e196d384bd48bad",
+      "content_hash": "sha256:530b2065b259d9e38e12255a9f37bb9a1e3852d93ad740f394eaf4ffa5a93630",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
+      "deck": "asap7_v0_gaps",
+      "content_hash": "sha256:a5ec65da302cdc1770d8b425418b47aaba7aa47ce9ed1c30a0d4c67ff84a52a2",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
+      "deck": "asap7_v123_gaps",
+      "content_hash": "sha256:4e7e079043f3ceb08dfc391cfd199deaa918d993d240302279d58c5fc42b6198",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
@@ -800,7 +814,7 @@
     {
       "deck": "asap7",
       "artifact": "drc_deck",
-      "content_hash": "sha256:c8555396e0ac1555e3a49cc45ed7277ca5448fbbef42f06556348c90069afa61",
+      "content_hash": "sha256:82a03bffe81e6335038cf687333983dde090d4c262f72bc64d4dde7345dddd9f",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
