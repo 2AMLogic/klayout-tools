@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import asap7_v0_gaps as _v0_gaps
+from . import asap7_v123_gaps as _v123_gaps
 
 #: The DRC-DSL deck script this module describes.
 DECK_PATH = Path(__file__).with_name("asap7.drc")
@@ -538,10 +539,6 @@ _TRACK = (
     "classified by routing track (same / parallel / aligned tracks); the deck "
     "has no routing-direction or track assignment"
 )
-_END_CAP = (
-    "corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs "
-    "per-via end-cap classification against the upper metal"
-)
 _EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
 _SADP_TRACK = (
     "defined against the routing tracks (adjacent tracks, parallel run "
@@ -609,11 +606,11 @@ def _top_metal_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     )
 
 
-def _v123_spacing_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
+def _v123_spacing_gaps(layer: str, corner: str) -> tuple[Asap7RuleGap, ...]:
     t = "Table 3.13.1"
     return (
         Asap7RuleGap(f"{layer}.S.1", t, _TRACK, "#3147"),
-        *_gaps(tuple(f"{layer}.S.{n}" for n in (2, 3, 4)), t, _END_CAP, "#3147"),
+        *_gaps(tuple(f"{layer}.S.{n}" for n in (2, 3, 4)), t, corner, "#3147"),
     )
 
 
@@ -641,11 +638,11 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.LIG.AUX.2", "Table 3.11.2", _v0_gaps.LIG_DIRECTION, "#3147"),
     Asap7RuleGap("V0.M1.AUX.3", "Table 3.11.2", _EXACT_W, "#3147"),
     # V1-V3 (Table 3.13.1; section 3.13 extends the V1 rules to V2 and V3)
-    *_v123_spacing_gaps("V1"),
+    *_v123_spacing_gaps("V1", _v123_gaps.CORNER_SPACING_M2_M3),
     Asap7RuleGap("V1.M2.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
-    *_v123_spacing_gaps("V2"),
+    *_v123_spacing_gaps("V2", _v123_gaps.CORNER_SPACING_M2_M3),
     Asap7RuleGap("V2.M3.AUX.2", "Table 3.13.1", _EXACT_W, "#3147"),
-    *_v123_spacing_gaps("V3"),
+    *_v123_spacing_gaps("V3", _v123_gaps.CORNER_SPACING_M4),
     # M4-M7 / V4-V7 (Tables 3.14-3.17)
     *_sadp_metal_gaps("M4", "Table 3.14.1", "Table 3.14.2"),
     *_sadp_metal_gaps("M5", "Table 3.14.1", "Table 3.14.2"),
