@@ -5067,7 +5067,7 @@ def _setup_success_env_real(tmp_path: Path) -> str:
 
 
 #: `klt_statime_native` (issue #925, Epic #704 Phase 3) is an optional Rust
-#: extension -- same posture as `klt_mom_native`/`klt_congestion_native`/
+#: extension -- same posture as `klt_mom_native` and
 #: `klt_yield_native` (see `tests/test_mom.py`'s identical `importorskip`).
 #: Its absence must never fail this integration test; it means `sta` is
 #: `None` (asserted in the always-run tier above) and the extra checks below
