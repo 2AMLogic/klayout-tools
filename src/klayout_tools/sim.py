@@ -493,6 +493,7 @@ from .sim_validate import _validate_noise_measurement as _validate_noise_measure
 from .sim_validate import _validate_on_unreached as _validate_on_unreached
 from .sim_validate import _validate_optional_flag as _validate_optional_flag
 from .sim_validate import _validate_rawfile_form as _validate_rawfile_form
+from .sim_window import parse_tran_window as _parse_tran_window
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -8866,32 +8867,6 @@ def _parse_spice_seconds(raw: str) -> float | None:
 #: coarse, advisory-only heuristic is what this issue ships, rather than
 #: the more impactful dispatch-time fail-fast guard it also asked for.
 _PREFLIGHT_MIN_TIMEPOINTS_PER_S = 50.0
-
-
-def _parse_tran_window(
-    analysis: dict[str, Any],
-) -> tuple[str, str, float, float] | None:
-    """Parse a ``tran`` analysis's own ``step``/``window`` tokens (the first
-    two space-separated tokens of ``analysis['args']``), shared by
-    :func:`_preflight_timeout_warning` (issue #1686) and
-    :func:`_run_fail_fast_probe` (issue #1694) -- both need the same "is
-    this a `tran` analysis with parseable timing tokens" gate.
-
-    Returns ``(step_token, window_token, step_s, window_s)`` (the original
-    token strings, for messages, alongside their parsed seconds), or
-    ``None`` when ``analysis['kind']`` isn't ``"tran"`` or the tokens can't
-    be parsed as positive SPICE time literals.
-    """
-    if analysis.get("kind") != "tran":
-        return None
-    tokens = (analysis.get("args") or "").split()
-    if len(tokens) < 2:
-        return None
-    step_s = _parse_spice_seconds(tokens[0])
-    window_s = _parse_spice_seconds(tokens[1])
-    if step_s is None or window_s is None or step_s <= 0 or window_s <= 0:
-        return None
-    return tokens[0], tokens[1], step_s, window_s
 
 
 def _preflight_timeout_warning(
