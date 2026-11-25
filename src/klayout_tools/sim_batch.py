@@ -108,6 +108,7 @@ from . import (
     _warn,
     remote_transport,
     sim_batch_image,
+    sim_batch_kept_artifacts,
     sim_batch_observer,
     sim_batch_pdk,
     sim_batch_receipt,
@@ -1713,40 +1714,32 @@ def read_collected_report(local_dir: str) -> dict[str, Any]:
 
 
 def _install_batch_artifacts(
-    corners: list[dict[str, Any]], *, collected_dir: str, artifacts_dir: str
+    corners: list[dict[str, Any]],
+    *,
+    collected_dir: str,
+    artifacts_dir: str,
+    client_netlist: str | None = None,
+    job_id: str | None = None,
 ) -> None:
-    """Move the collected ``outputs/artifacts/`` tree into the caller's own
-    artifacts directory and rewrite every corner's ``artifacts.*`` path to
-    point at it.
-
-    The rewrite itself is :func:`sim_remote._rewrite_remote_artifact_paths`,
-    reused unmodified -- only the *remote root* has to be recovered
-    differently. The `remote` backend knows its remote job directory (it
-    chose it); here the job instance's ``$EDA_OUTPUT_DIR`` is picked by the
-    harness at boot and never reported back, so the root is recovered from
-    the reported paths themselves: every one of them is
-    ``<$EDA_OUTPUT_DIR>/artifacts/...`` because
-    :func:`_build_batch_job_spec` is what pointed ``--outdir`` there.
-    """
+    """Move the collected ``outputs/artifacts/`` tree into the caller's artifacts
+    directory and repoint every corner's ``artifacts.*`` path at it
+    (:func:`sim_remote._rewrite_remote_artifact_paths`; the remote root is read
+    off the reported paths). Issue #7905: ``client_netlist`` repoints the decks'
+    job-side netlist ``.include``; a corner with no returned engine log gets an
+    ``engine_log_not_retained`` note naming ``job_id``."""
+    kept = sim_batch_kept_artifacts
     source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
-    if not os.path.isdir(source):
-        return
-    os.makedirs(artifacts_dir, exist_ok=True)
-    shutil.copytree(source, artifacts_dir, dirs_exist_ok=True)
-    marker = f"/{BATCH_ARTIFACTS_DIRNAME}/"
-    remote_root: str | None = None
-    for corner in corners:
-        for value in (corner.get("artifacts") or {}).values():
-            if isinstance(value, str) and marker in value:
-                remote_root = value[: value.rindex(marker) + len(marker) - 1]
-                break
-        if remote_root is not None:
-            break
-    if remote_root is None:
-        return
-    _rewrite_remote_artifact_paths(
-        corners, remote_root=remote_root, local_root=artifacts_dir
-    )
+    if os.path.isdir(source):
+        os.makedirs(artifacts_dir, exist_ok=True)
+        shutil.copytree(source, artifacts_dir, dirs_exist_ok=True)
+        root = kept.recover_remote_root(corners, f"/{BATCH_ARTIFACTS_DIRNAME}/")
+        if root is not None:
+            _rewrite_remote_artifact_paths(
+                corners, remote_root=root, local_root=artifacts_dir
+            )
+            if client_netlist is not None:
+                kept.rewrite_job_input_includes(corners, client_netlist)
+    kept.note_unretained_logs(corners, job_id=job_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -2989,6 +2982,7 @@ def _run_batch_job(
             timestamps=attach_timestamps,
             now=now,
             attach=True,
+            client_netlist=netlist_path,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -3044,6 +3038,7 @@ def _run_batch_job(
         expected_netlist=lambda: staged_digest,
         receipt_path=receipt_path,
         receipt=receipt,
+        client_netlist=netlist_path,
     )
 
 
@@ -3064,6 +3059,7 @@ def _poll_and_collect(
     receipt_path: str | None = None,
     receipt: dict[str, Any] | None = None,
     attach: bool = False,
+    client_netlist: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
@@ -3147,7 +3143,11 @@ def _poll_and_collect(
         _surface_log_fatal(corners, collected, identity.get("worker_environment"))
         if keep_artifacts:
             _install_batch_artifacts(
-                corners, collected_dir=collected, artifacts_dir=artifacts_dir
+                corners,
+                collected_dir=collected,
+                artifacts_dir=artifacts_dir,
+                client_netlist=client_netlist,
+                job_id=job_id,
             )
     worker = identity["worker_environment"]
     comparison = worker["pdk_stamp_comparison"]
