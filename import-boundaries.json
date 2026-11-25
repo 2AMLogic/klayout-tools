@@ -1004,6 +1004,7 @@
         "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_require_build",
         "klayout_tools.signoff_runset",
+        "klayout_tools.signoff_sim_closure",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
         "klayout_tools.signoff_sta_geometry",

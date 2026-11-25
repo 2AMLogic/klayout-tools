@@ -3066,6 +3066,17 @@ part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
 
+### `klt signoff` `citation.sim_closure` (issue #7860)
+
+A `klt sim` citation gains `sim_closure`: `{status, includes, stale[],
+unverifiable[]}` (or `{status: "not_recorded", reason}` when the cited report
+records no `environment.netlist_closure`), the re-hash of the report's recorded
+`.include` closure. This is an **additive** change to the signoff output, so no
+`schema_version` changes; the key is absent on every other kind. No `klt sim`
+report field is added and `provenance.input.content_hash` keeps meaning the top
+deck only. A stale include sets `citation.input_verified` to `false` without
+changing the item's status. See [`cli/signoff.md`](cli/signoff.md).
+
 ### `klt pex --dry-run` (issue #5464)
 
 `klt pex --dry-run` emits a **different payload** from a graded run, not a

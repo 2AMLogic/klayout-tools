@@ -202,6 +202,12 @@ this document (and the code) win.
   closure file missing from the tree is `drifted`, never `match`. `--root`
   re-anchors `scope: "repo"` entries; otherwise they resolve from the report's
   own location. Exit `0` match, `3` drifted, `1` missing/unparseable report.
+
+  `provenance.input.content_hash` stays **top-deck-only** (pinned equal to
+  `environment.netlist_sha256`); the transitive `.include` set lives in
+  `environment.netlist_closure`. `klt signoff --manifest` re-hashes that
+  closure for a cited report and discloses drift in `citation.sim_closure`
+  (issue #7860; see [`signoff.md`](signoff.md)).
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
