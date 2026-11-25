@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--require-pdk-match] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
 klt sim --check <report.json> [--root <dir>] [--format text|json]
 ```
 
@@ -305,7 +305,8 @@ and compares the installed identity *before simulating*; a `mismatch`, an
 `unknown` identity, a PDK that cannot be resolved, or a pin with neither
 `models.pdk` nor `models.pdk_root` set exits 1 with
 `error.code: "pdk_version_unmet"`. `remote` and `batch` reject the field with a
-request error (no silent pass): the worker-side check is tracked in #3462.
+request error. Batch supports a separate worker stamp pin through
+`models.pdk_expect.stamp_sha256` and `--require-pdk-match`.
 That rejection is keyed on the backend that *executes*: when the off-host
 backend is only a host default (`$KLT_SIM_BACKEND`) that a late yield steps
 back to `local` — a single-unit run, or `options.resume` — the pin is compared
@@ -8511,6 +8512,30 @@ them with the job
   `osdi_preload[].sha256` and `corner_section_libs[].sha256` hash those same
   staged files. The array is present only when the option staged inputs for
   an off-host backend.
+
+### Requiring a PDK revision match
+
+Set `options.require_pdk_match: true` or pass `--require-pdk-match` to grade
+each batch corner against the PDK revision used on its worker. The flag
+overrides the request option. Set `models.pdk_expect.stamp_sha256` to the
+64-digit hexadecimal SHA-256 of the expected `SOURCES` text. An explicit pin
+takes precedence over the submitter's installed PDK stamp and works without
+a local PDK. Read the pin from a known-good worker's `pdk.stamp_sha256`.
+
+A matching stamp passes this check. A different stamp produces an error
+corner with `pdk_stamp_mismatch`. Missing evidence, a different variant
+or an incompatible scheme produces `pdk_stamp_not_comparable`. The
+diagnostic includes the observed and expected stamps. Each job in a
+sharded run is graded against its own worker capture. The report's
+`pdk_stamp_comparison` records `required: true` and the explicit `expected`
+pin when supplied. Without enforcement the comparison remains advisory.
+
+When a worker runs staged models, its image stamp cannot establish the
+revision of the executed files. The required stamp check then reports
+`not_comparable` with reason `models_staged`. The individual file digest
+comparison remains available as `worker_environment.staged_model_comparison`.
+This gate applies to batch corner requests. Other backends and deck-list
+or command-list requests cannot grade a worker revision.
 
 ### Pinning a PDK build on batch
 

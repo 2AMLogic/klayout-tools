@@ -93,12 +93,17 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
+
+#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
+#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
+#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
 from . import (
     _warn,
     env_provenance,
     output_lock,
     sim_ac_waveform,
     sim_batch_history,
+    sim_batch_pdk,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -199,10 +204,6 @@ from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_attach import apply_attach as _apply_attach
-
-#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
-#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import (
     _remove_shard_manifest,
@@ -594,6 +595,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        "pdk_stamp_mismatch",
+        "pdk_stamp_not_comparable",
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
@@ -2213,6 +2216,7 @@ def run_sim(
     max_units_per_job: int | None = None,
     max_concurrent_jobs: int | None = None,
     dry_run: bool = False,
+    require_pdk_match: bool | None = None,
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
@@ -2444,15 +2448,9 @@ def run_sim(
     library, unsupported engine, unknown backend) -- once the sweep starts,
     every corner is reported in the response, including ones that error.
 
-    **Async submit (issue #3073).** ``submit_only=True`` uploads and launches
-    one ``batch`` job, then returns its identity (``job_id``, ``bucket``,
-    ``launched_at``, ...) *instead of the report*, without polling or
-    collecting; read it later with :func:`sim_batch_async.read_job_status`.
-    A deck-list request is one job too (issue #3958): ``submit_only`` and
-    ``attach_job_id`` apply to it on ``batch`` with ``job_ceiling: null``.
-    Anything it cannot represent as one job (another backend, ``hosts > 1``,
-    ``resume``, ``plot_dir``) raises :class:`SimError`
-    with code ``submit_only_unsupported`` before any S3 write.
+    With ``submit_only=True``, batch returns a job identity for later status
+    or attachment. A deck-list job has a null ceiling. Unsupported combinations
+    raise ``submit_only_unsupported`` before upload.
 
     **Output-directory ownership (issue #2770).** A run that writes
     persistent artifacts -- ``options.keep_artifacts``, ``resume``, a
@@ -2466,16 +2464,13 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
 
-    **Dry run (issues #3064, #5674).** ``dry_run=True`` runs every
-    pre-dispatch check of a corner request (shape, Monte Carlo spec,
-    measurement forms, model/OSDI resolution, staging closure, off-host PDK
-    check, and on ``batch`` the whole-job ceiling/split plan) and returns
-    :func:`_build_dry_run_report` -- the expanded unit list with its derived
-    seeds plus the batch ``job_ceiling`` assessment -- without running the
-    fail-fast probe, taking an output-directory lock, or invoking any
-    backend (no ngspice, SSH, S3 or EC2).
+    A dry run validates and expands corner requests, including off-host staging
+    and the batch ceiling/split plan. It returns the planned units and seeds
+    without a probe, an output lock or a dispatch.
     """
-    request = load_request(request_path)
+    request = sim_batch_pdk.apply_request_gate(
+        load_request(request_path), require_pdk_match
+    )
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
     # ``artifacts_dir`` baked into the command line would resolve against the
     # corner dir and ngspice would never find its deck. Absolutise once here.
@@ -2910,6 +2905,9 @@ def _prepare_sim_request(
     backend_source = _backend_source(backend, request)
     backend, backend_from_host_default = resolve_backend(backend, request)
     requested_backend = backend
+    backend_from_host_default = sim_batch_pdk.allow_backend_fallback(
+        request, backend, backend_from_host_default
+    )
     if backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
@@ -3676,6 +3674,7 @@ def _run_sim_corners(
     )
     checkpoint_path = _checkpoint_path(artifacts_dir)
     fingerprint_inputs: dict[str, Any] = {
+        "pdk_requirement": sim_batch_pdk.checkpoint_requirement(request),
         "netlist_path": dispatch_netlist_path,
         "models_lib": models_lib,
         "analysis": analysis,
