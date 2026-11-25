@@ -70,6 +70,12 @@ Design notes:
 - **Never fails the build.** Any git problem degrades to "no record" and a
   ``X.Y.Z.dev0+unknown`` version -- honest, and never mistakable for a
   release.
+- **The release build swaps in a tag-generated deck history (issue #5005).**
+  When ``KLT_DECK_HISTORY_PATH`` names a file outside the build root (the
+  release build writes ``$RUNNER_TEMP``), it is force-included as the
+  packaged ``decks/_history.json`` in wheel and sdist, replacing the tracked
+  copy in the artifact only: editing the tracked file would dirty the
+  checkout and turn the release version into ``X.Y.(Z+1).dev…+dirty``.
 - **Untracked files never count as dirty (issue #2248).** ``git_identity()``'s
   ``dirty`` probe ignores untracked files on purpose -- a package manager
   building a ``git+...@<sha>`` install clones into a scratch checkout that it
@@ -101,6 +107,19 @@ _RELATIVE_PATHS = {
     "wheel": "klayout_tools/_build_info.py",
     "sdist": "src/klayout_tools/_build_info.py",
 }
+
+#: Path of the packaged deck-history table inside each distribution target
+#: (issue #5005): same layout as the tracked file, but the CONTENT comes from
+#: ``KLT_DECK_HISTORY_PATH`` when the release build sets it.
+_HISTORY_RELATIVE_PATHS = {
+    "wheel": "klayout_tools/decks/_history.json",
+    "sdist": "src/klayout_tools/decks/_history.json",
+}
+
+#: Environment variable ``publish.yml``'s build job sets to swap in the
+#: tag-generated deck-history table without touching a tracked file (which
+#: would dirty the checkout and corrupt the release version, issue #5005).
+_HISTORY_PATH_ENV = "KLT_DECK_HISTORY_PATH"
 
 _GIT_TIMEOUT_S = 15
 
@@ -338,7 +357,31 @@ class BuildIdentityHook(BuildHookInterface):  # type: ignore[misc,valid-type]
         self._tmp_dir: str | None = None
 
         relative_path = _RELATIVE_PATHS.get(self.target_name)
-        if relative_path is None or version == "editable":
+        history_relative = _HISTORY_RELATIVE_PATHS.get(self.target_name)
+        if version == "editable":
+            return
+
+        # The release build's deck history (issue #5005): publish.yml checks
+        # out the tag, generates the table from that real tag into
+        # $RUNNER_TEMP and points this hook at it. The forced source lives
+        # OUTSIDE the build root, which is what makes hatchling treat the
+        # target path as reserved and skip the tracked file there -- the
+        # generated table replaces it in the artifact while the checkout (and
+        # so the version this build declares) stays clean. Applied before the
+        # git-identity early return so the wheel built from the sdist (no
+        # .git, identity None) keeps getting it too.
+        history_source = os.environ.get(_HISTORY_PATH_ENV)
+        if history_relative and history_source:
+            if not os.path.isfile(history_source):
+                raise RuntimeError(
+                    f"{_HISTORY_PATH_ENV}={history_source!r} does not exist;"
+                    " unset it or generate the table first"
+                )
+            build_data.setdefault("force_include", {})[
+                history_source
+            ] = history_relative
+
+        if relative_path is None:
             return
 
         identity = git_identity(self.root)
