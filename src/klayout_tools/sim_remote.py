@@ -792,11 +792,11 @@ def _build_remote_request(
                 ],
             }
 
-    options = dict(request.get("options") or {})
-    options["timeout_s"] = timeout_s
+    options = dict(request.get("options") or {}, timeout_s=timeout_s)
     options["keep_artifacts"] = keep_artifacts
     options["waveforms"] = want_waveforms
     options.pop("max_workers", None)
+    options.pop("require_pdk_match", None)  # Graded by the submitter after collection.
     if max_workers is not None:
         options["max_workers"] = max_workers
     remote_request["options"] = options

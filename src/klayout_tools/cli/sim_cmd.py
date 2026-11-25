@@ -93,6 +93,17 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
     in_job_id_mode = (
         vars(args).get("job_status") is not None or vars(args).get("cancel") is not None
     )
+    if getattr(args, "require_pdk_match", None) and (
+        in_job_id_mode
+        or getattr(args, "list_jobs", False)
+        or getattr(args, "op_lint", False)
+    ):
+        return emit_error(
+            "sim",
+            "--require-pdk-match applies only to batch corner requests",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     needs_request = getattr(args, "op_lint", False) or not in_job_id_mode
     if args.request is None and needs_request and not getattr(args, "list_jobs", False):
         sys.stderr.write(
@@ -146,6 +157,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            require_pdk_match=getattr(args, "require_pdk_match", None),
             max_units_per_job=args.max_units_per_job,
             max_concurrent_jobs=args.max_concurrent_jobs,
             dry_run=getattr(args, "dry_run", False),
@@ -228,6 +240,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--job-status", getattr(args, "job_status", None)),
             ("--cancel", getattr(args, "cancel", None)),
             ("--list-jobs", getattr(args, "list_jobs", False)),
+            ("--require-pdk-match", getattr(args, "require_pdk_match", None)),
             ("--pdk-root", getattr(args, "pdk_root", None)),
             ("--timeout-s", getattr(args, "timeout_s", None)),
         )
