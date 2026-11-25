@@ -20,6 +20,7 @@ from .sim_batch_corner_libs import (
     _lib_pairs,
     runner_corner_section_libs,
 )
+from .sim_batch_version_remedy import older_client_remedy
 from .sim_batch_worker_engine_build import (
     apply_worker_engine_build as apply_worker_engine_build,
 )
@@ -98,7 +99,8 @@ def refusal_diagnostic(
     asks when the runner preflight actually rejected the job, so a
     ``runner_version_check: "warn"`` run that proceeded never gets one. The
     remedy names the runner's accepted client major.minor, the updated image,
-    and the ``runner_version_check: "warn"`` opt-out (#5750);
+    and the ``runner_version_check: "warn"`` opt-out (#5750); a client older
+    than the runner additionally gets the #7857 pinned-client command.
     ``gate_release`` is :func:`klayout_tools.sim_batch._runner_gate_release`."""
     if identity.get("runner_compatibility") != "mismatch":
         return None
@@ -116,7 +118,8 @@ def refusal_diagnostic(
             f"client is klt {client}; submit from a client of klt {accepted}.x, "
             f"update the runner image to klt {client_release}, or set "
             'request.batch.runner_version_check to "warn" to run anyway'
-        ),
+        )
+        + older_client_remedy(client_release, [accepted]),
         "runner_klt_version": runner,
         "client_klt_version": client,
         "accepted_client_release": accepted,

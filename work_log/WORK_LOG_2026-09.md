@@ -2,6 +2,48 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-25
+
+- **PR #2508**: fix(signoff): verify item 11's re-read ERC spec against its own content_hash
+- **PR #2506**: feat(sim): grade a distrusted diagnostic's corner inconclusive, not pass
+- **PR #2505**: feat(sim): plausibility bounds to catch physically implausible solves before grading
+- **PR #2500**: fix(loom): restore champion-epic.md's missing Step 0 / Step 0a / Step 0.5
+- **PR #2499**: feat(sim): roll up diagnostic counts across corners in top-level report
+- **PR #2488**: fix(sim): stage the netlist's .include closure for off-host sim jobs
+- **PR #2487**: test(gf180mcu): accept both upstream MiM device-class spellings in the native cross-check
+- **PR #2486**: feat(pex): measure both legs with a caller-supplied command (--measure-command)
+- **PR #2483**: fix(pnr,extract): guard an io layer whose DEF port geometry extraction cannot see
+- **PR #2481**: fix(corpus): pin openroad/orfs Docker image by digest in regen/validation scripts
+- **PR #2480**: fix(signoff): grade a yield citation's sample size and negative control
+- **PR #2479**: feat(yield): add censored, a no-value category for an unmet measurement precondition
+- **PR #2475**: build(openroad): pin openroad/orfs by digest, not :latest
+- **PR #2474**: docs(signoff): note item 6's evidence verb needs a from-source toolchain
+- **PR #2472**: feat(lvs): disclose a resistor/capacitor class's never-compared geometry
+- **PR #2470**: feat(erc): grade a declared intentional tie via nets[].same_net_as
+- **PR #2469**: lvs: express a PDK fixed-geometry device-flavour wrapper (#2459)
+- **Issue #2496** (closed): klt signoff's item-11 ERC half re-reads the spec document from disk without checking it against the envelope's own provenance.spec.content_hash
+- **Issue #2494** (closed): champion-epic.md is missing the Step 0 / Step 0a sections that champion-common.md and champion-epic-standdown.md reference by name
+- **Issue #2493** (closed): sim: plausibility bounds (node_voltage_bounds/plausible_range) to catch physically implausible solves before grading
+- **Issue #2492** (closed): sim: options.fail_on_diagnostic to grade a recovered convergence diagnostic as inconclusive, not pass
+- **Issue #2491** (closed): sim: roll up diagnostic counts (recovered warnings included) at the top-level report
+- **Issue #2485** (closed): bug: klt sim's remote/batch transport stages only the request netlist, so every .include'd DUT (klt pex's whole testbench contract) resolves nowhere off-host
+- **Issue #2484** (closed): test(gf180mcu): native MiM cross-check asserts a vendor device-class name upstream renamed (cap_mim_2f0fF)
+- **Issue #2478** (closed): Friction: item 7 accepts only a klt pex envelope, but klt pex only drives klt sim requests — a block whose spec rows need caller-side post-processing can never cite it
+- **Issue #2477** (closed): Corpus regenerate/validation scripts still hardcode openroad/orfs:latest
+- **Issue #2473** (closed): place-and-route: io.layer_v="li1" yields DEF pins that klt extract cannot see, with a clean DRC and a 'match' LVS to cover for it
+- **Issue #2471** (closed): tests: op_sanity sky130 integration tests fail when KLT_SIM_BACKEND=batch is inherited from the environment
+- **Issue #2468** (closed): Friction: klt yield has no category for a draw censored by a conditioning event — errored understates the denominator, failed_unmeasurable charges a failure the graded row does not define
+- **Issue #2467** (closed): Friction: klt signoff grades a yield citation on status alone, so an admittedly-undersized campaign with no negative control renders T1 item 6 met
+- **Issue #2466** (closed): Friction: klt yield's native extension is unreachable from every published release, so klt signoff's kind-restricted T1 item 6 is ungradeable for a release-pinning consumer
+- **Issue #2465** (closed): install-openroad-docker.sh: pin openroad/orfs by digest, not :latest
+- **Issue #2464** (closed): klt sim: no way to dispatch an already-composed deck to remote/batch capacity
+- **Issue #2463** (closed): Friction: klt erc's supply spec cannot declare two labels as intentionally one net, so a deliberate supply tie is ungradeable
+- **Issue #2462** (closed): klt lvs: a drawn resistor's geometry is never compared on the subckt-call path, and compare_parameters contradicts its own parameter_excluded disclosure
+- **Issue #2461** (closed): klt lvs: a resistor/capacitor class's geometry is never compared, and nothing in the report says so
+- **Issue #2460** (closed): klt lvs: subckt-call conversion cannot handle fixed-geometry device wrappers (L supplied, W baked into the subcircuit name)
+- **Issue #2459** (closed): klt lvs: subckt-call converter cannot express a PDK's fixed-width device flavour wrapper (geometry in the subcircuit name, not a call-site parameter)
+- **Issue #2457** (closed): klt erc: no rule for 'a declared supply reaches a top-level terminal' -- a rail that is one island but bonds to nothing reports clean
+
 ### 2026-09-24
 
 - **PR #2455**: sim_batch: run one ngspice per physical core on the batch job instance

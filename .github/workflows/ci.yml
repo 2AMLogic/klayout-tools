@@ -198,16 +198,14 @@ jobs:
         run: uv run --frozen --extra dev python scripts/check_changelog_fragments.py
 
       - name: Canary manifest matches the forge
-        # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
-        # 2AMLogic canary repo is missing from blocks/canaries.json, or a listed
-        # repo is no longer public. Only reads public repo names, so the
-        # read-only GITHUB_TOKEN a fork PR gets is enough. A `gh` failure is a
-        # failure (never a silent pass). Fix: `scripts/ingest-canary.py
-        # --sync-manifest`, then ingest the new entries (blocks/README.md).
-        # GATES -- do not add continue-on-error.
+        # The pytest matrix checks manifest invariants on every PR. Only
+        # relevant PRs and merge groups also depend on today's public inventory.
+        # Pushes to main and the scheduled canary-manifest workflow always check it.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uv run --frozen --extra dev python scripts/ingest-canary.py --check-manifest
+          CANARY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CANARY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: scripts/ci-canary-manifest.sh
 
       - name: Committed examples/ carry no absolute host paths
         # `klt env-provenance lint-envelope` (issue #2224) over every
