@@ -15,6 +15,7 @@ hermetic coverage of the same conversion is in
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import shutil
@@ -24,7 +25,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.lvs import run_lvs
-from klayout_tools.signoff_runset import PINNED_RUNSETS
+from klayout_tools.signoff_runset import PINNED_RUNSETS, unrecognised_device_gaps
 
 pytestmark = pytest.mark.skipif(
     shutil.which("klayout") is None, reason="klayout binary absent"
@@ -278,31 +279,56 @@ def test_every_passive_call_agrees_with_its_native_control(
     assert _folded(source) == _folded(calls["device_census"]["reference"])
 
 
+def _lose_one(report: dict, name: str) -> dict:
+    """``report`` as if both the layout and the converted reference had lost one
+    ``name`` device while its source card was still read: the shape a reader
+    that dropped a card would leave (a copy; the source census is untouched)."""
+    lost = copy.deepcopy(report)
+    for side in ("layout", "reference"):
+        counts = lost["device_census"][side]
+        counts[next(k for k in counts if k.upper() == name.upper())] -= 1
+    return lost
+
+
 @pytest.mark.parametrize(
     ("group", "name", "card"),
     [
         ("cap_devices", "cap_cmim", "C_pattern_1"),
         ("res_devices", "rppd", "R_pattern_1"),
+        ("res_devices", "rhigh", "R_pattern_1"),
+        ("res_devices", "rsil", "R_pattern_1"),
     ],
-    ids=["cap_cmim", "rppd"],
+    ids=["cap_cmim", "rppd", "rhigh", "rsil"],
 )
 def test_one_converted_passive_call_restores_the_native_pairing(
     pdk_lvs, tmp_path, group, name, card
 ):
     gds, cdl = _unit_control(pdk_lvs, tmp_path, group, name)
     native = _lvs(pdk_lvs, tmp_path, gds, cdl)
-    swapped = _lvs(
-        pdk_lvs,
-        tmp_path,
-        gds,
-        _passives_as_calls(cdl, name, {card}),
-        form="subckt-call",
-    )
+    mixed = _passives_as_calls(cdl, name, {card})
+    assert f"\nX{card} " in f"\n{mixed}"  # the card really was converted
+    swapped = _lvs(pdk_lvs, tmp_path, gds, mixed, form="subckt-call")
     # Before the fix one converted card left 68/69 capacitors and 2/84
     # resistors paired (its ``w``/``l`` lost, or its terminals shifted).
     assert swapped["counts"]["devices"] == native["counts"]["devices"]
     assert swapped["category_counts"] == native["category_counts"]
-    assert swapped["device_census"]["reference_source"] is not None
+    # The PDK's own control spells a few cards ``$[model]``: the source census
+    # folds that into the model, so beside the converted call (and on the
+    # all-native control) it agrees class for class with the converted
+    # reference and signoff names no recognition gap. It used to count the
+    # wrapped cards apart and report them missing.
+    for report in (native, swapped):
+        census = report["device_census"]
+        assert not [k for k in census["reference_source"] if "$" in k]
+        assert _folded(census["reference_source"]) == _folded(census["reference"])
+        assert unrecognised_device_gaps(report) == []
+    # ...and a device that is really absent is still named, with the bracketed
+    # cards folded into the count it is measured against.
+    total = _folded(swapped["device_census"]["reference"])[name.upper()]
+    gaps = unrecognised_device_gaps(_lose_one(swapped, name))
+    assert len(gaps) == 1
+    assert f"source class '{name.upper()}' requires {total} converted" in gaps[0]
+    assert f"accounts for {total - 1}" in gaps[0]
 
 
 def test_unconvertible_call_is_named_beside_a_converted_passive(pdk_lvs, tmp_path):

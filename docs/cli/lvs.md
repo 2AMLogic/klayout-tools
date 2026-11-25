@@ -544,7 +544,9 @@ a compared circuit, say) still yields `mismatch`, and a run with a
 
 - `device_census` — `{layout: {class: n}, reference: {class: n}}`, plus
   `reference_source` (issue #6902): `{NAME: n}` — instance counts, keyed by
-  upper-cased name, over the reference *source* netlist re-read with the
+  upper-cased name (a CDL `$[model]` wrapper, as on a few of the PDK's own
+  `rppd`/`rhigh`/`rsil`/`cap_cmim` cards, is folded into `MODEL`, so those
+  cards count with their siblings), over the reference *source* netlist re-read with the
   plain SPICE reader (hierarchy intact, no deck delegate; for `sg13g2.lvs`
   the variant that also keeps its valueless `R`/`C`/`L` cards, issue #7855),
   one count per card per circuit definition. In scope are exactly the cards the runset's

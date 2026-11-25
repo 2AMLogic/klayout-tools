@@ -4,6 +4,7 @@ file-size ratchet ceiling, issue #5407)."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from .coverage import build_check_coverage
@@ -37,6 +38,19 @@ def _class_census(
     return declared, counts, unnamed
 
 
+_CDL_MODEL = re.compile(r"\$\[(.+)\]")
+
+
+def _device_class_key(name: object) -> str:
+    """The source census key for a plain-reader device class: upper-cased,
+    with the CDL ``$[model]`` wrapper (the PDK's native ``rppd`` / ``rhigh`` /
+    ``rsil`` / ``cap_cmim`` spelling) folded into ``model``, since the pinned
+    runset's reader strips it and counts that card under the plain model."""
+    text = str(name or "")
+    wrapped = _CDL_MODEL.fullmatch(text)
+    return (wrapped.group(1) if wrapped else text).upper()
+
+
 def _reference_source_census(
     reference_path: str | None,
     deck_file: str | None,
@@ -60,7 +74,8 @@ def _reference_source_census(
       (including calls that the pinned reader renames);
     - every device card the plain reader keeps (``M``/``Q``/``D``/``C``/
       ``R``/``L``...), keyed by its device-class name -- for modelled cards
-      that is the model string, as written.
+      that is the model string, as written, a CDL ``$[model]`` wrapper
+      folded into the model (:func:`_device_class_key`).
 
     ``None`` when the reference cannot be re-read: a report without this
     evidence cannot prove the delegate kept every reference device, and the
@@ -95,7 +110,7 @@ def _reference_source_census(
                     subcircuit_counts[name] = subcircuit_counts.get(name, 0) + 1
                 counts[name] = counts.get(name, 0) + 1
         for device in circuit.each_device():
-            name = str(device.device_class().name or "").upper()
+            name = _device_class_key(device.device_class().name)
             if name:
                 counts[name] = counts.get(name, 0) + 1
     return dict(sorted(counts.items()))

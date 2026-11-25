@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import klayout.db as kdb
+import pytest
 
 from klayout_tools import lvs_runset_census
 from klayout_tools.coverage import coverage_validation_error
@@ -91,6 +92,44 @@ def test_reference_source_census_folds_case_like_the_census_sides(tmp_path):
     )
 
     assert lvs_runset_census._reference_source_census(ref, deck) == {"PDK__FET": 1}
+
+
+def test_reference_source_census_folds_the_cdl_model_wrapper(tmp_path):
+    """Issue #7855: the PDK's native CDL spells a few cards ``$[model]``. The
+    reader strips that wrapper from the converted reference, so the source
+    census counts those cards under the plain model -- never as a class of
+    their own, which signoff would report as devices the reference lacks."""
+    deck = _write_spice(tmp_path / "pdk.lvs", _DECK_TEXT)
+    ref = _write_spice(
+        tmp_path / "ref.spice",
+        "Rp1 n1 n2 260 $SUB=sub $[pdk__res] m=1 l=0.5u w=0.5u\n"
+        "Rp2 n3 n4 260 $SUB=sub pdk__res m=1 l=0.5u w=0.5u\n"
+        "C0 p m 74f $[pdk__cap] w=7u l=7u m=1\n"
+        "C1 p m 74f pdk__cap w=7u l=7u m=1\n",
+    )
+
+    assert lvs_runset_census._reference_source_census(ref, deck) == {
+        "PDK__CAP": 2,
+        "PDK__RES": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "key"),
+    [
+        ("rppd", "RPPD"),
+        ("$[rppd]", "RPPD"),
+        ("$[RPPD]", "RPPD"),
+        ("$[cap_cmim]", "CAP_CMIM"),
+        ("", ""),
+        (None, ""),
+        # Only a whole-name wrapper is CDL notation; anything else is a name.
+        ("a$[b]", "A$[B]"),
+        ("$[]", "$[]"),
+    ],
+)
+def test_device_class_key_folds_case_and_the_cdl_wrapper(name, key):
+    assert lvs_runset_census._device_class_key(name) == key
 
 
 def test_reference_source_census_is_none_when_unreadable(tmp_path):
