@@ -6,8 +6,51 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-25
+
+- **PR #7888**: Document the canary CI gate and allow manual inventory checks
+- **PR #7887**: Keep parallel fake fleet collectors bound to their own shard
+- **PR #7871**: fix: write SG13G2 cap_cmim and poly-resistor calls as native cards
+- **Issue #7886** (closed): test_split_submits_balanced_jobs_and_merges_in_order fails on a high-core host: _MultiFleet.collect shares self.spec across concurrent shard collects
+- **Issue #7881** (closed): CI: record the canary gate's merge-group exception and restore its GATES/remediation comment
+- **Issue #7855** (closed): klt lvs klayout-runset + form subckt-call (sg13g2): cap_cmim purged by min_caps, poly-resistor terminals shifted by positional 0, and reference_source is null
+- **PR #7870**: docs(drc): clarify ASAP7 track spacing for aligned and shifted vias
+- **PR #7878**: Document device.connectivity in the canonical LVS category table
+- **PR #7862**: Name the pinned-client uvx remedy in older-client batch runner refusals
+- **PR #7877**: Run the live canary inventory check on relevant changes, main and a daily schedule
+- **PR #7873**: feat: export a noise run's per-frequency spectrum as artifacts.waveform_spectrum
+- **PR #7867**: fix(sim): name changed options when attaching a shard map
+- **PR #7875**: Register the public GF180 antifuse and eFuse OTP canaries
+- **PR #7858**: fix(lvs): identify runset device terminal mismatches
+- **PR #7868**: Register two new public GF180 canaries in the CI manifest
+- **PR #7851**: Record measured ASAP7 V1-V3 corner-spacing dispositions
+- **PR #7854**: Run and verify pinned GF180 corpus shards on the Spot fleet
+- **Issue #3147** (closed): ASAP7 DRC deck: resolve remaining V0–V3 spacing, enclosure and track-dependent rules
+- **Issue #7863** (closed): docs(lvs): add device.connectivity to the canonical mismatches[].category list
+- **Issue #7857** (closed): batch: no way to run a grid from a client pinned to an older minor once the fleet image moves on
+- **Issue #7876** (closed): CI: scope live canary inventory checks while retaining deterministic PR coverage
+- **Issue #7866** (closed): klt sim: options.waveforms on a noise analysis exports only the integrated-noise plot, not the per-frequency spectrum
+- **Issue #7861** (closed): klt sim deck-list --attach <shard map>: a --max-workers given at submit is now part of the request digest, and the mismatch hint does not name it
+- **Issue #7874** (closed): CI: two more public GF180 canaries are missing from the manifest on main
+- **Issue #7856** (closed): klt lvs klayout-runset: connectivity-mismatched device pairs with equal parameters are reported as device.property
+- **Issue #7865** (closed): Restore the CI canary manifest check for two new public GF180 repositories
+- **PR #7844**: Honor deck-list worker counts on local and staged executors
+- **PR #3531**: feat: gate batch sim on the worker's PDK stamp via --require-pdk-match
+- **Issue #7842** (closed): Honor options.max_workers in local-parallel deck-list requests and staged batch workers
+- **Issue #3462** (closed): klt sim batch: no way to require the worker PDK revision match a pin
+
 ### 2026-11-24
 
+- **PR #7850**: Share canonical geometry hashing across layout and cell digests
+- **PR #7848**: Share the voltage-selector parser with slope-band measurements
+- **Issue #7849** (closed): Share canonical cell-hashing loop between cell_geometry_digest and layout_geometry_digest
+- **Issue #7853** (closed): functional-verification reports carry no provenance block, so no provenance.input.content_hash to pin
+- **Issue #7847** (closed): Reuse the shared voltage-selector normalizer for slope-band measurements
+- **Issue #5531** (closed): klt sim batch: no way to list the fleet's in-flight jobs, so a client cannot tell whether the fleet is already busy before submitting
+- **Issue #2352** (closed): Dependency Dashboard
+- **Issue #6219** (closed): Publish the pinned xschem build as a release asset (credential-free install route)
+- **Issue #5672** (closed): place-and-route: a timing-free (structural) standard-cell Liberty cannot reach place/route — clock_period_ns is mandatory and CTS cannot be opted out of
+- **Issue #5578** (closed): Verify the original long-running simulation on the simlong fleet profile
 - **PR #7846**: Reuse SPICE geometry resolution for capacitors and diodes
 - **PR #7841**: fix(lvs): write native Q/M cards for SG13G2 bipolar and MOS calls under klayout-runset
 - **PR #7839**: Document facing-end ambiguity for ASAP7 V0 corner spacing
@@ -5231,46 +5274,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #2502** (closed): klt characterize: single-cell combinational NLDM extraction and .lib emission (core mechanism)
 - **Issue #2497** (closed): klt erc: erc.unconnected_net counts only islands carrying the declared label, so a rail split into a labelled piece and an unlabelled orphan grades clean
 - **Issue #2495** (closed): Friction: T1 item 11's analog LVS half is a restatement of the overall LVS verdict, so a structural supply claim is gated on an unrelated device-parameter defect
-
-### 2026-09-25
-
-- **PR #2508**: fix(signoff): verify item 11's re-read ERC spec against its own content_hash
-- **PR #2506**: feat(sim): grade a distrusted diagnostic's corner inconclusive, not pass
-- **PR #2505**: feat(sim): plausibility bounds to catch physically implausible solves before grading
-- **PR #2500**: fix(loom): restore champion-epic.md's missing Step 0 / Step 0a / Step 0.5
-- **PR #2499**: feat(sim): roll up diagnostic counts across corners in top-level report
-- **PR #2488**: fix(sim): stage the netlist's .include closure for off-host sim jobs
-- **PR #2487**: test(gf180mcu): accept both upstream MiM device-class spellings in the native cross-check
-- **PR #2486**: feat(pex): measure both legs with a caller-supplied command (--measure-command)
-- **PR #2483**: fix(pnr,extract): guard an io layer whose DEF port geometry extraction cannot see
-- **PR #2481**: fix(corpus): pin openroad/orfs Docker image by digest in regen/validation scripts
-- **PR #2480**: fix(signoff): grade a yield citation's sample size and negative control
-- **PR #2479**: feat(yield): add censored, a no-value category for an unmet measurement precondition
-- **PR #2475**: build(openroad): pin openroad/orfs by digest, not :latest
-- **PR #2474**: docs(signoff): note item 6's evidence verb needs a from-source toolchain
-- **PR #2472**: feat(lvs): disclose a resistor/capacitor class's never-compared geometry
-- **PR #2470**: feat(erc): grade a declared intentional tie via nets[].same_net_as
-- **PR #2469**: lvs: express a PDK fixed-geometry device-flavour wrapper (#2459)
-- **Issue #2496** (closed): klt signoff's item-11 ERC half re-reads the spec document from disk without checking it against the envelope's own provenance.spec.content_hash
-- **Issue #2494** (closed): champion-epic.md is missing the Step 0 / Step 0a sections that champion-common.md and champion-epic-standdown.md reference by name
-- **Issue #2493** (closed): sim: plausibility bounds (node_voltage_bounds/plausible_range) to catch physically implausible solves before grading
-- **Issue #2492** (closed): sim: options.fail_on_diagnostic to grade a recovered convergence diagnostic as inconclusive, not pass
-- **Issue #2491** (closed): sim: roll up diagnostic counts (recovered warnings included) at the top-level report
-- **Issue #2485** (closed): bug: klt sim's remote/batch transport stages only the request netlist, so every .include'd DUT (klt pex's whole testbench contract) resolves nowhere off-host
-- **Issue #2484** (closed): test(gf180mcu): native MiM cross-check asserts a vendor device-class name upstream renamed (cap_mim_2f0fF)
-- **Issue #2478** (closed): Friction: item 7 accepts only a klt pex envelope, but klt pex only drives klt sim requests — a block whose spec rows need caller-side post-processing can never cite it
-- **Issue #2477** (closed): Corpus regenerate/validation scripts still hardcode openroad/orfs:latest
-- **Issue #2473** (closed): place-and-route: io.layer_v="li1" yields DEF pins that klt extract cannot see, with a clean DRC and a 'match' LVS to cover for it
-- **Issue #2471** (closed): tests: op_sanity sky130 integration tests fail when KLT_SIM_BACKEND=batch is inherited from the environment
-- **Issue #2468** (closed): Friction: klt yield has no category for a draw censored by a conditioning event — errored understates the denominator, failed_unmeasurable charges a failure the graded row does not define
-- **Issue #2467** (closed): Friction: klt signoff grades a yield citation on status alone, so an admittedly-undersized campaign with no negative control renders T1 item 6 met
-- **Issue #2466** (closed): Friction: klt yield's native extension is unreachable from every published release, so klt signoff's kind-restricted T1 item 6 is ungradeable for a release-pinning consumer
-- **Issue #2465** (closed): install-openroad-docker.sh: pin openroad/orfs by digest, not :latest
-- **Issue #2464** (closed): klt sim: no way to dispatch an already-composed deck to remote/batch capacity
-- **Issue #2463** (closed): Friction: klt erc's supply spec cannot declare two labels as intentionally one net, so a deliberate supply tie is ungradeable
-- **Issue #2462** (closed): klt lvs: a drawn resistor's geometry is never compared on the subckt-call path, and compare_parameters contradicts its own parameter_excluded disclosure
-- **Issue #2461** (closed): klt lvs: a resistor/capacitor class's geometry is never compared, and nothing in the report says so
-- **Issue #2460** (closed): klt lvs: subckt-call conversion cannot handle fixed-geometry device wrappers (L supplied, W baked into the subcircuit name)
-- **Issue #2459** (closed): klt lvs: subckt-call converter cannot express a PDK's fixed-width device flavour wrapper (geometry in the subcircuit name, not a call-site parameter)
-- **Issue #2457** (closed): klt erc: no rule for 'a declared supply reaches a top-level terminal' -- a rail that is one island but bonds to nothing reports clean
 

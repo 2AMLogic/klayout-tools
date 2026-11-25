@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from .lvs_base import LvsError
+from .lvs_runset_sg13g2_cards import PASSIVE_CARD_SHAPES, sg13g2_model_name
+
+if TYPE_CHECKING:
+    import klayout.db as kdb
 
 #: ``reference.form`` values the runset engine accepts.
 _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
@@ -112,13 +116,12 @@ def rename_top_subckt(text: str, old: str, new: str) -> str:
     return "\n".join(out)
 
 
-# Native element classes and ordered terminal counts in IHP's SG13G2 reader.
-_SG13G2_RF_CARDS = {"INDUCTOR": ("L", 3), "SG13_HV_SVARICAP": ("C", 4)}
+_SG13G2_RF_CARDS = {"INDUCTOR", "SG13_HV_SVARICAP"}
 
 
 def _sg13g2_rf_card(tokens: list[str], positional: list[str]) -> str:
     name = positional[-1]
-    prefix, count = _SG13G2_RF_CARDS[name.upper()]
+    prefix, count = PASSIVE_CARD_SHAPES[name.upper()]
     terminals = len(positional) - 1
     if terminals != count:
         raise LvsError(f"SG13G2 {name} requires {count} terminals, got {terminals}")
@@ -136,7 +139,7 @@ def _sg13g2_reference_cards(
     from .netlist_normalize import _binding_known, _split_params, _tokenize
     from .netlist_normalize_scan import recovery_subckt_names
 
-    primitives = set(_SG13G2_RF_CARDS) | native_primitive_names()
+    primitives = _SG13G2_RF_CARDS | native_primitive_names()
     defined = recovery_subckt_names(text, source, primitives)
     lines = fold_spice_continuations(text.split("\n"))
     kept: set[int] = set()
@@ -150,7 +153,8 @@ def _sg13g2_reference_cards(
         elif head[0].lower() == ".ends":
             enclosing = ""
         elif head[0][:1].lower() == "x":
-            tokens = _tokenize(line)
+            # The CDL pin/model separator is not a terminal of the native card.
+            tokens = [token for token in _tokenize(line) if token != "/"]
             positional, params = _split_params(tokens[1:])
             name = positional[-1] if positional else ""
             model = name.upper()
@@ -158,9 +162,9 @@ def _sg13g2_reference_cards(
                 continue
             if model in _SG13G2_RF_CARDS and _binding_known(name, binding):
                 continue
-            # PDK unit fixtures may give a top the same name as the primitive
-            # it contains. Calls to a separate defined circuit are hierarchy.
-            if model in defined and model != enclosing:
+            # A fixture may name its top after the primitive it contains.
+            # Keep hierarchy and calls with a native-only backslash separator.
+            if (model in defined and model != enclosing) or "\\" in positional:
                 kept.add(i)
                 continue
             card = (
@@ -282,6 +286,169 @@ def is_sg13g2_runset(deck_file: str) -> bool:
     return os.path.basename(deck_file) == "sg13g2.lvs"
 
 
+def reference_spice_reader(deck_file: str | None) -> Any:
+    """Use the SG13G2 reader for its census and unresolved-call scan.
+    All other decks use the plain SPICE reader."""
+    import klayout.db as kdb
+
+    if deck_file and is_sg13g2_runset(deck_file):
+        return tolerant_spice_reader()
+    return kdb.NetlistSpiceReader()
+
+
+_VALUE_ELEMENTS = ("C", "R", "L")
+_CDL_SUBSTRATE = re.compile(r"(?<!\S)\$?SUB\s*=\s*", re.IGNORECASE)
+
+
+def _sg13g2_card_fields(
+    reader: kdb.NetlistSpiceReaderDelegate, s: str, element: str
+) -> tuple[str, kdb.ParseElementComponentsData]:
+    """Apply IHP's resistor field separator after identifying a poly model."""
+    parts = reader.parse_element_components(s, reader.variables())
+    if element == "R" and "\\" in parts.strings:
+        model = sg13g2_model_name(parts.strings[-1], element)
+        if PASSIVE_CARD_SHAPES.get(model) == ("R", 3):
+            s = re.sub(r"\s+\\\s+", " ", s)
+            parts = reader.parse_element_components(s, reader.variables())
+    return s, parts
+
+
+def _restore_poly_card(
+    reader: kdb.NetlistSpiceReaderDelegate, s: str, card: kdb.ParseElementData
+) -> None:
+    """Keep KLayout's parsed resistance and recover the IHP model and substrate."""
+    model = sg13g2_model_name(card.model_name, "R")
+    if PASSIVE_CARD_SHAPES.get(model) != ("R", 3):
+        return
+    card.model_name = model
+    if (
+        len(card.net_names) == 2
+        and {"$SUB", "SUB"}.intersection(card.parameters)
+        and (substrate := _CDL_SUBSTRATE.search(s))
+    ):
+        # Read the RHS as a net token so e.g. 007 keeps its spelling.
+        tail = reader.parse_element_components(s[substrate.end() :], reader.variables())
+        card.net_names = [*card.net_names, tail.strings[0]]
+
+
+def _stand_in_card(card: str, element: str) -> tuple[str, str]:
+    """``(card, element)`` to re-parse a valueless ``R``/``C``/``L`` card the
+    plain parse refused: the retries of IHP's ``CustomReader#parse_element``
+    (``rule_decks/custom_reader.lvs``), in its order. A varactor is read as an
+    ``M`` card, a four-net ``inductor3`` as an ``M`` card with a stand-in
+    ``L=0``, anything else with a stand-in ``C=0``/``R=0``/``L=0``."""
+    low = card.lower()
+    if element == "C" and "varicap" in low:
+        return card, "M"
+    if element == "L" and "inductor3" in low:
+        return f"{card} L=0", "M"
+    return f"{card} {element}=0", element
+
+
+def _create_generic_device(
+    circuit: Any,
+    name: str,
+    model: str,
+    nets: Sequence[Any],
+    registry: dict[str, Any],
+) -> None:
+    """Add ``name`` to ``circuit`` as a device of a class named ``model`` with
+    one terminal per net: the shape KLayout's own ``C``/``R``/``L`` handler
+    refuses (a three-net ``L``, a four-net ``C``). One class object per
+    ``model`` (``registry``); a card with another net count than the class's
+    first card raises, so the reference stays unreadable rather than guessed."""
+    import klayout.db as kdb
+
+    from .netlist_class_registry import shared_device_class
+
+    def make_class() -> kdb.DeviceClass:
+        device_class = kdb.DeviceClass()
+        device_class.name = model
+        for i in range(len(nets)):
+            device_class.add_terminal(
+                kdb.DeviceTerminalDefinition(f"T{i + 1}", f"Terminal {i + 1}")
+            )
+        return device_class
+
+    device_class = shared_device_class(circuit.netlist(), model, make_class, registry)
+    terminals = device_class.terminal_definitions()
+    if len(terminals) != len(nets):
+        raise RuntimeError(
+            f"'{model}' is used with {len(nets)} nets after a "
+            f"{len(terminals)}-net card of the same class"
+        )
+    device = circuit.create_device(device_class, name)
+    for net, terminal in zip(nets, terminals, strict=True):
+        device.connect_terminal(terminal.name, net)
+
+
+def tolerant_spice_reader() -> Any:
+    """A ``NetlistSpiceReader`` that keeps the valueless ``R``/``C``/``L``
+    cards ``sg13g2.lvs``'s own reader keeps (issue #7855).
+
+    Read model-last terminals as net names, including numeric substrates.
+    Valued poly resistors take their substrate from the CDL SUB parameter.
+    Other valueless cards use the deck's stand-in value. RF inductor and
+    varactor cards that KLayout still refuses use a generic device class."""
+    import klayout.db as kdb
+
+    registry: dict[str, kdb.DeviceClass] = {}
+
+    class _Delegate(kdb.NetlistSpiceReaderDelegate):
+        def parse_element(self, s: str, element: str) -> Any:
+            # IHP CDL permits a standalone slash between the pins and model.
+            s = re.sub(r"\s+/\s+", " ", s)
+            if element not in _VALUE_ELEMENTS:
+                return super().parse_element(s, element)
+            s, parts = _sg13g2_card_fields(self, s, element)
+            if parts.strings:
+                *nets, model = parts.strings
+                model = sg13g2_model_name(model, element)
+                params = parts.parameters
+                value = params.get(element, 0.0)
+                # CDL can put a resistance in the third field. Let KLayout
+                # parse that value before connecting a named substrate below.
+                if (
+                    PASSIVE_CARD_SHAPES.get(model) == (element, len(nets))
+                    and not {"$SUB", "SUB", "MODEL"}.intersection(params)
+                    and isinstance(value, (int, float))
+                ):
+                    card = kdb.ParseElementData()
+                    card.net_names, card.model_name = nets, model
+                    card.parameters, card.value = params, value
+                    return card
+            try:
+                card = super().parse_element(s, element)
+            except RuntimeError:
+                card = super().parse_element(*_stand_in_card(s, element))
+
+            if element == "R":
+                _restore_poly_card(self, s, card)
+            return card
+
+        def element(
+            self,
+            circuit: kdb.Circuit,
+            element: str,
+            name: str,
+            model: str,
+            value: float,
+            nets: Sequence[kdb.Net],
+            params: dict,
+        ) -> bool:
+            try:
+                return super().element(
+                    circuit, element, name, model, value, nets, params
+                )
+            except RuntimeError:
+                if element not in _VALUE_ELEMENTS or not model:
+                    raise
+            _create_generic_device(circuit, name, model, nets, registry)
+            return True
+
+    return kdb.NetlistSpiceReader(_Delegate())
+
+
 def _converted_call_names(declared: dict[str, Any], deck_file: str) -> set[str]:
     """Upper-cased callees the runset's own reader is known to turn into
     devices, which the unresolved-call scan therefore must not report: the
@@ -308,16 +475,19 @@ def _unresolved_reference_calls(
     """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
     calls the runset neither converted nor could resolve.
 
-    The reference is re-read with the plain SPICE reader (hierarchy intact).
-    A callee the runset itself converts (:func:`_converted_call_names`: its
-    ``declared`` device classes plus the deck's ``DEVICE_LIST``) is not
-    reported. ``[]`` when the reference cannot be re-read: the
-    runset's own verdict stands."""
+    The reference is re-read with the plain SPICE reader (hierarchy intact);
+    for ``sg13g2.lvs`` one that also keeps the valueless native ``R``/``C``/
+    ``L`` cards the runset's own reader keeps (:func:`reference_spice_reader`,
+    issue #7855: a raise on one used to hide every unresolved call in the
+    file). A callee the runset itself converts
+    (:func:`_converted_call_names`: its ``declared`` device classes plus the
+    deck's ``DEVICE_LIST``) is not reported. ``[]`` when the reference cannot
+    be re-read: the runset's own verdict stands."""
     import klayout.db as kdb
 
     netlist = kdb.Netlist()
     try:
-        netlist.read(reference_path, kdb.NetlistSpiceReader())
+        netlist.read(reference_path, reference_spice_reader(deck_file))
     except Exception:
         return []
     return find_unresolved(

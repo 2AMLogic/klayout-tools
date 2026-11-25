@@ -25,6 +25,18 @@ from __future__ import annotations
 import functools
 from typing import Any
 
+#: The measurement ``status`` of an ``optional`` measurement that produced no
+#: value (issue #2925): data ("this figure does not exist at this point"),
+#: not a failure -- it never makes its corner ``error``/``fail``.
+_ABSENT_STATUS = "absent"
+
+#: The additive measurement status for an unreached target (its diagnostic
+#: ``code``, ``NOT_REACHED_DIAGNOSTIC_CODE``, lives in ``sim_measurement_results``).
+NOT_REACHED_STATUS = "not_reached"
+
+#: The numeric bounds that contribute coverage checks (issue #1996).
+_RECOGNISED_LIMIT_KEYS = ("min", "max")
+
 #: The marker diagnostic :func:`_grade_measurement_value` attaches to a
 #: measurement whose value fell outside its declared
 #: ``measurements[].plausible_range``/``options.node_voltage_bounds``

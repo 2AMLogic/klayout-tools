@@ -1389,8 +1389,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 
 ## Why Rust
 
-The statistics core is the third Rust component in klayout-tools (after
-`native/mom/` and `native/congestion/`), following
+The statistics core follows
 [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)'s "Where Rust code lives"
 convention. It is dependency-free numerics: `erfc` (Cody's rational
 Chebyshev approximations), the inverse normal CDF (Acklam + a Halley

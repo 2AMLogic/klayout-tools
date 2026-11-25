@@ -299,8 +299,10 @@ python scripts/ingest-canary.py --check-manifest    # drift check, also run in C
 The rule is the repo **name** prefix, not a description prefix: most canary
 repos describe themselves "... — 2AM Logic canary block", and only 9 start
 with `Canary —`, so a description match would silently drop the rest.
-`--check-manifest` exits 1 when a public canary repo is missing from the
-manifest or a listed repo is no longer public. Private repos are never listed
+CI checks the live inventory on pushes to `main`, daily at 05:43 UTC, and on
+PRs or merge groups that change the manifest or its checker. Every PR runs the
+manifest tests against a fixed inventory. `--check-manifest` exits 1 when a
+public canary repo is missing from the manifest or a listed repo is no longer public. Private repos are never listed
 (the ingest's public-repo gate stays the enforcement). `pdk` is the
 `layout.json` family (`sky130`, `gf180mcu`, `sg13g2`); `asap7` and
 `sg13cmos5l` have no `klt` deck, so they are `null` and the site derives the

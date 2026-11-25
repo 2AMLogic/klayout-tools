@@ -59,6 +59,39 @@ def test_attach_shard_map_mismatch_names_the_differing_field(tmp_path, monkeypat
     assert "differing request field(s): batch.poll_timeout_s" in str(err.value)
 
 
+@pytest.mark.parametrize(
+    ("submitted", "current", "fields"),
+    [
+        (
+            {"options": {"timeout_s": 5}},
+            {"options": {"timeout_s": 6}},
+            ["options.timeout_s"],
+        ),
+        ({"options": {"max_workers": 3}}, {"options": {}}, ["options.max_workers"]),
+        ({"options": {}}, {}, ["options"]),
+        ({}, {"options": {}}, ["options"]),
+        ({"options": None}, {"options": {}}, ["options"]),
+    ],
+)
+def test_differing_option_fields(submitted, current, fields):
+    sections = sbs.request_section_digests(submitted)
+    assert sbs.differing_request_fields(sections, current) == fields
+
+
+def test_legacy_options_digest_only_reports_changed_sections():
+    options = {"timeout_s": 5}
+    sections = {"options": sbs.legacy_request_sha256(options)[:12]}
+    assert sbs.differing_request_fields(
+        sections, {"options": options, "remote": {}}
+    ) == ["remote"]
+
+
+def test_shard_map_without_section_digests_names_worker_override():
+    document = {"request_sha256": sbs.request_sha256({"options": {"max_workers": 3}})}
+    mismatch = sbs.shard_map_mismatch(document, {})
+    assert mismatch is not None and "--max-workers" in mismatch
+
+
 def test_attach_shard_map_accepts_a_legacy_full_request_digest(tmp_path, monkeypatch):
     _split_runner(monkeypatch)
     monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)

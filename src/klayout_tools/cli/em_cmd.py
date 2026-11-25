@@ -32,14 +32,14 @@ def _print_text(report: dict) -> None:
     print(f"request: {report['request']}")
     print(f"status: {report['status']}")
     print(f"engine: {env['engine']} {env['engine_version'] or '(version unknown)'}")
-    c = report["results"]["c"]
-    names = c["terminals"]
-    width = max(len(n) for n in names)
-    print()
-    print(" " * width + "  " + "  ".join(n.rjust(12) for n in names))
-    for name, row in zip(names, c["matrix"], strict=True):
-        print(f"{name.ljust(width)}  " + "  ".join(f"{v:12.6g}" for v in row))
-    print("(farads)")
+    if "temperature" in report["results"]:
+        t = report["results"]["temperature"]
+        print(f"peak temperature: {t['peak_temperature_k']:g} K")
+        print(f"source power: {t['source_power_w']:g} W")
+        print(f"boundary power: {t['boundary_power_w']:g} W")
+    else:
+        _print_matrix(report["results"]["c"])
+
     for check in report["checks"]:
         print(
             f"check {check['name']}: {check['status']} "
@@ -47,3 +47,13 @@ def _print_text(report: dict) -> None:
         )
     for key, art in report["artifacts"].items():
         print(f"artifact {key}: {art['path']}")
+
+
+def _print_matrix(c: dict) -> None:
+    names = c["terminals"]
+    width = max(len(n) for n in names)
+    print()
+    print(" " * width + "  " + "  ".join(n.rjust(12) for n in names))
+    for name, row in zip(names, c["matrix"], strict=True):
+        print(f"{name.ljust(width)}  " + "  ".join(f"{v:12.6g}" for v in row))
+    print("(farads)")

@@ -123,6 +123,7 @@ from . import (
     sim_mismatch_scale,
     sim_noise,
     sim_noise_mechanism,
+    sim_noise_spectrum,
     sim_op_args,
     sim_passes,
     sim_portable,
@@ -355,7 +356,15 @@ from .sim_analysis_overrides import (  # isort: skip
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
 from . import sim_errors, sim_population_limits, sim_regrade
 from .sim_errors import SimError as SimError
-from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
+from .sim_measurement_grading import (
+    _ABSENT_STATUS as _ABSENT_STATUS,
+)
+from .sim_measurement_grading import (
+    _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS,
+)
+from .sim_measurement_grading import (
+    _RECOGNISED_LIMIT_KEYS as _RECOGNISED_LIMIT_KEYS,
+)
 
 #: Moved to `sim_measurement_grading.py` (issue #7320) so the measurement
 #: sidecars import the grading primitives and shared response builders at
@@ -364,6 +373,9 @@ from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATU
 #: ``klayout_tools.sim.<name>`` keeps working.
 from .sim_measurement_grading import (
     IMPLAUSIBLE_DIAGNOSTIC_CODE as IMPLAUSIBLE_DIAGNOSTIC_CODE,
+)
+from .sim_measurement_grading import (
+    NOT_REACHED_STATUS as NOT_REACHED_STATUS,
 )
 from .sim_measurement_grading import (
     SAVE_MODE_NETLIST_NO_VALUE_HINT as SAVE_MODE_NETLIST_NO_VALUE_HINT,
@@ -7586,6 +7598,17 @@ def _run_corner(
                             "message": f"could not parse waveform rawfile: {exc}",
                         }
                     )
+                # Issue #7866: a `noise` corner's per-frequency spectrum, a
+                # sibling of the (totals-only) waveform artifact above.
+                artifacts.update(
+                    sim_noise_spectrum.persist(
+                        analysis,
+                        raw_path,
+                        waveform_max_bytes,
+                        waveform_decimate,
+                        diagnostics,
+                    )
+                )
             # Issue #3052: the engine has exited and its log is parsed, so the
             # persisted deck/log can now be rewritten to stable tokens.
             diagnostics.extend(
@@ -7774,10 +7797,6 @@ def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
         return None, f"SIG{-returncode}"
 
 
-#: The measurement ``status`` of an ``optional`` measurement that produced no
-#: value (issue #2925): data ("this figure does not exist at this point"),
-#: not a failure -- it never makes its corner ``error``/``fail``.
-_ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
@@ -7929,11 +7948,6 @@ def _parse_meas_errors(log_text: str) -> dict[str, str]:
             text = text[: _MEAS_ERROR_MAX_CHARS - 3] + "..."
         errors.setdefault(match.group(1).lower(), text)
     return errors
-
-
-#: The additive measurement status for an unreached target (its diagnostic
-#: ``code``, ``NOT_REACHED_DIAGNOSTIC_CODE``, lives in ``sim_measurement_results``).
-NOT_REACHED_STATUS = "not_reached"
 
 
 #: ngspice-46's reason line for a ``.meas`` target the completed sweep never
@@ -8512,6 +8526,7 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        lines.extend(sim_noise_spectrum.control_lines(analysis, raw_path))  # #7866
         if analysis["kind"] == "ac" and not measurements_spec:
             # An aborted sweep has no frequency vector to count (#7293).
             lines.extend(["if length(frequency) > 0", "display frequency", "end"])
@@ -9673,10 +9688,6 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     return values
 
 
-#: The numeric bounds that contribute coverage checks (issue #1996).
-_RECOGNISED_LIMIT_KEYS = ("min", "max")
-
-
 def _measurement_coverage(
     spec: dict[str, Any], corner: dict[str, Any], corner_index: int
 ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
@@ -10347,26 +10358,11 @@ def _rollup_measurements(
 
 # --------------------------------------------------------------------------- #
 # Waveform artifact (rawfile -> JSON)
-# The reader/writer moved to `sim_raw.py` (issue #6752); only the noise-mode
-# classifier of a parsed waveform stays here.
+# The reader/writer moved to `sim_raw.py` (issue #6752), the noise-mode
+# classifier of a parsed waveform to `sim_noise.py` (issue #7866).
 # --------------------------------------------------------------------------- #
 
-
-def noise_representation(waveform: dict[str, Any]) -> str:
-    """``"power"`` or ``"amplitude"`` for a parsed ``noise`` waveform dict
-    (issue #3006).
-
-    ngspice's ``sqrnoise`` squares every noise output vector. The rawfile
-    records which mode produced it: the integrated plot is named
-    ``Integrated Noise`` with ``voltage``/``current`` variables, or
-    ``Integrated Noise - V^2 or A^2`` with ``voltage^2``/``current^2`` ones.
-    """
-    if str(waveform.get("plotname", "")).strip().endswith("V^2 or A^2"):
-        return "power"
-    for var in waveform.get("variables", []):
-        if str(var.get("type", "")).endswith("^2"):
-            return "power"
-    return "amplitude"
+noise_representation = sim_noise.noise_representation
 
 
 # --------------------------------------------------------------------------- #
