@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .lvs_base import CATEGORY_DEVICE_CONNECTIVITY, CATEGORY_DEVICE_PROPERTY
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -102,17 +103,23 @@ def _device_findings(xref: Any, cp: Any, cname: dict[str, Any]) -> list[dict[str
                 )
             )
         else:
+            layout_params = _device_params(d1)
+            reference_params = _device_params(d2)
+            category = CATEGORY_DEVICE_PROPERTY
+            reason = "were paired but do not compare equal"
+            if layout_params == reference_params:
+                category = CATEGORY_DEVICE_CONNECTIVITY
+                reason = "were paired but their terminal connectivity differs"
             out.append(
                 _mismatch(
-                    "device.property",
+                    category,
                     "error",
-                    f"devices '{_device_label(d1)}' / '{_device_label(d2)}' "
-                    "were paired but do not compare equal",
+                    f"devices '{_device_label(d1)}' / '{_device_label(d2)}' {reason}",
                     "both",
                     device=dev_echo,
                     details={
-                        "layout_parameters": _device_params(d1),
-                        "reference_parameters": _device_params(d2),
+                        "layout_parameters": layout_params,
+                        "reference_parameters": reference_params,
                     },
                     circuit=cname,
                 )
