@@ -198,6 +198,26 @@ def test_deleted_include_is_unverifiable_never_false(tmp_path):
     ]
 
 
+def test_unreadable_include_preserves_top_deck_verification(tmp_path, monkeypatch):
+    _circuit(tmp_path)
+    report = _sim_report(tmp_path)
+
+    def deny_read(path):
+        assert Path(path) == tmp_path / "sub.spice"
+        raise PermissionError(path)
+
+    monkeypatch.setattr("klayout_tools.signoff_sim_closure.sha256_file", deny_read)
+    citation = _cited(_grade(report, tmp_path))
+
+    assert citation["input_verified"] is True
+    assert citation["sim_closure"] == {
+        "status": "partial",
+        "includes": 1,
+        "stale": [],
+        "unverifiable": [{"path": "sub.spice", "reason": "unreadable"}],
+    }
+
+
 def test_external_scope_include_has_no_resolvable_path(tmp_path):
     _circuit(tmp_path)
     closure = [

@@ -107,7 +107,10 @@ def _check_entry(
     # is not evidence a clean checkout would reproduce.
     if is_untracked_working_tree_file(path):
         return "unverifiable", _unverifiable(entry, "untracked")
-    actual = sha256_file(path)
+    try:
+        actual = sha256_file(path)
+    except OSError:
+        return "unverifiable", _unverifiable(entry, "unreadable")
     if actual is None:
         return "unverifiable", _unverifiable(entry, "not_found")
     if actual == recorded:
