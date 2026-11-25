@@ -997,13 +997,10 @@ def test_checked_in_history_table_covers_every_release():
         "the table -- rerun scripts/generate_deck_history.py"
     )
 
-    # The table reflects *tagged* history (not the working tree's hash), and
-    # since issue #5005 it is allowed to LAG: the release build generates the
-    # packaged table from the real tag outside the tree
-    # (publish.yml -> hatch_build.py), so the checked-in copy only refreshes
-    # when a normal PR runs the generator. Confirm the table's tags are a
-    # PREFIX of the real `git tag` list (older tags must never be missing;
-    # newer ones are the allowed lag).
+    # The table reflects *tagged* history, and since issue #5005 it may LAG: the
+    # release build generates the packaged table from the real tag outside the
+    # tree, so the checked-in copy refreshes only when a normal PR runs the
+    # generator. Its tags must be a PREFIX of `git tag` (none missing).
     result = subprocess.run(
         ["git", "tag", "--sort=v:refname", "--list", "v*"],
         cwd=repo_root,
@@ -1014,11 +1011,8 @@ def test_checked_in_history_table_covers_every_release():
     real_tags = [line for line in result.stdout.splitlines() if line.strip()]
     if real_tags:
         assert tags == real_tags[: len(tags)], (
-            "checked-in _history.json is not a prefix of `git tag` -- a"
-            " tagged release is missing from the table (rerun"
-            " scripts/generate_deck_history.py and commit the result;"
-            " trailing newer tags are the allowed lag, missing older ones"
-            " are not)"
+            "checked-in _history.json is not a prefix of `git tag`: a tagged "
+            "release is missing; rerun scripts/generate_deck_history.py"
         )
 
 

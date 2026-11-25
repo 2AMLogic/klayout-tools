@@ -115,10 +115,18 @@ fi
 # The last bump: newest first-parent commit whose subject names one. The three
 # spellings are documented in the header; plain release-PR subjects,
 # publisher subjects, and the merge commits that landed release PRs.
+#
+# Two portability/robustness rules for this pipeline (both bit on the real
+# 4,000+-commit history, where the match sits far from the tip):
+#   * the regexes use POSIX classes (`[^[:space:]]`), never `\S`: mawk, the
+#     default awk on Debian/Ubuntu runners, does not understand `\S`;
+#   * awk must read the WHOLE stream and print only the first match. An early
+#     `exit` closes the pipe while `git log` is still writing, git dies of
+#     SIGPIPE (141) and `pipefail` turns that into a spurious failure.
 line="$(git log --first-parent --format='%H%x09%ct%x09%s' "$ref" \
-  | awk -F'\t' '$3 ~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+$/ \
+  | awk -F'\t' '!found && ($3 ~ /^chore: bump version to [0-9]+\.[0-9]+\.[0-9]+$/ \
                  || $3 ~ /^chore\(release\): bump version to [0-9]+\.[0-9]+\.[0-9]+$/ \
-                 || $3 ~ /^Merge pull request #[0-9]+ from \S+\/release\/v[0-9]+\.[0-9]+\.[0-9]+/ { print; exit }')" \
+                 || $3 ~ /^Merge pull request #[0-9]+ from [^[:space:]]+\/release\/v[0-9]+\.[0-9]+\.[0-9]+/) { print; found = 1 }')" \
   || die "git log over '${ref}' failed"
 if [[ -z "$line" ]]; then
   die "no commit on ${ref}'s first-parent history names a version bump: cannot find the last bump (shallow clone?), refusing to guess"

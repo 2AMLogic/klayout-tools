@@ -72,13 +72,21 @@ Three jobs (Loom's model, `rjwalters/loom`
    files/refreshes a single tracking issue instead of tagging on failure),
    tags `vX.Y.Z` on that commit and dispatches `publish.yml` on the tag ref.
    A red bump is never tagged; its version ships later, from the first later
-   commit with the same `base-version` that goes green.
+   commit with the same `base-version` that goes green. If a run pushed the
+   tag but failed to dispatch `publish.yml`, the next run sees a tag that is
+   the newest and that `publish.yml` has never run on, and **dispatches only**
+   (no re-tag, no native-extras gate, never an older tag a newer release has
+   passed); a run list it cannot read fails red instead of reading as
+   "released".
 
 `tests/test_release_workflow_identity.py` pins the security-relevant shape of
 this workflow (only the publish job mints the OIDC token, no fallback push,
 no secret read, the `src/**` push filter that keeps the publisher's own
 commit from re-triggering the workflow), with mutation controls; mirror of
 Loom's `test-version-bump-workflow-identity.sh`.
+`tests/test_release_workflow_tag_job.py` guards the tag job and runs its own
+steps against a stub `gh` and a local origin, including the stranded-tag
+recovery above.
 
 ### Generated files are not in the bump commit
 
@@ -102,7 +110,15 @@ files that used to ride along in the release commit moved into the build:
 - **`site/src/data/cli.generated.json`** (site data): generated at site-build
   time by [`scripts/deploy-site.sh`](scripts/deploy-site.sh) and no longer
   committed; a `CHANGELOG.md`/`pyproject.toml` change redeploys the site, so
-  the release badge tracks the newest heading.
+  the release badge tracks the newest heading. CI's `site/` job generates it
+  before `tsc -b`; the Python drift tests call the generator in-process.
+- **`README.md`'s release claim** ("PyPI X.Y.Z"): the bump commit cannot carry
+  it, so in that commit the new `CHANGELOG.md` heading is one patch ahead of
+  the README. `tests/test_readme_drift.py` therefore lets the claim lag by
+  patch releases inside the newest release's `X.Y` line (the bump commit must
+  stay green or nothing is tagged); a minor or major release updates the
+  README with it, and a claim from an older `X.Y` line, or ahead of the
+  changelog, fails.
 
 ### Changelog fragments and release notes
 
@@ -201,6 +217,9 @@ recorded automatically at build time.
   ruleset bypass above.
 - **A red `CI` on the bump commit:** nothing is tagged; fix forward, and the
   next green commit carrying the same `base-version` is tagged instead.
+- **A tag with no publish run** (the `tag` job's dispatch step failed): re-run
+  the failed `Release` run. The tag job dispatches `publish.yml` on the
+  existing tag without re-tagging (see the `tag` job above).
 - **A failed publish after the tag:** run `publish.yml` via "Run workflow" on
   the existing `vX.Y.Z` tag; do not re-tag.
 

@@ -2,9 +2,9 @@
 
 ``site/src/data/cli.generated.json`` feeds the landing page's release badge,
 verb list, MCP tool count and deck list. It is generated from the CLI
-registry by ``scripts/gen_site_cli_data.py`` and committed; these tests fail
-when the committed copy no longer matches the code, so the site cannot fall
-behind the CLI again.
+registry by ``scripts/gen_site_cli_data.py`` at site-build time and is not
+committed (issue #5005), so these tests exercise the generator itself: every
+registered verb is listed once, doc links resolve, the output is valid JSON.
 """
 
 from __future__ import annotations

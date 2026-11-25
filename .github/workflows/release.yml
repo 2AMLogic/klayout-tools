@@ -424,7 +424,11 @@ jobs:
         id: resolve
         run: |
           set -euo pipefail
+          # version: the release this job acts on (empty = nothing to do).
+          # tag_exists: true only when `version` is already tagged and this run
+          # must just dispatch publish.yml (recovery, below).
           echo "version=" >>"$GITHUB_OUTPUT"
+          echo "tag_exists=false" >>"$GITHUB_OUTPUT"
 
           # Still on main? (A reverted/rewritten commit's late CI run is not
           # released; non-fast-forward is ruleset-blocked, but check anyway.)
@@ -434,12 +438,34 @@ jobs:
 
           version="$(git show "$HEAD_SHA":pyproject.toml | grep -E '^base-version' | head -1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
           tag="v$version"
+          newest="$(git tag --sort=-v:refname --list 'v*' | head -1)"
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            # Usually "already released". The one state that is not: an earlier
+            # run of this job pushed the tag and then failed to dispatch
+            # publish.yml (a transient gh/API error). A rerun used to see the
+            # tag, stop here, and never dispatch -- the release stranded with a
+            # tag and no publish run. So when this is the NEWEST tag and
+            # publish.yml has never run on its ref, dispatch it again; never
+            # re-tag, never revive an older tag a newer release has passed, and
+            # never guess when the run list cannot be read (a failing `gh` is a
+            # red step, not "already released").
+            if [ "$newest" = "$tag" ]; then
+              runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish.yml --branch "$tag" --limit 1 --json databaseId --jq 'length')"
+              if ! [[ "$runs" =~ ^[0-9]+$ ]]; then
+                echo "::error::cannot tell whether publish.yml ran on $tag (got '$runs'); failing rather than guessing"
+                exit 1
+              fi
+              if [ "$runs" = "0" ]; then
+                echo "$tag exists but publish.yml has never run on it; dispatching it now (recovery)." | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "version=$version" >>"$GITHUB_OUTPUT"
+                echo "tag_exists=true" >>"$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
             echo "$tag already exists; not tagging." ; exit 0
           fi
           # A newer tag already cut (this commit's version went stale: its
           # own CI was red, a later bump got tagged first): never go backwards.
-          newest="$(git tag --sort=-v:refname --list 'v*' | head -1)"
           if [ -n "$newest" ] && [ "$newest" != "$tag" ]; then
             oldest_first="$(printf '%s\n%s\n' "${newest#v}" "$version" | sort -V | head -1)"
             if [ "$oldest_first" = "$version" ]; then
@@ -449,9 +475,11 @@ jobs:
           fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
+      # A new release only: a recovery re-dispatch (tag_exists) passed this gate
+      # when its tag was cut, and a failure now would claim "no tag" falsely.
       - name: Gate on native extras
         id: native
-        if: steps.resolve.outputs.version != ''
+        if: steps.resolve.outputs.version != '' && steps.resolve.outputs.tag_exists != 'true'
         run: |
           set -euo pipefail
           status=0
@@ -477,14 +505,22 @@ jobs:
           exit 1
 
       - name: Tag the green commit and dispatch publish
-        if: steps.native.outputs.ok == 'true'
+        if: steps.native.outputs.ok == 'true' || steps.resolve.outputs.tag_exists == 'true'
+        env:
+          TAG_EXISTS: ${{ steps.resolve.outputs.tag_exists }}
         run: |
           set -euo pipefail
           v="v${{ steps.resolve.outputs.version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$v" -m "Release ${v#v}" "$HEAD_SHA"
-          git push origin "refs/tags/$v"
+          if [ "$TAG_EXISTS" = "true" ]; then
+            # Recovery (see the resolve step): the tag is already pushed and
+            # publish.yml never ran on it; dispatch only, never re-tag.
+            echo "$v is already tagged; dispatching publish only."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$v" -m "Release ${v#v}" "$HEAD_SHA"
+            git push origin "refs/tags/$v"
+          fi
           # GITHUB_TOKEN tag pushes do not trigger publish.yml's `push: tags`;
           # workflow_dispatch on the tag ref does, and builds from the tag.
           gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$v"

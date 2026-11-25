@@ -8,26 +8,36 @@ Two kinds of drift used to go unnoticed between releases:
 2. A new directory could land under `examples/` without an entry in
    `examples/README.md`, so the index silently stopped listing everything.
 
-`site/src/data/cli.generated.json` is the source of truth for both numbers.
-It is regenerated from the CLI registry by `scripts/gen_site_cli_data.py` and
-kept current by `tests/test_site_cli_data.py`, so these checks need no second
-generator and `RELEASING.md` needs no new manual step.
+`scripts/gen_site_cli_data.py` is the source of truth for both numbers. Its
+output (`site/src/data/cli.generated.json`) is gitignored since issue #5005, so
+these checks call the generator in-process rather than read the file: a plain
+checkout has nothing on disk to read.
 
-Note which number means what: `release.version` is the published release, but
-`verb_count` counts the verbs on `main` (it is regenerated whenever a verb
-lands, which is usually between releases). So the README may attribute the
-version to the release and the count to `main` -- never the count to the
+Note which number means what: `release.version` is the newest CHANGELOG
+release, but `verb_count` counts the verbs on `main` (it is regenerated whenever
+a verb lands, which is usually between releases). So the README may attribute
+the version to the release and the count to `main` -- never the count to the
 release.
+
+The release claim may lag by PATCH releases (issue #5005). Patch releases are
+automatic and the fleet publisher's bump commit changes exactly
+`pyproject.toml` and `CHANGELOG.md`, so the README cannot ride along: in that
+commit the CHANGELOG heading already says X.Y.(Z+1) while the README still says
+X.Y.Z (and the commit must stay green or the tag job never tags it). A minor
+or major release is deliberate and updates the README with it, so the claim must
+stay inside the newest release's X.Y line -- which is what catches the original
+drift (README "v0.5.0" while `main` was at v0.9.1).
 """
 
 from __future__ import annotations
 
-import json
+import importlib.util
 import re
+from functools import cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SITE_DATA = REPO_ROOT / "site" / "src" / "data" / "cli.generated.json"
+GENERATOR = REPO_ROOT / "scripts" / "gen_site_cli_data.py"
 README = REPO_ROOT / "README.md"
 EXAMPLES = REPO_ROOT / "examples"
 EXAMPLES_INDEX = EXAMPLES / "README.md"
@@ -45,8 +55,24 @@ VERSION_PATTERNS = {
 VERB_COUNT_PATTERN = re.compile(r"\b(\d+) verbs\b")
 
 
+@cache
 def _site_data() -> dict:
-    return json.loads(SITE_DATA.read_text(encoding="utf-8"))
+    spec = importlib.util.spec_from_file_location("gen_site_cli_data", GENERATOR)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_data()
+
+
+def _xyz(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def release_claim_is_current(claimed: str, newest: str) -> bool:
+    """True when a README release claim is acceptable against the newest
+    CHANGELOG release: same X.Y line, never ahead of it (patch lag only)."""
+    c, n = _xyz(claimed), _xyz(newest)
+    return c[:2] == n[:2] and c[2] <= n[2]
 
 
 def _entry_marker(name: str) -> str:
@@ -75,6 +101,7 @@ def _example_dirs() -> list[str]:
 def test_readme_release_version_matches_site_data():
     version = _site_data()["release"]["version"]
     text = README.read_text(encoding="utf-8")
+    claims: set[str] = set()
     for label, pattern in VERSION_PATTERNS.items():
         found = pattern.findall(text)
         # Non-vacuity: a reworded README that drops the claim entirely must
@@ -84,11 +111,31 @@ def test_readme_release_version_matches_site_data():
             f"VERSION_PATTERNS in {Path(__file__).name} if the wording moved "
             f"on purpose, so the guard keeps checking something"
         )
-        assert set(found) == {version}, (
-            f"README.md's {label} claim says {sorted(set(found))}, but "
-            f"site/src/data/cli.generated.json records release.version "
-            f"{version!r}"
+        stale = sorted(
+            v for v in set(found) if not release_claim_is_current(v, version)
         )
+        assert not stale, (
+            f"README.md's {label} claim says {stale}, outside the newest "
+            f"CHANGELOG release's X.Y line (release.version {version!r}); "
+            f"update the README's release claim (patch lag within the line is "
+            f"allowed, see this module's docstring)"
+        )
+        claims.update(found)
+    assert len(claims) == 1, (
+        f"README.md's release claims disagree with each other: {sorted(claims)}"
+    )
+
+
+def test_release_claim_tolerates_the_two_file_bump_commit_only():
+    """The publisher's bump commit rewrites only pyproject.toml and
+    CHANGELOG.md, so it lands with the heading one patch ahead of the README."""
+    assert release_claim_is_current("0.9.3", "0.9.3")
+    assert release_claim_is_current("0.9.2", "0.9.3")  # the bump commit itself
+    assert release_claim_is_current("0.9.0", "0.9.12")  # later patch releases
+    assert not release_claim_is_current("0.9.4", "0.9.3")  # ahead of the changelog
+    assert not release_claim_is_current("0.8.9", "0.9.3")  # missed a minor
+    assert not release_claim_is_current("0.5.0", "0.9.1")  # the #5419 drift
+    assert not release_claim_is_current("0.9.2", "1.0.0")  # missed a major
 
 
 def test_readme_verb_count_matches_site_data():
@@ -101,7 +148,7 @@ def test_readme_verb_count_matches_site_data():
     )
     assert set(found) == {verb_count}, (
         f"README.md quotes {sorted(set(found))} verbs, but "
-        f"site/src/data/cli.generated.json records verb_count {verb_count}"
+        f"scripts/gen_site_cli_data.py reports verb_count {verb_count}"
     )
 
 

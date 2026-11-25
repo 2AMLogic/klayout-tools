@@ -9,6 +9,8 @@ the verdict never depends on wall-clock time.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -228,16 +230,83 @@ def test_last_bump_subject_spellings(tmp_path, subject, spell):
     _commit(repo, "chore(deps): touch pyproject", date_epoch=T0 + 50)
     at = T0 + 100
     _commit(repo, subject, date_epoch=at)
+    release_sha = _git(repo, "rev-parse", "HEAD").strip()
     _commit(repo, "feat: after the bump", date_epoch=at + 10, touch="src/new.py")
 
     # Inside the new bump's window: deferred (the seed bump is far past, so a
     # wrong lookup that found the SEED bump would say "bump" here).
     r = _run(repo, now=str(at + 60), interval="86400")
     assert _field(r.stdout, "decision") == "deferred", spell
+    # The decision alone is not enough: both the seed bump and the release sit
+    # inside the first window, so returning the seed also "decides" correctly.
+    assert _field(r.stdout, "last_bump_sha") == release_sha, spell
 
     # And eligible again one interval after the real bump.
     r2 = _run(repo, now=str(at + DAY + 60), interval="86400")
     assert _field(r2.stdout, "decision") == "bump", spell
+    assert _field(r2.stdout, "last_bump_sha") == release_sha, spell
+
+
+def _deep_history_repo(base: Path, *, filler: int = 3000) -> tuple[Path, str]:
+    """A repo shaped like the real one: the last release merge is recent, with
+    thousands of older first-parent commits beneath it. Returns (repo, sha of
+    the release merge). ``git log`` output past the pipe buffer is what makes
+    an early-exiting consumer SIGPIPE the producer."""
+    repo = base / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.com")
+    stream = []
+    for i in range(filler):
+        msg = f"chore: filler commit {i:05d} " + "x" * 120
+        when = T0 - 10_000 + i
+        stream.append(
+            "commit refs/heads/main\n"
+            f"committer Test <test@example.com> {when} +0000\n"
+            f"data {len(msg)}\n{msg}\n"
+        )
+    subprocess.run(
+        ["git", "-C", str(repo), "fast-import", "--quiet"],
+        input="".join(stream),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    _git(repo, "reset", "-q", "--hard", "main")
+    _commit(
+        repo,
+        "Merge pull request #4242 from 2AMLogic/release/v0.9.2",
+        date_epoch=T0,
+        touch="pyproject.toml",
+    )
+    release_sha = _git(repo, "rev-parse", "HEAD").strip()
+    _commit(repo, "feat: unreleased", date_epoch=T0 + 10, touch="src/x.py")
+    return repo, release_sha
+
+
+@pytest.mark.parametrize("awk", ["default", "mawk"])
+def test_finds_the_last_bump_under_a_deep_real_shaped_history(tmp_path, awk):
+    """Regression (review of #7859): on the real 4,000+-commit history the gate
+    exited 2 'no bump'. Two causes, both reproduced here: ``\\S`` in the awk
+    regex (mawk, Debian/Ubuntu's default awk, has no ``\\S``), and an early awk
+    ``exit`` that SIGPIPEd ``git log`` (141) under ``pipefail``."""
+    env_extra = None
+    if awk == "mawk":
+        mawk = shutil.which("mawk")
+        if mawk is None:
+            pytest.skip("mawk is not installed here")
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        (shim / "awk").symlink_to(mawk)
+        env_extra = {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    repo, release_sha = _deep_history_repo(tmp_path)
+
+    r = _run(repo, now=str(T0 + DAY + 200), interval="86400", env_extra=env_extra)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _field(r.stdout, "decision") == "bump"
+    assert _field(r.stdout, "last_bump_sha") == release_sha
 
 
 def test_no_bump_commit_in_history_fails_closed(tmp_path):
