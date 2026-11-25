@@ -341,8 +341,9 @@ def test_one_converted_passive_call_restores_the_native_pairing(
         ("$SUB=sub $[{model}]", "$SUB=sub ${model}"),
         ("a_2 b_2 sub {model}", "a_2 b_2 sub / {model}"),
         ("a_1 b_1 sub {model}", "a_1 b_1 sub / {model}"),
+        ("$SUB=sub $[{model}]", r"$SUB=sub \ $[{model}]"),
     ],
-    ids=["bare", "dollar", "slash-native", "slash-call"],
+    ids=["bare", "dollar", "slash-native", "slash-call", "backslash"],
 )
 def test_native_poly_spellings_keep_mixed_census_and_unresolved_call(
     pdk_lvs, tmp_path, model, paired, original, replacement
@@ -361,6 +362,16 @@ def test_native_poly_spellings_keep_mixed_census_and_unresolved_call(
     assert sum(census["reference_source"].values()) == paired
     assert unrecognised_device_gaps(report) == []
     assert [m["instance"]["reference"] for m in _unresolved(report)] == ["Q9"]
+
+
+def test_backslash_on_a_capacitor_is_not_a_poly_separator(pdk_lvs, tmp_path):
+    gds, cdl = _unit_control(pdk_lvs, tmp_path, "cap_devices", "cap_cmim")
+    mixed = _passives_as_calls(cdl, "cap_cmim", {"C_pattern_1"})
+    assert "74.620f $[cap_cmim]" in mixed
+    mixed = mixed.replace("74.620f $[cap_cmim]", r"74.620f \ $[cap_cmim]", 1)
+    report = _lvs(pdk_lvs, tmp_path, gds, mixed, form="subckt-call")
+    assert report["counts"]["devices"]["matched"] == 68
+    assert report["device_census"]["reference_source"] is None
 
 
 def test_unconvertible_call_is_named_beside_a_converted_passive(pdk_lvs, tmp_path):

@@ -82,6 +82,30 @@ def test_unconvertible_passive_call_stays_a_call(tmp_path, call):
     assert call in _sg13g2_text(tmp_path, _schem(call)).splitlines()
 
 
+@pytest.mark.parametrize(
+    ("model", "pins"),
+    [
+        ("rppd", "a b sub"),
+        ("rhigh", "a b sub"),
+        ("rsil", "a b sub"),
+        ("cap_cmim", "a b"),
+        ("rppd", "a b"),
+    ],
+)
+def test_backslash_on_a_passive_call_stays_unresolved(tmp_path, model, pins):
+    # Even with the body pin missing, the separator cannot become a terminal.
+    call = rf"X1 {pins} \ {model} w=1u l=1u"
+    text = _sg13g2_text(tmp_path, _schem(call))
+    assert call in text.splitlines()
+    path, deck = _read(tmp_path, text)
+    found = _unresolved_reference_calls(
+        path, "LAYOUT", {}, deck, _unresolved_reference_subckt_calls
+    )
+    assert [
+        (m["instance"]["reference"], m["subcircuit"]["reference"]) for m in found
+    ] == [("1", model.upper())]
+
+
 def test_passive_hierarchy_and_explicit_device_map_take_precedence(tmp_path):
     text = (
         ".subckt SCHEM a b\n"
@@ -199,6 +223,7 @@ def test_numeric_passive_terminals_retain_their_connections(
     [
         ("$SUB=sub {model}", "SUB"),
         ("sub=007 $[{model}]", "007"),
+        (r"$SUB=sub/007 \ $[{model}]", "SUB/007"),
         ("$SUB=sub/007 ${model}", "SUB/007"),
     ],
 )

@@ -162,9 +162,9 @@ def _sg13g2_reference_cards(
                 continue
             if model in _SG13G2_RF_CARDS and _binding_known(name, binding):
                 continue
-            # PDK unit fixtures may give a top the same name as the primitive
-            # it contains. Calls to a separate defined circuit are hierarchy.
-            if model in defined and model != enclosing:
+            # A fixture may name its top after the primitive it contains.
+            # Keep hierarchy and calls with a native-only backslash separator.
+            if (model in defined and model != enclosing) or "\\" in positional:
                 kept.add(i)
                 continue
             card = (
@@ -287,11 +287,8 @@ def is_sg13g2_runset(deck_file: str) -> bool:
 
 
 def reference_spice_reader(deck_file: str | None) -> Any:
-    """The ``NetlistSpiceReader`` the census and the unresolved-call scan
-    re-read the converted reference with: the plain one, except for IHP's
-    ``sg13g2.lvs``, whose own reader keeps cards the plain one refuses
-    (:func:`tolerant_spice_reader`, issue #7855). Every other deck's reading
-    is unchanged."""
+    """Use the SG13G2 reader for its census and unresolved-call scan.
+    All other decks use the plain SPICE reader."""
     import klayout.db as kdb
 
     if deck_file and is_sg13g2_runset(deck_file):
@@ -301,6 +298,19 @@ def reference_spice_reader(deck_file: str | None) -> Any:
 
 _VALUE_ELEMENTS = ("C", "R", "L")
 _CDL_SUBSTRATE = re.compile(r"(?<!\S)\$?SUB\s*=\s*", re.IGNORECASE)
+
+
+def _sg13g2_card_fields(
+    reader: kdb.NetlistSpiceReaderDelegate, s: str, element: str
+) -> tuple[str, kdb.ParseElementComponentsData]:
+    """Apply IHP's resistor field separator after identifying a poly model."""
+    parts = reader.parse_element_components(s, reader.variables())
+    if element == "R" and "\\" in parts.strings:
+        model = sg13g2_model_name(parts.strings[-1], element)
+        if PASSIVE_CARD_SHAPES.get(model) == ("R", 3):
+            s = re.sub(r"\s+\\\s+", " ", s)
+            parts = reader.parse_element_components(s, reader.variables())
+    return s, parts
 
 
 def _restore_poly_card(
@@ -376,16 +386,10 @@ def tolerant_spice_reader() -> Any:
     """A ``NetlistSpiceReader`` that keeps the valueless ``R``/``C``/``L``
     cards ``sg13g2.lvs``'s own reader keeps (issue #7855).
 
-    For the native model-last shapes, the model determines the terminal
-    count. Read the net names directly so a numeric substrate such as ``0``
-    stays connected. On valued poly resistors, the CDL ``$SUB`` or ``SUB``
-    parameter supplies the third net. Other valueless cards get the deck's
-    stand-in retry (:func:`_stand_in_card`). A card KLayout's own handler still
-    refuses (:func:`_create_generic_device`: the RF inductor and varactor
-    cards) becomes a device of a generic class named by its model, which is
-    how the deck's ``process_device`` treats them too. Any other failure
-    still raises, so a reference that genuinely cannot be read stays
-    ``None`` / ``[]``."""
+    Read model-last terminals as net names, including numeric substrates.
+    Valued poly resistors take their substrate from the CDL SUB parameter.
+    Other valueless cards use the deck's stand-in value. RF inductor and
+    varactor cards that KLayout still refuses use a generic device class."""
     import klayout.db as kdb
 
     registry: dict[str, kdb.DeviceClass] = {}
@@ -396,7 +400,7 @@ def tolerant_spice_reader() -> Any:
             s = re.sub(r"\s+/\s+", " ", s)
             if element not in _VALUE_ELEMENTS:
                 return super().parse_element(s, element)
-            parts = self.parse_element_components(s, self.variables())
+            s, parts = _sg13g2_card_fields(self, s, element)
             if parts.strings:
                 *nets, model = parts.strings
                 model = sg13g2_model_name(model, element)
