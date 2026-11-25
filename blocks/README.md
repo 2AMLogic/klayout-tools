@@ -311,8 +311,10 @@ canary repo, so it is not in the manifest.
 
 [`canaries.json`](canaries.json) is the single source of truth for which
 canary repos the gallery presents: a list of `{repo, slug, pdk, ref}` entries
-(`ref` is `null` for default-branch HEAD, or a pinned sha). To add a canary,
-open a PR adding one entry; do not auto-discover repos.
+(`ref` is `null` for default-branch HEAD, or a pinned sha). To add a canary by
+hand, open a PR adding one entry. Nothing is added to the site unreviewed: the
+scheduled refresh below only *proposes* manifest changes, as a PR a human
+reviews and merges.
 
 ```bash
 python scripts/ingest-canary.py --manifest blocks/canaries.json [--dry-run]
@@ -321,10 +323,18 @@ python scripts/ingest-canary.py --manifest blocks/canaries.json [--dry-run]
 A failing entry (including the public-repo gate refusing a non-public repo)
 is reported, the remaining entries still run, and the exit status is non-zero.
 Re-running over unchanged upstream content leaves no `blocks/` diff.
-[`refresh-canaries.yml`](../.github/workflows/refresh-canaries.yml) runs this
-on manual trigger only (Actions → "Refresh canary blocks" → Run workflow;
-no schedule) and opens a PR (never a direct push) when `blocks/` changes;
-`deploy-site.yml` redeploys when it merges.
+[`refresh-canaries.yml`](../.github/workflows/refresh-canaries.yml) runs daily
+(and on manual trigger: Actions → "Refresh canary blocks" → Run workflow). It
+first runs `--sync-manifest`, so a new public `<pdk>-*` canary repo is added to
+`canaries.json` and one that is no longer public is dropped, then runs the
+ingest above. When `blocks/` changes it opens a PR (never a direct push) on one
+stable branch, `auto/refresh-canaries`: a later run updates that branch and PR
+in place, so an unmerged drift PR is not followed by a new one. No drift means
+no PR. A PR opened with `GITHUB_TOKEN` does not trigger other workflows, so
+close and reopen it to run the required checks. Dropping an entry does not
+delete its `blocks/<slug>/` directory, and the site serves every directory
+under `blocks/`; remove it by hand if the block should come down.
+`deploy-site.yml` redeploys when the PR merges.
 
 Content rules:
 
