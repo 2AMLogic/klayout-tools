@@ -536,6 +536,8 @@ _ACTIVE_NOTCH = (
     "enforced"
 )
 _TRACK = (
+    "The deck lacks the routing direction and track assignment needed to distinguish "
+    "same-track pairs from pairs on parallel tracks. "
     "On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly "
     "nested projections, the choice between 18 and 27 nm is unverified."
 )

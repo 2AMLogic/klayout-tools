@@ -30,6 +30,7 @@ _SECOND = {
     "shared_right": (-6, 18),
     "nested": (-2, 22),
 }
+# V0–V2 use the shared-left case in both orientations. V3 also checks its mirror.
 _CASES = [
     *product(
         ("V0", "V1", "V2"),
@@ -123,6 +124,7 @@ def test_partial_alignment_remains_a_measured_gap(family):
     gap = next(g for g in NOT_IMPLEMENTED if g.id == rule)
     assert rule not in RULE_IDS
     assert gap.table == ("Table 3.11.1" if family == "V0" else "Table 3.13.1")
+    assert "track assignment" in gap.reason
     assert "Fig. 1.2.6" in gap.reason and "strictly nested" in gap.reason
     row = next(
         line
