@@ -8,6 +8,12 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-25
 
+- **PR #7888**: Document the canary CI gate and allow manual inventory checks
+- **PR #7887**: Keep parallel fake fleet collectors bound to their own shard
+- **PR #7871**: fix: write SG13G2 cap_cmim and poly-resistor calls as native cards
+- **Issue #7886** (closed): test_split_submits_balanced_jobs_and_merges_in_order fails on a high-core host: _MultiFleet.collect shares self.spec across concurrent shard collects
+- **Issue #7881** (closed): CI: record the canary gate's merge-group exception and restore its GATES/remediation comment
+- **Issue #7855** (closed): klt lvs klayout-runset + form subckt-call (sg13g2): cap_cmim purged by min_caps, poly-resistor terminals shifted by positional 0, and reference_source is null
 - **PR #7870**: docs(drc): clarify ASAP7 track spacing for aligned and shifted vias
 - **PR #7878**: Document device.connectivity in the canonical LVS category table
 - **PR #7862**: Name the pinned-client uvx remedy in older-client batch runner refusals
