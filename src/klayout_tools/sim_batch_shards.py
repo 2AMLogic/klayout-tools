@@ -71,15 +71,22 @@ def _without_submission_only(
     return {**request, "batch": kept}
 
 
-def request_section_digests(request: dict[str, Any]) -> dict[str, str]:
-    """Short per-field digests (top-level keys; ``batch`` split per key) that
-    the shard map records so a digest mismatch can name what differs."""
+def request_section_digests(
+    request: dict[str, Any], *, split_options: bool | None = None
+) -> dict[str, str]:
+    """Hash each request field, splitting batch and nonempty options by key.
+
+    When comparing an existing map, use the granularity it recorded for options.
+    """
+    if split_options is None:
+        split_options = bool(request.get("options"))
     sections: dict[str, str] = {}
-    for key, value in request.items():
-        if key == "batch" and isinstance(value, dict):
+    for key, value in _without_submission_only(request, drop_empty=False).items():
+        if isinstance(value, dict) and (
+            key == "batch" or (key == "options" and split_options)
+        ):
             for sub, sub_value in value.items():
-                if sub not in _SUBMISSION_ONLY_BATCH_FIELDS:
-                    sections[f"batch.{sub}"] = _canonical_sha256(sub_value)[:12]
+                sections[f"{key}.{sub}"] = _canonical_sha256(sub_value)[:12]
         else:
             sections[key] = _canonical_sha256(value)[:12]
     return sections
@@ -89,7 +96,12 @@ def differing_request_fields(
     recorded: dict[str, str], request: dict[str, Any]
 ) -> list[str]:
     """Fields whose digest differs between a map's record and ``request``."""
-    current = request_section_digests(request)
+    split_options = None
+    if any(key.startswith("options.") for key in recorded):
+        split_options = True
+    elif "options" in recorded:
+        split_options = False
+    current = request_section_digests(request, split_options=split_options)
     return sorted(
         key
         for key in set(recorded) | set(current)
@@ -123,7 +135,7 @@ def shard_map_mismatch(document: dict[str, Any], request: dict[str, Any]) -> str
         f"differing request field(s): {', '.join(differing)}"
         if differing
         else "re-run with exactly the request file, overrides (--max-units-per-job, "
-        "--budget-s, --pdk-root) and environment used at --submit-only"
+        "--budget-s, --max-workers, --pdk-root) and environment used at --submit-only"
     )
     return f"request_sha256: map {str(recorded)[:12]}, request {current[:12]}; {detail}"
 
