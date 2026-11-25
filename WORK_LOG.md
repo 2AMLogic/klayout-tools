@@ -24,7 +24,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #7857** (closed): batch: no way to run a grid from a client pinned to an older minor once the fleet image moves on
 - **Issue #7876** (closed): CI: scope live canary inventory checks while retaining deterministic PR coverage
 - **Issue #7866** (closed): klt sim: options.waveforms on a noise analysis exports only the integrated-noise plot, not the per-frequency spectrum
-- **Issue #7861** (closed): klt sim deck-list `--attach <shard map>`: a `--max-workers` given at submit is now part of the request digest, and the mismatch hint does not name it
+- **Issue #7861** (closed): klt sim deck-list --attach <shard map>: a --max-workers given at submit is now part of the request digest, and the mismatch hint does not name it
 - **Issue #7874** (closed): CI: two more public GF180 canaries are missing from the manifest on main
 - **Issue #7856** (closed): klt lvs klayout-runset: connectivity-mismatched device pairs with equal parameters are reported as device.property
 - **Issue #7865** (closed): Restore the CI canary manifest check for two new public GF180 repositories
