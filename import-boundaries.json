@@ -1066,6 +1066,7 @@
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_fleet_status",
+        "klayout_tools.sim_batch_pdk",
         "klayout_tools.sim_batch_corner_libs",
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",

@@ -15,12 +15,7 @@ def add_sim_parser(
     _add_pdk_args: Callable[..., Any],
     _add_format_arg: Callable[..., Any],
 ) -> None:
-    """Register the ``sim`` verb for headless SPICE PVT corner sweeps.
-
-    Runs a SPICE process/voltage/temperature corner matrix declared by a
-    request JSON file via `ngspice -b`, one subprocess per corner. See
-    docs/cli/sim.md for the request/response contract.
-    """
+    """Register the sim verb for headless SPICE corner sweeps."""
     sim_parser = subparsers.add_parser(
         "sim",
         help="run a headless SPICE PVT corner matrix (ngspice)",
@@ -111,6 +106,12 @@ def add_sim_parser(
             "are not published by the fleet and are not reported. See "
             "docs/cli/sim.md."
         ),
+    )
+    sim_parser.add_argument(
+        "--require-pdk-match",
+        action="store_true",
+        default=None,
+        help="require the batch worker's PDK revision stamp to match",
     )
     sim_parser.add_argument(
         "--list-jobs",

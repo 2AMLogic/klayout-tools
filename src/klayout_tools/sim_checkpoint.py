@@ -115,6 +115,7 @@ def _checkpoint_fingerprint(
     ngspice_options: dict[str, Any] | None = None,
     transient_noise_seed: int | None = None,
     stimulus_lines: tuple[str, ...] = (),
+    pdk_requirement: dict[str, Any] | None = None,
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -140,6 +141,8 @@ def _checkpoint_fingerprint(
         "engine": engine,
         "corner_ids": [point.corner_id for point in corner_points],
     }
+    if pdk_requirement is not None:
+        payload["pdk_requirement"] = pdk_requirement
     if osdi_preload:
         # Issue #2513: a rebuilt `.osdi` changes every device it defines, so
         # it invalidates a checkpoint exactly like an edited model library.
@@ -152,12 +155,15 @@ def _checkpoint_fingerprint(
         # Only keyed in off the default, so an existing checkpoint stays
         # valid for a request that omits the option.
         payload["save_mode"] = save_mode
-    if save_vectors:
-        # Issue #3211: the saved vector set decides which measurements resolve.
-        payload["save_vectors"] = list(save_vectors)
-    if complex_vectors:
-        # Issue #3337: the declared vectors decide what the corner returns.
-        payload["complex_vectors"] = list(complex_vectors)
+    # These optional waveforms and stimuli affect the measurements a corner
+    # returns. Omit empty sequences to preserve older checkpoint fingerprints.
+    for key, values in (
+        ("save_vectors", save_vectors),
+        ("complex_vectors", complex_vectors),
+        ("stimulus", stimulus_lines),
+    ):
+        if values:
+            payload[key] = list(values)
     if ngspice_options:
         # Issue #3111: solver options change which solves converge, so a
         # checkpoint written under other options never applies. Only keyed
@@ -166,11 +172,6 @@ def _checkpoint_fingerprint(
     key_in_fingerprint(payload, transient_noise_seed)
     _key_in_mc_seed_options(payload, corner_points)
     _key_in_mc_mismatch_scale(payload, corner_points)
-    if stimulus_lines:
-        # Issue #2977: the declared stimulus decides every corner's drive, so
-        # an edited schedule must invalidate the checkpoint. Only keyed in
-        # when declared, so existing checkpoints stay valid.
-        payload["stimulus"] = list(stimulus_lines)
     if any(point.nodeset for point in corner_points):
         # Issue #3036: an initial guess can change which solution a
         # multi-equilibrium circuit lands on, so a changed hint must not reuse

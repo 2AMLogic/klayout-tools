@@ -7,7 +7,7 @@ local backend and read off the runner's report for an off-host one
 :func:`check_offhost_engine_version_pin`, issue #3041), and
 ``models.pdk_version`` can only be compared where the PDK resolves, so an
 off-host backend refuses it outright (:func:`check_pdk_version_pin`, issue
-#4046, with the worker-side comparison tracked in #3462).
+#4046, with a separate worker stamp pin in #3462).
 
 That makes *which* backend they are evaluated against part of their meaning,
 and ``sim`` resolves the backend in stages: two host-default yields run
@@ -163,8 +163,7 @@ def check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
 
     Local backends resolve the PDK the way ``provenance.pdk`` does and fail
     closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
-    resolves. Off-host backends reject the field: the worker-side comparison
-    is tracked in #3462, and silently passing would hide drift."""
+    resolves. Batch accepts a separate SOURCES stamp pin (#3462)."""
     from . import sim
 
     if pin is None:
@@ -172,9 +171,8 @@ def check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
     if backend in sim._OFFHOST_BACKENDS:
         raise SimError(
             f"models.pdk_version is not supported for backend {backend!r}: "
-            "the PDK is resolved on the runner, and the worker-side pin check "
-            "is not implemented yet (see issue #3462) -- use backend 'local' "
-            "or 'local-parallel', or drop the pin"
+            "use a local backend for an installed-version pin, or use a batch "
+            "worker stamp pin with --require-pdk-match (#3462)"
         )
     variant = models.get("pdk")
     root = models.get("pdk_root")
