@@ -241,13 +241,23 @@ def explaining_diagnostic(
 ) -> Mapping[str, Any] | None:
     """Choose this row’s diagnostic, preserving the first error on a solver abort."""
     errors = [d for d in diagnostics if d.get("severity") == "error"]
-    if not errors:
-        return diagnostics[0] if diagnostics else None
     if any(
         d.get("code") not in ("measurement", "singular_matrix", "nonconvergence")
         for d in errors
     ):
         return errors[0]
+
+    # An optional value missing on just one side is a PEX error. Its own
+    # klt sim diagnostic is informational, even beside a required window miss.
+    if measurement is not None and measurement.get("status") == "absent":
+        prefix = f"optional measurement '{measurement['name']}' "
+        for diagnostic in diagnostics:
+            if diagnostic.get("code") == "measurement_absent" and str(
+                diagnostic.get("message") or ""
+            ).startswith(prefix):
+                return diagnostic
+    if not errors:
+        return diagnostics[0] if diagnostics else None
 
     # An engine-confirmed window miss can explain a missing value beside
     # recovered stepping narration. Each .meas card has its own diagnostic.

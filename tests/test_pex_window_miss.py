@@ -1,5 +1,8 @@
 """PEX row-level attribution of ngspice measurement window misses."""
 
+import pytest
+
+from klayout_tools import sim
 from klayout_tools.pex import _build_delta_rows
 
 # Issue #7904: the diagnostics below are verbatim from a real single-corner
@@ -140,3 +143,51 @@ def test_an_unrelated_window_miss_never_replaces_a_rows_own_measurement_error():
         "tcross": _WINDOW_MISS["message"],
         "other": other["message"],
     }
+
+
+@pytest.mark.parametrize("absent_side", ["schematic", "extracted"])
+@pytest.mark.parametrize("sibling_misses", [True, False])
+def test_asymmetric_optional_measurement_names_its_own_absence(
+    absent_side, sibling_misses
+):
+    optional, absent = sim._absent_measurement({"name": "tcross_hi"})
+    other, other_absent = sim._absent_measurement({"name": "tcross_hi_other"})
+    present = {"name": optional["name"], "value": 1.0, "status": "pass"}
+    required = {"name": "tcross", "value": 1.0, "status": "pass"}
+    sides = {
+        side: {
+            "corners": [
+                {
+                    "corner_id": "tt",
+                    "measurements": [required, present, other],
+                    "diagnostics": [other_absent],
+                }
+            ]
+        }
+        for side in ("schematic", "extracted")
+    }
+    failed = sides[absent_side]["corners"][0]
+    failed["measurements"][1] = optional
+    failed["diagnostics"] = [other_absent, absent]
+    if sibling_misses:
+        failed["measurements"][0] = {**required, "value": None, "status": "error"}
+        failed["diagnostics"] = [
+            _STEPPING_SINGULAR,
+            _WINDOW_MISS,
+            *failed["diagnostics"],
+        ]
+
+    required_row, optional_row, symmetric_row = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=sides["schematic"],
+        extracted_report=sides["extracted"],
+    )
+    assert optional_row["status"] == "error"
+    assert optional_row["delta_pct"] is None
+    assert optional_row["error"]["side"] == absent_side
+    assert optional_row["error"]["code"] == absent["code"]
+    assert optional_row["error"]["message"] == absent["message"]
+    assert symmetric_row["status"] == "pass"
+    assert "error" not in symmetric_row
+    if sibling_misses:
+        assert required_row["error"]["message"] == _WINDOW_MISS["message"]
