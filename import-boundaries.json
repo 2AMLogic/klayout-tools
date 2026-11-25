@@ -218,6 +218,7 @@
         "klayout_tools.cli.parsers.em",
         "klayout_tools._em_geometry",
         "klayout_tools._em_layout",
+        "klayout_tools._em_thermal",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
