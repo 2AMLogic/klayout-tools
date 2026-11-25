@@ -25,9 +25,9 @@ import { LayoutCard } from "@/components/LayoutCard";
  * Everything that drifts with the code — the release version, the verb
  * list and summaries, the MCP tool count and the built-in deck names —
  * comes from `cliData` (`src/data/cli.generated.json`), which
- * `scripts/gen_site_cli_data.py` generates from the CLI registry and
- * `tests/test_site_cli_data.py` keeps current. Do not hand-write those
- * facts here.
+ * `scripts/gen_site_cli_data.py` generates from the CLI registry at build time
+ * (the file is not committed; `tests/test_site_cli_data.py` keeps the
+ * generator honest). Do not hand-write those facts here.
  *
  * The vision statement is the one in `ROADMAP.md` / `docs/ARCHITECTURE.md`
  * / `README.md`; CLAUDE.md asks for it to be identical everywhere.

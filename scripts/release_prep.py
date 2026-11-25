@@ -1,55 +1,36 @@
 #!/usr/bin/env python3
-"""Mechanical edits for an automated release (issue #4920).
+"""Compute the version-bump file edits for ``release.yml`` (issue #5005).
 
-``.github/workflows/release.yml`` calls this to do the text edits of the
-release sequence in ``RELEASING.md`` (steps 1, 4 and the CHANGELOG half of
-step 6); the workflow itself runs the generators (``uv lock``,
-``gen_site_cli_data.py``, ``generate_deck_history.py``) afterwards.
+``.github/workflows/release.yml``'s ``bump`` job calls this after the cadence
+gate (``scripts/version-bump-gate.sh``) says *bump*. Nothing is committed or
+pushed here: the job diffs the two files and POSTs them to the fleet
+publisher, which commits exactly this shape to ``main`` (2AMLogic/2am
+``infra/cloudflare/github-write/src/publish/``).
 
 Subcommands::
 
-    release_prep.py next                      # print the next minor version
     release_prep.py prepare [--version X.Y.Z] [--date YYYY-MM-DD]
-    release_prep.py refresh --version X.Y.Z [--check]
-    release_prep.py detect --subject "<commit subject>"
 
-``prepare`` edits, in place and idempotently (re-running it for the same
-version changes nothing):
+``prepare`` rewrites, in place:
 
-- ``pyproject.toml``: ``[tool.hatch.version] base-version``;
-- ``CHANGELOG.md``: inserts ``## X.Y.Z (date)`` directly below
-  ``## Unreleased``. Existing entries and fragments from ``changelog.d/``
-  become the release's entries, with fragments appended in filename order
-  and removed after assembly. ``## Unreleased`` stays empty for the next
-  cycle. With no entries from either source, the run refuses (``PrepError``,
-  before any file is written) to cut an empty release (issue #6086);
-- ``docs/cli/signoff.md``, each pending ``changelog.d/`` fragment, and the
-  ``## Unreleased`` body of ``CHANGELOG.md``: "first release after `vPREV`"
-  availability notes become "`klt X.Y.Z`" (PREV is the version being
-  superseded). A note may be hand-wrapped: its words are separated by spaces
-  or one line break plus indentation, never a blank line. A placeholder
-  anchored on a release older than PREV can never be resolved again; the prep
-  run refuses (``PrepError``) naming the source file and the physical line the
-  note starts on rather than let it ship stale. An anchor newer than PREV is
-  a note for a later cut: it is left alone in ``docs/cli/signoff.md``, whose
-  text persists, but refused in a fragment or the ``## Unreleased`` body
-  (also the late inputs ``refresh`` collects), because those are consumed into
-  a published release section and no later run could resolve it. Historical
-  ``CHANGELOG.md`` sections are left untouched.
+- ``pyproject.toml``: ``[tool.hatch.version]`` ``base-version`` -- exactly one
+  patch step (``0.9.N`` -> ``0.9.N+1``) by default, or ``--version`` forwarded
+  verbatim (a deliberate minor via the workflow's dispatch input; the
+  publisher refuses any step it does not allow, so this script does not try to
+  second-guess it);
+- ``CHANGELOG.md``: inserts an empty line and ``## X.Y.Z (date)`` directly
+  under the file's one ``## Unreleased`` line, leaving every other byte
+  untouched. Whatever ``## Unreleased`` held becomes the new section's body;
+  ``changelog.d/`` fragments are NOT folded in (they are rendered into the
+  GitHub Release notes at publish time by ``scripts/release_notes.py``).
 
-The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
-RELEASING.md's batch-runner rule (a contract change never ships in a patch)
-by construction. A patch is a manual override via ``--version``.
+The CHANGELOG edit is byte-for-byte the shape the publisher's validator
+(``version-sites.js`` ``changelogBump``) builds from the parent itself, so a
+bump computed here is accepted there or refused loudly here first.
 
-``detect`` reads a commit subject and prints the release version when it is a
-release-bump commit (``chore(release): bump version to X.Y.Z``, optionally
-with the ``(#NNN)`` suffix a squash merge appends, or the merge-commit subject
-``Merge pull request #N from <owner>/release/vX.Y.Z`` this repo's merge style
-produces) -- the tag job's gate for
-"tag this commit". It prints nothing and exits 0 otherwise.
-
-Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, an
-empty ``## Unreleased`` section, ...).
+Exit codes: 0 ok; 2 bad input (bad version, no/ambiguous ``## Unreleased``
+heading, the release heading already present, a version that does not
+increase).
 """
 
 from __future__ import annotations
@@ -65,21 +46,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _VERSION = r"\d+\.\d+\.\d+"
 _BASE_VERSION_RE = re.compile(rf'^(base-version\s*=\s*")({_VERSION})(")', re.MULTILINE)
-_RELEASE_SUBJECT_RE = re.compile(
-    rf"^chore\(release\): bump version to ({_VERSION})(?:\s|$)"
-)
-_MERGE_SUBJECT_RE = re.compile(
-    rf"^Merge pull request #\d+ from \S+?/release/v({_VERSION})(?:\s|$)"
-)
-_UNRELEASED_RE = re.compile(r"^## Unreleased[ \t]*$", re.MULTILINE)
-# The words of a note are separated by spaces/tabs or by one soft wrap (a single
-# line break plus indentation), as hand-wrapped Markdown prose has it. Never a
-# blank line: two paragraphs must not combine into a placeholder (issue #7493).
-_NOTE_GAP = r"(?:[ \t]+|[ \t]*\n[ \t]*)"
-_NOTE_PLACEHOLDER_RE = re.compile(
-    rf"(?:the{_NOTE_GAP})?(?:first|next){_NOTE_GAP}release{_NOTE_GAP}after{_NOTE_GAP}"
-    rf"`?v?({_VERSION})`?"
-)
+# Exactly the line the publisher's changelogBump matches: `## Unreleased`,
+# optionally ended by a CR (a CRLF file), nothing else -- trailing spaces make
+# the publisher refuse the bump, so they are refused here first.
+_UNRELEASED_RE = re.compile(r"^## Unreleased(\r?)$", re.MULTILINE)
+_DATED_RELEASE_RE = re.compile(rf"^## ({_VERSION}) \([^()\n]+\)[ \t]*$", re.MULTILINE)
 
 
 class PrepError(Exception):
@@ -93,9 +64,9 @@ def parse_version(text: str) -> tuple[int, int, int]:
     return major, minor, patch
 
 
-def next_minor(version: str) -> str:
-    major, minor, _ = parse_version(version)
-    return f"{major}.{minor + 1}.0"
+def next_patch(version: str) -> str:
+    major, minor, patch = parse_version(version)
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def read_base_version(pyproject_text: str) -> str:
@@ -110,312 +81,89 @@ def bump_pyproject(text: str, new: str) -> str:
     return _BASE_VERSION_RE.sub(rf"\g<1>{new}\g<3>", text, count=1)
 
 
-def _unreleased_span(text: str) -> tuple[int, int]:
-    """Offsets of the Unreleased body in the original changelog."""
-    match = _UNRELEASED_RE.search(text)
-    if match is None:
-        raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
-    start = match.end()
-    next_heading = re.compile(r"^## ", re.MULTILINE).search(text, start)
-    return start, next_heading.start() if next_heading else len(text)
+def add_release_heading(text: str, version: str, date: str) -> str:
+    """Insert the release heading under ``## Unreleased``, publisher-shaped.
 
-
-def _has_release_heading(text: str, version: str) -> bool:
-    return re.search(rf"^## {re.escape(version)} \(", text, re.MULTILINE) is not None
-
-
-def _read_changelog_fragments(directory: Path) -> dict[Path, str]:
-    """Read pending entries in filename order, keyed by the files to remove."""
-    fragments: dict[Path, str] = {}
-    for path in sorted(directory.glob("*.md")):
-        if path.name == "README.md" or not path.is_file():
-            continue
-        entry = path.read_text(encoding="utf-8")
-        if entry.strip():
-            fragments[path] = entry
-    return fragments
-
-
-def add_changelog_heading(
-    text: str, new: str, date: str, *, fragments: str = "", previous: str | None = None
-) -> str:
-    """Insert ``## new (date)`` below ``## Unreleased``; no-op if present.
-
-    The already-present early return runs first so an idempotent re-run never
-    trips the empty-section gate (issue #6086). The new section must contain
-    entries from ``## Unreleased`` or from fragments.
+    Mirrors ``changelogBump`` in 2am's ``version-sites.js``: the parent text
+    with the one ``## Unreleased`` line followed by an empty line and the
+    ``## version (date)`` line, every other byte unchanged. A CRLF file keeps
+    CRLF. Refuses (before writing anything) when the heading is ambiguous or
+    the release heading already exists.
     """
-    if _has_release_heading(text, new):
-        return text
-    heading_end, section_end = _unreleased_span(text)
-    entries = text[heading_end:section_end]
-    if not entries.strip() and not fragments:
+    if not re.fullmatch(_VERSION, version):
+        raise PrepError(f"not an X.Y.Z version: {version!r}")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise PrepError(f"not a YYYY-MM-DD date: {date!r}")
+    headings = _UNRELEASED_RE.findall(text)
+    if len(headings) != 1:
         raise PrepError(
-            "CHANGELOG.md '## Unreleased' section has no entries --"
-            " nothing to release; refusing to insert an empty release section"
+            f"CHANGELOG.md has {len(headings)} '## Unreleased' headings,"
+            " expected exactly 1"
         )
-    remaining = text[section_end:]
-    if previous is not None and previous != new:
-        entries = _resolve_notes(
-            entries, previous, new, "CHANGELOG.md", text.count("\n", 0, heading_end) + 1
+    if re.search(rf"^## {re.escape(version)} \([^\n]*\)[ \t]*$", text, re.MULTILINE):
+        raise PrepError(
+            f"CHANGELOG.md already has a '## {version}' heading;"
+            " not bumping to it again"
         )
-    if fragments:
-        legacy = entries.strip("\n")
-        body = f"{legacy}\n\n{fragments}" if legacy.strip() else fragments
-        entries = f"\n\n{body}\n" + ("\n" if remaining else "")
-    return f"{text[:heading_end]}\n\n## {new} ({date}){entries}{remaining}"
-
-
-def update_signoff_notes(text: str, previous: str, new: str) -> str:
-    """Resolve "the first release after `vPREV`" notes to the release now cut."""
-
-    def _resolve(match: re.Match[str]) -> str:
-        return f"`klt {new}`" if match.group(1) == previous else match.group(0)
-
-    return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
-
-
-def _resolve_notes(
-    text: str, previous: str, new: str, source: str, start_line: int = 1
-) -> str:
-    """Resolve notes in text that lands in a release section and is then gone.
-
-    Every caller passes a changelog fragment or changelog body: once its notes
-    are written into a release section no later cut can revisit them, so the
-    guard also refuses an anchor newer than ``previous`` here. Anchors are
-    checked against the original text, at their original lines, before any
-    substitution can collapse a wrapped note's line break.
-    """
-    check_signoff_note_anchors(
-        text, previous, source=source, start_line=start_line, consumed=True
+    crlf = "\r\n" in text
+    nl = "\r\n" if crlf else "\n"
+    cr = "\r" if crlf else ""
+    return _UNRELEASED_RE.sub(
+        f"## Unreleased{nl}{nl}## {version} ({date}){cr}", text, count=1
     )
-    return update_signoff_notes(text, previous, new)
 
 
-def check_signoff_note_anchors(
-    text: str,
-    previous: str,
-    *,
-    source: str = "docs/cli/signoff.md",
-    start_line: int = 1,
-    consumed: bool = False,
-) -> None:
-    """Refuse availability-note placeholders the resolver can never match again.
-
-    A placeholder is only resolvable for the release being bumped *from*
-    (``previous``); once ``base-version`` moves past its anchor it is orphaned
-    for good. Raise instead of letting it ship silently stale (issue #5582).
-
-    An anchor newer than ``previous`` is a note for a later cut. That is right
-    for ``docs/cli/signoff.md``, whose text persists, so it passes. With
-    ``consumed=True`` the text is a fragment or changelog body that is written
-    into a published release section and never read again, so a newer anchor is
-    orphaned too and is refused (issue #7493).
-
-    The scan covers the whole text so a note wrapped across lines is found, and
-    the reported line is the physical line the note starts on (``\\n`` counts
-    only; ``str.splitlines`` would also split on form feeds and the like).
-    """
-
-    previous_version = parse_version(previous)
-    for match in _NOTE_PLACEHOLDER_RE.finditer(text):
-        anchor = match.group(1)
-        lineno = start_line + text.count("\n", 0, match.start())
-        if parse_version(anchor) < previous_version:
-            raise PrepError(
-                f"{source}:{lineno}: availability note anchored"
-                f" on v{anchor}, older than the previous release"
-                f" {previous} -- the note resolver can never match it again;"
-                " resolve it by hand (e.g. '`klt X.Y.Z`')"
-            )
-        if consumed and parse_version(anchor) > previous_version:
-            raise PrepError(
-                f"{source}:{lineno}: availability note anchored"
-                f" on v{anchor}, newer than the previous release"
-                f" {previous} -- this text is written into a release section"
-                " and not read again, so the note would ship unresolved;"
-                " resolve it by hand or remove it"
-            )
+def _read(path: Path) -> str:
+    # newline="" so a CRLF file keeps its CRs: the publisher validates bytes,
+    # and the translation a plain text-mode read does would silently rewrite
+    # every line ending in CHANGELOG.md.
+    with open(path, encoding="utf-8", newline="") as handle:
+        return handle.read()
 
 
-def release_version_from_subject(subject: str) -> str | None:
-    subject = subject.strip()
-    match = _RELEASE_SUBJECT_RE.match(subject) or _MERGE_SUBJECT_RE.match(subject)
-    return match.group(1) if match else None
+def _write(path: Path, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
 
 
 def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     pyproject = repo / "pyproject.toml"
     changelog = repo / "CHANGELOG.md"
-    signoff = repo / "docs" / "cli" / "signoff.md"
 
-    py_text = pyproject.read_text(encoding="utf-8")
+    py_text = _read(pyproject)
     current = read_base_version(py_text)
-    new = version or next_minor(current)
-    if parse_version(new) < parse_version(current):
+    new = version or next_patch(current)
+    if parse_version(new) <= parse_version(current):
         raise PrepError(
-            f"version {new} is older than the current base-version {current}"
+            f"version {new} is not newer than the current base-version {current}"
         )
 
-    # Compute every write up front so a refusal (e.g. an empty '## Unreleased'
-    # section, issue #6086, or a stale availability-note anchor, issue #5582)
-    # leaves the tree untouched, pyproject.toml unbumped and fragments in place.
     new_py_text = bump_pyproject(py_text, new)
-    changelog_text = changelog.read_text(encoding="utf-8")
-    # An existing release heading means pending fragments are for a future cut.
-    fragments = (
-        {}
-        if _has_release_heading(changelog_text, new)
-        else _read_changelog_fragments(repo / "changelog.d")
-    )
-    new_log_text = add_changelog_heading(
-        changelog_text,
-        new,
-        date,
-        previous=current,
-        fragments="\n\n".join(
-            _resolve_notes(entry, current, new, f"changelog.d/{path.name}").strip("\n")
-            for path, entry in fragments.items()
-        ),
-    )
-    # On an idempotent re-run `current == new`; the notes were already resolved.
-    new_signoff_text = None
-    if signoff.exists() and current != new:
-        # Check the original text: substituting a wrapped note collapses its
-        # line break, which would shift the line a later refusal reports.
-        signoff_text = signoff.read_text(encoding="utf-8")
-        check_signoff_note_anchors(signoff_text, current)
-        new_signoff_text = update_signoff_notes(signoff_text, current, new)
+    new_log_text = add_release_heading(_read(changelog), new, date)
 
-    pyproject.write_text(new_py_text, encoding="utf-8")
-    changelog.write_text(new_log_text, encoding="utf-8")
-    for path in fragments:
-        path.unlink()
-    if new_signoff_text is not None:
-        signoff.write_text(new_signoff_text, encoding="utf-8")
+    _write(pyproject, new_py_text)
+    _write(changelog, new_log_text)
     return {"previous": current, "version": new, "date": date}
-
-
-_DATED_RELEASE = re.compile(rf"^## ({_VERSION}) \([^()\n]+\)[ \t]*$", re.MULTILINE)
-
-
-def _refresh_changelog(
-    text: str, version: str, fragments: dict[Path, str]
-) -> tuple[str, str]:
-    """Collect late release inputs between Unreleased and the previous release."""
-    heading_end, section_end = _unreleased_span(text)
-    entries = text[heading_end:section_end]
-    current = _DATED_RELEASE.match(text, section_end)
-    if current is None or current[1] != version:
-        raise PrepError(
-            f"expected the prepared ## {version} heading immediately after Unreleased"
-        )
-    older = _DATED_RELEASE.search(text, current.end())
-    if older is None or parse_version(older[1]) >= parse_version(version):
-        raise PrepError(f"cannot determine the previous release below ## {version}")
-    previous = older[1]
-
-    body = _resolve_notes(
-        text[current.end() : older.start()],
-        previous,
-        version,
-        "CHANGELOG.md",
-        text.count("\n", 0, current.end()) + 1,
-    )
-    additions = [
-        _resolve_notes(
-            entries,
-            previous,
-            version,
-            "CHANGELOG.md",
-            text.count("\n", 0, heading_end) + 1,
-        )
-    ]
-    additions.extend(
-        _resolve_notes(entry, previous, version, f"changelog.d/{path.name}")
-        for path, entry in fragments.items()
-    )
-    for entry in additions:
-        entry = entry.strip("\n")
-        # A rerun after the changelog write may still see a consumed fragment.
-        existing = body.strip("\n")
-        if entry.strip() and f"\n\n{entry}\n\n" not in f"\n\n{existing}\n\n":
-            body = body.rstrip("\n") + "\n\n" + entry + "\n\n"
-    before = text[:heading_end] + ("\n\n" if entries.strip() else entries)
-    return before + current[0] + body + text[older.start() :], previous
-
-
-def refresh(repo: Path, version: str, *, check: bool = False) -> bool:
-    """Refresh an already prepared release. Return whether any input was pending."""
-    current = read_base_version((repo / "pyproject.toml").read_text(encoding="utf-8"))
-    if version != current:
-        raise PrepError(
-            f"release branch version {version} disagrees with base-version {current}"
-        )
-    changelog = repo / "CHANGELOG.md"
-    original = changelog.read_text(encoding="utf-8")
-    fragments = _read_changelog_fragments(repo / "changelog.d")
-    refreshed, previous = _refresh_changelog(original, version, fragments)
-    edits = {changelog: refreshed} if refreshed != original else {}
-    signoff = repo / "docs/cli/signoff.md"
-    if signoff.is_file():
-        text = signoff.read_text(encoding="utf-8")
-        check_signoff_note_anchors(text, previous)
-        updated = update_signoff_notes(text, previous, version)
-        if updated != text:
-            edits[signoff] = updated
-    if not check:
-        for path, content in edits.items():
-            path.write_text(content, encoding="utf-8")
-        for path in fragments:
-            path.unlink()
-    return bool(edits or fragments)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("next", help="print the next minor version")
-    prep = sub.add_parser("prepare", help="apply the release text edits")
-    prep.add_argument("--version", help="override (default: next minor)")
-    prep.add_argument(
+    prep = parser.add_subparsers(dest="cmd", required=True)
+    p = prep.add_parser("prepare", help="apply the version-bump file edits")
+    p.add_argument(
+        "--version",
+        help="override (default: one patch step; a minor is forwarded and the"
+        " publisher refuses it unless a reviewed 2am change lists it)",
+    )
+    p.add_argument(
         "--date", default=_dt.datetime.now(_dt.timezone.utc).date().isoformat()
     )
-    ref = sub.add_parser("refresh", help="collect late notes into a prepared release")
-    ref.add_argument("--version", required=True, help="version of the release branch")
-    ref.add_argument(
-        "--check",
-        action="store_true",
-        help="exit 1 for pending updates without writing",
-    )
-    det = sub.add_parser(
-        "detect", help="print the version if --subject is a release bump"
-    )
-    det.add_argument("--subject", required=True)
     args = parser.parse_args(argv)
 
     try:
-        if args.cmd == "next":
-            current = read_base_version(
-                (args.repo / "pyproject.toml").read_text(encoding="utf-8")
-            )
-            print(next_minor(current))
-        elif args.cmd == "prepare":
+        if args.cmd == "prepare":
             print(json.dumps(prepare(args.repo, args.version, args.date)))
-        elif args.cmd == "refresh":
-            changed = refresh(args.repo, args.version, check=args.check)
-            if args.check and changed:
-                print(
-                    "Pending release notes. Run python3 scripts/release_prep.py "
-                    f"refresh --version {args.version} and commit the result.",
-                    file=sys.stderr,
-                )
-                return 1
-        else:
-            version = release_version_from_subject(args.subject)
-            if version:
-                print(version)
     except PrepError as exc:
         print(f"release_prep.py: {exc}", file=sys.stderr)
         return 2

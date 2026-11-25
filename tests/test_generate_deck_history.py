@@ -265,27 +265,47 @@ def test_version_regex_reads_both_pyproject_version_styles():
     assert module._VERSION_RE.search(real) is not None
 
 
-def test_as_release_entries_match_real_tag_modulo_git_commit(tmp_path, monkeypatch):
-    """The release PR records HEAD as a pseudo-tag; after tagging, the real-tag
-    entries must be identical except ``git_commit`` (null while pending, since
-    amend/squash change the sha), so the tag job's reconciliation can pass."""
+def test_as_release_flag_is_gone(tmp_path, monkeypatch):
+    """Issue #5005: ``--as-release`` recorded a pseudo-tag whose commit is
+    unknowable, and the packaged row then carried ``git_commit: null``. The
+    release build now generates from the real tag into ``--output``; the old
+    flag must stay refused so the null-commit path cannot come back."""
     repo = _make_repo(tmp_path)
-    decks_dir = repo / "src" / "klayout_tools" / "decks"
-    _write_pyproject(repo, "0.1.0")
-    (decks_dir / "sky130.py").write_text("DECK_A = 1\n")
-    _commit(repo, "v0.1.0")
-    _write_pyproject(repo, "0.2.0")
-    (decks_dir / "sky130.py").write_text("DECK_B = 2\n")
-    _commit(repo, None)
     monkeypatch.setattr(gdh, "REPO_ROOT", repo)
-    monkeypatch.setitem(gdh._PSEUDO_TAGS, "v0.2.0", "HEAD")
+    monkeypatch.setattr(gdh, "HISTORY_PATH", tmp_path / "_history.json")
 
-    pending = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
-    gdh._PSEUDO_TAGS.clear()
-    _git("tag", "v0.2.0", cwd=repo)
-    real = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
+    with pytest.raises(SystemExit) as exc:
+        gdh.main(["--as-release", "v0.2.0"])
+    assert exc.value.code == 2  # argparse usage error
 
-    assert pending and all(e["git_commit"] is None for e in pending)
-    assert all(e["git_commit"] for e in real)
-    strip = lambda es: [{k: v for k, v in e.items() if k != "git_commit"} for e in es]  # noqa: E731
-    assert strip(pending) == strip(real)
+
+def test_output_writes_elsewhere_and_leaves_tracked_file_untouched(
+    _tagged_repo, monkeypatch, tmp_path
+):
+    """Issue #5005: the release build regenerates the table from the real tag
+    into a path outside the tree -- editing the tracked file before ``uv
+    build`` would dirty the checkout and corrupt the release version."""
+    repo = _tagged_repo
+    tracked = repo / "src" / "klayout_tools" / "decks" / "_history.json"
+    tracked.write_text('{"entries": []}\n')
+    outside = tmp_path / "out" / "_history.json"
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+
+    assert gdh.main(["--output", str(outside)]) == 0
+
+    payload = json.loads(outside.read_text())
+    assert {e["git_tag"] for e in payload["entries"]} == {"v0.1.0", "v0.2.0"}
+    # From the real tag: every row carries its tag's commit.
+    assert all(e["git_commit"] for e in payload["entries"])
+    expected_commit = subprocess.run(
+        ["git", "rev-list", "-n", "1", "v0.2.0"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    for entry in payload["entries"]:
+        if entry["git_tag"] == "v0.2.0":
+            assert entry["git_commit"] == expected_commit
+    # The tracked file was not touched.
+    assert tracked.read_text() == '{"entries": []}\n'

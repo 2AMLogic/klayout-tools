@@ -3,8 +3,11 @@
  * and deck names the landing page shows (issue #4597).
  *
  * The JSON is generated from the `klt` CLI registry by
- * `scripts/gen_site_cli_data.py` and committed; `tests/test_site_cli_data.py`
- * fails when it drifts from the code. Never edit it by hand — regenerate it.
+ * `scripts/gen_site_cli_data.py` and is NOT committed (gitignored since issue
+ * #5005): `scripts/deploy-site.sh` and CI's `site/` job generate it before
+ * `tsc -b`, so a fresh checkout must run
+ * `uv run python scripts/gen_site_cli_data.py` once before type-checking or
+ * testing the site. Never edit it by hand — regenerate it.
  */
 import raw from "./cli.generated.json";
 

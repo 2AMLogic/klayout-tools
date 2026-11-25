@@ -10,9 +10,15 @@
 # runtime required.
 #
 # Pipeline:
-#   1. build  -- `npm --prefix site ci && npm --prefix site run build`,
+#   1. data   -- `uv run python scripts/gen_site_cli_data.py`, regenerating
+#                site/src/data/cli.generated.json (issue #5005: the file is
+#                generated at build time, not committed -- the fleet
+#                publisher that cuts releases commits exactly pyproject.toml
+#                and CHANGELOG.md, so the release badge tracks the newest
+#                CHANGELOG heading here instead).
+#   2. build  -- `npm --prefix site ci && npm --prefix site run build`,
 #                producing site/dist/.
-#   2. deploy -- `wrangler pages deploy site/dist` (skipped under
+#   3. deploy -- `wrangler pages deploy site/dist` (skipped under
 #                --no-deploy).
 #
 # Auth stays as-is from the pre-gallery script: a scoped API token, NOT
@@ -22,12 +28,17 @@
 # kicad-tools.org).
 #
 # Usage:
-#   scripts/deploy-site.sh [--no-deploy] [--help]
+#   scripts/deploy-site.sh [--no-deploy] [--no-regen-data] [--help]
 #
-#   --no-deploy   Build the site only (site/dist/); skip the wrangler
-#                 deploy. Useful for local verification without touching
-#                 Cloudflare. Does not require Cloudflare credentials.
-#   --help        Show this help and exit.
+#   --no-deploy     Build the site only (site/dist/); skip the wrangler
+#                   deploy. Useful for local verification without touching
+#                   Cloudflare. Does not require Cloudflare credentials.
+#   --no-regen-data Skip step 1 (use whatever site/src/data/
+#                   cli.generated.json is already on disk). CI never passes
+#                   this; it exists for a local Node-only site build on a
+#                   machine without uv, at the cost of a possibly stale
+#                   badge.
+#   --help          Show this help and exit.
 #
 # Out of scope: regenerating blocks/*/output/layout.json or renders — that's
 # the content pipeline (#62). This script only builds and deploys whatever
@@ -47,11 +58,13 @@ usage() {
 }
 
 NO_DEPLOY=0
+REGEN_DATA=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-deploy) NO_DEPLOY=1 ;;
-    -h|--help)   usage; exit 0 ;;
+    --no-deploy)     NO_DEPLOY=1 ;;
+    --no-regen-data) REGEN_DATA=0 ;;
+    -h|--help)       usage; exit 0 ;;
     *)
       err "Unknown argument: $1"
       echo "Run '$0 --help' for usage." >&2
@@ -68,15 +81,37 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- Step 1: build the site --------------------------------------------------
-info "Step 1/2: building the site (npm --prefix site ci && run build)"
+# --- Step 1: generate the landing-page data ----------------------------------
+# site/src/data/cli.generated.json is gitignored (issue #5005), and
+# site/src/data/cliData.ts imports it, so `tsc -b` in the build below fails
+# TS2307 on a clean checkout unless this step ran first.
+SITE_DATA="site/src/data/cli.generated.json"
+if [ "${REGEN_DATA}" -eq 1 ]; then
+  if ! command -v uv >/dev/null 2>&1; then
+    err "'uv' not found — required to generate ${SITE_DATA} (the file is not committed)."
+    err "Install uv, or pass --no-regen-data to build from a copy already on disk."
+    exit 1
+  fi
+  info "Step 1/3: generating ${SITE_DATA} (uv run python scripts/gen_site_cli_data.py)"
+  uv run --frozen python scripts/gen_site_cli_data.py
+else
+  info "Step 1/3: --no-regen-data set; using ${SITE_DATA} as it is on disk."
+  if [ ! -f "${SITE_DATA}" ]; then
+    err "${SITE_DATA} does not exist and --no-regen-data was given."
+    err "Generate it once with: uv run python scripts/gen_site_cli_data.py"
+    exit 1
+  fi
+fi
+
+# --- Step 2: build the site --------------------------------------------------
+info "Step 2/3: building the site (npm --prefix site ci && run build)"
 npm --prefix site ci
 npm --prefix site run build
 info "Site built to site/dist/."
 
-# --- Step 2: deploy ----------------------------------------------------------
+# --- Step 3: deploy ----------------------------------------------------------
 if [ "${NO_DEPLOY}" -eq 1 ]; then
-  info "Step 2/2: --no-deploy set; skipping Cloudflare Pages deploy."
+  info "Step 3/3: --no-deploy set; skipping Cloudflare Pages deploy."
   info "Done. Build is in site/dist/ (not deployed)."
   exit 0
 fi
@@ -149,5 +184,5 @@ if [ "${account_matches}" != "yes" ]; then
   exit 1
 fi
 
-info "Step 2/2: deploying site/dist/ to Cloudflare Pages (branch main)."
+info "Step 3/3: deploying site/dist/ to Cloudflare Pages (branch main)."
 exec npx wrangler pages deploy site/dist --project-name klayout-tools --branch main --commit-dirty=true

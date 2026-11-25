@@ -32,7 +32,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from ci_wall_clock_steps import CHECKOUT_STEP_PREFIXES  # noqa: E402
 from fetch_ci_wall_clock_history import job_durations  # noqa: E402
 
-# Exit-code contract, mirroring scripts/check-release-lag.sh's tiering.
+# Exit-code contract (0 ok / 1 breach / 2 check failed).
 EXIT_OK = 0
 EXIT_BREACH = 1
 

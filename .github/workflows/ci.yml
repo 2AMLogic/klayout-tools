@@ -240,16 +240,6 @@ jobs:
           git ls-files 'examples/**/*.json' \
             | xargs -r uv run --frozen --extra dev klt env-provenance lint-envelope
 
-      - name: Check prepared release notes
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository &&
-          github.base_ref == github.event.repository.default_branch &&
-          startsWith(github.head_ref, 'release/v')
-        env:
-          RELEASE_BRANCH: ${{ github.head_ref }}
-        run: python3 -I scripts/release_prep.py refresh --version "${RELEASE_BRANCH#release/v}" --check
-
   native:
     name: ${{ matrix.job_name }}
     # `native/mom/` (issue #718), `native/congestion/` (issue #785, Epic
@@ -984,6 +974,24 @@ jobs:
       - name: Install site dependencies
         if: steps.filter.outputs.site_changed == 'true'
         run: npm --prefix site ci
+
+      # `site/src/data/cli.generated.json` is gitignored since issue #5005 (the
+      # release bump commits exactly pyproject.toml + CHANGELOG.md), so a plain
+      # checkout has no `./cli.generated.json` for `src/data/cliData.ts` to
+      # import: `tsc -b` fails TS2307 and `IndexPage.test.tsx` cannot load it.
+      # Generate it first, the same step scripts/deploy-site.sh runs.
+      - name: Set up uv
+        if: steps.filter.outputs.site_changed == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Generate landing-page data (cli.generated.json)
+        if: steps.filter.outputs.site_changed == 'true'
+        run: uv run --frozen python scripts/gen_site_cli_data.py
 
       - name: Type check (tsc -b)
         # site/package.json's "check" script -- the same `tsc -b` the
