@@ -10,9 +10,10 @@ Also home to the ``delta[]`` row-label fields (:func:`delta_labels`, issue
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from . import sim_cause
 from .pex_errors import PexError
 
 # Only keys `klt sim` actually emits in its `environment` (see sim.py's
@@ -232,3 +233,38 @@ def schematic_probe_rows(
                 )
             rows.append(row)
     return rows
+
+
+def explaining_diagnostic(
+    diagnostics: Sequence[Mapping[str, Any]],
+    measurement: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Choose this row’s diagnostic, preserving the first error on a solver abort."""
+    errors = [d for d in diagnostics if d.get("severity") == "error"]
+    if not errors:
+        return diagnostics[0] if diagnostics else None
+    if any(
+        d.get("code") not in ("measurement", "singular_matrix", "nonconvergence")
+        for d in errors
+    ):
+        return errors[0]
+
+    # An engine-confirmed window miss can explain a missing value beside
+    # recovered stepping narration. Each .meas card has its own diagnostic.
+    measurements = [d for d in errors if d.get("code") == "measurement"]
+    window_miss = next(
+        (
+            d
+            for d in measurements
+            if sim_cause.reports_window_miss(str(d.get("message") or ""))
+        ),
+        None,
+    )
+    if window_miss is None:
+        return errors[0]
+    if measurement is not None and measurement.get("name"):
+        prefix = f"measurement '{measurement['name']}' "
+        for diagnostic in measurements:
+            if str(diagnostic.get("message") or "").startswith(prefix):
+                return diagnostic
+    return window_miss

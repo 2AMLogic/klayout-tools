@@ -225,7 +225,6 @@ from . import (
     pex_binding,
     pex_runset,
     pex_sim_evidence,
-    sim_cause,
 )
 from ._jsonnum import is_finite_number, is_number
 from ._paths import _resolve_relative
@@ -1242,49 +1241,6 @@ def _error_stage(code: str | None, message: str = "") -> str:
     return "unknown"
 
 
-#: Issue #7904: the error-severity codes ``klt sim`` leaves on a corner as
-#: solver *narration* -- ngspice logs a ``Warning: singular matrix`` /
-#: ``... stepping failed`` line for each gmin/source-stepping attempt on the
-#: path to a result. ``sim._recovered_from_stepping`` forgives them (downgrades
-#: them to ``warning``) only when every requested measurement returned a value,
-#: so on a corner whose measurement has none they stay ``error`` and sort ahead
-#: of the measurement diagnostic that actually names the failure.
-_STEPPING_NARRATION_CODES = frozenset({"singular_matrix", "nonconvergence"})
-
-
-def _explaining_diagnostic(
-    diagnostics: Sequence[Mapping[str, Any]],
-) -> Mapping[str, Any] | None:
-    """The one diagnostic that explains why an errored corner has no value.
-
-    The first error-severity diagnostic, with one exception (issue #7904): when
-    ngspice itself reported a ``.meas`` window miss ("out of interval", i.e. the
-    analysis completed and the target was never reached) and every error on the
-    corner is either a ``measurement`` diagnostic or stepping narration, the
-    window miss is the failure and the narration is not. Any other error --
-    ``analysis_aborted``, ``timestep_too_small``, ``timeout``, ``netlist`` -- is
-    evidence the solver did fail, so the first error still wins there. With no
-    error-severity diagnostic, the first diagnostic; with none, ``None``."""
-    errors = [d for d in diagnostics if d.get("severity") == "error"]
-    if not errors:
-        return diagnostics[0] if diagnostics else None
-    window_miss = next(
-        (
-            d
-            for d in errors
-            if d.get("code") == "measurement"
-            and sim_cause.reports_window_miss(str(d.get("message") or ""))
-        ),
-        None,
-    )
-    if window_miss is not None and all(
-        d.get("code") == "measurement" or d.get("code") in _STEPPING_NARRATION_CODES
-        for d in errors
-    ):
-        return window_miss
-    return errors[0]
-
-
 def _side_error(
     side: str,
     sim_report: Mapping[str, Any] | None,
@@ -1294,13 +1250,11 @@ def _side_error(
     code: str | None = None,
     measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe why a delta row errored (#3062). Read the corner's explaining
-    diagnostic (:func:`_explaining_diagnostic`: its first error diagnostic,
-    unless ngspice reported a measurement window miss behind stepping
-    narration, #7904), falling back to its first diagnostic. A
-    caller-supplied failure can supply the message and code directly. Include
-    the side's remote job metadata when available. A measurement-harness
-    message alone is an execute-stage error (#4555)."""
+    """Describe why a delta row errored (#3062). Select the diagnostic
+    explaining the row's failure, including a confirmed measurement window miss. A caller-supplied
+    failure can supply the message and code directly. Include the side's
+    remote job metadata when available. A measurement-harness message alone
+    is an execute-stage error (#4555)."""
     remote = None
     if sim_report is not None:
         remote = (sim_report.get("environment") or {}).get("remote")
@@ -1308,7 +1262,9 @@ def _side_error(
             for corner in sim_report.get("corners", []):
                 if corner.get("corner_id") != corner_id:
                     continue
-                chosen = _explaining_diagnostic(corner.get("diagnostics") or [])
+                chosen = pex_sim_evidence.explaining_diagnostic(
+                    corner.get("diagnostics") or [], measurement
+                )
                 if chosen is not None:
                     message = chosen.get("message") or chosen.get("code")
                     code = chosen.get("code")

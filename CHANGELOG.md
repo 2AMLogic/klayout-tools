@@ -14,24 +14,6 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt pex` `delta[].error` names a `.meas` window miss, not the solver
-  narration listed ahead of it** (issue #7904, 2026-11-25 — `klt pex`
-  `schema_version` unchanged and no field added; the `code` / `message`
-  *values* of an existing field change for the affected rows): a corner whose
-  extracted-side measurement never reached its target (`ngspice reported: out
-  of interval`) but whose log also narrated gmin/source stepping
-  (`Warning: singular matrix`, `Dynamic gmin stepping failed`) reported
-  `error.code: "singular_matrix"`. `klt sim` forgives that narration (downgrades
-  it to `warning`) only when every measurement returned a value, so beside a
-  value-less measurement it stays `severity: "error"` and sorted first, and
-  the first-error rule picked it. Grouping `delta[].error.code` therefore
-  counted window-miss rows as solver aborts. `delta[].error` now takes the
-  window-miss `measurement` diagnostic when every error-severity diagnostic on
-  the corner is a `measurement` entry or `singular_matrix` / `nonconvergence`
-  narration. Any other error-severity entry (`analysis_aborted`,
-  `timestep_too_small`, `timeout`, ...) keeps the first-error rule, so a
-  genuine solver abort still reports `singular_matrix`. `klt sim`'s own
-  diagnostics, severities and ordering are unchanged.
 - **`klt sta` `spef_annotation.annotation_warning` names a re-extraction
   recipe that works on a FinFET deck** (issue #7808, 2026-11-24, additive —
   `klt sta` `schema_version` unchanged; only the wording of an existing
