@@ -296,6 +296,7 @@ def reference_spice_reader(deck_file: str | None) -> Any:
 
 
 _VALUE_ELEMENTS = ("C", "R", "L")
+_CDL_SUBSTRATE = re.compile(r"(?<!\S)\$?SUB\s*=\s*", re.IGNORECASE)
 
 
 def _stand_in_card(card: str, element: str) -> tuple[str, str]:
@@ -355,8 +356,9 @@ def tolerant_spice_reader() -> Any:
 
     For the native model-last shapes, the model determines the terminal
     count. Read the net names directly so a numeric substrate such as ``0``
-    stays connected. Other valueless cards get the deck's stand-in retry
-    (:func:`_stand_in_card`). A card KLayout's own handler still
+    stays connected. On valued poly resistors, the CDL ``$SUB`` or ``SUB``
+    parameter supplies the third net. Other valueless cards get the deck's
+    stand-in retry (:func:`_stand_in_card`). A card KLayout's own handler still
     refuses (:func:`_create_generic_device`: the RF inductor and varactor
     cards) becomes a device of a generic class named by its model, which is
     how the deck's ``process_device`` treats them too. Any other failure
@@ -376,8 +378,8 @@ def tolerant_spice_reader() -> Any:
                 model = sg13g2_model_name(model)
                 params = parts.parameters
                 value = params.get(element, 0.0)
-                # CDL can also put a value in the third field and supply
-                # the substrate or model separately. Keep its ordinary parse.
+                # CDL can put a resistance in the third field. Let KLayout
+                # parse that value before connecting a named substrate below.
                 if (
                     PASSIVE_CARD_SHAPES.get(model) == (element, len(nets))
                     and not {"$SUB", "SUB", "MODEL"}.intersection(params)
@@ -388,9 +390,27 @@ def tolerant_spice_reader() -> Any:
                     card.parameters, card.value = params, value
                     return card
             try:
-                return super().parse_element(s, element)
+                card = super().parse_element(s, element)
             except RuntimeError:
                 return super().parse_element(*_stand_in_card(s, element))
+
+            model = sg13g2_model_name(card.model_name)
+            if (
+                element == "R"
+                and PASSIVE_CARD_SHAPES.get(model) == ("R", 3)
+                and len(card.net_names) == 2
+                and {"$SUB", "SUB"}.intersection(card.parameters)
+                and (substrate := _CDL_SUBSTRATE.search(s))
+            ):
+                # KLayout reads the positional resistance but leaves SUB in
+                # parameters. Read its RHS as a net token so e.g. 007 retains
+                # its spelling instead of becoming the numeric parameter 7.0.
+                tail = self.parse_element_components(
+                    s[substrate.end() :], self.variables()
+                )
+                card.net_names = [*card.net_names, tail.strings[0]]
+                card.model_name = model
+            return card
 
         def element(
             self,

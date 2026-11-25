@@ -189,17 +189,32 @@ def test_numeric_passive_terminals_retain_their_connections(
     }
 
 
-def test_sg13g2_reader_preserves_explicit_resistor_values(tmp_path):
-    path, deck = _read(
-        tmp_path,
-        ".subckt top\nR1 a b 0 rppd R=17\nR2 c d 250 $SUB=sub rhigh\n.ends\n",
-    )
+@pytest.mark.parametrize("model", ["rppd", "rhigh", "rsil"])
+@pytest.mark.parametrize("native_first", [True, False])
+@pytest.mark.parametrize(
+    ("native_fields", "substrate"),
+    [("$SUB=sub {model}", "SUB"), ("sub=007 $[{model}]", "007")],
+)
+def test_valued_poly_resistor_keeps_its_substrate_and_resistance(
+    tmp_path, model, native_first, native_fields, substrate
+):
+    native = f"R1 a b 2.5k {native_fields.format(model=model)}"
+    converted = f"R2 c d 0 {model} R=17"
+    cards = [native, converted] if native_first else [converted, native]
+    path, deck = _read(tmp_path, ".subckt top\n" + "\n".join(cards) + "\n.ends\n")
     netlist = kdb.Netlist()
     netlist.read(path, reference_spice_reader(deck))
-    assert {
-        d.device_class().name: d.parameter("R")
-        for d in netlist.circuit_by_name("TOP").each_device()
-    } == {"RPPD": 17, "RHIGH": 250}
+    devices = {}
+    for device in netlist.circuit_by_name("TOP").each_device():
+        cls = device.device_class()
+        pins = [
+            device.net_for_terminal(t.id()).name for t in cls.terminal_definitions()
+        ]
+        devices[device.name] = (cls.name, pins, device.parameter("R"))
+    assert devices == {
+        "1": (model.upper(), ["A", "B", substrate], 2500),
+        "2": (model.upper(), ["C", "D", "0"], 17),
+    }
 
 
 def test_grounded_wrapped_resistor_beside_native_valued_cdl(tmp_path):
