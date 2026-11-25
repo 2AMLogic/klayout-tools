@@ -45,7 +45,9 @@ def _reference_source_census(
 ) -> dict[str, int] | None:
     """Positive reference-side evidence for issue #6902: instance counts
     keyed by upper-cased name over the reference *source* netlist, re-read
-    with the plain SPICE reader (hierarchy intact, no deck delegate), one
+    with the plain SPICE reader (hierarchy intact, no deck delegate; for
+    ``sg13g2.lvs`` the one that also keeps its valueless ``R``/``C``/``L``
+    cards, :func:`.lvs_runset_reference.reference_spice_reader`), one
     count per card per circuit definition -- the same per-definition unit
     :func:`_class_census` counts. When requested, ``subcircuit_counts``
     records the subset of these cards seen as subcircuit calls.
@@ -68,10 +70,11 @@ def _reference_source_census(
     import klayout.db as kdb
 
     from .lvs_runset import _deck_device_list
+    from .lvs_runset_reference import reference_spice_reader
 
     netlist = kdb.Netlist()
     try:
-        netlist.read(reference_path, kdb.NetlistSpiceReader())
+        netlist.read(reference_path, reference_spice_reader(deck_file))
     except Exception:
         return None
     device_list = _deck_device_list(deck_file)

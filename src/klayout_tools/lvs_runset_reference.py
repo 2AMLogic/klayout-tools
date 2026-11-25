@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .lvs_base import LvsError
@@ -282,6 +282,125 @@ def is_sg13g2_runset(deck_file: str) -> bool:
     return os.path.basename(deck_file) == "sg13g2.lvs"
 
 
+def reference_spice_reader(deck_file: str | None) -> Any:
+    """The ``NetlistSpiceReader`` the census and the unresolved-call scan
+    re-read the converted reference with: the plain one, except for IHP's
+    ``sg13g2.lvs``, whose own reader keeps cards the plain one refuses
+    (:func:`tolerant_spice_reader`, issue #7855). Every other deck's reading
+    is unchanged."""
+    import klayout.db as kdb
+
+    if deck_file and is_sg13g2_runset(deck_file):
+        return tolerant_spice_reader()
+    return kdb.NetlistSpiceReader()
+
+
+_VALUE_ELEMENTS = ("C", "R", "L")
+
+
+def _stand_in_card(card: str, element: str) -> tuple[str, str]:
+    """``(card, element)`` to re-parse a valueless ``R``/``C``/``L`` card the
+    plain parse refused: the retries of IHP's ``CustomReader#parse_element``
+    (``rule_decks/custom_reader.lvs``), in its order. A varactor is read as an
+    ``M`` card, a four-net ``inductor3`` as an ``M`` card with a stand-in
+    ``L=0``, anything else with a stand-in ``C=0``/``R=0``/``L=0``."""
+    low = card.lower()
+    if element == "C" and "varicap" in low:
+        return card, "M"
+    if element == "L" and "inductor3" in low:
+        return f"{card} L=0", "M"
+    return f"{card} {element}=0", element
+
+
+def _create_generic_device(
+    circuit: Any,
+    name: str,
+    model: str,
+    nets: Sequence[Any],
+    registry: dict[str, Any],
+) -> None:
+    """Add ``name`` to ``circuit`` as a device of a class named ``model`` with
+    one terminal per net: the shape KLayout's own ``C``/``R``/``L`` handler
+    refuses (a three-net ``L``, a four-net ``C``). One class object per
+    ``model`` (``registry``); a card with another net count than the class's
+    first card raises, so the reference stays unreadable rather than guessed."""
+    import klayout.db as kdb
+
+    from .netlist_class_registry import shared_device_class
+
+    def make_class() -> kdb.DeviceClass:
+        device_class = kdb.DeviceClass()
+        device_class.name = model
+        for i in range(len(nets)):
+            device_class.add_terminal(
+                kdb.DeviceTerminalDefinition(f"T{i + 1}", f"Terminal {i + 1}")
+            )
+        return device_class
+
+    device_class = shared_device_class(circuit.netlist(), model, make_class, registry)
+    terminals = device_class.terminal_definitions()
+    if len(terminals) != len(nets):
+        raise RuntimeError(
+            f"'{model}' is used with {len(nets)} nets after a "
+            f"{len(terminals)}-net card of the same class"
+        )
+    device = circuit.create_device(device_class, name)
+    for net, terminal in zip(nets, terminals, strict=True):
+        device.connect_terminal(terminal.name, net)
+
+
+def tolerant_spice_reader() -> Any:
+    """A ``NetlistSpiceReader`` that keeps the valueless ``R``/``C``/``L``
+    cards ``sg13g2.lvs``'s own reader keeps (issue #7855).
+
+    The plain reader raises ``Can't find a value for a R, C or L device`` on
+    ``C1 a b cap_cmim w= l= m=`` or ``R1 a b sub rppd w= l=``, and the census
+    and the unresolved-call scan swallow that and report ``None`` / ``[]``:
+    the converted reference of any SG13G2 passive looked unreadable. The
+    delegate retries such a card as the deck's own does
+    (:func:`_stand_in_card`); the value never reaches a comparison, only the
+    class and the nets are counted. A card KLayout's own handler still
+    refuses (:func:`_create_generic_device`: the RF inductor and varactor
+    cards) becomes a device of a generic class named by its model, which is
+    how the deck's ``process_device`` treats them too. Any other failure
+    still raises, so a reference that genuinely cannot be read stays
+    ``None`` / ``[]``."""
+    import klayout.db as kdb
+
+    registry: dict[str, kdb.DeviceClass] = {}
+
+    class _Delegate(kdb.NetlistSpiceReaderDelegate):
+        def parse_element(self, s: str, element: str) -> Any:
+            try:
+                return super().parse_element(s, element)
+            except RuntimeError:
+                if element not in _VALUE_ELEMENTS:
+                    raise
+                return super().parse_element(*_stand_in_card(s, element))
+
+        def element(
+            self,
+            circuit: kdb.Circuit,
+            element: str,
+            name: str,
+            model: str,
+            value: float,
+            nets: Sequence[kdb.Net],
+            params: dict,
+        ) -> bool:
+            try:
+                return super().element(
+                    circuit, element, name, model, value, nets, params
+                )
+            except RuntimeError:
+                if element not in _VALUE_ELEMENTS or not model:
+                    raise
+            _create_generic_device(circuit, name, model, nets, registry)
+            return True
+
+    return kdb.NetlistSpiceReader(_Delegate())
+
+
 def _converted_call_names(declared: dict[str, Any], deck_file: str) -> set[str]:
     """Upper-cased callees the runset's own reader is known to turn into
     devices, which the unresolved-call scan therefore must not report: the
@@ -308,16 +427,19 @@ def _unresolved_reference_calls(
     """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
     calls the runset neither converted nor could resolve.
 
-    The reference is re-read with the plain SPICE reader (hierarchy intact).
-    A callee the runset itself converts (:func:`_converted_call_names`: its
-    ``declared`` device classes plus the deck's ``DEVICE_LIST``) is not
-    reported. ``[]`` when the reference cannot be re-read: the
-    runset's own verdict stands."""
+    The reference is re-read with the plain SPICE reader (hierarchy intact);
+    for ``sg13g2.lvs`` one that also keeps the valueless native ``R``/``C``/
+    ``L`` cards the runset's own reader keeps (:func:`reference_spice_reader`,
+    issue #7855: a raise on one used to hide every unresolved call in the
+    file). A callee the runset itself converts
+    (:func:`_converted_call_names`: its ``declared`` device classes plus the
+    deck's ``DEVICE_LIST``) is not reported. ``[]`` when the reference cannot
+    be re-read: the runset's own verdict stands."""
     import klayout.db as kdb
 
     netlist = kdb.Netlist()
     try:
-        netlist.read(reference_path, kdb.NetlistSpiceReader())
+        netlist.read(reference_path, reference_spice_reader(deck_file))
     except Exception:
         return []
     return find_unresolved(

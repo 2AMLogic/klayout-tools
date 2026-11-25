@@ -370,6 +370,41 @@ reference count at 67 (it read 66 with no finding before). Regression tests:
 `tests/test_lvs_runset_sg13g2_cards.py` (pinned reader) and
 `tests/test_lvs_runset_reference.py` (hermetic).
 
+**IHP SG13G2 `cap_cmim` and poly-resistor calls (issue #7855).** The same
+conversion now writes native `C`/`R` cards for the passives, again in the
+form of the PDK's `sg13g2_pr/*.sym`:
+
+| Call | Native card |
+| --- | --- |
+| `X.. a b cap_cmim w= l= m=` | `C.. a b cap_cmim w= l= m=` |
+| `X.. a b <body> {rppd,rhigh,rsil} w= l= m= b= ps=` | `R.. a b <body> <same model> w= l= m= [b=] [ps=]` |
+
+`w` and `l` are required and `m` defaults to `1`; `b` and `ps` are carried
+only when the call gives them, never defaulted. The generic conversion lost
+the geometry this relies on: it wrote `cap_cmim` as `A=`/`P=` with no `w`/`l`
+(the deck reads a capacitor's `w` as its value, so `min_caps(1e-18)` purged
+every converted capacitor before `compare`) and wrote a resistor with a
+positional `0` before the model, dropping `m`/`b`/`ps`, which the deck
+compares. A call that cannot be written faithfully (no `w` or `l`, or not two
+terminals for `cap_cmim` / three for a resistor) stays an `X` call and is
+reported as `reference.unresolved_subckt_call`. `rfcmim` is not converted:
+the curated callee is `cap_rfcmim`, a different, three-terminal device.
+Live-verified with klayout 0.30.12 and the pinned `sg13g2.lvs` on the PDK's
+`cap_devices/cap_cmim` (69 capacitors) and `res_devices/{rppd,rhigh,rsil}`
+(84, 90 and 86 devices) testcases: every card rewritten as a call compares with
+the same device tallies and findings as the native netlist; one swapped
+capacitor used to leave 68 of 69 paired and one swapped `rppd` 2 of 84.
+
+For `sg13g2.lvs`, `device_census.reference_source` and the unresolved-call
+scan now read the converted reference with a reader that keeps the valueless
+`R`/`C`/`L` cards the runset's own reader keeps (a stand-in value, a varactor
+or `inductor3` read as an `M` card, any other card KLayout refuses as a device
+of a generic class named by its model). The plain reader raised on such a card,
+which made `reference_source` `null` (so `klt signoff` failed closed on a
+matching report) and hid any unresolved `X` call in the same file. A reference
+that cannot be read even so is still `null` / unscanned, and every other deck
+reads as before.
+
 **RF/bipolar subcircuits and differently named tops (issue #5402).** Under
 `reference.form: "subckt-call"`, an `X` card whose subcircuit is in the
 runset's own `DEVICE_LIST` and is
@@ -510,8 +545,9 @@ a compared circuit, say) still yields `mismatch`, and a run with a
 - `device_census` — `{layout: {class: n}, reference: {class: n}}`, plus
   `reference_source` (issue #6902): `{NAME: n}` — instance counts, keyed by
   upper-cased name, over the reference *source* netlist re-read with the
-  plain SPICE reader (hierarchy intact, no deck delegate), one count per
-  card per circuit definition. In scope are exactly the cards the runset's
+  plain SPICE reader (hierarchy intact, no deck delegate; for `sg13g2.lvs`
+  the variant that also keeps its valueless `R`/`C`/`L` cards, issue #7855),
+  one count per card per circuit definition. In scope are exactly the cards the runset's
   reader delegate is responsible for keeping: subcircuit calls whose callee
   is in the deck's `DEVICE_LIST` (the ones the delegate converts to devices,
   including the ones it renames), plus every device card the plain reader
