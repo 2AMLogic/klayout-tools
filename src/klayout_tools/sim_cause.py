@@ -340,6 +340,11 @@ _WINDOW_MISS_HINT = (
 )
 
 
+#: Where :func:`_cause_suffix` puts the engine's reason; the one marker
+#: :func:`reports_window_miss` reads it back by.
+_REPORTED_CAUSE_PREFIX = " -- ngspice reported: "
+
+
 def _cause_suffix(cause: str) -> str:
     """The ``measurement`` diagnostic suffix for an ngspice ``.meas`` reason.
 
@@ -349,7 +354,22 @@ def _cause_suffix(cause: str) -> str:
     opt-ins (``on_unreached: "null"`` / ``optional: true``) that grade such a
     window miss instead of erroring.
     """
-    suffix = f" -- ngspice reported: {cause}"
+    suffix = f"{_REPORTED_CAUSE_PREFIX}{cause}"
     if _MEAS_ABSENT_CAUSE_RE.search(cause):
         suffix += _WINDOW_MISS_HINT
     return suffix
+
+
+def reports_window_miss(message: str) -> bool:
+    """True when a ``measurement`` diagnostic's ``message`` says ngspice
+    evaluated the ``.meas`` card and reported "out of interval" (issue #7904).
+
+    That is the engine itself stating the analysis ran to completion and the
+    target was never reached -- the reader of a report (``klt pex``'s
+    ``delta[].error``) can then tell it from a solver failure. Keyed on the
+    engine's reason text that :func:`_cause_suffix` places after
+    :data:`_REPORTED_CAUSE_PREFIX`, not on the hint wording that follows it, so
+    a report assembled by a runner whose hint text differs still matches.
+    """
+    _, found, cause = message.partition(_REPORTED_CAUSE_PREFIX)
+    return bool(found) and _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
