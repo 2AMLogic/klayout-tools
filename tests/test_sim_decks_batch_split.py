@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from threading import Barrier
 from unittest.mock import Mock
 
 import pytest
@@ -38,8 +39,9 @@ class _MultiFleet(_FakeFleet):
         return dict(self.statuses.get(job_id, self.status))
 
     def collect(self, config, job_id, local_dir, **kwargs):
-        self.spec = self.specs[job_id]
-        super().collect(config, job_id, local_dir, **kwargs)
+        worker = _FakeFleet(self.status, fail_collect=self.fail_collect)
+        worker.submit(config, job_id, self.specs[job_id])
+        worker.collect(config, job_id, local_dir, **kwargs)
 
 
 def _install(monkeypatch, fleet):
@@ -76,6 +78,15 @@ def _staged_ids(spec):
 
 
 def test_split_submits_balanced_jobs_and_merges_in_order(tmp_path, monkeypatch):
+    # Let all three shards select their job before any fake worker reads its spec.
+    collectors = Barrier(3, timeout=10)
+    collect = _FakeFleet.collect
+
+    def collect_together(self, config, job_id, local_dir, **kwargs):
+        collectors.wait()
+        return collect(self, config, job_id, local_dir, **kwargs)
+
+    monkeypatch.setattr(_FakeFleet, "collect", collect_together)
     (tmp_path / ".git").mkdir()
     fleet = _install_and_fleet(monkeypatch)
     report = _run(tmp_path, _request(tmp_path), max_units_per_job=2)
