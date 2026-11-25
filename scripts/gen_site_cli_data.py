@@ -16,11 +16,13 @@ shipped (issue #4597). This script derives every one of them from the code:
 - latest release and date: the newest ``## X.Y.Z (YYYY-MM-DD)`` heading in
   ``CHANGELOG.md``.
 
-The output, ``site/src/data/cli.generated.json``, is committed so the site
-build stays Node-only. ``tests/test_site_cli_data.py`` regenerates it and
-fails on any difference, so a new verb, a renamed help string or a release
-heading cannot land without the site picking it up. Because the file lives
-under ``site/``, refreshing it also triggers ``deploy-site.yml``.
+The output, ``site/src/data/cli.generated.json``, is generated at site-build
+time by ``scripts/deploy-site.sh`` and never committed (issue #5005: the
+release bump commits exactly ``pyproject.toml`` and ``CHANGELOG.md``, so the
+release badge tracks the newest ``CHANGELOG.md`` heading here instead).
+``tests/test_site_cli_data.py`` keeps the generator honest. Because the file
+lives under ``site/``, regenerating it as part of the deploy means every
+release (a ``CHANGELOG.md`` heading change) redeploys the site.
 
 Usage::
 

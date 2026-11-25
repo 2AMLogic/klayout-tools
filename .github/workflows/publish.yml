@@ -43,7 +43,22 @@ jobs:
           version: "latest"
           python-version: "3.10"
 
+      # Issue #5005: generate the deck-history table for THIS tag into
+      # $RUNNER_TEMP and let hatch_build.py force-include it as the packaged
+      # decks/_history.json. The tag already exists here, so the rows carry
+      # the tag's own commit (no --as-release pseudo-tag, whose rows would
+      # carry null). Nothing in the tracked tree changes: any tracked-file
+      # edit dirties the checkout and would corrupt the version below into
+      # X.Y.(Z+1).dev0+g<sha>.dirty -- tests/test_release_build_identity.py
+      # pins exactly that failure mode.
+      - name: Generate the tag's deck history (outside the tracked tree)
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_deck_history.py --output "$RUNNER_TEMP/_history.json"
+
       - name: Build package
+        env:
+          KLT_DECK_HISTORY_PATH: ${{ runner.temp }}/_history.json
         run: uv build
 
       - uses: actions/upload-artifact@v7
@@ -104,9 +119,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # Full history + tags: release_notes.py collects the changelog.d/
+          # fragments ADDED since the previous v* tag (issue #5005), which a
+          # shallow checkout cannot see.
+          fetch-depth: 0
 
       - name: Build release notes from CHANGELOG.md
         run: |
+          set -euo pipefail
           python3 -I scripts/release_notes.py "${GITHUB_REF_NAME#v}" \
             >"$RUNNER_TEMP/release-notes.md"
           cat "$RUNNER_TEMP/release-notes.md"

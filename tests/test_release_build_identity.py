@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import email.message
 import email.parser
-import gzip
 import json
 import subprocess
 import sys
@@ -98,7 +97,11 @@ def _make_tagged_clone(tmp_path: Path) -> tuple[Path, str]:
 
     _git(clone, "add", "-A")
     _git(
-        clone, "commit", "-q", "-m", f"chore: bump version to {version}",
+        clone,
+        "commit",
+        "-q",
+        "-m",
+        f"chore: bump version to {version}",
     )
     tag = f"v{version}"
     _git(clone, "tag", tag)
@@ -112,11 +115,7 @@ def _make_tagged_clone(tmp_path: Path) -> tuple[Path, str]:
 def _wheel_metadata_version(dist_dir: Path) -> str:
     (wheel,) = dist_dir.glob("*.whl")
     with zipfile.ZipFile(wheel) as z:
-        name, = (
-            n
-            for n in z.namelist()
-            if n.endswith(".dist-info/METADATA")
-        )
+        (name,) = (n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
         msg: email.message.Message = email.parser.Parser().parsestr(
             z.read(name).decode("utf-8")
         )
@@ -126,11 +125,7 @@ def _wheel_metadata_version(dist_dir: Path) -> str:
 def _sdist_metadata_version(dist_dir: Path) -> str:
     (sdist,) = dist_dir.glob("*.tar.gz")
     with tarfile.open(sdist, "r:gz") as tar:
-        name, = (
-            n
-            for n in tar.getnames()
-            if n.endswith("/PKG-INFO")
-        )
+        (name,) = (n for n in tar.getnames() if n.endswith("/PKG-INFO"))
         chunk = tar.extractfile(name)
         assert chunk is not None
         msg: email.message.Message = email.parser.Parser().parsestr(
@@ -148,7 +143,7 @@ def _wheel_history(dist_dir: Path) -> dict:
 def _sdist_history(dist_dir: Path) -> dict:
     (sdist,) = dist_dir.glob("*.tar.gz")
     with tarfile.open(sdist, "r:gz") as tar:
-        name, = (
+        (name,) = (
             n
             for n in tar.getnames()
             if n.endswith("/src/klayout_tools/decks/_history.json")
@@ -178,9 +173,7 @@ def test_tagged_build_carries_bare_version_and_tag_history(tmp_path: Path) -> No
     )
 
     # The tracked file is untouched and the tree is clean BEFORE the build.
-    assert _git(
-        clone, "status", "--porcelain", "--untracked-files=no"
-    ) == ""
+    assert _git(clone, "status", "--porcelain", "--untracked-files=no") == ""
 
     dist = clone / "dist"
     subprocess.run(
@@ -189,15 +182,20 @@ def test_tagged_build_carries_bare_version_and_tag_history(tmp_path: Path) -> No
         check=True,
         capture_output=True,
         text=True,
-        env={"KLT_DECK_HISTORY_PATH": str(generated), "PATH": __import__("os").environ["PATH"]}
-        | {k: v for k, v in __import__("os").environ.items() if k.startswith(("UV_", "HOME", "XDG_"))},
+        env={
+            "KLT_DECK_HISTORY_PATH": str(generated),
+            "PATH": __import__("os").environ["PATH"],
+        }
+        | {
+            k: v
+            for k, v in __import__("os").environ.items()
+            if k.startswith(("UV_", "HOME", "XDG_"))
+        },
     )
 
     # Clean tree after the build: nothing in the sequence dirtied a tracked
     # file (a dirty tree would also have corrupted the version below).
-    assert _git(
-        clone, "status", "--porcelain", "--untracked-files=no"
-    ) == ""
+    assert _git(clone, "status", "--porcelain", "--untracked-files=no") == ""
 
     assert _wheel_metadata_version(dist) == version
     assert _sdist_metadata_version(dist) == version
@@ -210,7 +208,9 @@ def test_tagged_build_carries_bare_version_and_tag_history(tmp_path: Path) -> No
             assert row["package_version"] == version
 
 
-def test_tagged_build_without_the_env_var_uses_the_tracked_table(tmp_path: Path) -> None:
+def test_tagged_build_without_the_env_var_uses_the_tracked_table(
+    tmp_path: Path,
+) -> None:
     """A plain ``uv build`` (a dev build, a manual sdist) keeps packaging the
     tracked table: the swap-in is opt-in via the env var only."""
     clone, tag = _make_tagged_clone(tmp_path)
@@ -222,7 +222,11 @@ def test_tagged_build_without_the_env_var_uses_the_tracked_table(tmp_path: Path)
         capture_output=True,
         text=True,
         env={"PATH": __import__("os").environ["PATH"]}
-        | {k: v for k, v in __import__("os").environ.items() if k.startswith(("UV_", "HOME", "XDG_"))},
+        | {
+            k: v
+            for k, v in __import__("os").environ.items()
+            if k.startswith(("UV_", "HOME", "XDG_"))
+        },
     )
     # The tag is newer than the checked-in table knows about (the table on
     # main lags by design now), so the wheel's table has NO row for it -- the
@@ -258,7 +262,11 @@ def test_editing_a_tracked_file_before_the_build_corrupts_the_version(
         capture_output=True,
         text=True,
         env={"PATH": __import__("os").environ["PATH"]}
-        | {k: v for k, v in __import__("os").environ.items() if k.startswith(("UV_", "HOME", "XDG_"))},
+        | {
+            k: v
+            for k, v in __import__("os").environ.items()
+            if k.startswith(("UV_", "HOME", "XDG_"))
+        },
     )
     built = _wheel_metadata_version(dist)
     assert built != tag[1:]

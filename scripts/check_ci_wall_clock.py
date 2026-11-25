@@ -81,7 +81,7 @@ job with ~29 s of normal cargo work, reported as a "compute breach". That time
 job's compute figure *always*, with anything above 60 s named as a stall; as
 with the cache miss, nothing else is excluded.
 
-Exit codes (mirroring `scripts/check-release-lag.sh`'s tiering):
+Exit codes (0 = ok / 1 = breach / 2 = the check itself could not run):
 
   0  within budget, a queue-only breach, an UNCONFIRMED compute breach, or a
      `--report-only` run

@@ -2,11 +2,12 @@
 """Changelog-fragment shape gate (issue #7619).
 
 `changelog.d/README.md` documents one format for a pending entry, and
-`scripts/release_prep.py prepare` concatenates each fragment verbatim -- it
-neither checks nor repairs the shape. A fragment that is a bare paragraph, or a
-bullet with no issue number, therefore lands in `CHANGELOG.md` without the
-traceability every other entry has. By `prepare` time the author is long gone,
-so the check belongs at PR time, as a CI gate.
+`scripts/release_notes.py` renders each pending fragment verbatim into the
+release's GitHub Release notes (issue #5005) -- it neither checks nor repairs
+the shape. A fragment that is a bare paragraph, or a bullet with no issue
+number, therefore lands in the published notes without the traceability every
+other entry has. By publish time the author is long gone, so the check belongs
+at PR time, as a CI gate.
 
 A fragment passes when both hold:
 
@@ -20,7 +21,7 @@ A fragment passes when both hold:
 Not checked: that the reference equals the filename's issue number, that there
 is a bold headline, or the shape of any bullet after the first.
 
-Scope mirrors `release_prep._read_changelog_fragments`: `*.md` files only,
+Scope mirrors the fragment set `release_notes.py` renders: `*.md` files only,
 skipping `README.md`, non-files and empty / whitespace-only files. The
 standalone script is deliberate -- enforcing this inside `prepare` would hide
 the defect in a release step and break its bare ``- first`` test fixtures.
@@ -56,7 +57,7 @@ _FILENAME_ISSUE_RE = re.compile(r"^(\d+)-")
 
 
 def fragment_paths(directory: Path) -> list[Path]:
-    """Fragments `release_prep prepare` would consume, in filename order."""
+    """Pending fragments in filename order, the order notes render them in."""
     return [
         path
         for path in sorted(directory.glob("*.md"))
@@ -67,7 +68,7 @@ def fragment_paths(directory: Path) -> list[Path]:
 def check_text(text: str, filename: str = "") -> list[str]:
     """Reasons ``text`` is not a valid fragment; empty for a valid one.
 
-    A whitespace-only fragment is skipped by `release_prep`, so it is valid.
+    A whitespace-only fragment is skipped at render time, so it is valid.
     """
     if not text.strip():
         return []

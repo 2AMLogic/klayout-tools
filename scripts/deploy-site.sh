@@ -10,9 +10,15 @@
 # runtime required.
 #
 # Pipeline:
-#   1. build  -- `npm --prefix site ci && npm --prefix site run build`,
+#   1. data   -- `uv run python scripts/gen_site_cli_data.py`, regenerating
+#                site/src/data/cli.generated.json (issue #5005: the file is
+#                generated at build time, not committed -- the fleet
+#                publisher that cuts releases commits exactly pyproject.toml
+#                and CHANGELOG.md, so the release badge tracks the newest
+#                CHANGELOG heading here instead).
+#   2. build  -- `npm --prefix site ci && npm --prefix site run build`,
 #                producing site/dist/.
-#   2. deploy -- `wrangler pages deploy site/dist` (skipped under
+#   3. deploy -- `wrangler pages deploy site/dist` (skipped under
 #                --no-deploy).
 #
 # Auth stays as-is from the pre-gallery script: a scoped API token, NOT
@@ -22,12 +28,17 @@
 # kicad-tools.org).
 #
 # Usage:
-#   scripts/deploy-site.sh [--no-deploy] [--help]
+#   scripts/deploy-site.sh [--no-deploy] [--no-regen-data] [--help]
 #
-#   --no-deploy   Build the site only (site/dist/); skip the wrangler
-#                 deploy. Useful for local verification without touching
-#                 Cloudflare. Does not require Cloudflare credentials.
-#   --help        Show this help and exit.
+#   --no-deploy     Build the site only (site/dist/); skip the wrangler
+#                   deploy. Useful for local verification without touching
+#                   Cloudflare. Does not require Cloudflare credentials.
+#   --no-regen-data Skip step 1 (use whatever site/src/data/
+#                   cli.generated.json is already on disk). CI never passes
+#                   this; it exists for a local Node-only site build on a
+#                   machine without uv, at the cost of a possibly stale
+#                   badge.
+#   --help          Show this help and exit.
 #
 # Out of scope: regenerating blocks/*/output/layout.json or renders — that's
 # the content pipeline (#62). This script only builds and deploys whatever
@@ -149,5 +160,5 @@ if [ "${account_matches}" != "yes" ]; then
   exit 1
 fi
 
-info "Step 2/2: deploying site/dist/ to Cloudflare Pages (branch main)."
+info "Step 3/3: deploying site/dist/ to Cloudflare Pages (branch main)."
 exec npx wrangler pages deploy site/dist --project-name klayout-tools --branch main --commit-dirty=true

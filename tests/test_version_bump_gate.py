@@ -44,7 +44,7 @@ def _commit(
     _git(
         repo,
         "-c",
-        f"user.name=Test",
+        "user.name=Test",
         "-c",
         "user.email=test@example.com",
         "commit",
@@ -89,9 +89,7 @@ def _run(
         argv += ["--now", now]
     if interval is not None:
         argv += ["--interval", interval]
-    return subprocess.run(
-        argv, cwd=repo, capture_output=True, text=True, env=env
-    )
+    return subprocess.run(argv, cwd=repo, capture_output=True, text=True, env=env)
 
 
 def _field(out: str, key: str) -> str:
@@ -317,20 +315,42 @@ def test_force_requires_reason_and_dispatch_and_a_human(tmp_path):
     _commit(repo, "feat: x", date_epoch=T0 + 10, touch="src/x.py")
 
     no_reason = _run(
-        repo, "--force", "true", "--actor", "someone",
-        now=str(T0 + 20), interval="86400", event="workflow_dispatch",
+        repo,
+        "--force",
+        "true",
+        "--actor",
+        "someone",
+        now=str(T0 + 20),
+        interval="86400",
+        event="workflow_dispatch",
     )
     assert no_reason.returncode == 2
 
     from_push = _run(
-        repo, "--force", "true", "--reason", "why", "--actor", "someone",
-        now=str(T0 + 20), interval="86400", event="push",
+        repo,
+        "--force",
+        "true",
+        "--reason",
+        "why",
+        "--actor",
+        "someone",
+        now=str(T0 + 20),
+        interval="86400",
+        event="push",
     )
     assert from_push.returncode == 2
 
     bot = _run(
-        repo, "--force", "true", "--reason", "why", "--actor", "x[bot]",
-        now=str(T0 + 20), interval="86400", event="workflow_dispatch",
+        repo,
+        "--force",
+        "true",
+        "--reason",
+        "why",
+        "--actor",
+        "x[bot]",
+        now=str(T0 + 20),
+        interval="86400",
+        event="workflow_dispatch",
     )
     assert bot.returncode == 2
     assert "bot" in _field(bot.stdout, "reason")

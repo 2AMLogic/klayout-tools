@@ -828,9 +828,14 @@ git add src/klayout_tools/decks/_history.json
 git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
 
-`python scripts/generate_deck_history.py --as-release vX.Y.Z` records `HEAD`
-as the not-yet-tagged release `vX.Y.Z`; the automated release PR uses it so no
-follow-up push is needed (issue #4920).
+The release build itself does not wait for that commit: `publish.yml`
+regenerates the table for the tag into `$RUNNER_TEMP`
+(`--output`, issue #5005) and `hatch_build.py` force-includes it as the
+packaged `decks/_history.json`, so a published wheel always carries a row for
+its own tag — with the tag's commit, never a placeholder. The committed copy
+on `main` may therefore lag behind `git tag` until a follow-up PR like the
+one above; `tests/test_deck_history.py` accepts that lag (the table's tags
+are a prefix of `git tag`).
 
 Idempotent — re-running it against unchanged tag history reproduces
 byte-identical output, so it is safe to run speculatively. A standalone

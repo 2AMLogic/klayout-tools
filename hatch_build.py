@@ -377,9 +377,9 @@ class BuildIdentityHook(BuildHookInterface):  # type: ignore[misc,valid-type]
                     f"{_HISTORY_PATH_ENV}={history_source!r} does not exist;"
                     " unset it or generate the table first"
                 )
-            build_data.setdefault("force_include", {})[
-                history_source
-            ] = history_relative
+            build_data.setdefault("force_include", {})[history_source] = (
+                history_relative
+            )
 
         if relative_path is None:
             return

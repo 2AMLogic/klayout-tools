@@ -97,11 +97,13 @@ def add_release_heading(text: str, version: str, date: str) -> str:
     headings = _UNRELEASED_RE.findall(text)
     if len(headings) != 1:
         raise PrepError(
-            f"CHANGELOG.md has {len(headings)} '## Unreleased' headings, expected exactly 1"
+            f"CHANGELOG.md has {len(headings)} '## Unreleased' headings,"
+            " expected exactly 1"
         )
     if re.search(rf"^## {re.escape(version)} \([^\n]*\)[ \t]*$", text, re.MULTILINE):
         raise PrepError(
-            f"CHANGELOG.md already has a '## {version}' heading; not bumping to it again"
+            f"CHANGELOG.md already has a '## {version}' heading;"
+            " not bumping to it again"
         )
     crlf = "\r\n" in text
     nl = "\r\n" if crlf else "\n"

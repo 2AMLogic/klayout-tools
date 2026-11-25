@@ -206,9 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output) if args.output else HISTORY_PATH
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2) + "\n")
-    print(
-        f"wrote {len(entries)} entries covering {tags[0]}..{tags[-1]} to {output}"
-    )
+    print(f"wrote {len(entries)} entries covering {tags[0]}..{tags[-1]} to {output}")
     return 0
 
 

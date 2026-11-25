@@ -967,8 +967,6 @@ def test_checked_in_history_table_covers_every_release():
     import subprocess
     from pathlib import Path
 
-    from _pending_release_tag import with_pending_tag
-
     repo_root = Path(__file__).resolve().parent.parent
     real_path = repo_root / "src" / "klayout_tools" / "decks" / "_history.json"
     data = json.loads(real_path.read_text())
@@ -999,9 +997,13 @@ def test_checked_in_history_table_covers_every_release():
         "the table -- rerun scripts/generate_deck_history.py"
     )
 
-    # The table reflects *tagged* history (not the working tree's hash).
-    # Confirm the tag set matches reality so the fixture doesn't silently
-    # drift from a real `git tag` run.
+    # The table reflects *tagged* history (not the working tree's hash), and
+    # since issue #5005 it is allowed to LAG: the release build generates the
+    # packaged table from the real tag outside the tree
+    # (publish.yml -> hatch_build.py), so the checked-in copy only refreshes
+    # when a normal PR runs the generator. Confirm the table's tags are a
+    # PREFIX of the real `git tag` list (older tags must never be missing;
+    # newer ones are the allowed lag).
     result = subprocess.run(
         ["git", "tag", "--sort=v:refname", "--list", "v*"],
         cwd=repo_root,
@@ -1009,11 +1011,14 @@ def test_checked_in_history_table_covers_every_release():
         capture_output=True,
         text=True,
     )
-    real_tags = with_pending_tag(repo_root, tags, result.stdout)
+    real_tags = [line for line in result.stdout.splitlines() if line.strip()]
     if real_tags:
-        assert tags == real_tags, (
-            "checked-in _history.json is stale relative to `git tag` -- "
-            "rerun scripts/generate_deck_history.py and commit the result"
+        assert tags == real_tags[: len(tags)], (
+            "checked-in _history.json is not a prefix of `git tag` -- a"
+            " tagged release is missing from the table (rerun"
+            " scripts/generate_deck_history.py and commit the result;"
+            " trailing newer tags are the allowed lag, missing older ones"
+            " are not)"
         )
 
 

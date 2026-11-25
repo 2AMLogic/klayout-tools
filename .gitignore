@@ -6,6 +6,9 @@ dist/
 .venv.foreign-*/
 site/node_modules/
 site/dist/
+# Landing-page capability data, regenerated at site-build time by
+# scripts/deploy-site.sh (issue #5005) -- never committed anymore.
+site/src/data/cli.generated.json
 .pytest_cache/
 .ruff_cache/
 

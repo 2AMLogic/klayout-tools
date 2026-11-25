@@ -68,21 +68,23 @@ live site up to `main`.
 ### Generated landing-page data
 
 The landing page's release badge, verb list, MCP tool count and deck list
-come from [`src/data/cli.generated.json`](src/data/cli.generated.json), never
-from hand-written copy. [`../scripts/gen_site_cli_data.py`](../scripts/gen_site_cli_data.py)
+come from `src/data/cli.generated.json`, never from hand-written copy.
+[`../scripts/gen_site_cli_data.py`](../scripts/gen_site_cli_data.py)
 builds it from the `klt` CLI registry, the MCP bridge, the deck registry and
-the newest release heading in `CHANGELOG.md`. The file is committed, so the
-site build stays Node-only, and
-[`../tests/test_site_cli_data.py`](../tests/test_site_cli_data.py) fails when
-it drifts from the code. After adding a verb, changing a verb's help text or
-cutting a release, run:
+the newest release heading in `CHANGELOG.md`. Since issue #5005 the file is
+**generated at build time and never committed** (the release bump commits
+exactly `pyproject.toml` and `CHANGELOG.md`): `scripts/deploy-site.sh`
+regenerates it before the npm build, and a `CHANGELOG.md` or
+`pyproject.toml` change triggers the deploy so the badge tracks the newest
+release. For a local Node-only site build on a machine without uv, generate
+it once by hand, or pass `--no-regen-data`:
 
 ```
 uv run python scripts/gen_site_cli_data.py
 ```
 
-Because the file lives under `site/`, committing it also triggers the deploy
-workflow.
+[`../tests/test_site_cli_data.py`](../tests/test_site_cli_data.py) keeps the
+generator's output honest.
 
 ## Vite + React gallery project
 

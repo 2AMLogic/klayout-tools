@@ -26,8 +26,15 @@ on:
     paths:
       - "site/**"
       - "blocks/**"
+      # A release changes the landing page's release badge (the newest
+      # CHANGELOG heading feeds site/src/data/cli.generated.json, generated
+      # at build time since issue #5005), so both release-bearing files
+      # deploy the site too.
+      - "CHANGELOG.md"
+      - "pyproject.toml"
       # Redeploy if the deploy pipeline itself changes.
       - "scripts/deploy-site.sh"
+      - "scripts/gen_site_cli_data.py"
       - ".github/workflows/deploy-site.yml"
 
 permissions:
@@ -54,6 +61,14 @@ jobs:
         with:
           # Node 22+ per scripts/deploy-site.sh / site @types/node.
           node-version: "24"
+
+      # scripts/deploy-site.sh regenerates site/src/data/cli.generated.json
+      # (issue #5005: the file is no longer committed; the release badge
+      # tracks the newest CHANGELOG heading at build time) before the npm
+      # build, which needs uv for the generator's package imports.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
 
       - name: Build and deploy
         # scripts/deploy-site.sh builds site/dist/ then runs

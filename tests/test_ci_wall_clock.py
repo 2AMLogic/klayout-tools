@@ -40,9 +40,8 @@ BUDGET_FILE = REPO_ROOT / ".github" / "ci-wall-clock-budget.json"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 MEASURED = REPO_ROOT / "tests" / "fixtures" / "ci_wall_clock" / "actions_timings.json"
 
-# Exit-code contract, mirroring scripts/check-release-lag.sh's tiering:
-#   0 = within budget, a queue-only breach, or a report-only run,
-#   1 = compute budget breach, 2 = the check itself could not run.
+# Exit-code contract (0 = within budget / queue-only breach / report-only,
+# 1 = compute budget breach, 2 = the check itself could not run):
 EXIT_OK = 0
 EXIT_BREACH = 1
 EXIT_CANNOT_RUN = 2

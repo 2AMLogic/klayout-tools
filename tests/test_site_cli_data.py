@@ -35,12 +35,13 @@ def data(gen):
     return gen.build_data()
 
 
-def test_committed_site_data_is_current(gen, data):
-    committed = gen.OUTPUT.read_text(encoding="utf-8")
-    assert committed == gen.render(data), (
-        "site/src/data/cli.generated.json is stale; run "
-        "`uv run python scripts/gen_site_cli_data.py` and commit the result"
-    )
+def test_rendered_site_data_round_trips(gen, data, tmp_path):
+    """Issue #5005: the file is generated at site-build time (never
+    committed), so the drift guard is that the generator's render is stable,
+    complete JSON -- not a comparison against a tracked copy."""
+    rendered = gen.render(data)
+    assert rendered.endswith("\n")
+    assert json.loads(rendered) == data
 
 
 def test_every_registered_verb_is_listed_once(data):
@@ -88,5 +89,5 @@ def test_every_doc_link_resolves_to_a_committed_page(data):
             assert (REPO_ROOT / page).is_file(), page
 
 
-def test_output_is_valid_json(gen):
-    json.loads(gen.OUTPUT.read_text(encoding="utf-8"))
+def test_output_is_valid_json(gen, data):
+    json.loads(gen.render(data))

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib.util
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -68,10 +67,7 @@ def test_prepare_default_is_one_patch_step(repo: Path) -> None:
     info = rp.prepare(repo, None, "2026-11-25")
 
     assert info == {"previous": "0.9.2", "version": "0.9.3", "date": "2026-11-25"}
-    assert (
-        'base-version = "0.9.3"'
-        in (repo / "pyproject.toml").read_text()
-    )
+    assert 'base-version = "0.9.3"' in (repo / "pyproject.toml").read_text()
     # The old value is gone and nothing else in the file changed.
     expected_py = PYPROJECT.replace('base-version = "0.9.2"', 'base-version = "0.9.3"')
     assert (repo / "pyproject.toml").read_text() == expected_py
@@ -82,14 +78,12 @@ def test_patch_bump_keeps_major_minor(repo: Path) -> None:
     (#4211): an automatic bump may never change it."""
     for _ in range(3):
         rp.prepare(repo, None, "2026-11-25")
-        current = rp.read_base_version(
-            (repo / "pyproject.toml").read_text()
-        )
+        current = rp.read_base_version((repo / "pyproject.toml").read_text())
         assert current.startswith("0.9.")
         (repo / "CHANGELOG.md").write_text(
-            (repo / "CHANGELOG.md").read_text().replace(
-                "## Unreleased\n", "## Unreleased\n\n- more\n", 1
-            )
+            (repo / "CHANGELOG.md")
+            .read_text()
+            .replace("## Unreleased\n", "## Unreleased\n\n- more\n", 1)
         )
 
 
@@ -97,9 +91,7 @@ def test_prepare_inserts_heading_directly_under_unreleased(repo: Path) -> None:
     rp.prepare(repo, None, "2026-11-25")
 
     text = (repo / "CHANGELOG.md").read_text()
-    assert (
-        "## Unreleased\n\n## 0.9.3 (2026-11-25)\n\n- entry A\n- entry B\n" in text
-    )
+    assert "## Unreleased\n\n## 0.9.3 (2026-11-25)\n\n- entry A\n- entry B\n" in text
     # The former Unreleased body now belongs to the release; Unreleased itself
     # is empty again, and older sections are untouched.
     assert text.endswith("## 0.9.1 (2026-10-01)\n\n- older\n")

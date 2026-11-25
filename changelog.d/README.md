@@ -15,9 +15,11 @@ unless its first non-blank line starts with `- ` and its text contains a
 line of a multi-line bullet). Run `python scripts/check_changelog_fragments.py`
 before pushing; it names each offending file and why.
 
-`scripts/release_prep.py prepare` appends the fragments in filename order
-after any existing `## Unreleased` entries in the new release section of
-`CHANGELOG.md` and removes the files it consumed. It copies each fragment as
-written and does not check or repair its shape, which is why the check above
-runs at PR time. It skips this README, empty files, and files with other
-extensions; the check skips the same files.
+Since issue #5005 fragments are never folded into `CHANGELOG.md` at release
+time (the fleet publisher's bump commit changes only `pyproject.toml` and the
+release heading). Instead, `scripts/release_notes.py` renders the fragments
+ADDED since the previous `v*` tag into that release's GitHub Release notes,
+in filename order, after the release's `CHANGELOG.md` section. The files stay
+on disk; keep them -- they are the durable record of what each release
+shipped, and the window (previous tag, this tag] is what keeps one release
+from repeating an earlier one's entries.
