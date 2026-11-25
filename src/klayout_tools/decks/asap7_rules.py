@@ -49,8 +49,7 @@ class Asap7Rule:
 
 @dataclass(frozen=True)
 class Asap7RuleGap:
-    """A DRM rule in a covered table (3.1-3.19) that the deck does not
-    check yet."""
+    """An unchecked rule from DRM Tables 3.1–3.19."""
 
     id: str
     table: str
@@ -536,9 +535,8 @@ _ACTIVE_NOTCH = (
     "enforced"
 )
 _TRACK = (
-    "The deck lacks the routing direction and track assignment needed to distinguish "
-    "same-track pairs from pairs on parallel tracks. "
-    "On parallel tracks the shifted cuts of Fig. 1.2.6(c) need 27 nm. For strictly "
+    "The deck lacks routing direction and track assignment to distinguish same-track "
+    "from parallel-track pairs. Shifted cuts in Fig. 1.2.6(c) need 27 nm. For strictly "
     "nested projections, the choice between 18 and 27 nm is unverified."
 )
 _EXACT_W = "a 24 × 18 nm via in a 24 nm square fits only one assumed track direction"
