@@ -1,14 +1,13 @@
 //! `klt_yield_native` -- the Rust statistics core behind `klt yield`
 //! (issue #816, Phase 1a of the statistical/yield epic #710).
 //!
-//! This is this repo's **third** Rust component (after `native/mom/`, issue
-//! #718, and `native/congestion/`, issue #785), following the same
+//! Like `native/mom/`, this crate follows the
 //! standalone `maturin`-built pyo3 extension convention (`native/<engine>/`,
 //! per `docs/ARCHITECTURE.md`'s "Where Rust code lives") -- its own
 //! `Cargo.toml` + `pyproject.toml`, reached from the top-level
 //! `pyproject.toml` via a PEP 735 dependency group.
 //!
-//! The split with Python mirrors `mom.py`/`congestion.py`: reading a `klt
+//! The split with Python mirrors `mom.py`: reading a `klt
 //! sim` Monte Carlo report (or a plain sample-set document) and turning it
 //! into this crate's request shape is the Python layer's job
 //! (`src/klayout_tools/yield_analysis.py`); everything statistical --

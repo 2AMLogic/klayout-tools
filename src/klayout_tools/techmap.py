@@ -109,7 +109,7 @@ def _binary_path() -> str:
     ``_native.find_cargo_binary``, issue #3189).
 
     Raises :class:`TechmapError` with a clear, actionable message (mirroring
-    ``mom.py``'s/``congestion.py``'s own "extension not installed" errors)
+    the install hint in :mod:`klayout_tools.mom`)
     if neither exists -- this module never silently shells out to `cargo
     build` from production code (a multi-second first-call latency spike a
     caller of ``run_techmap`` would not expect); building is a deliberate,
