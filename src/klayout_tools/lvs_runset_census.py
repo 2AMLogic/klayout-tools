@@ -4,10 +4,10 @@ file-size ratchet ceiling, issue #5407)."""
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from .coverage import build_check_coverage
+from .lvs_runset_sg13g2_cards import sg13g2_model_name as _device_class_key
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -36,19 +36,6 @@ def _class_census(
                     continue
                 counts[cls] = counts.get(cls, 0) + 1
     return declared, counts, unnamed
-
-
-_CDL_MODEL = re.compile(r"\$\[(.+)\]")
-
-
-def _device_class_key(name: object) -> str:
-    """The source census key for a plain-reader device class: upper-cased,
-    with the CDL ``$[model]`` wrapper (the PDK's native ``rppd`` / ``rhigh`` /
-    ``rsil`` / ``cap_cmim`` spelling) folded into ``model``, since the pinned
-    runset's reader strips it and counts that card under the plain model."""
-    text = str(name or "")
-    wrapped = _CDL_MODEL.fullmatch(text)
-    return (wrapped.group(1) if wrapped else text).upper()
 
 
 def _reference_source_census(

@@ -62,10 +62,26 @@ _PASSIVES: dict[str, tuple[str, int, tuple[str, ...]]] = {
     "RSIL": ("R", 3, ("b", "ps")),
 }
 
+# Native model-last card shapes, including the RF devices.
+PASSIVE_CARD_SHAPES = {
+    **{name: (prefix, pins) for name, (prefix, pins, _) in _PASSIVES.items()},
+    "INDUCTOR": ("L", 3),
+    "INDUCTOR3": ("L", 4),
+    "SG13_HV_SVARICAP": ("C", 4),
+}
+
 #: A bare micrometre value: a unit suffix would scale it a second time.
 _PLAIN_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 
 _TERMINALS = 4
+_CDL_MODEL = re.compile(r"\$\[(.+)\]")
+
+
+def sg13g2_model_name(name: object) -> str:
+    """The upper-cased model name as the IHP reader sees it in native CDL."""
+    text = str(name or "")
+    wrapped = _CDL_MODEL.fullmatch(text)
+    return (wrapped.group(1) if wrapped else text).upper()
 
 
 def native_primitive_names() -> frozenset[str]:

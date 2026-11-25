@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from .lvs_base import LvsError
+from .lvs_runset_sg13g2_cards import PASSIVE_CARD_SHAPES, sg13g2_model_name
 
 #: ``reference.form`` values the runset engine accepts.
 _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
@@ -112,13 +113,12 @@ def rename_top_subckt(text: str, old: str, new: str) -> str:
     return "\n".join(out)
 
 
-# Native element classes and ordered terminal counts in IHP's SG13G2 reader.
-_SG13G2_RF_CARDS = {"INDUCTOR": ("L", 3), "SG13_HV_SVARICAP": ("C", 4)}
+_SG13G2_RF_CARDS = {"INDUCTOR", "SG13_HV_SVARICAP"}
 
 
 def _sg13g2_rf_card(tokens: list[str], positional: list[str]) -> str:
     name = positional[-1]
-    prefix, count = _SG13G2_RF_CARDS[name.upper()]
+    prefix, count = PASSIVE_CARD_SHAPES[name.upper()]
     terminals = len(positional) - 1
     if terminals != count:
         raise LvsError(f"SG13G2 {name} requires {count} terminals, got {terminals}")
@@ -136,7 +136,7 @@ def _sg13g2_reference_cards(
     from .netlist_normalize import _binding_known, _split_params, _tokenize
     from .netlist_normalize_scan import recovery_subckt_names
 
-    primitives = set(_SG13G2_RF_CARDS) | native_primitive_names()
+    primitives = _SG13G2_RF_CARDS | native_primitive_names()
     defined = recovery_subckt_names(text, source, primitives)
     lines = fold_spice_continuations(text.split("\n"))
     kept: set[int] = set()
@@ -353,13 +353,10 @@ def tolerant_spice_reader() -> Any:
     """A ``NetlistSpiceReader`` that keeps the valueless ``R``/``C``/``L``
     cards ``sg13g2.lvs``'s own reader keeps (issue #7855).
 
-    The plain reader raises ``Can't find a value for a R, C or L device`` on
-    ``C1 a b cap_cmim w= l= m=`` or ``R1 a b sub rppd w= l=``, and the census
-    and the unresolved-call scan swallow that and report ``None`` / ``[]``:
-    the converted reference of any SG13G2 passive looked unreadable. The
-    delegate retries such a card as the deck's own does
-    (:func:`_stand_in_card`); the value never reaches a comparison, only the
-    class and the nets are counted. A card KLayout's own handler still
+    For the native model-last shapes, the model determines the terminal
+    count. Read the net names directly so a numeric substrate such as ``0``
+    stays connected. Other valueless cards get the deck's stand-in retry
+    (:func:`_stand_in_card`). A card KLayout's own handler still
     refuses (:func:`_create_generic_device`: the RF inductor and varactor
     cards) becomes a device of a generic class named by its model, which is
     how the deck's ``process_device`` treats them too. Any other failure
@@ -371,11 +368,28 @@ def tolerant_spice_reader() -> Any:
 
     class _Delegate(kdb.NetlistSpiceReaderDelegate):
         def parse_element(self, s: str, element: str) -> Any:
+            if element not in _VALUE_ELEMENTS:
+                return super().parse_element(s, element)
+            parts = self.parse_element_components(s, self.variables())
+            if parts.strings:
+                *nets, model = parts.strings
+                model = sg13g2_model_name(model)
+                params = parts.parameters
+                value = params.get(element, 0.0)
+                # CDL can also put a value in the third field and supply
+                # the substrate or model separately. Keep its ordinary parse.
+                if (
+                    PASSIVE_CARD_SHAPES.get(model) == (element, len(nets))
+                    and not {"$SUB", "SUB", "MODEL"}.intersection(params)
+                    and isinstance(value, (int, float))
+                ):
+                    card = kdb.ParseElementData()
+                    card.net_names, card.model_name = nets, model
+                    card.parameters, card.value = params, value
+                    return card
             try:
                 return super().parse_element(s, element)
             except RuntimeError:
-                if element not in _VALUE_ELEMENTS:
-                    raise
                 return super().parse_element(*_stand_in_card(s, element))
 
         def element(

@@ -348,6 +348,19 @@ def test_unconvertible_call_is_named_beside_a_converted_passive(pdk_lvs, tmp_pat
     assert report["status"] == "mismatch"
 
 
+def test_grounded_rppd_keeps_source_devices_and_unresolved_call(pdk_lvs, tmp_path):
+    gds, cdl = _unit_control(pdk_lvs, tmp_path, "res_devices", "rppd")
+    calls = _passives_as_calls(cdl, "rppd")
+    assert "nw_r2 rppd" in calls
+    calls = calls.replace("nw_r2 rppd", "0 rppd").replace(
+        ".ENDS top", "XQ9 a b c sub npn13G2v Nx=1\n.ENDS top"
+    )
+    report = _lvs(pdk_lvs, tmp_path, gds, calls, form="subckt-call")
+    assert report["counts"]["devices"]["matched"] == 84
+    assert report["device_census"]["reference_source"] == {"RPPD": 84}
+    assert [m["instance"]["reference"] for m in _unresolved(report)] == ["Q9"]
+
+
 @pytest.mark.parametrize(
     ("group", "name"),
     [

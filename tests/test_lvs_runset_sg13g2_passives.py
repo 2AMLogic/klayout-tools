@@ -154,6 +154,64 @@ def test_sg13g2_reader_keeps_the_valueless_cards_as_devices(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("element", "pins", "model"),
+    [
+        ("R", "1 2", "rppd"),
+        ("R", "1 2", "rhigh"),
+        ("R", "1 2", "rsil"),
+        ("L", "1 2", "inductor"),
+        ("L", "1 2 3", "inductor3"),
+        ("C", "1 2 3", "sg13_hv_svaricap"),
+        ("C", "1", "cap_cmim"),
+    ],
+)
+@pytest.mark.parametrize("bodies", [("0", "sub"), ("sub", "0"), ("sub", "7")])
+def test_numeric_passive_terminals_retain_their_connections(
+    tmp_path, element, pins, model, bodies
+):
+    cards = [
+        f"{element}{i} {pins} {body} {model} w=1u" for i, body in enumerate(bodies, 1)
+    ]
+    path, deck = _read(tmp_path, ".subckt top\n" + "\n".join(cards) + "\n.ends\n")
+    netlist = kdb.Netlist()
+    netlist.read(path, reference_spice_reader(deck))
+    connections = {
+        d.name: [
+            d.net_for_terminal(t.id()).name
+            for t in d.device_class().terminal_definitions()
+        ]
+        for d in netlist.circuit_by_name("TOP").each_device()
+        if d.device_class().name == model.upper()
+    }
+    assert connections == {
+        str(i): [*pins.split(), body.upper()] for i, body in enumerate(bodies, 1)
+    }
+
+
+def test_sg13g2_reader_preserves_explicit_resistor_values(tmp_path):
+    path, deck = _read(
+        tmp_path,
+        ".subckt top\nR1 a b 0 rppd R=17\nR2 c d 250 $SUB=sub rhigh\n.ends\n",
+    )
+    netlist = kdb.Netlist()
+    netlist.read(path, reference_spice_reader(deck))
+    assert {
+        d.device_class().name: d.parameter("R")
+        for d in netlist.circuit_by_name("TOP").each_device()
+    } == {"RPPD": 17, "RHIGH": 250}
+
+
+def test_grounded_wrapped_resistor_beside_native_valued_cdl(tmp_path):
+    path, deck = _read(
+        tmp_path,
+        ".subckt top\nR1 a b 0 $[rppd] w=1u l=1u\n"
+        "R2 c d sub $[rppd] w=1u l=1u\n"
+        "R3 e f 260 $SUB=sub $[rppd] w=1u l=1u\n.ends\n",
+    )
+    assert lvs_runset_census._reference_source_census(path, deck) == {"RPPD": 3}
+
+
 def test_census_counts_the_converted_passives(tmp_path):
     path, deck = _read(tmp_path, VALUELESS)
     verdict = {"device_census": {}}
