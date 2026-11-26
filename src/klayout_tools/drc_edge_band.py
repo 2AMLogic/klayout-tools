@@ -33,10 +33,9 @@ it. One tap can carry edges in both classes -- near the well's boundary on
 one side, deep inside on the others -- and selecting a class by clipping
 the tap polygon would leave an artificial edge at the cut for the enclosure
 check to measure. So the split is made on the *edges* of the unclipped
-checked region instead, each class then measured by
-``klayout.db.Edges.enclosed_check`` against the enclosing layer's edges --
-which, with the default metric, reports the same pairs as the
-``Region.enclosed_check`` the unbanded rule runs.
+checked region instead. Strict segments retain the shielded enclosure
+pairs from the original region check. The two well-depth classes use the
+foundry expressions on their selected edges.
 """
 
 from __future__ import annotations
@@ -174,29 +173,60 @@ def run_edge_band_check(
     # A stream too coarse to resolve the band cannot place any edge in it:
     # relax nothing, rather than call the whole well "interior".
     inner = pure.sized(-width_dbu) if width_dbu > 0 else kdb.Region()
-    relaxed_edges = region.outside(exclude).edges()
+    relaxed_edges = region.not_interacting(exclude).edges()
     band_edges = relaxed_edges & (pure - inner)
     interior_edges = relaxed_edges & inner
-    strict_edges = (region.edges() - band_edges) - interior_edges
+    well_edges = band_edges + interior_edges
 
     edge_pairs = kdb.EdgePairs()
     for edges, threshold_dbu, metrics in (
         (band_edges, rule.threshold_dbu, spec.band_metrics),
         (interior_edges, spec.inner_threshold_dbu, spec.inner_metrics),
-        (strict_edges, rule.threshold_dbu, None),
     ):
         distance = round(threshold_dbu * setup.dbu_scale)
-        options = (
-            {}
-            if metrics is None
-            else {"metrics": getattr(kdb.Region, _METRICS[metrics])}
+        edge_pairs.insert(
+            edges.enclosed_check(
+                other_edges, distance, metrics=getattr(kdb.Region, _METRICS[metrics])
+            )
         )
-        edge_pairs.insert(edges.enclosed_check(other_edges, distance, **options))
+
+    distance = round(rule.threshold_dbu * setup.dbu_scale)
+    if well_edges.is_empty():
+        edge_pairs = region.enclosed_check(other_region, distance)
+    else:
+        strict_edges = region.edges() - well_edges
+        if not strict_edges.is_empty():
+            pairs = region.enclosed_check(other_region, distance)
+            edge_pairs.insert(_strict_parts(pairs, strict_edges, distance))
 
     outside_region = None
     if rule.report_escapes:
         outside_region = region.interacting(other_region) - other_region
     return edge_pairs, outside_region
+
+
+def _strict_parts(pairs: Any, strict_edges: Any, distance: int) -> Any:
+    """Clip shielded region-check pairs to the strict part of each tap edge."""
+    import klayout.db as kdb
+
+    # Query only nearby segments when a layout has many taps. Rechecking a
+    # clipped edge against its original partner keeps the distance metric and
+    # prevents an implant behind that partner from producing a second marker.
+    index = kdb.Shapes()
+    index.insert(strict_edges)
+    result = kdb.EdgePairs()
+    for pair in pairs.each():
+        tap = kdb.Edges(pair.first)
+        nearby = kdb.Edges(
+            [shape.edge for shape in index.each_touching(pair.first.bbox())]
+        )
+        if (tap - nearby).is_empty():
+            result.insert(pair)
+        else:
+            result.insert(
+                (tap & nearby).enclosed_check(kdb.Edges(pair.second), distance)
+            )
+    return result
 
 
 def _joined_region(cell: Any, layout: Any, layers: tuple[tuple[int, int], ...]) -> Any:
