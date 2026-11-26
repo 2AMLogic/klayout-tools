@@ -152,3 +152,19 @@ def test_text_report_without_a_pin_shows_todays_line(tmp_path, capsys):
     cite = next(line for line in out.splitlines() if "cite: " in line)
     assert "content_hash_basis" not in cite
     assert cite.rstrip().endswith("exit_status=0)")
+
+
+def test_changed_sim_includes_name_each_path(capsys):
+    citation = {
+        **CITATION,
+        "input_verified": False,
+        "sim_closure": {
+            "status": "stale",
+            "stale": [{"path": "upper.spice"}, {"path": "lower.spice"}],
+        },
+    }
+    _print_input_verified(citation)
+    statement = capsys.readouterr().out
+    assert "CHANGED" in statement and "include" in statement
+    assert "upper.spice" in statement and "lower.spice" in statement
+    assert "the artifact this envelope names" not in statement
