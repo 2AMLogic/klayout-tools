@@ -173,10 +173,11 @@ def run_edge_band_check(
     # A stream too coarse to resolve the band cannot place any edge in it:
     # relax nothing, rather than call the whole well "interior".
     inner = pure.sized(-width_dbu) if width_dbu > 0 else kdb.Region()
-    relaxed_edges = region.not_interacting(exclude).edges()
-    band_edges = relaxed_edges & (pure - inner)
-    interior_edges = relaxed_edges & inner
-    well_edges = band_edges + interior_edges
+    excluded, eligible = region.split_interacting(exclude)
+    at_well, away_from_well = eligible.split_interacting(pure)
+    well_edges = at_well.edges()
+    band_edges = well_edges & (pure - inner)
+    interior_edges = well_edges & inner
 
     edge_pairs = kdb.EdgePairs()
     for edges, threshold_dbu, metrics in (
@@ -191,13 +192,10 @@ def run_edge_band_check(
         )
 
     distance = round(rule.threshold_dbu * setup.dbu_scale)
-    if well_edges.is_empty():
-        edge_pairs = region.enclosed_check(other_region, distance)
-    else:
-        strict_edges = region.edges() - well_edges
-        if not strict_edges.is_empty():
-            pairs = region.enclosed_check(other_region, distance)
-            edge_pairs.insert(_strict_parts(pairs, strict_edges, distance))
+    strict = excluded + away_from_well
+    edge_pairs.insert(strict.enclosed_check(other_region, distance))
+    crossing = at_well.not_inside(pure)
+    edge_pairs.insert(_strict_parts(crossing, other_region, pure, distance))
 
     outside_region = None
     if rule.report_escapes:
@@ -205,26 +203,52 @@ def run_edge_band_check(
     return edge_pairs, outside_region
 
 
-def _strict_parts(pairs: Any, strict_edges: Any, distance: int) -> Any:
-    """Clip shielded region-check pairs to the strict part of each tap edge."""
+def _strict_parts(crossing: Any, implant: Any, wells: Any, distance: int) -> Any:
+    """Shielded enclosure on the perimeter of crossing taps outside the wells."""
     import klayout.db as kdb
 
-    # Query only nearby segments when a layout has many taps. Rechecking a
-    # clipped edge against its original partner keeps the distance metric and
-    # prevents an implant behind that partner from producing a second marker.
-    index = kdb.Shapes()
-    index.insert(strict_edges)
     result = kdb.EdgePairs()
-    for pair in pairs.each():
-        tap = kdb.Edges(pair.first)
-        nearby = kdb.Edges(
-            [shape.edge for shape in index.each_touching(pair.first.bbox())]
-        )
-        if (tap - nearby).is_empty():
-            result.insert(pair)
-        else:
+    shielded = set(crossing.enclosed_check(implant, distance).each())
+    if not shielded:
+        return result
+
+    # A marker's endpoints are rounded to the layout grid. On a slope the
+    # marker need not be collinear with its source edge. Recover its two
+    # source edges by reproducing the marker, then cut the original tap edge
+    # at the well boundary. Whole-edge shielding would test a different
+    # span, so use the ordinary region check above to select visible pairs.
+    candidates = crossing.enclosed_check(
+        implant, distance, whole_edges=True, shielded=False
+    )
+    well_index = kdb.Shapes()
+    well_index.insert(wells)
+    for pair in candidates.each():
+        tap_edge = kdb.Edges(pair.first)
+        partner = kdb.Edges(pair.second)
+        for marker in tap_edge.enclosed_check(partner, distance).each():
+            if marker in shielded:
+                result.insert(_clip_strict_marker(pair, marker, well_index, distance))
+    return result
+
+
+def _clip_strict_marker(
+    source: Any, marker: Any, well_index: Any, distance: int
+) -> Any:
+    import klayout.db as kdb
+
+    nearby = kdb.Region(
+        [shape.polygon for shape in well_index.each_touching(source.first.bbox())]
+    )
+    result = kdb.EdgePairs()
+    marker_box = marker.first.bbox()
+    for part in (kdb.Edges(source.first) - nearby).each():
+        # Both stretches belong to the same source edge. If the well cut is
+        # beyond the violation, keep the original marker's grid coordinates.
+        if marker_box.inside(part.bbox()):
+            return kdb.EdgePairs(marker)
+        if marker_box.touches(part.bbox()):
             result.insert(
-                (tap & nearby).enclosed_check(kdb.Edges(pair.second), distance)
+                kdb.Edges(part).enclosed_check(kdb.Edges(source.second), distance)
             )
     return result
 
