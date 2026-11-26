@@ -332,16 +332,18 @@ def test_sg13g2_defined_native_name_keeps_reachable_child(
 ):
     import klayout.db as kdb
 
+    ref_dir = tmp_path / "customer's reference"
+    ref_dir.mkdir()
     call = f"Xchild a b c d {model}{params}"
     definition = f".subckt {model} a b c d{params}\nR1 a b 1k\nR2 c d 2k\n.ends\n"
     if included:
-        (tmp_path / "cells.sp").write_text(definition)
-        definition = ".include cells.sp\n"
-    converted = _sg13g2_text(tmp_path, _schem(call) + definition)
+        (ref_dir / "cells.sp").write_text(definition)
+        definition = ".include 'cells.sp'\n"
+    converted = _sg13g2_text(ref_dir, _schem(call) + definition)
     assert call in converted.splitlines()
 
     netlist = kdb.Netlist()
-    netlist.read(str(tmp_path / "reference_converted.sp"), kdb.NetlistSpiceReader())
+    netlist.read(str(ref_dir / "reference_converted.sp"), kdb.NetlistSpiceReader())
     top = netlist.circuit_by_name("LAYOUT")
     (child,) = top.each_subcircuit()
     child_circuit = child.circuit_ref()

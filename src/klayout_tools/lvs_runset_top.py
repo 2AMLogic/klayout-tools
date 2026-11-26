@@ -15,11 +15,16 @@ import re
 
 from .netlist_block import space_separate_subckt_ports, uncomment_xschem_wrapper
 from .netlist_block_wrapper import DeckScope
-from .netlist_normalize_scan import defined_subckt_names, quote_spice_includes
+from .netlist_normalize_scan import defined_subckt_names
 
 _SUBCKT_RE = re.compile(r"^(\s*\.(?:subckt|ends)\s+)(\S+)", re.I)
-_QUOTED_INCLUDE_RE = re.compile(
-    r"""^(\s*\.(?:include|inc)\s+)("[^"]+"|'[^']+')\s*$""", re.IGNORECASE
+_INCLUDE_RE = re.compile(
+    r"""^([ \t]*\.(?:include|inc)[ \t]+)
+        ( "(?:\\.|[^"\\\r\n])+"
+        | '(?:\\.|[^'\\\r\n])+'
+        | [^'"\s][^\r\n]*? )
+        (?=[ \t]*\r?$)""",
+    re.IGNORECASE | re.MULTILINE | re.VERBOSE,
 )
 
 
@@ -128,20 +133,19 @@ def prepare_reference_top(
 def resolve_relative_includes(text: str, base_dir: str) -> str:
     """Resolve both unquoted and quoted relative ``.include``/``.inc`` paths
     against ``base_dir`` so a converted work-dir copy still finds them."""
-    text = quote_spice_includes(text, base_dir)
-    changed = False
-    out: list[str] = []
-    for line in text.splitlines(keepends=True):
-        stripped = line.rstrip("\r\n")
-        ending = line[len(stripped) :]
-        match = _QUOTED_INCLUDE_RE.match(stripped)
-        if match is not None:
-            quoted = match.group(2)
-            quote, target = quoted[0], quoted[1:-1]
-            if not os.path.isabs(target) and target[0] not in ("$", "~"):
-                resolved = os.path.normpath(os.path.join(base_dir, target))
-                if quote not in resolved:
-                    line = f"{match.group(1)}{quote}{resolved}{quote}{ending}"
-                    changed = True
-        out.append(line)
-    return "".join(out) if changed else text
+
+    def relocate(match: re.Match[str]) -> str:
+        directive, argument = match.groups()
+        if argument[0] in ("'", '"'):
+            quote, target = argument[0], argument[1:-1]
+            if os.path.isabs(target) or target.startswith(("$", "~")):
+                return match.group()
+            # The child is already a SPICE string. Escape only the added prefix.
+            prefix = os.path.join(base_dir, "")
+        else:
+            quote, target = "'", ""
+            prefix = os.path.normpath(os.path.join(base_dir, argument))
+        escaped = prefix.replace("\\", "\\\\").replace(quote, "\\" + quote)
+        return f"{directive}{quote}{escaped}{target}{quote}"
+
+    return _INCLUDE_RE.sub(relocate, text)

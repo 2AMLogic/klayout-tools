@@ -210,20 +210,26 @@ def test_xschem_wrapper_with_subckt_call_and_rerun_replay(tmp_path, fake_klayout
 
 
 @pytest.mark.parametrize(
-    ("quote", "child"),
+    ("source_dir", "include_arg", "child"),
     [
-        ('"', "leaf.sp"),
-        ('"', "vendor's models/leaf.sp"),
-        ("'", 'vendor"s models/leaf.sp'),
+        ("sub", '"leaf.sp"', "leaf.sp"),
+        ("sub", '''"vendor's models/leaf.sp"''', "vendor's models/leaf.sp"),
+        ("sub", """'vendor"s models/leaf.sp'""", 'vendor"s models/leaf.sp'),
+        ("customer's reference", "'cells/leaf.sp'", "cells/leaf.sp"),
+        ('ASIC 3" reference', '"cells/leaf.sp"', "cells/leaf.sp"),
+        (r"""customer's 3" \ref""", r'"cells/a\"b\\c.sp"', 'cells/a"b\\c.sp'),
+        ("customer's reference", "cells/leaf.sp", "cells/leaf.sp"),
     ],
 )
-def test_quoted_relative_include_bus_ports_and_deck_scopes(tmp_path, quote, child):
-    sub = tmp_path / "sub"
+def test_quoted_relative_include_bus_ports_and_deck_scopes(
+    tmp_path, source_dir, include_arg, child
+):
+    sub = tmp_path / source_dir
     leaf = sub / child
     leaf.parent.mkdir(parents=True)
     leaf.write_text(".subckt my_leaf a0 a1 y\nR1 a0 y 1k\nR2 a1 y 2k\n.ends\n")
     wrapped = (
-        f"; comment\n.include {quote}{child}{quote}\n"
+        f"; comment\n.include {include_arg}\n"
         ".control\n**.subckt ignored x\n.endc\n"
         ".lib unused_sec\n**.subckt also_ignored x\n.endl\n"
         "**.subckt my_block a[1],a[0]\n*+ y\n"
@@ -241,12 +247,18 @@ def test_quoted_relative_include_bus_ports_and_deck_scopes(tmp_path, quote, chil
         str(work),
         str(deck),
     )
-    assert source.read_text() == wrapped
+    assert source.read_bytes() == wrapped.encode()
     nl = kdb.Netlist()
     nl.read(out, kdb.NetlistSpiceReader())
     top = nl.circuit_by_name("LAY_BLOCK")
     assert [p.name() for p in top.each_pin()] == ["A[1]", "A[0]", "Y"]
-    assert [s.circuit_ref().name for s in top.each_subcircuit()] == ["MY_LEAF"]
+    (child_instance,) = top.each_subcircuit()
+    included = child_instance.circuit_ref()
+    assert included.name == "MY_LEAF"
+    assert [device.device_class().name for device in included.each_device()] == [
+        "RES",
+        "RES",
+    ]
 
 
 @pytest.mark.parametrize(
