@@ -55,6 +55,12 @@ from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
 from .lvs_runset_ports import augment_verdict, strict_top_port_mode
+from .runset_deck_vars import (
+    RESERVED_RUNSET_VARS as RESERVED_RUNSET_VARS,
+)
+from .runset_deck_vars import (
+    normalize_deck_vars,
+)
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -66,9 +72,6 @@ RUNSET_ENGINE = "klayout-runset"
 RUNSET_DEFAULT_TIMEOUT_S = 600.0
 
 _KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
-
-#: ``-rd`` names this engine sets itself; ``deck_vars`` may not override them.
-RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
 
 #: Request ``options`` keys this engine understands; anything else is refused,
 #: not silently ignored -- an option believed in force but absent is worse.
@@ -107,20 +110,14 @@ def _existing_file(raw: Any, request_dir: str, label: str) -> str:
 
 def _parse_deck_vars(raw_vars: Any) -> dict[str, str]:
 
-    raw_vars = raw_vars or {}
-    if not isinstance(raw_vars, dict):
-        raise LvsError("request.deck_vars must be a JSON object of name -> value")
-    deck_vars: dict[str, str] = {}
-    for name, value in raw_vars.items():
-        if name in RESERVED_RUNSET_VARS:
-            raise LvsError(
-                f"deck_vars may not set '{name}': the {RUNSET_ENGINE} engine "
-                f"sets {', '.join(RESERVED_RUNSET_VARS)} itself"
-            )
-        if isinstance(value, (dict, list)) or value is None:
-            raise LvsError(f"deck_vars['{name}'] must be a string, number or boolean")
-        deck_vars[name] = str(value).lower() if isinstance(value, bool) else str(value)
-    return deck_vars
+    return normalize_deck_vars(
+        raw_vars,
+        error_cls=LvsError,
+        not_object="request.deck_vars must be a JSON object of name -> value",
+        reserved=f"deck_vars may not set '{{name}}': the {RUNSET_ENGINE} engine "
+        f"sets {{reserved}} itself",
+        not_scalar="deck_vars['{name}'] must be a string, number or boolean",
+    )
 
 
 def _parse_options(raw: Any) -> dict[str, Any]:
