@@ -1,6 +1,9 @@
 """Worker-observed simulator identity out of ``environment.remote`` (issues
 #3110, #5566): ``sim.apply_engine_host``'s two readers, kept together; split
-out of :mod:`klayout_tools.sim_batch_features` (size ratchet)."""
+out of :mod:`klayout_tools.sim_batch_features` (size ratchet). Also home to
+``_compare_engine_builds``, the per-worker banner/digest comparison behind
+``worker_environment.engine_build_comparison`` (#3095, #7959), moved here from
+:mod:`klayout_tools.sim_batch` for the same reason."""
 
 from __future__ import annotations
 
@@ -114,6 +117,50 @@ def apply_worker_engine_build(environment: dict[str, Any]) -> None:
         "binary_sha256": next(iter(digests)) if len(digests) == 1 else None,
         "probe": probe,
         "reason": reason,
+    }
+
+
+def _digest_comparison(
+    worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``{"digest": "match" | "mismatch"}`` when both sides carry a valid
+    ``binary_sha256`` (hex case ignored), else ``{}`` (issue #7959)."""
+    worker = normalize_sha256((worker_simulator or {}).get("binary_sha256"))
+    client = normalize_sha256((client_build or {}).get("binary_sha256"))
+    if worker is None or client is None:
+        return {}
+    return {"digest": "match" if worker == client else "mismatch"}
+
+
+def _compare_engine_builds(
+    worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare the worker's ``--version`` banner with the client's
+    ``environment.client_engine_build`` banner (#3095; the off-host probe key, #5566).
+    ``not_comparable`` unless both sides have one; never a proven mismatch. Whitespace
+    normalised; a match proves the same banner, not the same build options.
+
+    With a valid ``binary_sha256`` on both sides the result also carries ``digest``
+    (``"match"`` / ``"mismatch"``): the same binary or not, independent of the banner
+    result because one banner covers many builds (#7959). Omitted -- the banner-only
+    object, as before -- when either hash is absent, ``null`` or malformed."""
+    digest = _digest_comparison(worker_simulator, client_build)
+    worker = (worker_simulator or {}).get("version_banner")
+    client = (client_build or {}).get("version_banner")
+    if not isinstance(worker, str) or not isinstance(client, str):
+        return {"status": "not_comparable", **digest}
+    if not worker.strip() or not client.strip():
+        return {"status": "not_comparable", **digest}
+    if " ".join(worker.split()) == " ".join(client.split()):
+        return {"status": "match", **digest}
+    return {
+        "status": "mismatch",
+        "warning": (
+            "the worker's ngspice --version banner differs from the local "
+            "binary's; build options (e.g. FFT linkage) may differ, so "
+            "results derived from them can differ from a local run"
+        ),
+        **digest,
     }
 
 
