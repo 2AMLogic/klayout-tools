@@ -180,6 +180,17 @@ def test_missing_approvals_is_refused_with_stable_code(tmp_path):
     assert exc.value.code == sim_commands.CODE_APPROVALS_MISSING
 
 
+@pytest.mark.parametrize("name", [r"\inputs\tb.txt", "stdout.bin"])
+def test_invalid_bound_input_name_reports_approval_error(tmp_path, name):
+    entry = {"id": "test", "interpreter": "vvp", "bound_inputs": {name: _sha("tb")}}
+    path = _write(
+        tmp_path / "approvals.json", {"schema_version": 1, "approvals": [entry]}
+    )
+    with pytest.raises(SimError, match=r"approvals\[0\]\.bound_inputs") as exc:
+        sim_commands.load_approvals(path)
+    assert exc.value.code == sim_commands.CODE_APPROVALS_INVALID
+
+
 def test_approvals_may_come_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv(sim_commands.APPROVALS_ENV, _approvals(tmp_path))
     assert run_sim(_request(tmp_path), backend="local")["status"] == "pass"

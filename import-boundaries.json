@@ -865,6 +865,7 @@
         "klayout_tools",
         "klayout_tools._annotation",
         "klayout_tools._artifact_envelope",
+        "klayout_tools._batch_approvals",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
