@@ -1234,6 +1234,7 @@ class _DrcSetup:
     waivers: Any
     pdk_info: dict[str, Any] | None
     layout: Any
+    nominal_dbu_um: float
     dbu_scale: float
     top_cells: list[Any]
     deck_layer_tuples: set[tuple[int, int]]
@@ -1448,12 +1449,6 @@ def _prepare_drc(
 
     layout = load_layout(path, DrcError)
 
-    # `deck`'s threshold_dbu values are authored against nominal_dbu_um, not
-    # necessarily this layout's own dbu (see DrcRule's docstring / #172) —
-    # rescale so the same physical distance is checked regardless of the
-    # stream's database unit.
-    dbu_scale = nominal_dbu_um / layout.dbu
-
     top_cells = _select_top_cells(layout, top, DrcError)
     if top is not None:
         # Each rule looks up its inputs in this private layout. Remove layers
@@ -1479,7 +1474,8 @@ def _prepare_drc(
         waivers=waivers,
         pdk_info=pdk_info,
         layout=layout,
-        dbu_scale=dbu_scale,
+        nominal_dbu_um=nominal_dbu_um,
+        dbu_scale=nominal_dbu_um / layout.dbu,  # deck units to layout units (#172)
         top_cells=top_cells,
         deck_layer_tuples=deck_layer_tuples,
         stream_layer_tuples=stream_layer_tuples,

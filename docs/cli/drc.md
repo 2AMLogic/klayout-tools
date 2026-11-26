@@ -2712,9 +2712,13 @@ band under the rule's `edge_band` key.
 
 Both well-depth checks follow the foundry's `nwell.not_interacting(dnwell)`.
 Contact with `DNWELL` anywhere on a well excludes that whole polygon from
-`NP.5d`. For a qualifying well, the enclosure is measured to the edges of
+`NP.5d`. A tap must overlap some `Nwell` in area to qualify for the
+well-depth checks. Taps with only external well contact use the strict
+fallback. In a qualifying well, the enclosure is measured to the edges of
 `nplus.not(dnwell).not_outside(nwell)`. A nearby `DNWELL` can therefore cut
 the implant short even when both the tap and its well are clear of `DNWELL`.
+On coarse grids, the two enclosure limits and the signed well inset round
+to the nearest layout unit, with half-unit ties toward positive infinity.
 
 What the split still leaves approximated: the strict fallback keeps the
 0.16 µm limit for taps touching `DNWELL`, where the foundry has a separate

@@ -110,15 +110,82 @@ def _butted_sloped_shapes():
     return [(COMP, _sloped_tap()), (NPLUS, implant), (COMP, pcomp), (PPLUS, pcomp)]
 
 
-def _marker_vertices(path, shapes):
+def _marker_vertices(path, shapes, dbu=0.001):
     layout = kdb.Layout()
-    layout.dbu = 0.001
+    layout.dbu = dbu
     top = layout.create_cell("TOP")
     for layer, shape in shapes:
         top.shapes(layout.layer(*layer)).insert(shape)
     layout.write(str(path))
     markers = _markers(run_drc(str(path), "gf180mcu", rules=[RULE]))
     return sorted(sorted(map(tuple, marker["polygon"])) for marker in markers)
+
+
+@pytest.mark.parametrize(
+    ("dbu", "side", "well_margin", "implant_margin", "expected"),
+    [
+        (0.008, 125, 125, 2, 4),  # NP.5dii: 16 nm < 20 nm
+        (0.008, 125, 125, 3, 0),
+        (0.064, 16, 4, 2, 4),  # NP.5di: 128 nm < 160 nm
+        (0.064, 16, 4, 3, 0),
+        (0.006, 167, 71, 13, 4),  # The -429 nm well inset snaps to -71 DBU.
+        (0.006, 167, 72, 13, 0),
+        # KLayout divides the physical 0.16 um by the DBU. On this grid
+        # that quotient is just below 62.5 in floating point.
+        (0.00256, 400, 100, 62, 0),
+    ],
+)
+def test_half_grid_well_depth_distances(
+    tmp_path, dbu, side, well_margin, implant_margin, expected
+):
+    tap = kdb.Box(0, 0, side, side)
+    shapes = [
+        (COMP, tap),
+        (NPLUS, tap.enlarged(implant_margin, implant_margin)),
+        (NWELL, tap.enlarged(well_margin, well_margin)),
+    ]
+    assert len(_marker_vertices(tmp_path / "tap.gds", shapes, dbu)) == expected
+
+
+@pytest.mark.parametrize(
+    ("well_left", "overlaps_other_well", "expect_marker"),
+    [
+        (999, False, True),
+        (1000, False, False),
+        (1001, False, False),
+        (1000, True, True),
+    ],
+)
+def test_tap_must_overlap_a_well_to_use_the_cut_implant(
+    tmp_path, well_left, overlaps_other_well, expect_marker
+):
+    shapes = [
+        (COMP, kdb.Box(0, 0, 1000, 1000)),
+        (NPLUS, kdb.Box(-200, -200, 1200, 1200)),
+        (NWELL, kdb.Box(well_left, -1200, 1050, 2200)),
+        (DNWELL, kdb.Box(1100, -2500, 3500, 3500)),
+    ]
+    if overlaps_other_well:
+        # The foundry selects whole taps against all Nwell, then measures
+        # their edges in the band of pure wells only.
+        shapes.extend(
+            [
+                (NWELL, kdb.Box(-1000, -1200, 500, 2200)),
+                (DNWELL, kdb.Box(-2000, -2500, -900, 3500)),
+            ]
+        )
+    marker = [(1000, 0), (1000, 1000), (1100, 0), (1100, 1000)]
+    assert _marker_vertices(tmp_path / "tap.gds", shapes) == (
+        [marker] if expect_marker else []
+    )
+
+
+def test_external_well_contact_keeps_drawn_implant_violations(tmp_path):
+    shapes = _tap_shapes(80, None)
+    baseline = _markers(_run(tmp_path, shapes))
+    assert len(baseline) == 4
+    shapes.append({"layer": list(NWELL), "box": [1000, -1200, 1050, 2200]})
+    assert _markers(_run(tmp_path, shapes)) == baseline
 
 
 def test_remote_banded_tap_preserves_strict_sloped_markers(tmp_path):
