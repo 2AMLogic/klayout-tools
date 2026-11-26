@@ -142,7 +142,10 @@ manifest's) and the digest the broker's key names, and when the size matches
 the entry. Otherwise the temporary file is deleted and `get` exits `1` with
 `error.code` set to `hash_mismatch`, `key_mismatch` or `size_mismatch`. If the
 broker answers a key other than the manifest `uri`'s key, that is also a
-`key_mismatch`. An existing `OUT` is replaced only with `--force`.
+`key_mismatch`. An existing `OUT` is replaced only with `--force`. Missing
+parent directories of `OUT` are created, including intermediate ones, so a
+clean checkout can restore an object at its manifest entry name with
+`klt artifact get MANIFEST#NAME -o NAME` run from the repo root.
 
 `-o -` writes the verified bytes to stdout and no JSON envelope. Errors still
 go to stderr. With `--format json`, the success payload is

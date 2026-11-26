@@ -264,7 +264,7 @@ def test_reput_is_a_noop_success(broker, report, tmp_path, capsys):
 def test_get_by_manifest_entry_writes_verified_bytes(broker, report, tmp_path, capsys):
     manifest = tmp_path / "m.json"
     _put(report, manifest, capsys)
-    out_path = tmp_path / "fetched.json"
+    out_path = tmp_path / "a" / "b" / "fetched.json"
 
     code, out, _ = _run(
         [
