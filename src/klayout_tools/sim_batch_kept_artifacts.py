@@ -23,10 +23,12 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+import shutil
 from functools import partial
+from pathlib import Path
 from typing import Any
 
-from .sim_batch_contract import BATCH_NETLIST_FILENAME
+from .sim_batch_contract import BATCH_NETLIST_FILENAME, BatchError
 from .sim_batch_hints import engine_log_not_retained
 
 #: Files beside ``corner.cir`` that can name the job's netlist path.
@@ -53,7 +55,38 @@ def recover_remote_root(corners: list[dict[str, Any]], marker: str) -> str | Non
     return None
 
 
-def _read(path: str) -> str | None:
+def copy_collected_tree(source: str, local_root: str) -> dict[Path, Path]:
+    """Map collected relative paths to their files under the resolved artifact root."""
+    source_root = Path(source)
+    installed: dict[Path, Path] = {}
+    root = Path(local_root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def copy_entry(src: Path, dest: Path) -> None:
+        if src.is_symlink() or dest.is_symlink():
+            raise BatchError(
+                f"cannot install a batch artifact through a symlink: {src} -> {dest}"
+            )
+        if src.is_dir():
+            dest.mkdir(exist_ok=True)
+            for child in src.iterdir():
+                copy_entry(child, dest / child.name)
+            shutil.copystat(src, dest)
+        else:
+            if dest.exists() and (not dest.is_file() or dest.stat().st_nlink > 1):
+                raise BatchError(
+                    f"cannot overwrite a special or multiply linked artifact: {dest}"
+                )
+            shutil.copy2(src, dest)
+            installed[src.relative_to(source_root)] = dest
+
+    # The caller may choose a symlink as the root. Pin its target once, then
+    # reject links below it, including directory links encountered during copying.
+    copy_entry(source_root, root.resolve())
+    return installed
+
+
+def _read(path: Path) -> str | None:
     try:
         with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
             return fh.read()
@@ -89,9 +122,9 @@ def _quote_target(target: str, match: re.Match[str]) -> str:
 def rewrite_job_input_includes(
     corners: list[dict[str, Any]],
     client_netlist: str,
+    installed: dict[Path, Path],
     *,
-    remote_root: str | None = None,
-    local_root: str | None = None,
+    remote_root: str,
 ) -> int:
     """Point each installed corner deck's job-side netlist ``.include`` at
     ``client_netlist``; return how many files were rewritten.
@@ -100,9 +133,8 @@ def rewrite_job_input_includes(
     one generated, ``klt``-written deck), then replaced -- as an exact path,
     never a pattern -- in that deck and in the ``netlist.expanded.cir`` /
     ``.spiceinit`` beside it when they carry the same path. Decks are located
-    through ``artifacts.deck``, which the install has already rewritten to its
-    local copy, so another job's tree under the same artifacts directory is
-    never touched. A corner with no deck, an unreadable deck, or no job-side
+    through ``artifacts.deck``. Each deck and sibling must be a file copied
+    from this collection. A corner with no deck, an unreadable deck, or no job-side
     include is skipped. A worker-side reference to the retained expanded deck
     is localized to that corner’s installed sibling. Model-library directives still
     name the worker's PDK root.
@@ -110,32 +142,34 @@ def rewrite_job_input_includes(
     client = os.path.abspath(client_netlist)
     rewritten = 0
     for corner in corners:
-        deck = (corner.get("artifacts") or {}).get("deck")
-        if not isinstance(deck, str):
+        reported = (corner.get("artifacts") or {}).get("deck")
+        if not isinstance(reported, str) or not posixpath.isabs(reported):
+            continue
+        # The report supplies only a lookup key. All filesystem paths come
+        # from the current copy, including optional files beside the deck.
+        relative = Path(posixpath.relpath(reported, remote_root))
+        deck = installed.get(relative)
+        if deck is None:
             continue
         deck_text = _read(deck)
         if deck_text is None:
             continue
-        folder = os.path.dirname(deck)
-        expanded = os.path.join(folder, "netlist.expanded.cir")
-        remote_expanded = None
-        if (
-            remote_root is not None
-            and local_root is not None
-            and os.path.isfile(expanded)
-        ):
-            remote_expanded = posixpath.join(
-                remote_root, os.path.relpath(expanded, local_root)
-            )
-        job_path = _job_netlist_path(deck_text, remote_expanded)
+        expanded = installed.get(relative.with_name("netlist.expanded.cir"))
+        remote_expanded = posixpath.join(
+            posixpath.dirname(reported), "netlist.expanded.cir"
+        )
+        job_path = _job_netlist_path(deck_text, remote_expanded if expanded else None)
         if job_path is None:
             continue
-        target = os.path.abspath(expanded) if job_path == remote_expanded else client
+        target = str(expanded) if expanded and job_path == remote_expanded else client
         exact = re.compile(
             r"""(?P<quote>["']?)""" + re.escape(job_path) + r"(?P=quote)(?![\w./-])"
         )
         quote_target = partial(_quote_target, target)
-        for path in (deck, *(os.path.join(folder, n) for n in _SIBLING_FILES)):
+        siblings = (installed.get(relative.with_name(name)) for name in _SIBLING_FILES)
+        for path in (deck, *siblings):
+            if path is None:
+                continue
             text = deck_text if path == deck else _read(path)
             if text is None:
                 continue

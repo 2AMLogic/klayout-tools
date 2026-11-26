@@ -90,7 +90,6 @@ import math
 import os
 import random
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -1725,17 +1724,18 @@ def _install_batch_artifacts(
     kept = sim_batch_kept_artifacts
     source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(source):
-        os.makedirs(artifacts_dir, exist_ok=True)
-        shutil.copytree(source, artifacts_dir, dirs_exist_ok=True)
+        installed = kept.copy_collected_tree(source, artifacts_dir)
         root = kept.recover_remote_root(corners, f"/{BATCH_ARTIFACTS_DIRNAME}/")
         if root is not None:
+            # Match worker paths against the files just installed before
+            # translating the report into paths for the submitting host.
+            if client_netlist is not None:
+                kept.rewrite_job_input_includes(
+                    corners, client_netlist, installed, remote_root=root
+                )
             _rewrite_remote_artifact_paths(
                 corners, remote_root=root, local_root=artifacts_dir
             )
-            if client_netlist is not None:
-                kept.rewrite_job_input_includes(
-                    corners, client_netlist, remote_root=root, local_root=artifacts_dir
-                )
     kept.note_unretained_logs(corners, job_id=job_id)
 
 

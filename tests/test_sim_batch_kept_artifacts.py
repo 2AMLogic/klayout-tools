@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
@@ -142,16 +144,16 @@ def test_rewrite_leaves_tokens_missing_expansions_and_foreign_decks_alone(tmp_pa
         "retained": _deck(f"{REMOTE}/tt_27C/netlist.expanded.cir"),  # kept copy
         "other_file": _deck("/var/tmp/eda-job-1/inputs/models.spice"),
     }
-    corners = []
-    for name, text in decks.items():
-        path = tmp_path / f"{name}.cir"
-        path.write_text(text)
-        corners.append({"artifacts": {"deck": str(path)}})
+    files = {f"{name}/corner.cir": text for name, text in decks.items()}
+    local = _install(
+        tmp_path,
+        [_corner(name) for name in decks],
+        files,
+        client_netlist=str(tmp_path / "tb.spice"),
+    )
 
-    assert kept.rewrite_job_input_includes(corners, str(tmp_path / "tb.spice")) == 0
-
-    for name, text in decks.items():
-        assert (tmp_path / f"{name}.cir").read_text() == text
+    for name, text in files.items():
+        assert (local / name).read_text() == text
     assert foreign.read_text() == _deck()
 
 
@@ -191,7 +193,72 @@ def test_rewrite_tolerates_missing_decks_and_non_string_values(tmp_path):
         {"artifacts": {"deck": str(tmp_path / "gone" / "corner.cir")}},
         {},
     ]
-    assert kept.rewrite_job_input_includes(corners, str(tmp_path / "tb.spice")) == 0
+    local = _install(
+        tmp_path,
+        [_corner(), *corners],
+        {"tt_27C/corner.cir": _deck()},
+        client_netlist=str(tmp_path / "tb.spice"),
+    )
+    assert (local / "tt_27C/corner.cir").read_text() == _deck(
+        str(tmp_path / "tb.spice")
+    )
+
+
+def test_install_only_rewrites_decks_and_siblings_from_this_collection(tmp_path):
+    local = tmp_path / "local"
+    outside = tmp_path / "another-run"
+    stale = local / "previous"
+    current = local / "current"
+    for directory in (outside, stale, current):
+        directory.mkdir(parents=True)
+    original = _deck().encode() + b"* original bytes\r\n"
+    protected = [
+        outside / "corner.cir",
+        outside / ".spiceinit",
+        outside / "netlist.expanded.cir",
+        stale / "corner.cir",
+        current / ".spiceinit",
+    ]
+    for path in protected:
+        path.write_bytes(original)
+
+    corners = [_corner("current"), _corner("previous"), _corner("../another-run")]
+    client = tmp_path / "tb.spice"
+    _install(
+        tmp_path, corners, {"current/corner.cir": _deck()}, client_netlist=str(client)
+    )
+
+    assert (current / "corner.cir").read_text() == _deck(str(client))
+    for path in protected:
+        assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("link", ["directory symlink", "file symlink", "hard link"])
+def test_install_protects_linked_destinations(tmp_path, link):
+    outside = tmp_path / "original"
+    outside.mkdir()
+    original = _deck().encode()
+    (outside / ".spiceinit").write_bytes(original)
+    local = tmp_path / "local"
+    local.mkdir()
+    corner = local / "tt_27C"
+    if link == "directory symlink":
+        corner.symlink_to(outside, target_is_directory=True)
+    else:
+        corner.mkdir()
+        if link == "file symlink":
+            (corner / ".spiceinit").symlink_to(outside / ".spiceinit")
+        else:
+            (corner / ".spiceinit").hardlink_to(outside / ".spiceinit")
+
+    with pytest.raises(sb.BatchError):
+        _install(
+            tmp_path,
+            [_corner()],
+            {"tt_27C/.spiceinit": "collected"},
+            client_netlist="tb.spice",
+        )
+    assert (outside / ".spiceinit").read_bytes() == original
 
 
 def test_install_without_a_client_netlist_keeps_the_deck_verbatim(tmp_path):
