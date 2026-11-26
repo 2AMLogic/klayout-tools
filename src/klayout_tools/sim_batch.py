@@ -145,6 +145,7 @@ from .sim_batch_reattach import (
 )
 from .sim_batch_version_remedy import older_client_remedy
 from .sim_batch_warn import warn_over_serial_bound_once
+from .sim_batch_worker_engine_build import _compare_engine_builds
 from .sim_echo_checks import check_runner_option_echoes
 from .sim_errors import SimError
 from .sim_exit_reason import status_exit_code as _status_exit_code
@@ -1881,31 +1882,6 @@ def attach_staged_model_comparison(
             worker_env[key] = _compare_staged_model_inputs(
                 staged_model_inputs, worker_env.get("model_inputs"), client_stamp
             )
-
-
-def _compare_engine_builds(
-    worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Compare the worker's ``--version`` banner with the client's
-    ``environment.client_engine_build`` banner (#3095; the off-host probe key, #5566).
-    ``not_comparable`` unless both sides have one; never a proven mismatch. Whitespace
-    normalised; a match proves the same banner, not the same build options."""
-    worker = (worker_simulator or {}).get("version_banner")
-    client = (client_build or {}).get("version_banner")
-    if not isinstance(worker, str) or not isinstance(client, str):
-        return {"status": "not_comparable"}
-    if not worker.strip() or not client.strip():
-        return {"status": "not_comparable"}
-    if " ".join(worker.split()) == " ".join(client.split()):
-        return {"status": "match"}
-    return {
-        "status": "mismatch",
-        "warning": (
-            "the worker's ngspice --version banner differs from the local "
-            "binary's; build options (e.g. FFT linkage) may differ, so "
-            "results derived from them can differ from a local run"
-        ),
-    }
 
 
 def attach_engine_build_comparison(
