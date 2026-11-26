@@ -139,7 +139,7 @@ def repo(tmp_path) -> Path:
 
 
 def _approval(**overrides) -> dict:
-    base = {
+    return {
         "id": "ota-netlist",
         "interpreter": "python3",
         "script": "scripts/gen.py",
@@ -147,9 +147,8 @@ def _approval(**overrides) -> dict:
         "allowed_arguments": [["--seed", "1"]],
         "artifact": ARTIFACT_PATH,
         "output": "build/ota.spice",
+        **overrides,
     }
-    base.update(overrides)
-    return base
 
 
 def _approvals_file(tmp_path: Path, *approvals: dict) -> str:
@@ -483,6 +482,7 @@ def test_approval_requires_a_script_content_hash(tmp_path):
     "overrides",
     [
         {"script": "/etc/passwd"},
+        {"script": r"\scripts\gen.py"},
         {"script": "../outside.py"},
         {"output": "../../escape"},
         {"artifact": "/abs/path"},
