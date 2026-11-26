@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf as sdf
 from klayout_tools import signoff
@@ -309,3 +310,28 @@ def test_delay_outside_any_cell_under_an_unresolvable_scope_is_refused(
     assert "the DELAY clauses outside any CELL (the annotation root)" in message
     assert "options.sdf.scope does not resolve" in message
     assert runner.calls == []
+
+
+@needs_icarus
+def test_cocotb_preprocesses_the_builds_defines_and_includes(tmp_path, monkeypatch):
+    request = Path(_unit_request(tmp_path))
+    spec = json.loads(request.read_text())
+    spec["options"].update(
+        includes=["."], build_args=["-DFAST"], defines={"UNIT": "1ps"}
+    )
+    request.write_text(json.dumps(spec))
+    (tmp_path / "unit.vh").write_text("`ifdef FAST\n`timescale `UNIT/1ps\n`endif\n")
+    source = tmp_path / "dly.v"
+    source.write_text(
+        source.read_text().replace(
+            "module klt_inv", '`include "unit.vh"\nmodule klt_inv'
+        )
+    )
+    runner = ReceiptRunner()
+    _stub_runner(monkeypatch, runner)
+    with pytest.raises(fv.FunctionalVerificationError, match="1000x too small"):
+        fv.run_functional_verification(str(request))
+    assert runner.calls == []
+    assert not (
+        tmp_path / ".klt" / "functional-verification" / "sim_build_icarus"
+    ).exists()

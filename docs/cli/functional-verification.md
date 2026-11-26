@@ -384,10 +384,9 @@ entry named after `verilog_top` (a failure carries
 `error_type: "VerilogBenchFailure"`). `environment.cocotb_version` is `null` and
 `environment.results_xml` is the absent envelope (`{path: null, scope: "absent"}`); `environment.test_log`/`build_log`
 name the transcripts and `environment.sdf` is populated as on the cocotb path.
-A module that receives a delay must declare its own `` `timescale `` here,
-because this path rejects `options.timescale` and so supplies no default
-unit: one that declares none is refused before the build (see "SDF
-back-annotation").
+A module that receives a delay needs a known HDL unit here. This path
+rejects `options.timescale`, so only the HDL can supply that unit (see
+"SDF back-annotation").
 `provenance.input.content_hash` covers the resolved `request.sources`,
 including the Verilog bench file listed there — so a Verilog-top report cannot
 be bundled with a `source`-role synthesize citation in one `klt signoff`
@@ -826,18 +825,15 @@ A `CELL` carrying only `TIMINGCHECK` entries, or whose entries a
 normalization pass removed, receives no delay and is not compared, and
 neither is a module no retained delay lands in.
 
-A module's unit is the last `` `timescale `` before its declaration, read
-across `request.sources` in compile order: the directive persists from one
-file into the next and `` `resetall `` restores the compile-time default.
-That default is the unit of `options.timescale` on the cocotb path and
-nothing on the Verilog-bench path, which rejects `options.timescale`. A
-module's own directive always wins over the request's default, so a
-matching `options.timescale` can never mask a conflicting model declaration.
-**A target whose unit cannot be established is refused rather than
-guessed**: a model that is not itself a `request.sources` entry (one reached
-only through `` `include `` -- list it in `sources`), or one that declares no
-`` `timescale `` on the Verilog-bench path (put a `` `timescale `` in it).
-Conditional-compilation directives are not evaluated.
+A module-local SystemVerilog `timeunit` overrides the active
+`` `timescale `` for that module. Directives take effect in source order
+across files. `` `resetall `` restores the default. The cocotb path supplies
+the unit of `options.timescale` as its compiler default. The Verilog-bench
+path requires a known HDL unit. For sources with macros, conditionals, or
+includes, the preflight runs the Icarus preprocessor with the build's
+include paths, defines, and per-source define wrappers. It refuses before
+build if it cannot establish a retained target's unit, including when
+custom build arguments introduce another compilation unit or command file.
 
 Two additive fields record the outcome on both the cocotb and the
 Verilog-bench path, so a stored verdict states which timing it is evidence

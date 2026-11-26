@@ -2356,14 +2356,6 @@ def run_functional_verification(
         # line counter is cumulative across the calls above), never
         # against the request's own SDF path.
         sdf.update(_sdf_refusal_attribution(sdf_paths, ports))
-        # Issue #7983: Icarus applies each SDF delay in the annotated module's
-        # own time unit, so a TIMESCALE that differs from the unit of a
-        # module still receiving a delay is refused here, before the build;
-        # a match records both units on `sdf` for the report.
-        _check_sdf_time_units(
-            sdf, sdf_paths, sources, hdl_toplevel, verilog_tb, timescale
-        )
-
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
             shim_path,
@@ -2399,6 +2391,18 @@ def run_functional_verification(
         sources, source_defines, output_dir
     )
     includes = [*includes, *scoped_include_dirs]
+    if sdf is not None:
+        _check_sdf_time_units(
+            sdf,
+            sdf_paths,
+            sources,
+            hdl_toplevel,
+            timescale[0] if verilog_tb is None else None,
+            includes,
+            defines,
+            user_build_args,
+            build_dir if verilog_tb is None else None,
+        )
 
     if verilog_tb is not None:
         return with_run_inputs(

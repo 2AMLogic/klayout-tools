@@ -71,6 +71,7 @@ from .functional_verification_sdf_instance import (
     _parse_sdf_inventory_module,
 )
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
+from .functional_verification_sdf_unit_syntax import _sdf_syntax, _sdf_timescale
 from .request_paths import resolve_request_path
 
 
@@ -671,7 +672,6 @@ def _split_sdf_bus_port_interconnects(
     sdfversion = _header_field(r'\(SDFVERSION\s+"([^"]*)"\)', "3.0")
     design = _header_field(r'\(DESIGN\s+"([^"]*)"\)', "")
     divider = _header_field(r"\(DIVIDER\s+(\S+?)\)", ".")
-    timescale = _header_field(r"\(TIMESCALE\s+([^)]*)\)", "1ns")
 
     # Group deferred entries by the (celltype, instance) of the CELL block
     # they came from -- almost always exactly one group (the top design's
@@ -720,9 +720,8 @@ def _split_sdf_bus_port_interconnects(
     if not deferred_by_cell:
         return None
 
-    # Build the "safe" text: the original file with every deferred entry's
-    # exact span cut out, leaving every surrounding paren/structure (and
-    # every non-deferred entry) untouched.
+    timescale = _sdf_timescale(_sdf_syntax(text))
+    # Cut only the deferred entries, keeping every surrounding clause intact.
     removed_spans.sort()
     safe_parts = []
     cursor = 0

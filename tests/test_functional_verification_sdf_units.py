@@ -2,22 +2,24 @@
 
 Icarus ignores an SDF's ``TIMESCALE`` and applies every delay in the
 annotated module's own unit, so ``klt`` refuses a differing unit before the
-build. These are the no-simulator cases, driven through the public verb on
-the Verilog-bench example with the dispatch replaced by a spy: a refusal
-must never reach it. The real-Icarus regressions live in
-``test_functional_verification_verilog_top.py`` and the controlled-runner
-cocotb cases in ``test_functional_verification_sdf_receipts.py``.
+build. A dispatch spy on the public Verilog-bench request verifies a
+refusal precedes compilation. A real Icarus run checks that a matching,
+preprocessed model still annotates successfully.
 """
 
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools import functional_verification as fv
+from klayout_tools import functional_verification_hdl_units as units
 from klayout_tools import functional_verification_sdf as sdf
-from klayout_tools import functional_verification_sdf_units as units
+from klayout_tools import functional_verification_sdf_unit_syntax as syntax
 from test_functional_verification_verilog_top import EXAMPLE_DIR, _stage_sdf_units
 
 
@@ -127,13 +129,12 @@ def test_leaf_without_a_timescale_is_unresolved_on_the_verilog_bench(
     request = _stage_sdf_units(tmp_path, leaf_timescale=None)
     message = _refused(tmp_path, monkeypatch, request)
     assert "'u1' (CELLTYPE \"and_cell\")" in message
-    assert "module 'and_cell' declares no `timescale" in message
+    assert "effective time unit of module 'and_cell' could not be resolved" in message
     assert "testbench.verilog_top rejects options.timescale" in message
 
 
 def test_undeclared_celltype_is_unresolved(tmp_path, monkeypatch):
-    """A model that is not itself a ``request.sources`` entry (one reached
-    only through ``` `include ````, say) is refused rather than guessed."""
+    """A CELLTYPE absent from the build sources cannot be verified."""
     stock = (EXAMPLE_DIR / "and2.sdf").read_text()
     request = _stage_sdf_units(
         tmp_path,
@@ -235,7 +236,7 @@ def test_verilog_time_units_follow_the_last_directive_in_compile_order(tmp_path)
         "`timescale 1ps/1ps\n"
         "module fifth(input a, output y); endmodule\n"
     )
-    texts = sdf._read_verilog_source_texts([str(first), str(second)])
+    texts = units._active_sources([str(first), str(second)], [], {}, [], None)
 
     assert units._verilog_time_units(texts, "1ns") == {
         "first": "1ns",
@@ -259,7 +260,7 @@ def test_verilog_time_units_follow_the_last_directive_in_compile_order(tmp_path)
     ],
 )
 def test_unit_comparison_includes_the_multiplier(left, right, same):
-    assert units._same_time_unit(left, right) is same
+    assert syntax._same_time_unit(left, right) is same
 
 
 @pytest.mark.parametrize(
@@ -301,7 +302,7 @@ def test_clause_end_agrees_with_the_shared_character_loop(text):
             expected = sdf._sdf_matching_paren(text, open_index) + 1
         except fv.FunctionalVerificationError:
             expected = None
-        assert units._sdf_clause_end(text, open_index) == expected
+        assert syntax._sdf_clause_end(text, open_index) == expected
 
 
 def test_clause_end_agrees_with_the_shared_character_loop_on_random_text():
@@ -317,4 +318,155 @@ def test_clause_end_agrees_with_the_shared_character_loop_on_random_text():
             expected = sdf._sdf_matching_paren(text, 0) + 1
         except fv.FunctionalVerificationError:
             expected = None
-        assert units._sdf_clause_end(text, 0) == expected
+        assert syntax._sdf_clause_end(text, 0) == expected
+
+
+@pytest.mark.parametrize(
+    "prefix", ['(* keep_hierarchy = "yes" *) ', "module other; endmodule "]
+)
+def test_module_declaration_after_an_attribute_or_endmodule(
+    tmp_path, monkeypatch, prefix
+):
+    request = _stage_sdf_units(tmp_path)
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        leaf.read_text().replace("module and_cell", prefix + "module and_cell")
+    )
+    assert _dispatched_annotation(monkeypatch, request)["time_unit"] == "1ns"
+
+
+def test_module_timeunit_overrides_directive_for_only_that_module(
+    tmp_path, monkeypatch
+):
+    request = _stage_sdf_units(tmp_path)
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(leaf.read_text().replace("  and (", "  timeunit 1ps/1ps;\n  and ("))
+    assert "1000x too small" in _refused(tmp_path, monkeypatch, request)
+    (tmp_path / "and2.sdf").write_text(_sdf("1ps", _LEAF_CELL))
+    assert _dispatched_annotation(monkeypatch, request)["time_unit"] == "1ps"
+
+
+@needs_icarus
+@pytest.mark.parametrize("define_option", ["defines", "source_defines"])
+def test_effective_unit_from_included_header_and_active_branch(
+    tmp_path, monkeypatch, define_option
+):
+    request = Path(_stage_sdf_units(tmp_path))
+    header_dir = tmp_path / "headers"
+    header_dir.mkdir()
+    (header_dir / "units.vh").write_text(
+        "`ifdef FAST\n`timescale 1ps/1ps\n`endif\n"
+        "`ifdef NEVER_SET\n`timescale 1ns/1ps\n`endif\n"
+    )
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        leaf.read_text().replace(
+            "module and_cell", '`include "units.vh"\nmodule and_cell'
+        )
+    )
+    spec = json.loads(request.read_text())
+    spec["options"]["includes"] = ["headers"]
+    spec["options"][define_option] = (
+        {"FAST": None} if define_option == "defines" else {"and_cell.v": {"FAST": None}}
+    )
+    request.write_text(json.dumps(spec))
+    assert "1000x too small" in _refused(tmp_path, monkeypatch, str(request))
+    del spec["options"][define_option]
+    request.write_text(json.dumps(spec))
+    assert _dispatched_annotation(monkeypatch, str(request))["time_unit"] == "1ns"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("(CELL ", "( CELL "),
+        ("(DELAY ", "(delay "),
+        ("(CELLTYPE ", "( CeLlTyPe "),
+        ("(INSTANCE ", "( InStAnCe "),
+    ],
+)
+def test_alternate_sdf_cell_syntax_still_checks_the_leaf(
+    tmp_path, monkeypatch, old, new
+):
+    request = _stage_sdf_units(
+        tmp_path,
+        leaf_timescale="1ps/1ps",
+        sdf_text=_sdf("1ns", _LEAF_CELL.replace(old, new)),
+    )
+    message = _refused(tmp_path, monkeypatch, request)
+    assert "'u1'" in message and "1000x too small" in message
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "( TiMeScAlE 1ps)",
+        "/* (TIMESCALE 1ns) ( */ (TIMESCALE 1ps)",
+        "// (TIMESCALE 1ns) )\n (TIMESCALE /* comment */ 1ps)",
+        '(PROGRAM "fake (TIMESCALE 1ns) //") (TIMESCALE 1ps)',
+    ],
+)
+def test_actual_sdf_header_sets_the_unit(tmp_path, monkeypatch, header):
+    text = _sdf("1ns", _LEAF_CELL).replace("(TIMESCALE 1ns)", header)
+    request = _stage_sdf_units(tmp_path, sdf_text=text)
+    assert "1000x too large" in _refused(tmp_path, monkeypatch, request)
+
+
+@pytest.mark.parametrize("invalid", ["0ps", "1ns extra"])
+def test_invalid_multiplier_or_trailing_text_is_a_typed_refusal(
+    tmp_path, monkeypatch, invalid
+):
+    request = _stage_sdf_units(tmp_path, sdf_timescale=invalid)
+    assert f"TIMESCALE {invalid!r}" in _refused(tmp_path, monkeypatch, request)
+
+
+def test_each_mismatched_target_has_its_own_factor(tmp_path, monkeypatch):
+    request = _stage_sdf_units(
+        tmp_path,
+        leaf_timescale="1ps/1ps",
+        sdf_text=_sdf("10ps", _LEAF_CELL, _ROOT_CELL),
+    )
+    message = _refused(tmp_path, monkeypatch, request)
+    assert 'CELLTYPE "and_cell", `timescale 1ps): 10x too small' in message
+    assert 'CELLTYPE "and2", `timescale 1ns): 100x too large' in message
+
+
+@needs_icarus
+def test_matching_preprocessed_attributed_model_runs_on_icarus(tmp_path):
+    request = Path(_stage_sdf_units(tmp_path, sdf_timescale="1ps", delay="500"))
+    spec = json.loads(request.read_text())
+    spec["options"]["includes"] = ["."]
+    request.write_text(json.dumps(spec))
+    (tmp_path / "unit.vh").write_text("timeunit 1ps/1ps;\n")
+    leaf = tmp_path / "and_cell.v"
+    leaf.write_text(
+        leaf.read_text()
+        .replace("module and_cell", '(* keep = "yes" *) module and_cell')
+        .replace("  and (", '  `include "unit.vh"\n  and (')
+    )
+    report = fv.run_functional_verification(str(request))
+    assert report["status"] == "pass"
+    annotation = report["environment"]["sdf"]
+    assert (annotation["timescale"], annotation["time_unit"]) == ("1ps", "1ps")
+
+
+def test_split_sdf_keeps_the_actual_header_unit(tmp_path):
+    # The vector endpoint sends this entry to the second annotation file.
+    path = tmp_path / "split.sdf"
+    path.write_text(
+        _sdf("1ps", _ROOT_CELL.replace("a u1.A", "a[0] u1.A")).replace(
+            "(TIMESCALE 1ps)", "/* (TIMESCALE 1ns) */ ( TiMeScAlE 1ps)"
+        )
+    )
+    original, deferred = sdf._split_sdf_bus_port_interconnects(str(path), {"a"})
+    assert "( TiMeScAlE 1ps)" in original
+    assert "(TIMESCALE 1ps)" in deferred
+
+
+def test_uncertain_compilation_unit_refuses_before_build(tmp_path, monkeypatch):
+    request = Path(_stage_sdf_units(tmp_path))
+    spec = json.loads(request.read_text())
+    spec["options"]["build_args"] = ["-u"]
+    request.write_text(json.dumps(spec))
+    message = _refused(tmp_path, monkeypatch, str(request))
+    assert "'u1'" in message and "options.build_args entry '-u'" in message
