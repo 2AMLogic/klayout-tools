@@ -58,13 +58,10 @@ def entry_path(
     return resolve_committed_path(entry, report_path=report_path)
 
 
-def _recomputed_identity(paths: list[str]) -> str | None:
+def _recomputed_identity(paths: list[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
-        try:
-            text, _ = _read_text(path)
-        except IncludeStagingError:
-            return None
+        text, _ = _read_text(path)
         digest.update(_normalized_netlist_text(text).encode("utf-8"))
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
@@ -142,12 +139,18 @@ def check_sim_report(report_path: str, *, root: str | None = None) -> dict[str, 
         resolved.append(path)
 
     recorded = env.get("netlist_identity")
-    actual_identity = _recomputed_identity(resolved) if complete else None
+    identity_error = env.get("netlist_identity_error")
+    try:
+        actual_identity = _recomputed_identity(resolved) if complete else None
+    except IncludeStagingError as exc:
+        actual_identity = None
+        complete = False
+        identity_error = f"{identity_error}. {exc}" if identity_error else str(exc)
     identity_check = hash_check(
         "environment.netlist_identity", recorded, actual_identity
     )
-    if env.get("netlist_identity_error"):
-        identity_check["error"] = env["netlist_identity_error"]
+    if identity_error:
+        identity_check["error"] = identity_error
     checks.append(identity_check)
 
     result = build_check_result(report_path=report_path, checks=checks, skipped=skipped)
