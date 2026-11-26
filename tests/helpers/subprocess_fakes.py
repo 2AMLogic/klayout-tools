@@ -72,6 +72,12 @@ def patch_openroad_run(monkeypatch, fake_run: Callable) -> None:
     monkeypatch.setattr(_openroad_engine, "Popen", popen)
 
 
+#: The per-root clock inventory a faked OpenROAD stage dump must carry.
+#: `ClockPlan.inventory` raises without it for every declared root: hex of the
+#: UTF-8 root name (here `clk`) keys the period and clocked-register count.
+CLOCK_METRICS = {"clock__period_ns__636c6b": 1.1, "clock__registers__636c6b": 2}
+
+
 _STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
 
 

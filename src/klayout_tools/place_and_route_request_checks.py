@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from ._power_activity import validate_power_activity
+from .place_and_route_clock import ClockConstraints
 from .place_and_route_multicycle import validated_entries as validate_multicycle_entries
 from .place_and_route_pins import check_io_pin_constraints
 from .place_and_route_request import (
@@ -75,8 +76,7 @@ class _RequestLevelChecks(NamedTuple):
     macros: list[dict[str, Any]]
     instance_groups: list[dict[str, Any]]
     power: dict[str, Any] | None
-    clock_port: str | None
-    clock_period_ns: float | None
+    clocks: ClockConstraints
     max_transition_ns: float | None
     max_capacitance_pf: float | None
     max_fanout: float | None
@@ -194,8 +194,7 @@ def _validate_request_level(
     groups = _validate_instance_groups(request.get("instance_groups"), target_stage)
     power = _validate_power(request.get("power"), cell_library, library)
     (
-        clock_port,
-        clock_period_ns,
+        clocks,
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,
@@ -203,7 +202,7 @@ def _validate_request_level(
         output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
     multicycle = validate_multicycle_entries(
-        request.get("constraints") or {}, clock_period_ns
+        request.get("constraints") or {}, clocks.period_ns
     )
     # Issue #4914: same validation/semantics as `klt sta`'s (issue #3744).
     power_activity = validate_power_activity(
@@ -247,8 +246,7 @@ def _validate_request_level(
         macros=macros,
         instance_groups=groups,
         power=power,
-        clock_port=clock_port,
-        clock_period_ns=clock_period_ns,
+        clocks=clocks,
         max_transition_ns=max_transition_ns,
         max_capacitance_pf=max_capacitance_pf,
         max_fanout=max_fanout,
