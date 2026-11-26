@@ -1,0 +1,1 @@
+- **Place-and-route carries independent root clocks through CTS, routing and post-route timing.** Declare ports and periods in `constraints.clocks`, optionally group asynchronous domains with `clock_groups`, and inspect the measured periods and register counts in `clock_roots` (#7945).

@@ -53,12 +53,11 @@ from .place_and_route_base import (
     PlaceAndRouteError,
     _require_extract_deck_for_cell_library,
 )
+from .place_and_route_clock import ClockConstraints
 from .place_and_route_library_limits import library_limit_fields, prepare_reports
 from .place_and_route_script import (
-    _clock_lines,
     _design_rule_check_lines,
     _design_rule_constraint_lines,
-    _io_delay_lines,
     _metrics_report_lines,
     _violation_count_lines,
     _wire_rc_lines,
@@ -71,8 +70,9 @@ def _corner_sweep_script_lines(
     checkpoint_in: str,
     corners: list[dict[str, str]],
     io_spec: dict[str, str],
-    clock_port: str | None,
-    clock_period_ns: float | None,
+    clock_port: str | None = None,
+    clock_period_ns: float | None = None,
+    clocks: ClockConstraints | None = None,
     max_transition_ns: float | None = None,
     max_capacitance_pf: float | None = None,
     max_fanout: float | None = None,
@@ -175,9 +175,10 @@ def _corner_sweep_script_lines(
         f"{_tcl_literal(corner['path'])}"
         for corner in corners
     ]
-    lines += _clock_lines(clock_port, clock_period_ns)
+    clocks = clocks or ClockConstraints(clock_port, clock_period_ns)
+    lines += clocks.declaration_lines()
     # read_db restores no SDC, including the boundary delays (#1865).
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += clocks.delay_lines(input_delay_ns, output_delay_ns)
     lines += multicycle_lines(multicycle, mode="apply")
     lines += [
         *_wire_rc_lines(io_spec, library),
@@ -215,8 +216,9 @@ def _spef_sta_script_lines(
     *,
     checkpoint_in: str,
     liberty_path: str,
-    clock_port: str | None,
-    clock_period_ns: float | None,
+    clock_port: str | None = None,
+    clock_period_ns: float | None = None,
+    clocks: ClockConstraints | None = None,
     spef_path: str,
     net_names: list[str],
     sdf_path: str | None = None,
@@ -289,14 +291,15 @@ def _spef_sta_script_lines(
         f"read_db {_tcl_literal(checkpoint_in)}",
         f"read_liberty {_tcl_literal(liberty_path)}",
     ]
-    lines += _clock_lines(clock_port, clock_period_ns)
+    clocks = clocks or ClockConstraints(clock_port, clock_period_ns)
+    lines += clocks.declaration_lines()
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
     # Issue #1865: re-emitted here for the same reason `_clock_lines` above
     # is -- this is a fresh OpenSTA session seeded from a `read_db`, which
     # carries no SDC state of its own.
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += clocks.delay_lines(input_delay_ns, output_delay_ns)
     lines += multicycle_lines(multicycle, mode="apply")
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
@@ -446,8 +449,7 @@ def _post_route_spef_metrics(
     def_path: str,
     cell_library: str,
     liberty_path: str,
-    clock_port: str | None,
-    clock_period_ns: float | None,
+    clocks: ClockConstraints,
     checkpoint_in: str,
     write_sdf: bool = False,
     max_transition_ns: float | None = None,
@@ -671,8 +673,7 @@ def _post_route_spef_metrics(
     lines = _spef_sta_script_lines(
         checkpoint_in=checkpoint_in,
         liberty_path=liberty_path,
-        clock_port=clock_port,
-        clock_period_ns=clock_period_ns,
+        clocks=clocks,
         spef_path=spef_path,
         net_names=net_names,
         sdf_path=sdf_path,
@@ -781,8 +782,7 @@ def _run_corner_sweep(
     checkpoint_in: str,
     corners: list[dict[str, str]],
     io_spec: dict[str, str],
-    clock_port: str | None,
-    clock_period_ns: float | None,
+    clocks: ClockConstraints,
     output_dir: str,
     hdl_toplevel: str,
     max_transition_ns: float | None = None,
@@ -925,8 +925,7 @@ def _run_corner_sweep(
         checkpoint_in=checkpoint_in,
         corners=corners,
         io_spec=io_spec,
-        clock_port=clock_port,
-        clock_period_ns=clock_period_ns,
+        clocks=clocks,
         max_transition_ns=max_transition_ns,
         max_capacitance_pf=max_capacitance_pf,
         max_fanout=max_fanout,
@@ -1029,8 +1028,7 @@ def _run_corner_sweep(
             checkpoint_in=checkpoint_in,
             corners=[corner],
             io_spec=io_spec,
-            clock_port=clock_port,
-            clock_period_ns=clock_period_ns,
+            clocks=clocks,
             max_transition_ns=max_transition_ns,
             max_capacitance_pf=max_capacitance_pf,
             max_fanout=max_fanout,
