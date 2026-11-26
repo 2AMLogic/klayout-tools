@@ -38,6 +38,7 @@ from .sim_batch_contract_worker import (
     _worker_capture_command,
 )
 from .sim_batch_job_timeout import caller_poll_timeout_s
+from .sim_batch_receipt import staged_include_sources
 
 if TYPE_CHECKING:
     pass
@@ -157,6 +158,7 @@ def _build_batch_job_spec(
                 else _default_batch_job_timeout_s(corner_count, timeout_s)
             )
         ),
+        include_sources=staged_include_sources(staged.netlist),
         inputs=(
             *(
                 BatchJobInput(

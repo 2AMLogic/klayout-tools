@@ -645,15 +645,15 @@ INCONCLUSIVE_DIAGNOSTIC_CODE = "inconclusive"
 #: ``options.waveform_max_bytes`` and the JSON conversion is skipped (#3211).
 WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 
-#: Grading markers and post-grading information are emitted downstream of
-#: ``options.fail_on_diagnostic`` matching. Keep these codes outside the
-#: selectable vocabulary. The drift guard derives them from emission sites.
+#: Grading markers and post-grading information (emitted after
+#: ``options.fail_on_diagnostic`` matching) stay outside the selectable vocabulary.
 _GRADING_MARKER_CODES: frozenset[str] = frozenset(
     {
         INCONCLUSIVE_DIAGNOSTIC_CODE,
         IMPLAUSIBLE_DIAGNOSTIC_CODE,
         MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
         sim_homotopy.DC_HOMOTOPY_RECOVERY_CODE,
+        "engine_log_not_retained",  # sim_batch_kept_artifacts (#7905)
     }
 )
 

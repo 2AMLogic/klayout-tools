@@ -90,7 +90,6 @@ import math
 import os
 import random
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -100,6 +99,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from . import (
@@ -134,6 +134,9 @@ from .sim_batch_hints import (
     hint_existing_fatal,
     with_runner_hints,
 )
+from .sim_batch_kept_artifacts import (
+    install_batch_artifacts as _install_batch_artifacts,
+)
 from .sim_batch_log import read_collected_log
 from .sim_batch_pdk import _client_pdk_stamp as _client_pdk_stamp
 from .sim_batch_pdk import _compare_pdk_stamps as _compare_pdk_stamps
@@ -152,7 +155,6 @@ from .sim_pin_settle import _enforce_published_engine_version_pin
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
-    _rewrite_remote_artifact_paths,
     _run_sharded,
     _shard_corner_points,
     _unrun_corner_report,
@@ -1708,48 +1710,6 @@ def read_collected_report(local_dir: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Artifact collection
-# --------------------------------------------------------------------------- #
-
-
-def _install_batch_artifacts(
-    corners: list[dict[str, Any]], *, collected_dir: str, artifacts_dir: str
-) -> None:
-    """Move the collected ``outputs/artifacts/`` tree into the caller's own
-    artifacts directory and rewrite every corner's ``artifacts.*`` path to
-    point at it.
-
-    The rewrite itself is :func:`sim_remote._rewrite_remote_artifact_paths`,
-    reused unmodified -- only the *remote root* has to be recovered
-    differently. The `remote` backend knows its remote job directory (it
-    chose it); here the job instance's ``$EDA_OUTPUT_DIR`` is picked by the
-    harness at boot and never reported back, so the root is recovered from
-    the reported paths themselves: every one of them is
-    ``<$EDA_OUTPUT_DIR>/artifacts/...`` because
-    :func:`_build_batch_job_spec` is what pointed ``--outdir`` there.
-    """
-    source = os.path.join(collected_dir, BATCH_ARTIFACTS_DIRNAME)
-    if not os.path.isdir(source):
-        return
-    os.makedirs(artifacts_dir, exist_ok=True)
-    shutil.copytree(source, artifacts_dir, dirs_exist_ok=True)
-    marker = f"/{BATCH_ARTIFACTS_DIRNAME}/"
-    remote_root: str | None = None
-    for corner in corners:
-        for value in (corner.get("artifacts") or {}).values():
-            if isinstance(value, str) and marker in value:
-                remote_root = value[: value.rindex(marker) + len(marker) - 1]
-                break
-        if remote_root is not None:
-            break
-    if remote_root is None:
-        return
-    _rewrite_remote_artifact_paths(
-        corners, remote_root=remote_root, local_root=artifacts_dir
-    )
-
-
-# --------------------------------------------------------------------------- #
 # One job: submit -> wait -> collect
 # --------------------------------------------------------------------------- #
 
@@ -2973,6 +2933,11 @@ def _run_batch_job(
                 notify=notify,
                 launch_kwargs=launch_kwargs,
             )
+
+        @cache
+        def attached_netlist() -> sim_batch_receipt.BatchNetlist:
+            return sim_batch_receipt.attached_netlist(request, netlist_path)
+
         return _poll_and_collect(
             config=config,
             job_id=job_id,
@@ -2983,12 +2948,11 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
-            expected_netlist=lambda: sim_batch_receipt.attached_netlist_sha256(
-                request, netlist_path
-            ),
+            expected_netlist=attached_netlist,
             timestamps=attach_timestamps,
             now=now,
             attach=True,
+            client_netlist=netlist_path,
         )
     spec = _prepare_batch_job_spec(
         request,
@@ -3007,7 +2971,7 @@ def _run_batch_job(
         "client_status_terminal_at": None,
         "client_collected_at": None,
     }
-    staged_digest = sim_batch_receipt.submitted_netlist_sha256(spec, netlist_sha256)
+    submitted_netlist = sim_batch_receipt.submitted_netlist(spec, netlist_sha256)
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
     sim_batch_observer.report_submitted(job_id)
@@ -3041,9 +3005,10 @@ def _run_batch_job(
         sleep=sleep,
         timestamps=timestamps,
         now=now,
-        expected_netlist=lambda: staged_digest,
+        expected_netlist=lambda: submitted_netlist,
         receipt_path=receipt_path,
         receipt=receipt,
+        client_netlist=netlist_path,
     )
 
 
@@ -3059,11 +3024,12 @@ def _poll_and_collect(
     runner: remote_transport.CommandRunner | None,
     sleep: Any,
     timestamps: dict[str, str | None],
-    expected_netlist: Callable[[], str],
+    expected_netlist: Callable[[], sim_batch_receipt.BatchNetlist],
     now: Callable[[], str],
     receipt_path: str | None = None,
     receipt: dict[str, Any] | None = None,
     attach: bool = False,
+    client_netlist: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
@@ -3137,7 +3103,9 @@ def _poll_and_collect(
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_runner_option_echoes(request, report)
-        sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
+        sim_batch_receipt.check_collected_netlist(
+            job_id, report, lambda: expected_netlist().sha256
+        )
         identity = _read_job_identity(collected, request, report=report)
         environment = {**environment, **identity}
         environment.update(collected_report_env(status, report))
@@ -3147,7 +3115,12 @@ def _poll_and_collect(
         _surface_log_fatal(corners, collected, identity.get("worker_environment"))
         if keep_artifacts:
             _install_batch_artifacts(
-                corners, collected_dir=collected, artifacts_dir=artifacts_dir
+                corners,
+                collected_dir=collected,
+                artifacts_dir=artifacts_dir,
+                client_netlist=client_netlist,
+                include_sources=lambda: expected_netlist().include_sources,
+                job_id=job_id,
             )
     worker = identity["worker_environment"]
     comparison = worker["pdk_stamp_comparison"]

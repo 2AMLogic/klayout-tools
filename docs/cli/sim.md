@@ -3274,6 +3274,32 @@ copies under `DIR` (one `DIR/<job_id>/` subdirectory per shard when
 `hosts > 1`). This works for any run that produced a simulator report,
 including failed corners and exit-3/4 jobs.
 
+What comes back for a kept corner, per corner directory: `corner.cir`, the
+engine log (`ngspice.log` / `xyce.log`) and, when the request needs them,
+`.spiceinit`, a generated netlist and the waveform files. Two things are made usable on
+the submitting host ([#7905](https://github.com/2AMLogic/klayout-tools/issues/7905)):
+
+- **The deck's netlist include.** A kept `corner.cir` points to the submitted
+  netlist, or to the installed `netlist.expanded.cir` or
+  `netlist.supply_waveforms.cir` when the worker generated that copy for the
+  corner. These copies preserve the worker's include expansion and the
+  corner's swept supply levels. Includes of staged DUT files point back to
+  their original files on the submitting host, even when staging renamed
+  two files with the same basename. Replay still requires any worker-resolved
+  model libraries at their recorded paths. Portable records keep their
+  `$REQUEST_DIR` and `$CORNER_DIR` tokens.
+
+- **A missing engine log is stated.** If a corner reports no log, or its
+  reported log was absent from this job's collected files, it carries one
+  `info` diagnostic, `engine_log_not_retained`. A file left at the same
+  path by an earlier job does not count. The diagnostic includes the
+  `job_id` to inspect (`s3://<bucket>/<jobs prefix>/<job_id>/outputs/`; the
+  report never prints the bucket). It is additive: no existing field
+  changes, an `info` note never regrades the corner, and a unit that never
+  started an engine (`budget_exceeded`, `lost_shard`, ...) does not get one.
+  The tail of the engine log for a *failed job* is still surfaced in the job's
+  `batch_job_failed` message as before.
+
 Limitations: if the job failed before ngspice ran (a validation error, a
 failed upload) no deck or log exists, so there is nothing to retrieve. In that
 case the diagnostic and `environment.remote` give `job_id` and `region`;
@@ -10705,6 +10731,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 | `margin_ambiguous` | **Emitted, never selectable.** A third route to `status: "inconclusive"` (issue #3088): a `measurements[].transfer` margin metric met its limit but the AC band cannot support a pass (`ambiguity[]` in the entry's `transfer.margins`); see "Margins at every crossing". `severity: "warning"`, never `"error"`. |
+| `engine_log_not_retained` | **Emitted, never selectable.** With `--backend batch` and `options.keep_artifacts`, the corner reported no log or its reported log was absent from this job's collected files ([#7905](https://github.com/2AMLogic/klayout-tools/issues/7905)). Added by the client after collection, so it never reaches `options.fail_on_diagnostic` matching. `severity: "info"`, never regrades the corner; additive `job_id` names the job (one per shard) whose `outputs/` prefix to inspect. Not emitted for a unit that never started an engine. See "Getting the per-corner deck and ngspice log through klt". |
 
 **The `measurement` code's lookup is case-insensitive** (issue #2546): a
 `.meas`/`.measure` card's own name is folded to lower-case by both engines

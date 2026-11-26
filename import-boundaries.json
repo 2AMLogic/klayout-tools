@@ -1074,6 +1074,7 @@
         "klayout_tools.sim_batch_corner_libs",
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
+        "klayout_tools.sim_batch_kept_artifacts",
         "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_image",
         "klayout_tools.sim_batch_job_timeout",

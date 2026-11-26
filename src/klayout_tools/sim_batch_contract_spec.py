@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import (
@@ -115,6 +115,11 @@ class BatchJobSpec:
     timeout_seconds: int | None = None
     inputs: tuple[BatchJobInput, ...] = ()
     image_profile: str | None = None
+
+    # Client-side provenance for kept netlists. Never serialized into job.json.
+    include_sources: dict[str, str] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     def to_job_json(self) -> dict[str, Any]:
         """The ``job.json`` document, in ``batch-fleet.md``'s own field

@@ -9,7 +9,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import sim_staging
 from .sim_batch_contract import BATCH_NETLIST_FILENAME, BATCH_REQUEST_FILENAME
@@ -19,24 +19,46 @@ from .sim_errors import SimError
 COLLECTED_NETLIST_MISMATCH = "batch_netlist_digest_mismatch"
 
 
-def submitted_netlist_sha256(spec: BatchJobSpec, source_digest: str | None) -> str:
+class BatchNetlist(NamedTuple):
+    """Identity of the uploaded deck and sources of its staged include files."""
+
+    sha256: str
+    include_sources: dict[str, str]
+
+
+def staged_include_sources(staged: sim_staging.StagedNetlist) -> dict[str, str]:
+    """Map upload names to original files, including sources rewritten for upload."""
+    return {
+        item.staged_name: os.path.abspath(item.source_path)
+        for item in staged.includes
+        if item.source_path is not None
+    }
+
+
+def submitted_netlist(spec: BatchJobSpec, source_digest: str | None) -> BatchNetlist:
     """Capture the expected runner digest before submitting the prepared inputs."""
     deck = next(item for item in spec.inputs if item.name == BATCH_NETLIST_FILENAME)
     if deck.content is None and source_digest is not None:
-        return source_digest
-    return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+        digest = source_digest
+    else:
+        digest = sim_staging.staged_input_sha256(deck.content, deck.local_path)
+    return BatchNetlist(digest, spec.include_sources)
 
 
-def attached_netlist_sha256(request: dict[str, Any], netlist_path: str) -> str:
+def attached_netlist(request: dict[str, Any], netlist_path: str) -> BatchNetlist:
     """Reconstruct the submitted netlist's flat include names for a collected job."""
     try:
-        deck = sim_staging.stage_netlist(
+        staged = sim_staging.stage_netlist(
             netlist_path,
             netlist_staged_name=BATCH_NETLIST_FILENAME,
             reserved_names=(BATCH_REQUEST_FILENAME,),
             roots=sim_staging.host_resolved_roots(request),
-        ).netlist
-        return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+        )
+        deck = staged.netlist
+        return BatchNetlist(
+            sim_staging.staged_input_sha256(deck.content, deck.local_path),
+            staged_include_sources(staged),
+        )
     except (OSError, sim_staging.IncludeStagingError) as exc:
         raise SimError(f"cannot verify staged batch netlist: {exc}") from exc
 
