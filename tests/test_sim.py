@@ -10664,7 +10664,7 @@ def test_pdk_module_is_the_only_resolution_path(monkeypatch, tmp_path):
         calls.append((args, kwargs))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(sim, "find_pdk", spy)
+    monkeypatch.setattr(pdk, "find_pdk", spy)
 
     install_root = tmp_path / "install"
     variant_dir = install_root / "sky130A" / "libs.tech"
