@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
-      "lines": 695
+      "lines": 649
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 909
+      "lines": 844
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
