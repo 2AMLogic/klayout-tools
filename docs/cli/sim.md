@@ -3008,8 +3008,8 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 **Closure-only deck caveat (issue
 [#7985](https://github.com/2AMLogic/klayout-tools/issues/7985)): `stamp_scope`
 can read `executed` for a deck that ran the caller's models.** On a deck-list
-(`decks[]`) batch job, a relative `.include` / `.inc` / `.lib <file>
-<section>` target that resolves next to the deck (or next to the file
+(`decks[]`) batch job, a relative `.include` / `.inc` / `.lib <file> <section>`
+target that resolves next to the deck (or next to the file
 including it) is staged with the deck's closure on its own. It needs no
 `decks[].inputs[]` declaration (see "Pre-composed decks"), and staging it
 alone leaves `stamp_scope` at `executed`. With `model.lib` beside the deck
