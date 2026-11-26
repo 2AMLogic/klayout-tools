@@ -184,7 +184,7 @@ def _tie_well_region(
     """This tie's well/substrate region and whether a caller-asserted one is
     degenerate -- ``(well_region, well_degenerate)``.
 
-    Two sources, decided by :func:`_parse_well_declaration` at spec-validation
+    Three sources, decided by :func:`_parse_well_declaration` at spec-validation
     time, not here:
 
     - a drawn ``well_layer`` (every tie before issue #2255) -- the merged
@@ -192,9 +192,8 @@ def _tie_well_region(
       :func:`_degenerate_tie_reasons`);
     - ``well_complement_of`` (issue #3750) -- the top-cell extent minus the
       named drawn layers, for a bulk substrate with no drawn well shape.
-      Degenerate by the same test as ``well_boxes`` (the named layers draw
-      nothing, so the "substrate" is the whole die) and also when they
-      cover the whole die (nothing left to check);
+      Both the named wells and the remaining substrate must have geometry
+      inside the extent. Sparse drawn wells still define a real boundary;
     - ``well_boxes`` (issue #2255) -- the union of the caller's asserted
       micrometre boxes, for a native-substrate block that draws no well/tub
       layer at all. Degenerate when it covers the top cell's own extent to
@@ -217,16 +216,14 @@ def _tie_well_region(
         wells = kdb.Region()
         for well_layer in tie["well_complement_of"]:
             wells += _region(layout, top_cell, well_layer)
-        asserted = (extent - wells.merged()).merged()
-        if asserted.is_empty():
-            # Wells cover the whole die: no substrate left to check.
-            return asserted, True
-    elif tie["well_boxes"]:
-        asserted = _boxes_region(kdb, layout, tie["well_boxes"])
-        extent = kdb.Region(top_cell.bbox())
-    else:
+        covered = extent & wells
+        substrate = (extent - covered).merged()
+        return substrate, covered.is_empty() or substrate.is_empty()
+    if not tie["well_boxes"]:
         return _region(layout, top_cell, tie["well_layer"]).merged(), False
 
+    asserted = _boxes_region(kdb, layout, tie["well_boxes"])
+    extent = kdb.Region(top_cell.bbox())
     extent_area = extent.area()
     if extent_area <= 0:
         # A top cell with no geometry at all: there is no extent to be

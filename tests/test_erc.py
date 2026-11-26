@@ -9136,6 +9136,27 @@ def test_well_complement_of_grades_the_substrate_outside_the_nwell(tmp_path):
     assert report["erc_coverage"]["well_assertion_coverage"] == []
 
 
+@pytest.mark.parametrize("vss_tap", [True, False], ids=["connected", "untapped"])
+def test_sparse_well_complement_checks_the_substrate_tie(tmp_path, vss_tap):
+    def expand_extent(layout, top):
+        top.shapes(layout.layer(99, 0)).insert(kdb.DBox(0, 0, 1000, 1000))
+
+    report = _run_complement(
+        tmp_path, "sparse", _complement_tie(), vss_tap=vss_tap, edit=expand_extent
+    )
+    coverage = report["erc_coverage"]
+    assert _COMPLEMENT_ID in coverage["checked"]
+    assert _COMPLEMENT_ID in coverage["checked_by_well_assertion"]
+    assert coverage["skipped"] == []
+    findings = [
+        (finding["layer"], finding["net"])
+        for finding in report["erc_findings"]
+        if finding["rule"] == "erc.missing_tie"
+    ]
+    assert findings == ([] if vss_tap else [("substrate_tie", "VSS")])
+    assert report["erc_status"] == ("clean" if vss_tap else "violations")
+
+
 def test_well_complement_of_list_form_matches_the_string_form(tmp_path):
     report = _run_complement(tmp_path, "comp_list", _complement_tie(["10/0", "98/0"]))
 
