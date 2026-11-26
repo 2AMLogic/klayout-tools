@@ -103,12 +103,15 @@ def _check_entry(
     )
     if path is None:
         return "unverifiable", _unverifiable(entry, "unresolvable_scope")
-    # Same git-index basis as the top deck (#6139): a file git does not track
-    # is not evidence a clean checkout would reproduce.
-    if is_untracked_working_tree_file(path):
-        return "unverifiable", _unverifiable(entry, "untracked")
+    # Inspect metadata before asking the index: a committed rename and a
+    # real untracked file both have no index entry. Never read untracked bytes.
     try:
+        Path(path).stat()
+        if is_untracked_working_tree_file(path):
+            return "unverifiable", _unverifiable(entry, "untracked")
         actual = sha256_file(path)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return "unverifiable", _unverifiable(entry, "not_found")
     except OSError:
         return "unverifiable", _unverifiable(entry, "unreadable")
     if actual is None:

@@ -307,3 +307,39 @@ def test_block_is_json_serialisable_and_garbage_closures_never_raise(tmp_path):
         block = check_sim_closure(envelope, str(tmp_path / "sim.json"), tmp_path)
         json.dumps(block)
         assert block["status"] in {"verified", "partial", "not_recorded"}
+
+
+def test_committed_include_rename_is_not_found(tmp_path):
+    repo = _git_checkout(tmp_path)
+    _circuit(repo)
+    report = _sim_report(repo)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "Original simulation inputs")
+    _git(repo, "mv", "sub.spice", "renamed.spice")
+    _git(repo, "commit", "-qm", "Rename the included deck")
+
+    citation = _cited(_grade(report, repo))
+    assert citation["sim_closure"]["unverifiable"] == [
+        {"path": "sub.spice", "reason": "not_found"}
+    ]
+
+
+def test_tracked_include_lookup_denied_is_unreadable(tmp_path, monkeypatch):
+    repo = _git_checkout(tmp_path)
+    _circuit(repo)
+    report = _sim_report(repo)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "Track the divider inputs")
+    denied = repo / "sub.spice"
+    real_stat = Path.stat
+
+    def deny_lookup(path, *args, **kwargs):
+        if path == denied:
+            raise PermissionError("Permission denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", deny_lookup)
+    citation = _cited(_grade(report, repo))
+    assert citation["sim_closure"]["unverifiable"] == [
+        {"path": "sub.spice", "reason": "unreadable"}
+    ]
